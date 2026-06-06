@@ -70,6 +70,18 @@
             <name>Maven Central</name>
             <url>https://repo.maven.apache.org/maven2/</url>
         </repository>
+        <!-- Hyperledger Besu EVM artifacts are NOT on Maven Central; served from Besu Artifactory. -->
+        <repository>
+            <id>besu-maven</id>
+            <name>Hyperledger Besu Artifactory</name>
+            <url>https://hyperledger.jfrog.io/artifactory/besu-maven/</url>
+            <releases>
+                <enabled>true</enabled>
+            </releases>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
+        </repository>
     </repositories>
 
     <pluginRepositories>
@@ -535,6 +547,21 @@
             <artifactId>byte-buddy-agent</artifactId>
             <version>${byte-buddy-agent.version}</version>
             <scope>test</scope>
+        </dependency>
+
+        <!-- Hyperledger Besu EVM (embeddable library) for the XDAG EVM execution layer.
+             26.5.0 is the latest JDK-21-safe release; 26.6.0+ is Java-25 bytecode and
+             throws UnsupportedClassVersionError on JDK 21. Re-verify class-file major
+             version (65 = Java 21) on any upgrade. Apache-2.0. -->
+        <dependency>
+            <groupId>org.hyperledger.besu</groupId>
+            <artifactId>besu-evm</artifactId>
+            <version>26.5.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.hyperledger.besu</groupId>
+            <artifactId>besu-datatypes</artifactId>
+            <version>26.5.0</version>
         </dependency>
 
     </dependencies>
