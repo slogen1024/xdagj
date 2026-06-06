@@ -50,5 +50,12 @@ public enum DatabaseName {
 
     ADDRESS,
 
-    TXHISTORY
+    TXHISTORY,
+
+    /**
+     * EVM world state (accounts, contract code, contract storage) for the embedded EVM.
+     * Keys are prefixed within this single store (see io.xdag.evm.state.EvmStateSchema):
+     * 0x00|address -> account record, 0x01|codeHash -> code, 0x02|address|slot -> storage value.
+     */
+    EVM_STATE
 }
