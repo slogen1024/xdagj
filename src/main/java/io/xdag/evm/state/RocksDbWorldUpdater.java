@@ -1,0 +1,185 @@
+/*
+ * The MIT License (MIT)
+ *
+ * Copyright (c) 2020-2030 The XdagJ Developers
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+package io.xdag.evm.state;
+
+import io.xdag.db.rocksdb.KVSource;
+import io.xdag.evm.state.EvmStateSchema.AccountRecord;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import org.apache.tuweni.bytes.Bytes;
+import org.hyperledger.besu.datatypes.Address;
+import org.hyperledger.besu.datatypes.Hash;
+import org.hyperledger.besu.datatypes.Wei;
+import org.hyperledger.besu.evm.account.Account;
+import org.hyperledger.besu.evm.account.MutableAccount;
+import org.hyperledger.besu.evm.worldstate.WorldUpdater;
+
+/**
+ * A persistent Besu {@link WorldUpdater} backed by the single {@code EVM_STATE} {@link KVSource}.
+ *
+ * <p>Structured exactly like Besu's in-memory {@code SimpleWorld} (Apache-2.0 template): a nested
+ * updater with a {@code parent} and an {@link Optional}-cache of accounts. The difference is the
+ * <b>root</b> (parent == null): {@link #getAccount}/{@link #get} lazily load+deserialize from the
+ * store, and {@link #commit()} serializes every touched account and persists the whole delta in one
+ * {@link KVSource#batchWrite} call (atomic within this single store).
+ *
+ * <p>The Sub-project A executor is unchanged: {@code XdagEvmExecutor.deploy/call(WorldUpdater, ...)}
+ * works against {@code new RocksDbWorldUpdater(evmStateStore)} exactly as it did against SimpleWorld.
+ */
+public class RocksDbWorldUpdater implements WorldUpdater {
+
+    private final RocksDbWorldUpdater parent;
+    private final KVSource<byte[], byte[]> store;
+    private Map<Address, Optional<RocksDbAccount>> accounts = new HashMap<>();
+
+    /** Root updater backed by the EVM_STATE store. */
+    public RocksDbWorldUpdater(KVSource<byte[], byte[]> store) {
+        this.parent = null;
+        this.store = store;
+    }
+
+    private RocksDbWorldUpdater(RocksDbWorldUpdater parent) {
+        this.parent = parent;
+        this.store = parent.store;
+    }
+
+    @Override
+    public WorldUpdater updater() {
+        return new RocksDbWorldUpdater(this);
+    }
+
+    @Override
+    public Account get(Address address) {
+        return getAccount(address);
+    }
+
+    @Override
+    public MutableAccount getAccount(Address address) {
+        Optional<RocksDbAccount> cached = accounts.get(address);
+        if (cached != null) {
+            return cached.orElse(null);
+        }
+        if (parent != null) {
+            Account parentAccount = parent.getAccount(address);
+            if (parentAccount != null) {
+                RocksDbAccount child = new RocksDbAccount(parentAccount, parentAccount.getAddress(),
+                        parentAccount.getNonce(), parentAccount.getBalance(), parentAccount.getCode());
+                accounts.put(address, Optional.of(child));
+                return child;
+            }
+            return null;
+        }
+        // Root: load from the store.
+        byte[] raw = store.get(EvmStateSchema.accountKey(address));
+        if (raw == null) {
+            return null;
+        }
+        AccountRecord record = EvmStateSchema.decodeAccount(raw);
+        Bytes code = Bytes.EMPTY;
+        if (!record.codeHash().equals(Hash.EMPTY)) {
+            byte[] codeBytes = store.get(EvmStateSchema.codeKey(record.codeHash()));
+            if (codeBytes != null) {
+                code = Bytes.wrap(codeBytes);
+            }
+        }
+        RocksDbAccount account = new RocksDbAccount(store, address, record.nonce(), record.balance(), code);
+        accounts.put(address, Optional.of(account));
+        return account;
+    }
+
+    @Override
+    public MutableAccount createAccount(Address address, long nonce, Wei balance) {
+        if (getAccount(address) != null) {
+            throw new IllegalStateException("Cannot create an account when one already exists");
+        }
+        RocksDbAccount account = parent != null
+                ? new RocksDbAccount((Account) null, address, nonce, balance, Bytes.EMPTY)
+                : new RocksDbAccount(store, address, nonce, balance, Bytes.EMPTY);
+        accounts.put(address, Optional.of(account));
+        return account;
+    }
+
+    @Override
+    public void deleteAccount(Address address) {
+        accounts.put(address, Optional.empty());
+    }
+
+    @Override
+    public Collection<? extends Account> getTouchedAccounts() {
+        return accounts.values().stream().filter(Optional::isPresent).map(Optional::get).toList();
+    }
+
+    @Override
+    public Collection<Address> getDeletedAccountAddresses() {
+        return accounts.entrySet().stream().filter(e -> e.getValue().isEmpty()).map(Map.Entry::getKey).toList();
+    }
+
+    @Override
+    public void revert() {
+        accounts = new HashMap<>();
+    }
+
+    @Override
+    public void commit() {
+        if (parent != null) {
+            // In-memory child: push changes up to the parent, exactly like SimpleWorld.
+            accounts.forEach((address, account) -> {
+                if (account.isEmpty() || !account.get().commit()) {
+                    parent.accounts.put(address, account);
+                }
+            });
+            return;
+        }
+        // Root: flush the whole delta to the store atomically.
+        Map<byte[], byte[]> puts = new HashMap<>();
+        Set<byte[]> deletes = new HashSet<>();
+        accounts.forEach((address, optAccount) -> {
+            if (optAccount.isEmpty()) {
+                deletes.add(EvmStateSchema.accountKey(address));
+                return;
+            }
+            RocksDbAccount account = optAccount.get();
+            Hash codeHash = account.getCodeHash();
+            puts.put(EvmStateSchema.accountKey(address),
+                    EvmStateSchema.encodeAccount(account.getNonce(), account.getBalance(), codeHash));
+            Bytes code = account.getCode();
+            if (code != null && !code.isEmpty()) {
+                puts.put(EvmStateSchema.codeKey(codeHash), code.toArray());
+            }
+            account.getUpdatedStorage().forEach((slot, value) ->
+                    puts.put(EvmStateSchema.storageKey(address, slot), EvmStateSchema.encodeStorageValue(value)));
+        });
+        store.batchWrite(puts, deletes);
+        accounts = new HashMap<>();
+    }
+
+    @Override
+    public Optional<WorldUpdater> parentUpdater() {
+        return Optional.ofNullable(parent);
+    }
+}

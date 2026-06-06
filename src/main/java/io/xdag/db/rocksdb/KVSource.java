@@ -25,6 +25,7 @@
 package io.xdag.db.rocksdb;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 import org.apache.commons.lang3.tuple.Pair;
@@ -58,5 +59,22 @@ public interface KVSource<K, V> {
     List<V> prefixValueLookup(byte[] key);
 
     List<Pair<byte[], byte[]>> prefixKeyAndValueLookup(byte[] key);
+
+    /**
+     * Apply a set of puts and deletes. The default implementation applies them sequentially;
+     * RocksDB-backed implementations may override this with an atomic {@code org.rocksdb.WriteBatch}.
+     * Used by the EVM world state to flush an entire account-state delta at commit time.
+     *
+     * @param puts    key/value pairs to write
+     * @param deletes keys to remove
+     */
+    default void batchWrite(Map<K, V> puts, Set<K> deletes) {
+        if (puts != null) {
+            puts.forEach(this::put);
+        }
+        if (deletes != null) {
+            deletes.forEach(this::delete);
+        }
+    }
 
 }
