@@ -55,7 +55,9 @@ public class JsonRpcHandler extends SimpleChannelInboundHandler<FullHttpRequest>
 
     static {
         MAPPER = new ObjectMapper()
-                .configure(JsonParser.Feature.INCLUDE_SOURCE_IN_LOCATION, true)
+                // Do not embed the raw source snippet in parse-error locations; it would otherwise be
+                // exposed to clients and may echo back sensitive request content.
+                .configure(JsonParser.Feature.INCLUDE_SOURCE_IN_LOCATION, false)
                 .configure(JsonParser.Feature.ALLOW_UNQUOTED_FIELD_NAMES, true)
                 .configure(DeserializationFeature.ACCEPT_SINGLE_VALUE_AS_ARRAY, true)
                 .configure(DeserializationFeature.ACCEPT_EMPTY_STRING_AS_NULL_OBJECT, true)
@@ -97,7 +99,8 @@ public class JsonRpcHandler extends SimpleChannelInboundHandler<FullHttpRequest>
             return;
         } catch (Exception e) {
             log.debug("Failed to parse JSON-RPC request", e);
-            sendError(ctx, new JsonRpcError(JsonRpcError.ERR_PARSE, "Invalid JSON request: " + e.getMessage()));
+            // Do not echo the parser's exception detail (may include request content) to the client.
+            sendError(ctx, new JsonRpcError(JsonRpcError.ERR_PARSE, "Invalid JSON request"));
             return;
         }
 
@@ -109,7 +112,8 @@ public class JsonRpcHandler extends SimpleChannelInboundHandler<FullHttpRequest>
             sendError(ctx, new JsonRpcError(e.getCode(), e.getMessage()), rpcRequest);
         } catch (Exception e) {
             log.error("Error processing request", e);
-            sendError(ctx, new JsonRpcError(JsonRpcError.ERR_INTERNAL, "Internal error: " + e.getMessage()), rpcRequest);
+            // Keep the detail server-side only; return a generic message to the client.
+            sendError(ctx, new JsonRpcError(JsonRpcError.ERR_INTERNAL, "Internal error"), rpcRequest);
         }
     }
 
@@ -136,7 +140,8 @@ public class JsonRpcHandler extends SimpleChannelInboundHandler<FullHttpRequest>
             sendHttpResponse(ctx, content, HttpResponseStatus.OK);
         } catch (Exception e) {
             log.error("Error sending response", e);
-            sendError(ctx, new JsonRpcError(JsonRpcError.ERR_INTERNAL, "Error serializing response: " + e.getMessage()));
+            // Keep the detail server-side only; return a generic message to the client.
+            sendError(ctx, new JsonRpcError(JsonRpcError.ERR_INTERNAL, "Internal error"));
         }
     }
 
@@ -172,13 +177,16 @@ public class JsonRpcHandler extends SimpleChannelInboundHandler<FullHttpRequest>
                 .set(HttpHeaderNames.CONTENT_TYPE, "application/json")
                 .set(HttpHeaderNames.CONTENT_LENGTH, content.readableBytes());
 
-        // Get CORS Origin and set corresponding headers
+        // Get the CORS origin resolved by CorsHandler and echo it. Credentials are only attached when
+        // the origin was explicitly allow-listed (never for a "*" wildcard match).
         String origin = ctx.channel().attr(CorsHandler.CORS_ORIGIN).get();
         if (origin != null) {
             response.headers()
                     .set(HttpHeaderNames.ACCESS_CONTROL_ALLOW_ORIGIN, origin)
-                    .set(HttpHeaderNames.ACCESS_CONTROL_ALLOW_CREDENTIALS, "true")
                     .set(HttpHeaderNames.VARY, "Origin");
+            if (Boolean.TRUE.equals(ctx.channel().attr(CorsHandler.CORS_ALLOW_CREDENTIALS).get())) {
+                response.headers().set(HttpHeaderNames.ACCESS_CONTROL_ALLOW_CREDENTIALS, "true");
+            }
         }
 
 //        ctx.writeAndFlush(response);

@@ -267,12 +267,20 @@ public class BytesUtils {
             return null;
         }
         hexString = hexString.toUpperCase();
+        if (hexString.length() % 2 != 0) {
+            throw new IllegalArgumentException("Hex string must have an even length: " + hexString.length());
+        }
         int length = hexString.length() / 2;
         char[] hexChars = hexString.toCharArray();
         byte[] d = new byte[length];
         for (int i = 0; i < length; i++) {
             int pos = i * 2;
-            d[i] = (byte) (charToByte(hexChars[pos]) << 4 | charToByte(hexChars[pos + 1]));
+            int high = charToByte(hexChars[pos]);
+            int low = charToByte(hexChars[pos + 1]);
+            if (high < 0 || low < 0) {
+                throw new IllegalArgumentException("Invalid hex character in input string");
+            }
+            d[i] = (byte) (high << 4 | low);
         }
         return d;
     }

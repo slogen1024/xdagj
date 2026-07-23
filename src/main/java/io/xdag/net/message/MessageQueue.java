@@ -47,9 +47,10 @@ public class MessageQueue {
                     .build());
     private final Config config;
     //'8192' is a value obtained from testing experience, not a standard value.Looking forward to optimization.
-    private final BlockingQueue<Message> queue = new LinkedBlockingQueue<>(8192);
+    private static final int MAX_QUEUE_SIZE = 8192;
+    private final BlockingQueue<Message> queue = new LinkedBlockingQueue<>(MAX_QUEUE_SIZE);
     private final Queue<Message> prioritized = new ConcurrentLinkedQueue<>();
-    private ChannelHandlerContext ctx;
+    private volatile ChannelHandlerContext ctx;
     private ScheduledFuture<?> timerTask;
 
     private final AtomicBoolean isClosed = new AtomicBoolean(false);
@@ -75,28 +76,38 @@ public class MessageQueue {
     }
 
     public synchronized void deactivate() {
-        this.timerTask.cancel(false);
+        if (this.timerTask != null) {
+            this.timerTask.cancel(false);
+        }
     }
 
     public void disconnect(ReasonCode code) {
         log.debug("Actively closing the connection: reason = {}", code);
 
+        // guard against disconnect() being called before activate() (ctx not yet set)
+        final ChannelHandlerContext c = ctx;
+        if (c == null) {
+            return;
+        }
         // avoid repeating close requests
         if (isClosed.compareAndSet(false, true)) {
-            ctx.writeAndFlush(new DisconnectMessage(code)).addListener((ChannelFutureListener) future -> ctx.close());
+            c.writeAndFlush(new DisconnectMessage(code)).addListener((ChannelFutureListener) future -> c.close());
         }
     }
 
     public void sendMessage(Message msg) {
     //when full message queue, whitelist don't need to disconnect.
         if (config.getNodeSpec().getNetPrioritizedMessages().contains(msg.getCode())) {
+            // bound the prioritized queue so a flood cannot grow it unbounded
+            if (prioritized.size() >= MAX_QUEUE_SIZE) {
+                disconnect(ReasonCode.MESSAGE_QUEUE_FULL);
+                return;
+            }
             prioritized.add(msg);
         } else {
-            try {
-                //update to BlockingQueue, capacity 8192
-                queue.put(msg);
-            } catch (InterruptedException e) {
-                throw new RuntimeException(e);
+            // non-blocking offer: never block the Netty IO thread when the queue is full
+            if (!queue.offer(msg)) {
+                disconnect(ReasonCode.MESSAGE_QUEUE_FULL);
             }
         }
     }

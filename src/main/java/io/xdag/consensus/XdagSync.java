@@ -204,8 +204,11 @@ public class XdagSync extends AbstractXdagLifecycle {
         try {
             sf.get(REQUEST_WAIT, TimeUnit.SECONDS);
         } catch (InterruptedException | ExecutionException | TimeoutException e) {
-            blocksRequestMap.remove(randomSeq);
             log.error(e.getMessage(), e);
+        } finally {
+            // Always remove the pending entry. The normal reply path (processBlocksReply -> sf.set)
+            // only completes the future and never cleaned up the map, leaking an entry per request.
+            blocksRequestMap.remove(randomSeq);
         }
     }
 

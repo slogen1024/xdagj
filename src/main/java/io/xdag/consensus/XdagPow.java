@@ -82,7 +82,9 @@ public class XdagPow implements PoW, Listener, Runnable, XdagLifecycle {
     protected PoolAwardManager poolAwardManager;
     protected AtomicReference<Task> currentTask = new AtomicReference<>();
     protected AtomicLong taskIndex = new AtomicLong(0L);
-    private boolean isWorking = false;
+    // Read from the P2P/pretop thread (receiveNewPretop) while written by the PoW main thread, so
+    // it must be volatile to publish state changes across threads.
+    private volatile boolean isWorking = false;
 
     private final ExecutorService timerExecutor = Executors.newSingleThreadExecutor(BasicThreadFactory.builder()
             .namingPattern("XdagPow-timer-thread")
@@ -293,12 +295,21 @@ public class XdagPow implements PoW, Listener, Runnable, XdagLifecycle {
         // stop generate main block
         isWorking = false;
         if (b != null) {
-            Block newBlock = new Block(new XdagBlock(b.toBytes()));
+            // Snapshot the winning nonce/serialized block under the same lock onNewShare uses.
+            // Otherwise onNewShare's b.setNonce(...) can interleave with b.toBytes() here, yielding
+            // a torn read of the block being broadcast.
+            byte[] blockBytes;
+            Bytes32 winningShare;
+            synchronized (minHash) {
+                blockBytes = b.toBytes();
+                winningShare = minShare.get();
+            }
+            Block newBlock = new Block(new XdagBlock(blockBytes));
             log.debug("Broadcast locally generated blockchain, waiting to be verified. block hash = [{}]", newBlock.getHash().toHexString());
             // add new block and broadcast the new block
             kernel.getBlockchain().tryToConnect(newBlock);
             Bytes32 currentPreHash = Bytes32.wrap(currentTask.get().getTask()[0].getData());
-            poolAwardManager.addAwardBlock(minShare.get(), currentPreHash, newBlock.getHash(), newBlock.getTimestamp());
+            poolAwardManager.addAwardBlock(winningShare, currentPreHash, newBlock.getHash(), newBlock.getTimestamp());
             BlockWrapper bw = new BlockWrapper(newBlock, kernel.getConfig().getNodeSpec().getTTL());
             broadcaster.broadcast(bw);
         }
@@ -523,7 +534,11 @@ public class XdagPow implements PoW, Listener, Runnable, XdagLifecycle {
     }
 
     public class GetShares implements Runnable {
-        private final LinkedBlockingQueue<String> shareQueue = new LinkedBlockingQueue<>();
+        // Bound the queue: each share triggers a full RandomX hash on this single thread, so an
+        // unbounded queue lets a share flood grow memory without limit. offer() returns false when
+        // full and the surplus shares are rejected (logged in getShareInfo).
+        private static final int SHARE_QUEUE_CAPACITY = 50_000;
+        private final LinkedBlockingQueue<String> shareQueue = new LinkedBlockingQueue<>(SHARE_QUEUE_CAPACITY);
         private volatile boolean isRunning = false;
         private static final int SHARE_FLAG = 2;
 

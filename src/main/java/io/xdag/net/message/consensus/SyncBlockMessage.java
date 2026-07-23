@@ -28,6 +28,7 @@ import io.xdag.utils.SimpleEncoder;
 import io.xdag.core.XdagBlock;
 import io.xdag.net.message.Message;
 import io.xdag.net.message.MessageCode;
+import io.xdag.net.message.MessageException;
 import io.xdag.utils.SimpleDecoder;
 import lombok.Getter;
 import lombok.Setter;
@@ -41,12 +42,17 @@ public class SyncBlockMessage extends Message {
     private int ttl;
     private byte executionState;
 
-    public SyncBlockMessage(byte[] body) {
+    public SyncBlockMessage(byte[] body) throws MessageException {
         super(MessageCode.SYNC_BLOCK, null);
 
         SimpleDecoder dec = new SimpleDecoder(body);
 
         this.body = dec.readBytes();
+        // guard against attacker-sized body: XdagBlock requires exactly 512 bytes
+        if (this.body == null || this.body.length != 512) {
+            throw new MessageException("Invalid block body size: "
+                    + (this.body == null ? "null" : this.body.length));
+        }
         this.xdagBlock = new XdagBlock(this.body);
         this.block = new Block(this.xdagBlock);
         this.ttl = dec.readInt();

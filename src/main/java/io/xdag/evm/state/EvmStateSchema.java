@@ -46,6 +46,9 @@ public final class EvmStateSchema {
     public static final byte PREFIX_CODE = 0x01;
     public static final byte PREFIX_STORAGE = 0x02;
 
+    /** Fixed on-disk size of an account record: nonce(8) || balance(32) || codeHash(32). */
+    public static final int ACCOUNT_RECORD_LENGTH = 8 + 32 + 32;
+
     private EvmStateSchema() {
     }
 
@@ -61,6 +64,11 @@ public final class EvmStateSchema {
         return Bytes.concatenate(Bytes.of(PREFIX_STORAGE), address, slot.toBytes()).toArray();
     }
 
+    /** Prefix ({@code 0x02 || address}) that all of an account's storage-slot keys share. */
+    public static byte[] storagePrefix(Address address) {
+        return Bytes.concatenate(Bytes.of(PREFIX_STORAGE), address).toArray();
+    }
+
     /** Decoded account header (code is stored separately, keyed by codeHash). */
     public record AccountRecord(long nonce, Wei balance, Hash codeHash) {
     }
@@ -68,12 +76,17 @@ public final class EvmStateSchema {
     public static byte[] encodeAccount(long nonce, Wei balance, Hash codeHash) {
         Bytes record = Bytes.concatenate(
                 Bytes.ofUnsignedLong(nonce),          // 8 bytes, big-endian
-                Bytes32.leftPad(balance.toBytes()),   // 32 bytes  // CONFIRM Wei.toBytes() width <= 32
+                Bytes32.leftPad(balance.toBytes()),   // 32 bytes (Wei is UInt256-bounded, so always <= 32)
                 codeHash);                            // 32 bytes
         return record.toArray();
     }
 
     public static AccountRecord decodeAccount(byte[] raw) {
+        if (raw == null || raw.length != ACCOUNT_RECORD_LENGTH) {
+            throw new IllegalStateException(
+                    "corrupt account record, expected " + ACCOUNT_RECORD_LENGTH + " bytes but got "
+                            + (raw == null ? "null" : raw.length));
+        }
         Bytes b = Bytes.wrap(raw);
         long nonce = b.slice(0, 8).toLong();
         Wei balance = Wei.of(b.slice(8, 32).toUnsignedBigInteger());
@@ -86,6 +99,10 @@ public final class EvmStateSchema {
     }
 
     public static UInt256 decodeStorageValue(byte[] raw) {
+        if (raw == null || raw.length != 32) {
+            throw new IllegalStateException(
+                    "corrupt storage value, expected 32 bytes but got " + (raw == null ? "null" : raw.length));
+        }
         return UInt256.fromBytes(Bytes32.wrap(Bytes.wrap(raw)));
     }
 }

@@ -62,6 +62,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.xdag.cli.Commands.getStateByFlags;
@@ -70,7 +72,8 @@ import static io.xdag.core.BlockState.MAIN;
 import static io.xdag.core.BlockType.*;
 import static io.xdag.core.XdagField.FieldType.*;
 import static io.xdag.crypto.keys.AddressUtils.toBytesAddress;
-import static io.xdag.db.mysql.TransactionHistoryStoreImpl.totalPage;
+import static io.xdag.db.mysql.TransactionHistoryStoreImpl.getTotalPage;
+import static io.xdag.db.mysql.TransactionHistoryStoreImpl.resetTotalPage;
 import static io.xdag.rpc.error.JsonRpcError.*;
 import static io.xdag.rpc.util.TypeConverter.toQuantityJsonHex;
 import static io.xdag.utils.BasicUtils.*;
@@ -83,6 +86,12 @@ public class XdagApiImpl extends AbstractXdagLifecycle implements XdagApi {
     private final Blockchain blockchain;
     private final RPCSpec rpcSpec;
     private JsonRpcServer server;
+
+    // S-07: throttle wallet-unlock attempts to defeat passphrase brute-forcing over RPC.
+    private static final int MAX_UNLOCK_FAILURES = 5;
+    private static final long UNLOCK_LOCKOUT_MS = 30_000L;
+    private final AtomicInteger unlockFailures = new AtomicInteger(0);
+    private final AtomicLong unlockLockedUntil = new AtomicLong(0L);
 
     public XdagApiImpl(Kernel kernel) {
         this.kernel = kernel;
@@ -142,7 +151,13 @@ public class XdagApiImpl extends AbstractXdagLifecycle implements XdagApi {
 
     @Override
     public String xdag_getBalanceByNumber(String bnOrId) {
-        Block block = blockchain.getBlockByHeight(Long.parseLong(bnOrId));
+        long height;
+        try {
+            height = Long.parseLong(bnOrId);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        Block block = blockchain.getBlockByHeight(height);
         if (null == block) {
             return null;
         }
@@ -245,13 +260,22 @@ public class XdagApiImpl extends AbstractXdagLifecycle implements XdagApi {
             key.set(8, Objects.requireNonNull(hash).slice(8, 20));
             balance = String.format("%s", kernel.getAddressStore().getBalanceByAddress(fromBase58(address).toArray()).toDecimal(9, XUnit.XDAG).toPlainString());
         } else {
-            if (StringUtils.length(address) == 32) {
-                hash = BasicUtils.address2Hash(address);
-            } else {
-                hash = BasicUtils.getHash(address);
+            try {
+                if (StringUtils.length(address) == 32) {
+                    hash = BasicUtils.address2Hash(address);
+                } else {
+                    hash = BasicUtils.getHash(address);
+                }
+            } catch (RuntimeException e) {
+                // S-22: malformed base64/hex must surface as a clean AddressFormatException, not an
+                // unchecked IllegalArgumentException/IndexOutOfBoundsException escaping the handler.
+                throw new AddressFormatException("invalid address or hash: " + address);
             }
             key.set(8, Objects.requireNonNull(hash).slice(8, 24));
             Block block = kernel.getBlockStore().getBlockInfoByHash(Bytes32.wrap(key));
+            if (block == null) {
+                return null;
+            }
             balance = String.format("%s", block.getInfo().getAmount().toDecimal(9, XUnit.XDAG).toPlainString());
         }
         return balance;
@@ -563,9 +587,9 @@ public class XdagApiImpl extends AbstractXdagLifecycle implements XdagApi {
                 .state("Accepted");
         if (page != 0) {
             BlockResultDTOBuilder.transactions(getTxHistory(address, page, parameters))
-                    .totalPage(totalPage);
+                    .totalPage(getTotalPage());
         }
-        totalPage = 1;
+        resetTotalPage();
         return BlockResultDTOBuilder.build();
     }
 
@@ -590,9 +614,9 @@ public class XdagApiImpl extends AbstractXdagLifecycle implements XdagApi {
 //                .height(block.getInfo().getHeight())
         if (page != 0) {
             BlockResultDTOBuilder.transactions(getTxLinks(block, page, parameters))
-                    .totalPage(totalPage);
+                    .totalPage(getTotalPage());
         }
-        totalPage = 1;
+        resetTotalPage();
         return BlockResultDTOBuilder.build();
     }
 
@@ -632,7 +656,13 @@ public class XdagApiImpl extends AbstractXdagLifecycle implements XdagApi {
     }
 
     public BlockResponse getBlockByNumber(String bnOrId, int page, Object... parameters) {
-        Block blockFalse = blockchain.getBlockByHeight(Long.parseLong(bnOrId));
+        long height;
+        try {
+            height = Long.parseLong(bnOrId);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        Block blockFalse = blockchain.getBlockByHeight(height);
         if (null == blockFalse) {
             return null;
         }
@@ -649,10 +679,15 @@ public class XdagApiImpl extends AbstractXdagLifecycle implements XdagApi {
         if (WalletUtils.checkAddress(hash)) {
             return transferAccountToBlockResultDTO(hash, page, parameters);
         } else {
-            if (StringUtils.length(hash) == 32) {
-                blockHash = address2Hash(hash);
-            } else {
-                blockHash = BasicUtils.getHash(hash);
+            try {
+                if (StringUtils.length(hash) == 32) {
+                    blockHash = address2Hash(hash);
+                } else {
+                    blockHash = BasicUtils.getHash(hash);
+                }
+            } catch (RuntimeException e) {
+                // S-22: malformed base64/hex must surface as a clean AddressFormatException.
+                throw new AddressFormatException("invalid address or hash: " + hash);
             }
             Block block = blockchain.getBlockByHash(blockHash, true);
             if (block == null) {
@@ -778,9 +813,9 @@ public class XdagApiImpl extends AbstractXdagLifecycle implements XdagApi {
                 .height(block.getInfo().getHeight());
         if (page != 0) {
             BlockResultDTOBuilder.transactions(getTxLinks(block, page, parameters))
-                    .totalPage(totalPage);
+                    .totalPage(getTotalPage());
         }
-        totalPage = 1;
+        resetTotalPage();
         return BlockResultDTOBuilder.build();
     }
 
@@ -833,12 +868,27 @@ public class XdagApiImpl extends AbstractXdagLifecycle implements XdagApi {
     }
 
     private void checkPassword(String passphrase, ProcessResponse result) {
+        // S-07: reject further attempts while locked out, defeating brute-force of the wallet passphrase.
+        long now = System.currentTimeMillis();
+        if (now < unlockLockedUntil.get()) {
+            result.setCode(ERR_XDAG_WALLET_LOCKED);
+            result.setErrMsg("too many failed unlock attempts, try again later");
+            return;
+        }
         Wallet wallet = new Wallet(kernel.getConfig());
         try {
             boolean res = wallet.unlock(passphrase);
             if (!res) {
+                if (unlockFailures.incrementAndGet() >= MAX_UNLOCK_FAILURES) {
+                    unlockLockedUntil.set(now + UNLOCK_LOCKOUT_MS);
+                    unlockFailures.set(0);
+                    log.warn("Wallet unlock failed {} times; locking unlock attempts for {} ms",
+                            MAX_UNLOCK_FAILURES, UNLOCK_LOCKOUT_MS);
+                }
                 result.setCode(ERR_XDAG_WALLET_LOCKED);
                 result.setErrMsg("wallet unlock failed");
+            } else {
+                unlockFailures.set(0);
             }
         } catch (Exception e) {
             result.setCode(ERR_XDAG_WALLET);

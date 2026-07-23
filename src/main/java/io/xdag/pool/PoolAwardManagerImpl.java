@@ -122,6 +122,10 @@ public class PoolAwardManagerImpl extends AbstractXdagLifecycle implements PoolA
                 }
             } catch (InterruptedException e) {
                 log.error(" Can not take the awardBlock from awardBlockQueue{}", e.getMessage(), e);
+            } catch (Exception e) {
+                // Catch-all so a single malformed/unexpected block (e.g. NPE, RuntimeException) only
+                // skips that block instead of permanently killing the reward worker thread.
+                log.error("Error while processing award block, skipping it: {}", e.getMessage(), e);
             }
         }
     }
@@ -168,14 +172,15 @@ public class PoolAwardManagerImpl extends AbstractXdagLifecycle implements PoolA
         MutableBytes32 hashlow = MutableBytes32.create();
         hashlow.set(8, Bytes.wrap(hash).slice(8, 24));
         Block block = blockchain.getBlockByHash(hashlow, true);
-        BlockInfo blockInfo = kernel.getBlockStore().getBlockInfo(hashlow);
-        if (blockInfo != null) {
-            block.getInfo().setFee(blockInfo.getFee());
-        }
         log.debug("Hash low [{}]", hashlow.toHexString());
+        // Null-check before any block.getInfo() dereference, otherwise a missing block NPEs here.
         if (block == null) {
             log.debug("Can't find the block");
             return -2;
+        }
+        BlockInfo blockInfo = kernel.getBlockStore().getBlockInfo(hashlow);
+        if (blockInfo != null) {
+            block.getInfo().setFee(blockInfo.getFee());
         }
         // nonce = share(12 bytes) + pool wallet address(20 bytes)
         if (compareTo(block.getNonce().slice(12, 20).toArray(), 0,

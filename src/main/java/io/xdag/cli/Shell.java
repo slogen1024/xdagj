@@ -49,6 +49,8 @@ import org.jline.reader.impl.DefaultParser;
 import org.jline.terminal.Terminal;
 
 import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -574,7 +576,13 @@ public class Shell extends JlineCommandRegistry implements CommandRegistry, Teln
         } while (StringUtils.isEmpty(line));
 
         if (isTelnet) {
-            return line.equals(kernel.getConfig().getAdminSpec().getAdminTelnetPassword());
+            // NOTE: telnet is cleartext and should be bound to loopback only.
+            // Use a constant-time comparison to avoid leaking the password via timing.
+            String pw = kernel.getConfig().getAdminSpec().getAdminTelnetPassword();
+            if (line == null || pw == null) {
+                return false;
+            }
+            return MessageDigest.isEqual(line.getBytes(StandardCharsets.UTF_8), pw.getBytes(StandardCharsets.UTF_8));
         }
 
         return true;

@@ -178,6 +178,9 @@ public class SimpleDecoder {
      * @throws IndexOutOfBoundsException if there are not enough bytes
      */
     protected void require(int n) {
+        if (n < 0) {
+            throw new SimpleCodecException("invalid length: " + n);
+        }
         if (to - index < n) {
             String msg = String.format("input [%d, %d], require: [%d %d]", from, to, index, index + n);
             throw new IndexOutOfBoundsException(msg);

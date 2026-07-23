@@ -39,6 +39,7 @@ import io.netty.handler.logging.LogLevel;
 import io.netty.handler.logging.LoggingHandler;
 import io.xdag.config.spec.RPCSpec;
 import io.xdag.rpc.api.XdagApi;
+import io.xdag.rpc.server.handler.AuthHandler;
 import io.xdag.rpc.server.handler.CorsHandler;
 import io.xdag.rpc.server.handler.JsonRequestHandler;
 import io.xdag.rpc.server.handler.JsonRpcHandler;
@@ -109,6 +110,9 @@ public class JsonRpcServer {
                             p.addLast(new HttpObjectAggregator(rpcSpec.getRpcHttpMaxContentLength()));
                             // CORS handler
                             p.addLast(new CorsHandler(rpcSpec.getRpcHttpCorsOrigins()));
+                            // API token gate: when a token is configured it rejects requests lacking a
+                            // valid bearer token. Placed after CorsHandler so OPTIONS preflight is not gated.
+                            p.addLast(new AuthHandler(rpcSpec.getRpcHttpApiToken()));
                             // JSON-RPC handler
                             p.addLast(new JsonRpcHandler(rpcSpec, handlers));
                         }

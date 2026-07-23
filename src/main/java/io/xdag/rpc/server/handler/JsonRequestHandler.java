@@ -81,28 +81,29 @@ public class JsonRequestHandler implements JsonRpcRequestHandler {
                         if (params[1] == null || params[1].toString().trim().isEmpty()) {
                             params[1] = "0";
                         }
-                        yield xdagApi.xdag_getBlockByHash(params[0].toString(), Integer.parseInt(params[1].toString()));
+                        validatePageParam(params[1]);
+                        yield xdagApi.xdag_getBlockByHash(params[0].toString(), parsePageParam(params[1]));
                     } else if (params.length == 3) {
                         if (params[1] == null || params[1].toString().trim().isEmpty()) {
                             params[1] = "0";
                         }
-                        if (params[2] == null || params[2].toString().trim().isEmpty()) {
-                            params[2] = "0";
-                        }
-                        yield xdagApi.xdag_getBlockByHash(params[0].toString(), Integer.parseInt(params[1].toString()), Integer.parseInt(params[2].toString()));
+                        validatePageParam(params[1]);
+                        yield xdagApi.xdag_getBlockByHash(params[0].toString(), parsePageParam(params[1]),
+                                parsePageSizeParam(params[2]));
                     } else if (params.length == 4) {
                         if (params[1] == null || params[1].toString().trim().isEmpty()) {
                             params[1] = "0";
                         }
-                        yield xdagApi.xdag_getBlockByHash(params[0].toString(), Integer.parseInt(params[1].toString()), params[2].toString(), params[3].toString());
+                        validatePageParam(params[1]);
+                        yield xdagApi.xdag_getBlockByHash(params[0].toString(), parsePageParam(params[1]),
+                                params[2].toString(), params[3].toString());
                     } else if (params.length == 5) {
                         if (params[1] == null || params[1].toString().trim().isEmpty()) {
                             params[1] = "0";
                         }
-                        if (params[4] == null || params[4].toString().trim().isEmpty()) {
-                            params[4] = "0";
-                        }
-                        yield xdagApi.xdag_getBlockByHash(params[0].toString(), Integer.parseInt(params[1].toString()), params[2].toString(), params[3].toString(), Integer.parseInt(params[4].toString()));
+                        validatePageParam(params[1]);
+                        yield xdagApi.xdag_getBlockByHash(params[0].toString(), parsePageParam(params[1]),
+                                params[2].toString(), params[3].toString(), parsePageSizeParam(params[4]));
                     } else {
                         throw JsonRpcException.invalidParams("Invalid number of parameters for xdag_getBlockByHash");
                     }
@@ -113,15 +114,15 @@ public class JsonRequestHandler implements JsonRpcRequestHandler {
                         if (params[1] == null || params[1].toString().trim().isEmpty()) {
                             params[1] = "0";
                         }
-                        yield xdagApi.xdag_getBlockByNumber(params[0].toString(), Integer.parseInt(params[1].toString()));
+                        validatePageParam(params[1]);
+                        yield xdagApi.xdag_getBlockByNumber(params[0].toString(), parsePageParam(params[1]));
                     } else if (params.length == 3) {
                         if (params[1] == null || params[1].toString().trim().isEmpty()) {
                             params[1] = "0";
                         }
-                        if (params[2] == null || params[2].toString().trim().isEmpty()) {
-                            params[2] = "0";
-                        }
-                        yield xdagApi.xdag_getBlockByNumber(params[0].toString(), Integer.parseInt(params[1].toString()), Integer.parseInt(params[2].toString()));
+                        validatePageParam(params[1]);
+                        yield xdagApi.xdag_getBlockByNumber(params[0].toString(), parsePageParam(params[1]),
+                                parsePageSizeParam(params[2]));
                     } else {
                         throw JsonRpcException.invalidParams("Invalid number of parameters for xdag_getBlockByNumber");
                     }
@@ -187,7 +188,8 @@ public class JsonRequestHandler implements JsonRpcRequestHandler {
                     if (params.length < 2) {
                         throw JsonRpcException.invalidParams("Missing transaction arguments or passphrase");
                     }
-                    yield xdagApi.xdag_getTransactionByHash(params[0].toString(), Integer.parseInt(params[1].toString()));
+                    validatePageParam(params[1]);
+                    yield xdagApi.xdag_getTransactionByHash(params[0].toString(), parsePageParam(params[1]));
                 }
                 case "xdag_getBalanceByNumber" -> {
                     validateParams(params, "Missing transaction arguments or passphrase");
@@ -201,7 +203,8 @@ public class JsonRequestHandler implements JsonRpcRequestHandler {
             throw e;
         } catch (Exception e) {
             log.error("Error handling request: {}", e.getMessage(), e);
-            throw JsonRpcException.internalError("Internal error: " + e.getMessage());
+            // Keep the detail server-side only; return a generic message to the client.
+            throw JsonRpcException.internalError("Internal error");
         }
     }
 
@@ -239,6 +242,35 @@ public class JsonRequestHandler implements JsonRpcRequestHandler {
         }
     }
 
+    /**
+     * Parses a page parameter that has already passed {@link #validatePageParam(Object)} (or has been
+     * defaulted to "0"). The wrapping turns any residual non-numeric value into invalidParams instead
+     * of letting a NumberFormatException bubble up to the generic catch.
+     */
+    private int parsePageParam(Object param) throws JsonRpcException {
+        try {
+            return Integer.parseInt(param.toString());
+        } catch (NumberFormatException e) {
+            throw JsonRpcException.invalidParams("Invalid page number format");
+        }
+    }
+
+    /**
+     * Parses an optional page-size parameter. An empty/blank value yields 0, which signals the store to
+     * apply its default page size; any supplied value must be an integer within 1..100.
+     */
+    private int parsePageSizeParam(Object param) throws JsonRpcException {
+        if (param == null || param.toString().trim().isEmpty()) {
+            return 0;
+        }
+        validatePageSizeParam(param);
+        try {
+            return Integer.parseInt(param.toString());
+        } catch (NumberFormatException e) {
+            throw JsonRpcException.invalidParams("Invalid page size format");
+        }
+    }
+
     private void validateTimeParam(Object param, String message) throws JsonRpcException {
         if (param == null || param.toString().trim().isEmpty()) {
             throw JsonRpcException.invalidParams(message);
@@ -258,6 +290,9 @@ public class JsonRequestHandler implements JsonRpcRequestHandler {
         }
         try {
             double value = Double.parseDouble(request.getValue());
+            if (Double.isNaN(value) || Double.isInfinite(value)) {
+                throw JsonRpcException.invalidParams("Transaction value must be a finite number > 0");
+            }
             if (value <= 0) {
                 throw JsonRpcException.invalidParams("Transaction value must be greater than 0");
             }

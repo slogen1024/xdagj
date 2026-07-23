@@ -126,6 +126,19 @@ public class Kernel {
             return;
         }
         isRunning.set(true);
+        try {
+            startComponents();
+            // Register the shutdown hook only after every component started successfully.
+            Launcher.registerShutdownHook("kernel", this::testStop);
+        } catch (RuntimeException | Error e) {
+            // A failure mid-startup must not leak already-started subsystems (Q-12).
+            log.error("Kernel startup failed; rolling back partially started components", e);
+            testStop();
+            throw e;
+        }
+    }
+
+    private void startComponents() {
         startEpoch = XdagTime.getCurrentEpoch();
 
         // Initialize channel manager
@@ -245,8 +258,6 @@ public class Kernel {
         telnetServer.start();
 
         blockchain.registerListener(pow);
-
-        Launcher.registerShutdownHook("kernel", this::testStop);
     }
 
     /**
@@ -264,36 +275,63 @@ public class Kernel {
             api.stop();
         }
 
-        // Stop consensus
-        sync.stop();
-        syncMgr.stop();
-        pow.stop();
+        // Stop consensus (null-guarded so testStop works after a partial start)
+        if (sync != null) {
+            sync.stop();
+        }
+        if (syncMgr != null) {
+            syncMgr.stop();
+        }
+        if (pow != null) {
+            pow.stop();
+        }
 
         // Stop networking layer
-        channelMgr.stop();
-        nodeMgr.stop();
+        if (channelMgr != null) {
+            channelMgr.stop();
+        }
+        if (nodeMgr != null) {
+            nodeMgr.stop();
+        }
 
         // Close message queue timer
         MessageQueue.timer.shutdown();
 
         // Close P2P networking
-        p2p.close();
-        client.close();
+        if (p2p != null) {
+            p2p.close();
+        }
+        if (client != null) {
+            client.close();
+        }
 
         // Stop data layer
-        blockchain.stopCheckMain();
+        if (blockchain != null) {
+            blockchain.stopCheckMain();
+        }
 
         // Close all databases
-        for (DatabaseName name : DatabaseName.values()) {
-            dbFactory.getDB(name).close();
+        if (dbFactory != null) {
+            for (DatabaseName name : DatabaseName.values()) {
+                dbFactory.getDB(name).close();
+            }
         }
 
         // Stop remaining services
-        if(webSocketServer != null) {
+        if (webSocketServer != null) {
             webSocketServer.stop();
-
         }
-        poolAwardManager.stop();
+        if (poolAwardManager != null) {
+            poolAwardManager.stop();
+        }
+
+        // Stop telnet admin server and RandomX (Q-11)
+        if (telnetServer != null) {
+            telnetServer.stop();
+        }
+        if (randomx != null) {
+            randomx.stop();
+        }
     }
 
     public enum Status {

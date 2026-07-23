@@ -28,7 +28,6 @@ import com.google.common.collect.Queues;
 import io.xdag.Kernel;
 import io.xdag.config.*;
 import io.xdag.core.*;
-import io.xdag.crypto.core.CryptoProvider;
 import io.xdag.crypto.encoding.Base58;
 import io.xdag.db.TransactionHistoryStore;
 import io.xdag.net.Channel;
@@ -44,8 +43,8 @@ import org.apache.commons.lang3.concurrent.BasicThreadFactory;
 import org.apache.commons.lang3.time.FastDateFormat;
 import org.apache.tuweni.bytes.Bytes32;
 
-import java.util.ArrayList;
 import java.util.Date;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.*;
@@ -229,12 +228,14 @@ public class SyncManager extends AbstractXdagLifecycle {
      */
     public boolean syncPushBlock(BlockWrapper blockWrapper, Bytes32 hashLow) {
         if (syncMap.size() >= MAX_SIZE) {
-            for (int j = 0; j < DELETE_NUM; j++) {
-                List<Bytes32> keyList = new ArrayList<>(syncMap.keySet());
-
-                Bytes32 key = keyList.get(CryptoProvider.nextInt(0, keyList.size()));
-                assert key != null;
-                if (syncMap.remove(key) != null) blockchain.getXdagStats().nwaitsync--;
+            // Evict the first DELETE_NUM entries in O(DELETE_NUM) using a single iterator pass.
+            // The previous implementation rebuilt a full keySet snapshot (up to MAX_SIZE) on every
+            // iteration, making eviction O(DELETE_NUM * MAX_SIZE) under the synchronized import lock.
+            Iterator<Bytes32> it = syncMap.keySet().iterator();
+            for (int j = 0; j < DELETE_NUM && it.hasNext(); j++) {
+                it.next();
+                it.remove();
+                blockchain.getXdagStats().nwaitsync--;
             }
         }
         AtomicBoolean r = new AtomicBoolean(true);

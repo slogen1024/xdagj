@@ -34,6 +34,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -57,6 +58,8 @@ import org.rocksdb.RestoreOptions;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.RocksIterator;
+import org.rocksdb.WriteBatch;
+import org.rocksdb.WriteOptions;
 
 @Slf4j
 @Setter
@@ -132,7 +135,7 @@ public class RocksdbKVSource implements KVSource<byte[], byte[]> {
 
                 // read options
                 readOpts = new ReadOptions();
-                readOpts = readOpts.setPrefixSameAsStart(true).setVerifyChecksums(false);
+                readOpts = readOpts.setPrefixSameAsStart(true).setVerifyChecksums(true);
 
                 try {
                     log.debug("Opening database");
@@ -236,6 +239,11 @@ public class RocksdbKVSource implements KVSource<byte[], byte[]> {
     public byte[] get(byte[] key) {
         resetDbLock.readLock().lock();
         try {
+            if (db == null) {
+                // Mirrors put(): a closed/reset db must not throw NPE on a racing reader.
+                log.error("db is null");
+                return null;
+            }
             if (log.isTraceEnabled()) {
                 log.trace("~> RocksdbKVSource.get(): {}, key: {}", name, Hex.encodeHexString(key));
             }
@@ -258,6 +266,11 @@ public class RocksdbKVSource implements KVSource<byte[], byte[]> {
     public void delete(byte[] key) {
         resetDbLock.readLock().lock();
         try {
+            if (db == null) {
+                // Mirrors put(): a closed/reset db must not throw NPE on a racing deleter.
+                log.error("db is null");
+                return;
+            }
             if (log.isTraceEnabled()) {
                 log.trace("~> RocksdbKVSource.delete(): {}, key: {}", name, Hex.encodeHexString(key));
             }
@@ -267,6 +280,35 @@ public class RocksdbKVSource implements KVSource<byte[], byte[]> {
             }
         } catch (RocksDBException e) {
             log.error("Failed to delete from db '{}'", name, e);
+            throw new RuntimeException(e);
+        } finally {
+            resetDbLock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Apply all {@code puts} and {@code deletes} in a single atomic {@link WriteBatch}. Either the
+     * whole delta lands or none of it does, so a crash mid-commit cannot leave a half-written record.
+     * Used by the EVM world state ({@link io.xdag.evm.state.RocksDbWorldUpdater}) at commit time.
+     */
+    @Override
+    public void batchWrite(Map<byte[], byte[]> puts, Set<byte[]> deletes) {
+        resetDbLock.readLock().lock();
+        try (WriteBatch batch = new WriteBatch(); WriteOptions writeOptions = new WriteOptions()) {
+            if (puts != null) {
+                for (Map.Entry<byte[], byte[]> e : puts.entrySet()) {
+                    batch.put(e.getKey(), e.getValue());
+                }
+            }
+            if (deletes != null) {
+                for (byte[] key : deletes) {
+                    batch.delete(key);
+                }
+            }
+            db.write(writeOptions, batch);
+        } catch (RocksDBException e) {
+            log.error("Failed to batchWrite into db '{}'", name, e);
+            hintOnTooManyOpenFiles(e);
             throw new RuntimeException(e);
         } finally {
             resetDbLock.readLock().unlock();
@@ -363,6 +405,8 @@ public class RocksdbKVSource implements KVSource<byte[], byte[]> {
             log.debug("Close db: {}", name);
             db.close();
             readOpts.close();
+            // Null out the handle so the db == null guards in get/put/delete take effect after close.
+            db = null;
 
             alive = false;
 
@@ -375,13 +419,21 @@ public class RocksdbKVSource implements KVSource<byte[], byte[]> {
 
     @Override
     public void reset() {
-        close();
+        // Hold the write lock for the whole close -> deleteDirectory -> init sequence so no reader
+        // can slip into the use-after-close window between the steps. The write lock is reentrant,
+        // so the nested close()/init() calls re-acquire it on the same thread without deadlock.
+        resetDbLock.writeLock().lock();
         try {
-            FileUtils.deleteDirectory(new File(getPath().toString()));
-        } catch (IOException e) {
-            log.error(e.getMessage(), e);
+            close();
+            try {
+                FileUtils.deleteDirectory(new File(getPath().toString()));
+            } catch (IOException e) {
+                log.error(e.getMessage(), e);
+            }
+            init();
+        } finally {
+            resetDbLock.writeLock().unlock();
         }
-        init();
     }
 
     private Path getPath() {

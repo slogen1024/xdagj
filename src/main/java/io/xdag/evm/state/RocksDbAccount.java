@@ -57,6 +57,8 @@ public class RocksDbAccount implements MutableAccount {
     private Bytes code;
     private final Map<UInt256, UInt256> updatedStorage = new HashMap<>();
     private boolean immutable = false;
+    /** Set by {@link #clearStorage()} (SELFDESTRUCT / account recreation): originals must be wiped at commit. */
+    private boolean storageCleared = false;
 
     /** Root/store-backed account loaded from the EVM_STATE store. */
     public RocksDbAccount(KVSource<byte[], byte[]> store, Address address, long nonce, Wei balance, Bytes code) {
@@ -113,6 +115,11 @@ public class RocksDbAccount implements MutableAccount {
         if (updatedStorage.containsKey(key)) {
             return updatedStorage.get(key);
         }
+        // After a clearStorage(), un-rewritten slots read as zero even though the store still
+        // holds their pre-clear originals (which are only kept for gas-refund accounting).
+        if (storageCleared) {
+            return UInt256.ZERO;
+        }
         return getOriginalStorageValue(key);
     }
 
@@ -166,11 +173,17 @@ public class RocksDbAccount implements MutableAccount {
     public void clearStorage() {
         requireMutable();
         updatedStorage.clear();
+        storageCleared = true;
     }
 
     @Override
     public Map<UInt256, UInt256> getUpdatedStorage() {
         return updatedStorage;
+    }
+
+    /** Whether {@link #clearStorage()} was called on this account; honored by the updater at commit. */
+    public boolean isStorageCleared() {
+        return storageCleared;
     }
 
     @Override
@@ -194,6 +207,12 @@ public class RocksDbAccount implements MutableAccount {
             parentAccount.balance = balance;
             parentAccount.nonce = nonce;
             parentAccount.code = code;
+            // A storage clear in the child must wipe the parent's pending slots, not merely
+            // overlay them, otherwise the parent's previously-set slots survive the clear.
+            if (storageCleared) {
+                parentAccount.updatedStorage.clear();
+                parentAccount.storageCleared = true;
+            }
             parentAccount.updatedStorage.putAll(updatedStorage);
             return true;
         }

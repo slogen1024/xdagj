@@ -53,6 +53,9 @@ import static io.xdag.utils.BytesUtils.long2UnsignedLong;
  */
 public class BasicUtils {
 
+    /** 2^32 as an exact BigDecimal, used as the divisor for the fractional part of XDAG amounts. */
+    private static final BigDecimal POW_2_32 = BigDecimal.valueOf(2).pow(32);
+
     /**
      * Calculate difficulty from hash by shifting right 32 bits (4 bytes)
      * @param hash Input hash value
@@ -206,8 +209,10 @@ public class BasicUtils {
         }
         long first = xdag >>> 32;
         long temp = xdag - (first << 32);
-        double tem = temp / Math.pow(2, 32);
-        BigDecimal bigDecimal = new BigDecimal(first + tem);
+        // Build the value from exact integer parts so large amounts keep full precision
+        // (avoids the precision loss of summing first + fraction in a double).
+        BigDecimal bigDecimal = BigDecimal.valueOf(first)
+                .add(BigDecimal.valueOf(temp).divide(POW_2_32, 12, RoundingMode.HALF_UP));
         return bigDecimal.setScale(12, RoundingMode.HALF_UP).doubleValue();
     }
 
@@ -219,8 +224,9 @@ public class BasicUtils {
     public static double amount2xdag(UInt64 xdag) {
         UInt64 first = xdag.shiftRight(32);
         UInt64 temp = xdag.subtract(first.shiftLeft(32));
-        double tem = 1.0*temp.toLong()/Math.pow(2, 32);
-        BigDecimal bigDecimal = new BigDecimal(first.toLong() + tem);
+        // Build the value from exact integer parts so large amounts keep full precision.
+        BigDecimal bigDecimal = BigDecimal.valueOf(first.toLong())
+                .add(BigDecimal.valueOf(temp.toLong()).divide(POW_2_32, 12, RoundingMode.HALF_UP));
         return bigDecimal.setScale(12, RoundingMode.HALF_UP).doubleValue();
     }
 
@@ -305,8 +311,9 @@ public class BasicUtils {
         if(xdag < 0) throw new XdagOverFlowException();
         long first = xdag >> 32;
         long temp = xdag - (first << 32);
-        double tem = temp / Math.pow(2, 32);
-        return new BigDecimal(first + tem);
+        // temp / 2^32 terminates within 32 decimal places, so this is an exact representation;
+        // building it from integer parts avoids the precision loss of a double intermediate sum.
+        return BigDecimal.valueOf(first).add(BigDecimal.valueOf(temp).divide(POW_2_32, 32, RoundingMode.HALF_UP));
     }
 
     /**

@@ -51,6 +51,10 @@ public class ChannelSupervise {// supervise channel
         ChannelMap.remove(channel.id());
     }
 
+    public static int channelCount() {
+        return ChannelMap.size();
+    }
+
     public static String showChannel() {
         StringBuilder sb = new StringBuilder();
         // Loop through the key-value pairs in the ChannelMap and add them to the StringBuilder

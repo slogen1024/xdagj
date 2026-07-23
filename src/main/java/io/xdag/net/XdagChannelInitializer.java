@@ -73,6 +73,8 @@ public class XdagChannelInitializer extends ChannelInitializer<SocketChannel> {
             ch.closeFuture().addListener(future -> channelMgr.remove(channel));
         } catch (Exception e) {
             log.error("Unexpected error: [{}]", e.getMessage(), e);
+            // close the socket so a failed initialization does not leak the connection
+            ch.close();
         }
     }
 }

@@ -33,9 +33,18 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 
+/**
+ * CORS gate for the RPC endpoint. Confirmed behavior: when {@code allowedOrigins} contains "*" the
+ * response is echoed as {@code Access-Control-Allow-Origin: *} and NEVER carries
+ * {@code Access-Control-Allow-Credentials} — credentials are granted only to exact-listed origins
+ * (see {@link #isCredentialedOrigin}). A "*" wildcard therefore cannot be combined with credentials.
+ */
 @Slf4j
 public class CorsHandler extends ChannelInboundHandlerAdapter {
+    /** Resolved {@code Access-Control-Allow-Origin} value to echo on the actual response. */
     public static final AttributeKey<String> CORS_ORIGIN = AttributeKey.valueOf("CorsOrigin");
+    /** Whether {@code Access-Control-Allow-Credentials: true} may accompany the response. */
+    public static final AttributeKey<Boolean> CORS_ALLOW_CREDENTIALS = AttributeKey.valueOf("CorsAllowCredentials");
     private final Set<String> allowedOrigins;
     private static final String ALLOWED_HEADERS = "content-type, authorization";
     private static final String ALLOWED_METHODS = "GET, POST, OPTIONS";
@@ -89,41 +98,61 @@ public class CorsHandler extends ChannelInboundHandlerAdapter {
         }
 
         FullHttpResponse response = new DefaultFullHttpResponse(
-                HttpVersion.HTTP_1_1, 
+                HttpVersion.HTTP_1_1,
                 HttpResponseStatus.OK);
 
+        // Credentials are only granted to explicitly-listed origins. An origin allowed solely via the
+        // "*" wildcard is echoed as "*" WITHOUT credentials — never reflect an arbitrary origin with
+        // Access-Control-Allow-Credentials, which would let any site make credentialed calls.
+        boolean credentialed = isCredentialedOrigin(origin);
         response.headers()
-                .set(HttpHeaderNames.ACCESS_CONTROL_ALLOW_ORIGIN, origin)
+                .set(HttpHeaderNames.ACCESS_CONTROL_ALLOW_ORIGIN, credentialed ? origin : "*")
                 .set(HttpHeaderNames.ACCESS_CONTROL_ALLOW_METHODS, ALLOWED_METHODS)
                 .set(HttpHeaderNames.ACCESS_CONTROL_ALLOW_HEADERS, ALLOWED_HEADERS)
-                .set(HttpHeaderNames.ACCESS_CONTROL_ALLOW_CREDENTIALS, "true")
                 .set(HttpHeaderNames.ACCESS_CONTROL_MAX_AGE, "3600")
                 .set(HttpHeaderNames.VARY, "Origin")
                 .set(HttpHeaderNames.CONTENT_LENGTH, 0);
+        if (credentialed) {
+            response.headers().set(HttpHeaderNames.ACCESS_CONTROL_ALLOW_CREDENTIALS, "true");
+        }
 
         ctx.writeAndFlush(response);
     }
 
+    /**
+     * An empty allow-list now means "no cross-origin access" rather than "allow everything". A request
+     * is only cross-origin-allowed if its origin is explicitly listed or a "*" wildcard is configured.
+     */
     private boolean isOriginAllowed(String origin) {
-        return allowedOrigins.isEmpty() || allowedOrigins.contains("*") || allowedOrigins.contains(origin);
+        return allowedOrigins.contains("*") || allowedOrigins.contains(origin);
+    }
+
+    /** True only for an exact-listed origin: such origins may receive Allow-Credentials. */
+    private boolean isCredentialedOrigin(String origin) {
+        return allowedOrigins.contains(origin);
     }
 
     private void setCorsHeaders(ChannelHandlerContext ctx, String origin) {
-        ctx.channel().attr(CORS_ORIGIN).set(origin);
+        boolean credentialed = isCredentialedOrigin(origin);
+        ctx.channel().attr(CORS_ORIGIN).set(credentialed ? origin : "*");
+        ctx.channel().attr(CORS_ALLOW_CREDENTIALS).set(credentialed);
     }
 
     private void sendError(ChannelHandlerContext ctx, String origin) {
         FullHttpResponse response = new DefaultFullHttpResponse(
                 HttpVersion.HTTP_1_1,
                 HttpResponseStatus.FORBIDDEN);
-        
+
         if (origin != null && isOriginAllowed(origin)) {
+            boolean credentialed = isCredentialedOrigin(origin);
             response.headers()
-                    .set(HttpHeaderNames.ACCESS_CONTROL_ALLOW_ORIGIN, origin)
-                    .set(HttpHeaderNames.ACCESS_CONTROL_ALLOW_CREDENTIALS, "true")
+                    .set(HttpHeaderNames.ACCESS_CONTROL_ALLOW_ORIGIN, credentialed ? origin : "*")
                     .set(HttpHeaderNames.VARY, "Origin");
+            if (credentialed) {
+                response.headers().set(HttpHeaderNames.ACCESS_CONTROL_ALLOW_CREDENTIALS, "true");
+            }
         }
-        
+
         response.headers().set(HttpHeaderNames.CONTENT_LENGTH, 0);
         ctx.writeAndFlush(response);
     }

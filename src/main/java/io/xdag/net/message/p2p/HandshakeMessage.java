@@ -51,6 +51,11 @@ import lombok.Setter;
 @Setter
 public abstract class HandshakeMessage extends Message {
 
+    /** Upper bound on the number of advertised capabilities (pre-auth memory amplification guard). */
+    private static final int MAX_CAPABILITIES = 16;
+    /** Upper bound on the length of a single capability string. */
+    private static final int MAX_CAPABILITY_LENGTH = 64;
+
     protected final Network network;
     protected final short networkVersion;
 
@@ -119,8 +124,16 @@ public abstract class HandshakeMessage extends Message {
         this.port = dec.readInt();
         this.clientId = dec.readString();
         List<String> capabilities = new ArrayList<>();
-        for (int i = 0, size = dec.readInt(); i < size; i++) {
-            capabilities.add(dec.readString());
+        int capabilitiesSize = dec.readInt();
+        if (capabilitiesSize < 0 || capabilitiesSize > MAX_CAPABILITIES) {
+            throw new IllegalArgumentException("Invalid capabilities count: " + capabilitiesSize);
+        }
+        for (int i = 0; i < capabilitiesSize; i++) {
+            String capability = dec.readString();
+            if (capability.length() > MAX_CAPABILITY_LENGTH) {
+                throw new IllegalArgumentException("Capability string too long: " + capability.length());
+            }
+            capabilities.add(capability);
         }
         this.capabilities = capabilities.toArray(new String[0]);
         this.latestBlockNumber = dec.readLong();

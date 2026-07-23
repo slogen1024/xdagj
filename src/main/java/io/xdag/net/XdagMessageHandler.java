@@ -54,10 +54,15 @@ public class XdagMessageHandler extends MessageToMessageCodec<Frame, Message>  {
     private final AtomicInteger count;
 
     private final int netMaxPacketSize;
+    private final int maxFramesPerPacket;
 
     public XdagMessageHandler(Config config) {
         this.config = config;
         this.netMaxPacketSize = config.getNodeSpec().getNetMaxPacketSize();
+        int frameBodySize = config.getNodeSpec().getNetMaxFrameBodySize();
+        // Upper bound on the number of frames a single packet may legitimately occupy.
+        // A peer that exceeds this is abusively fragmenting and gets disconnected.
+        this.maxFramesPerPacket = frameBodySize > 0 ? (netMaxPacketSize / frameBodySize) + 1 : 1;
         this.messageFactory = new MessageFactory();
         this.count = new AtomicInteger(0);
     }
@@ -100,7 +105,7 @@ public class XdagMessageHandler extends MessageToMessageCodec<Frame, Message>  {
 
         int total = (dataCompressed.length - 1) / limit + 1;
         for (int i = 0; i < total; i++) {
-            byte[] body = new byte[(i < total - 1) ? limit : dataCompressed.length % limit];
+            byte[] body = new byte[(i < total - 1) ? limit : dataCompressed.length - i * limit];
             System.arraycopy(dataCompressed, i * limit, body, 0, body.length);
 
             out.add(new Frame(Frame.VERSION, COMPRESS_TYPE, packetType, packetId, packetSize, body.length, body));
@@ -130,10 +135,25 @@ public class XdagMessageHandler extends MessageToMessageCodec<Frame, Message>  {
                     incompletePackets.put(packetId, pair);
                 }
 
-                pair.getLeft().add(frame);
+                // Reject non-positive body sizes: they would never reduce the remaining
+                // counter, letting a peer grow the frame list without bound (OOM).
+                if (frame.getBodySize() <= 0) {
+                    incompletePackets.invalidate(packetId);
+                    throw new IOException("Invalid frame body size: " + frame.getBodySize());
+                }
+
+                List<Frame> frames = pair.getLeft();
+                frames.add(frame);
+
+                // Cap the number of frames per packet to bound memory usage.
+                if (frames.size() > maxFramesPerPacket) {
+                    incompletePackets.invalidate(packetId);
+                    throw new IOException("Too many frames in packet: " + frames.size());
+                }
+
                 int remaining = pair.getRight().addAndGet(-frame.getBodySize());
                 if (remaining == 0) {
-                    decodedMsg = decodeMessage(pair.getLeft());
+                    decodedMsg = decodeMessage(frames);
 
                     // remove complete packets from cache
                     incompletePackets.invalidate(packetId);

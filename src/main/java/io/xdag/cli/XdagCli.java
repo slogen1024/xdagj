@@ -40,6 +40,7 @@ import io.xdag.db.rocksdb.RocksdbKVSource;
 import io.xdag.db.rocksdb.SnapshotStoreImpl;
 import io.xdag.utils.BytesUtils;
 import io.xdag.utils.XdagTime;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.Option;
@@ -57,6 +58,7 @@ import org.apache.commons.lang3.Strings;
 import static io.xdag.crypto.keys.AddressUtils.toBytesAddress;
 import static io.xdag.utils.WalletUtils.WALLET_PASSWORD_PROMPT;
 
+@Slf4j
 public class XdagCli extends Launcher {
 
     private static final Scanner scanner = new Scanner(new InputStreamReader(System.in, StandardCharsets.UTF_8));
@@ -159,14 +161,16 @@ public class XdagCli extends Launcher {
         }
         String[] newArgs = argsList.toArray(new String[0]);
         // parse common options
-        CommandLine cmd = null;
+        CommandLine cmd;
         try {
             cmd = parseOptions(newArgs);
         } catch (ParseException exception) {
+            // Never rely on an assert here: asserts are disabled in production and cmd would be null (Q-29).
             System.err.println("Parsing Failed:" + exception.getMessage());
+            printHelp();
+            return;
         }
 
-        assert cmd != null;
         if (cmd.hasOption(XdagOption.HELP.toString())) {
             printHelp();
         } else if (cmd.hasOption(XdagOption.VERSION.toString())) {
@@ -397,6 +401,8 @@ public class XdagCli extends Launcher {
         Wallet wallet = loadWallet();
         if (getPassword() == null) {
             if (wallet.unlock("")) {
+                // S-34: an empty password unlocked the wallet — it has no password protection.
+                log.warn("Wallet is NOT password-protected (empty password). Set a wallet password to secure your keys.");
                 setPassword("");
             } else {
                 setPassword(readPassword(WALLET_PASSWORD_PROMPT));

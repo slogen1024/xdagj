@@ -84,7 +84,7 @@ public class XdagBlock {
 
     public XdagField[] getFields() {
         if (this.fields == null) {
-            throw new Error("no fields");
+            throw new IllegalArgumentException("no fields");
         } else {
             return this.fields;
         }

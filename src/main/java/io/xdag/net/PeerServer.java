@@ -101,8 +101,10 @@ public class PeerServer extends AbstractXdagLifecycle {
                 bossGroup.shutdownGracefully();
             }
             if (workerGroup != null) {
-                workerGroup.shutdownGracefully(); 
+                workerGroup.shutdownGracefully();
             }
+            // Fail fast: the node must not report started when it is not actually listening.
+            throw new RuntimeException("Failed to start Xdag P2P server on " + ip + ":" + port, e);
         }
     }
 

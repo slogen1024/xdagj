@@ -53,6 +53,7 @@ import java.io.ByteArrayOutputStream;
 import java.math.BigInteger;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -64,6 +65,11 @@ import static io.xdag.utils.BytesUtils.equalBytes;
 
 @Slf4j
 public class BlockStoreImpl implements BlockStore {
+
+    /** Fixed-offset header length of a RocksDB tx-history record; the remark follows it. */
+    private static final int TX_HISTORY_HEADER_LEN = 90;
+    /** Upper bound on a stored remark (matches the 32-byte on-chain remark field). */
+    private static final int MAX_REMARK_LENGTH = 32;
 
     private final Kryo kryo;
 
@@ -105,6 +111,9 @@ public class BlockStoreImpl implements BlockStore {
         kryo.register(SnapshotInfo.class);
         kryo.register(UInt64.class);
         kryo.register(XAmount.class);
+        // Lock the registry: refuse to instantiate any class not registered above, so
+        // attacker-controlled stored bytes cannot trigger gadget-class instantiation on read.
+        kryo.setRegistrationRequired(true);
     }
 
     private byte[] serialize(final Object obj) throws SerializationException {
@@ -169,6 +178,12 @@ public class BlockStoreImpl implements BlockStore {
         } catch (SerializationException e) {
             log.error(e.getMessage(), e);
         }
+        if (value == null) {
+            // A transient serialize failure must not delete the existing record:
+            // RocksdbKVSource.put(key, null) deletes the key, destroying the persisted status.
+            log.error("Skip saving XdagStatus; existing record preserved");
+            return;
+        }
         indexSource.put(new byte[]{SETTING_STATS}, value);
     }
 
@@ -177,6 +192,11 @@ public class BlockStoreImpl implements BlockStore {
         byte[] remark = new byte[]{};
         if (txHistory.getRemark() != null) {
             remark = txHistory.getRemark().getBytes(StandardCharsets.UTF_8);
+            if (remark.length > MAX_REMARK_LENGTH) {
+                // Never persist a remark longer than the on-chain field; keeps the stored
+                // length field within a sane, bounded range on the read-back path.
+                remark = Arrays.copyOf(remark, MAX_REMARK_LENGTH);
+            }
         }
         byte[] isWalletAddress = new byte[]{(byte) (txHistory.getAddress().getIsAddress() ? 1 : 0)};
         byte[] key = BytesUtils.merge(TX_HISTORY, BytesUtils.merge(txHistory.getAddress().getAddress().toArray(),
@@ -197,9 +217,20 @@ public class BlockStoreImpl implements BlockStore {
 
     public List<TxHistory> getAllTxHistoryFromRocksdb() {
         List<TxHistory> res = Lists.newArrayList();
+        // N+1 (full key scan + per-key get) is kept on purpose: the prefix-scan APIs
+        // (fetchPrefix / prefixKeyAndValueLookup) run with ReadOptions.prefixSameAsStart(true),
+        // but the TXHISTORY source is created without a fixed-length prefix extractor
+        // (prefixSeekLength == 0, see RocksdbFactory), so a prefixed single-pass scan is not
+        // guaranteed to return every record. A full keys() scan is the correctness-safe choice.
         Set<byte[]> Keys = txHistorySource.keys();
         for (byte[] key : Keys) {
             byte[] txHistoryBytes = txHistorySource.get(key);
+            if (txHistoryBytes == null || txHistoryBytes.length < TX_HISTORY_HEADER_LEN) {
+                // A truncated/corrupt record must not abort the whole replay loop.
+                log.warn("Skipping malformed tx-history record, length={}",
+                        txHistoryBytes == null ? "null" : txHistoryBytes.length);
+                continue;
+            }
             byte type = BytesUtils.subArray(txHistoryBytes, 0, 1)[0];
             boolean isAddress = BytesUtils.subArray(txHistoryBytes, 1, 1)[0] == 1;
             XdagField.FieldType fieldType = XdagField.FieldType.fromByte(type);
@@ -212,8 +243,12 @@ public class BlockStoreImpl implements BlockStore {
             Address address = new Address(addresshashlow, fieldType, amount, isAddress);
             long remarkLength = BytesUtils.bytesToLong(BytesUtils.subArray(txHistoryBytes, 82, 8), 0, true);
             String remark = null;
-            if (remarkLength != 0) {
-                remark = new String(BytesUtils.subArray(txHistoryBytes, 90, (int) remarkLength),
+            if (remarkLength < 0 || remarkLength > txHistoryBytes.length - TX_HISTORY_HEADER_LEN) {
+                // Reject an out-of-range length instead of allocating/over-reading from it.
+                log.warn("Skipping remark with invalid length {} in tx-history record (record length {})",
+                        remarkLength, txHistoryBytes.length);
+            } else if (remarkLength != 0) {
+                remark = new String(BytesUtils.subArray(txHistoryBytes, TX_HISTORY_HEADER_LEN, (int) remarkLength),
                         StandardCharsets.UTF_8).trim();
             }
             res.add(new TxHistory(address, hash, timestamp, remark));
@@ -253,6 +288,12 @@ public class BlockStoreImpl implements BlockStore {
             value = serialize(status);
         } catch (SerializationException e) {
             log.error(e.getMessage(), e);
+        }
+        if (value == null) {
+            // A transient serialize failure must not delete the existing record:
+            // RocksdbKVSource.put(key, null) deletes the key, destroying the persisted top status.
+            log.error("Skip saving XdagTopStatus; existing record preserved");
+            return;
         }
         indexSource.put(new byte[]{SETTING_TOP_STATUS}, value);
     }
@@ -375,6 +416,12 @@ public class BlockStoreImpl implements BlockStore {
         } catch (SerializationException e) {
             log.error(e.getMessage(), e);
         }
+        if (value == null) {
+            // A transient serialize failure must not delete the existing record:
+            // RocksdbKVSource.put(key, null) deletes the key, destroying the persisted sums.
+            log.error("Skip saving sums for key {}; existing record preserved", key);
+            return;
+        }
         indexSource.put(BytesUtils.merge(SUMS_BLOCK_INFO, key.getBytes(StandardCharsets.UTF_8)), value);
     }
 
@@ -473,6 +520,13 @@ public class BlockStoreImpl implements BlockStore {
         } catch (SerializationException e) {
             log.error(e.getMessage(), e);
         }
+        if (value == null) {
+            // A transient serialize failure must not delete the existing record:
+            // RocksdbKVSource.put(key, null) deletes the key, destroying the persisted block info.
+            // Skip the height mapping too so it never points at a block whose info was not saved.
+            log.error("Skip saving BlockInfo for height {}; existing record preserved", blockInfo.getHeight());
+            return;
+        }
         indexSource.put(BytesUtils.merge(HASH_BLOCK_INFO, blockInfo.getHashlow()), value);
         // 如果区块是主块的话顺便保存对应的高度信息
         // TODO: paulochen 如果回滚了，对应高度的键值对该怎么更新(直接让其height=0的区块覆盖)
@@ -569,6 +623,10 @@ public class BlockStoreImpl implements BlockStore {
                 log.error("can't deserialize data:{}", Hex.toHexString(value));
                 log.error(e.getMessage(), e);
             }
+        }
+        if (blockInfo == null) {
+            // Deserialize failed: do not hand back a Block wrapping a null BlockInfo.
+            return null;
         }
         return new Block(blockInfo);
 //        if (blockSource.get(hashlow.toArray()) == null) {

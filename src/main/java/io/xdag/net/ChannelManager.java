@@ -51,7 +51,7 @@ public class ChannelManager extends AbstractXdagLifecycle {
     private final BlockingQueue<BlockWrapper> newForeignBlocks = new LinkedBlockingQueue<>();
     // Thread for block distribution
     private final Thread blockDistributeThread;
-    private final Set<InetSocketAddress> addressSet = new HashSet<>();
+    private final Set<InetSocketAddress> addressSet;
     protected ConcurrentHashMap<InetSocketAddress, Channel> channels = new ConcurrentHashMap<>();
     protected ConcurrentHashMap<String, Channel> activeChannels = new ConcurrentHashMap<>();
     private static final int LRU_CACHE_SIZE = 1024;
@@ -64,7 +64,8 @@ public class ChannelManager extends AbstractXdagLifecycle {
         this.kernel = kernel;
         // Resending new blocks to network in loop
         this.blockDistributeThread = new Thread(this::newBlocksDistributeLoop, "NewSyncThreadBlocks");
-        initWhiteIPs();
+        // Written once at construction; kept immutable since it is read by Netty threads.
+        this.addressSet = Set.copyOf(kernel.getConfig().getNodeSpec().getWhiteIPList());
     }
 
     @Override
@@ -168,10 +169,6 @@ public class ChannelManager extends AbstractXdagLifecycle {
 
     public void onNewForeignBlock(BlockWrapper blockWrapper) {
         newForeignBlocks.add(blockWrapper);
-    }
-
-    private void initWhiteIPs() {
-        addressSet.addAll(kernel.getConfig().getNodeSpec().getWhiteIPList());
     }
 
     // use for ipv4
