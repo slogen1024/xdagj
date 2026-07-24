@@ -53,20 +53,20 @@ public final class EvmStateSchema {
     }
 
     public static byte[] accountKey(Address address) {
-        return Bytes.concatenate(Bytes.of(PREFIX_ACCOUNT), address).toArray();
+        return Bytes.concatenate(Bytes.of(PREFIX_ACCOUNT), address.getBytes()).toArray();
     }
 
     public static byte[] codeKey(Hash codeHash) {
-        return Bytes.concatenate(Bytes.of(PREFIX_CODE), codeHash).toArray();
+        return Bytes.concatenate(Bytes.of(PREFIX_CODE), codeHash.getBytes()).toArray();
     }
 
     public static byte[] storageKey(Address address, UInt256 slot) {
-        return Bytes.concatenate(Bytes.of(PREFIX_STORAGE), address, slot.toBytes()).toArray();
+        return Bytes.concatenate(Bytes.of(PREFIX_STORAGE), address.getBytes(), slot.toBytes()).toArray();
     }
 
     /** Prefix ({@code 0x02 || address}) that all of an account's storage-slot keys share. */
     public static byte[] storagePrefix(Address address) {
-        return Bytes.concatenate(Bytes.of(PREFIX_STORAGE), address).toArray();
+        return Bytes.concatenate(Bytes.of(PREFIX_STORAGE), address.getBytes()).toArray();
     }
 
     /** Decoded account header (code is stored separately, keyed by codeHash). */
@@ -77,7 +77,7 @@ public final class EvmStateSchema {
         Bytes record = Bytes.concatenate(
                 Bytes.ofUnsignedLong(nonce),          // 8 bytes, big-endian
                 Bytes32.leftPad(balance.toBytes()),   // 32 bytes (Wei is UInt256-bounded, so always <= 32)
-                codeHash);                            // 32 bytes
+                codeHash.getBytes());                 // 32 bytes
         return record.toArray();
     }
 

@@ -145,7 +145,14 @@ public final class XdagEvmExecutor {
         return collect(frame, gasLimit, Optional.empty());
     }
 
-    /** Test/bootstrap helper: place runtime code directly at an address and persist it. */
+    /**
+     * Test/bootstrap helper: place runtime code directly at an address and persist it.
+     *
+     * <p>Pass the ROOT updater (e.g. the {@code SimpleWorld} itself), not a child: Besu's
+     * {@code SimpleAccount.commit()} merges nonce/balance/storage but NOT code, so code written
+     * through a child updater is silently dropped when the child commits into its parent.
+     * ({@code RocksDbAccount.commit()} does merge code, so RocksDB-backed children are safe.)
+     */
     public void setCode(WorldUpdater parent, Address address, Bytes runtimeCode) {
         MutableAccount account = parent.getOrCreate(address);
         account.setCode(runtimeCode);
@@ -215,9 +222,12 @@ public final class XdagEvmExecutor {
     private XdagExecutionResult collect(MessageFrame frame, long gasLimit, Optional<Address> createdContract) {
         boolean success = frame.getState() == MessageFrame.State.COMPLETED_SUCCESS;
         long gasUsed = gasLimit - frame.getRemainingGas();
+        // getOutputData() is what THIS frame produced via RETURN/REVERT; getReturnData() is the
+        // buffer a child call returned into this frame (RETURNDATACOPY's source) — always empty
+        // for a top-level frame that made no sub-calls.
         return new XdagExecutionResult(
                 success,
-                frame.getReturnData(),
+                frame.getOutputData(),
                 gasUsed,
                 frame.getLogs(),
                 frame.getRevertReason(),

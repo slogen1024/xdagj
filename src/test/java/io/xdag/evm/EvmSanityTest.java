@@ -47,7 +47,7 @@ public class EvmSanityTest extends EvmTestBase {
     @Test
     public void push0_runs_on_shanghai() {
         Bytes runtime = Bytes.fromHexString("0x5f5f5260205ff3");
-        evm.setCode(world.updater(), bob, runtime);
+        evm.setCode(world, bob, runtime); // root, not a child: SimpleAccount.commit() drops code
 
         XdagExecutionResult r = call(owner, bob, Bytes.EMPTY);
 
@@ -59,7 +59,7 @@ public class EvmSanityTest extends EvmTestBase {
     @Test
     public void revert_marks_failure() {
         Bytes runtime = Bytes.fromHexString("0x60006000fd");
-        evm.setCode(world.updater(), bob, runtime);
+        evm.setCode(world, bob, runtime); // root, not a child: SimpleAccount.commit() drops code
 
         XdagExecutionResult r = call(owner, bob, Bytes.EMPTY);
 

@@ -552,6 +552,14 @@
             <artifactId>besu-datatypes</artifactId>
             <version>26.5.0</version>
         </dependency>
+        <!-- Keccak-256 (org.hyperledger.besu.crypto.Hash) used by EvmAddress and test ABI helpers.
+             Besu publishes it as a runtime-scoped transitive dep of besu-datatypes, so it must be
+             declared explicitly to reach the compile classpath. -->
+        <dependency>
+            <groupId>org.hyperledger.besu.internal</groupId>
+            <artifactId>besu-crypto-algorithms</artifactId>
+            <version>26.5.0</version>
+        </dependency>
 
     </dependencies>
 

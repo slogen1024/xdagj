@@ -45,7 +45,7 @@ public final class Abi {
 
     /** Left-pad a 20-byte address into a 32-byte ABI word. */
     public static Bytes encodeAddress(Address address) {
-        return Bytes.concatenate(Bytes.wrap(new byte[12]), address);
+        return Bytes.concatenate(Bytes.wrap(new byte[12]), address.getBytes());
     }
 
     /** Encode a non-negative integer as a 32-byte big-endian ABI word. */
