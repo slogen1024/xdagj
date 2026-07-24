@@ -224,10 +224,13 @@ public class JsonRpcHandlerTest {
         assertEquals("http://localhost:3000", response.headers().get(HttpHeaderNames.ACCESS_CONTROL_ALLOW_ORIGIN));
         String content = response.content().toString(StandardCharsets.UTF_8);
         
-        // Verify the complete error response structure
+        // Verify the complete error response structure. Hardened behavior: the response carries a
+        // generic message only — the wrapped exception's detail must NOT be leaked to the client.
         assertTrue("Response should contain jsonrpc version", content.contains("\"jsonrpc\":\"2.0\""));
         assertTrue("Response should contain error code", content.contains("\"code\":-32603"));
-        assertTrue("Response should contain error message", content.contains("\"message\":\"Internal error: Internal error\""));
+        assertTrue("Response should contain generic error message", content.contains("\"message\":\"Internal error\""));
+        assertFalse("Response must not leak exception detail",
+                content.contains("\"message\":\"Internal error: Internal error\""));
 //        assertTrue("Response should contain id", content.contains("\"id\":\"1\"");
         assertFalse("Response should not contain result", content.contains("\"result\""));
     }

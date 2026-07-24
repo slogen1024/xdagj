@@ -60,11 +60,17 @@ public class TaskTest {
     private Wallet wallet;
 
     @Before
-    public void setUp() {
+    public void setUp() throws IOException {
         String pwd = "password";
         Config config = new DevnetConfig();
         wallet = new Wallet(config);
-        wallet.unlock(pwd);
+        // The wallet file path (devnet/wallet/wallet.data) is shared by every test class using
+        // DevnetConfig. Drop whatever a previous class left behind so unlock() always initializes
+        // a fresh wallet instead of silently failing against a foreign/corrupt file.
+        if (wallet.exists()) {
+            wallet.delete();
+        }
+        assertTrue("wallet must unlock", wallet.unlock(pwd));
         ECKeyPair key = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
         wallet.setAccounts(Collections.singletonList(key));
         wallet.flush();

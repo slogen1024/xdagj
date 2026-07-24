@@ -303,8 +303,10 @@ public class JsonRequestHandlerTest {
             handler.handle(request);
             fail("Should throw JsonRpcException for non-numeric page number");
         } catch (JsonRpcException e) {
-            assertEquals("Error code should be invalid params", JsonRpcError.ERR_INTERNAL, e.getCode());
-            assertEquals("Error message should match", "Internal error: For input string: \"abc\"", e.getMessage());
+            // Hardened behavior: a malformed page param is an invalid-params error (-32602), and the
+            // raw NumberFormatException detail is no longer leaked to the client.
+            assertEquals("Error code should be invalid params", JsonRpcError.ERR_INVALID_PARAMS, e.getCode());
+            assertEquals("Error message should match", "Invalid page number format", e.getMessage());
         }
     }
 
@@ -324,8 +326,9 @@ public class JsonRequestHandlerTest {
             handler.handle(request);
             fail("Should throw JsonRpcException for non-numeric page size");
         } catch (JsonRpcException e) {
-            assertEquals("Error code should be invalid params", JsonRpcError.ERR_INTERNAL, e.getCode());
-            assertEquals("Error message should match", "Internal error: For input string: \"abc\"", e.getMessage());
+            // Hardened behavior: see testHandleNonNumericPageNumber.
+            assertEquals("Error code should be invalid params", JsonRpcError.ERR_INVALID_PARAMS, e.getCode());
+            assertEquals("Error message should match", "Invalid page size format", e.getMessage());
         }
     }
 
