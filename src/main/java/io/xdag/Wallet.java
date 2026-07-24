@@ -130,6 +130,10 @@ public class Wallet {
     public void lock() {
         password = null;
         accounts.clear();
+        // Clear the cached HD secret on lock. NOTE: String secrets cannot be reliably zeroized
+        // in the JVM; dropping the reference is the best we can do without a char[] refactor.
+        mnemonicPhrase = null;
+        nextAccountIndex = 0;
     }
 
     public ECKeyPair getDefKey() {
@@ -331,12 +335,19 @@ public class Wallet {
             }
 
             // set posix permissions
-            if (FileSystems.getDefault().supportedFileAttributeViews().contains("posix") && !file.exists()) {
+            boolean isPosix = FileSystems.getDefault().supportedFileAttributeViews().contains("posix");
+            if (isPosix && !file.exists()) {
                 Files.createFile(file.toPath());
                 Files.setPosixFilePermissions(file.toPath(), POSIX_SECURED_PERMISSIONS);
             }
 
             FileUtils.writeByteArrayToFile(file, enc.toBytes());
+
+            // Re-apply 0600 on every write so an existing wallet file cannot be left readable
+            // by other users on POSIX filesystems (S-35).
+            if (isPosix) {
+                Files.setPosixFilePermissions(file.toPath(), POSIX_SECURED_PERMISSIONS);
+            }
             return true;
         } catch (IOException e) {
             log.error("Failed to write wallet to disk", e);

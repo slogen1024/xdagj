@@ -67,7 +67,24 @@ public class TransactionHistoryStoreImpl implements TransactionHistoryStore {
     private Connection connBatch = null;
     private PreparedStatement pstmtBatch = null;
     private int count = 0;
-    public static int totalPage = 1;
+
+    /**
+     * Page count for the most recent {@link #listTxHistoryByAddress} call on the CURRENT thread.
+     * RPC requests are processed synchronously on a single Netty worker thread, so the count travels
+     * back to the caller via a per-thread value rather than a shared mutable static — the previous
+     * {@code public static int totalPage} could be raced on by requests on different worker threads.
+     */
+    private static final ThreadLocal<Integer> TOTAL_PAGE = ThreadLocal.withInitial(() -> 1);
+
+    /** Page count from the last tx-history query on this thread; defaults to 1 when none has run. */
+    public static int getTotalPage() {
+        return TOTAL_PAGE.get();
+    }
+
+    /** Clears the per-thread page count once the caller has consumed it. */
+    public static void resetTotalPage() {
+        TOTAL_PAGE.remove();
+    }
 
     public TransactionHistoryStoreImpl(long txPageSizeLimit) {
         this.TX_PAGE_SIZE_LIMIT = txPageSizeLimit;
@@ -145,20 +162,48 @@ public class TransactionHistoryStoreImpl implements TransactionHistoryStore {
             }
         } catch (Exception e) {
             log.error(e.getMessage(), e);
-        } finally {
-            if (connBatch != null && txHistory == null) {
+            // Roll back the pending batch and reset the counter so the next call starts from a clean slate.
+            count = 0;
+            if (connBatch != null) {
                 try {
-                    connBatch.close();
-                    pstmtBatch.close();
-                    log.info("The loading is complete, close mysql.");
-                } catch (SQLException e) {
-                    log.error(e.getMessage(), e);
+                    connBatch.rollback();
+                } catch (SQLException re) {
+                    log.error(re.getMessage(), re);
                 }
-                connBatch = null;
-                pstmtBatch = null;
+            }
+            // Drop the (possibly broken) connection and statement; they are re-created on the next call.
+            closeBatchResources();
+        } finally {
+            // End of a load run: release the batch resources (no-op if the catch already closed them).
+            if (txHistory == null && (connBatch != null || pstmtBatch != null)) {
+                closeBatchResources();
+                log.info("The loading is complete, close mysql.");
             }
         }
         return result;
+    }
+
+    /**
+     * Releases the batch connection and statement, closing the statement BEFORE the connection and
+     * guarding each independently so a null (or already-closed) resource cannot trigger an NPE.
+     */
+    private void closeBatchResources() {
+        if (pstmtBatch != null) {
+            try {
+                pstmtBatch.close();
+            } catch (SQLException e) {
+                log.error(e.getMessage(), e);
+            }
+            pstmtBatch = null;
+        }
+        if (connBatch != null) {
+            try {
+                connBatch.close();
+            } catch (SQLException e) {
+                log.error(e.getMessage(), e);
+            }
+            connBatch = null;
+        }
     }
 
     @Override
@@ -212,7 +257,7 @@ public class TransactionHistoryStoreImpl implements TransactionHistoryStore {
                 if (rs.next()) {
                     totalcount = rs.getInt(1);
                 }
-                totalPage = totalcount < PAGE_SIZE ? 1 : (int) Math.ceil((double) totalcount / PAGE_SIZE);
+                TOTAL_PAGE.set(totalcount < PAGE_SIZE ? 1 : (int) Math.ceil((double) totalcount / PAGE_SIZE));
 
                 pstmt = conn.prepareStatement(SQL_QUERY_TXHISTORY_BY_ADDRESS_WITH_TIME);
                 pstmt.setString(1, address);

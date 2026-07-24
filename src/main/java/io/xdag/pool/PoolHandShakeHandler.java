@@ -31,6 +31,7 @@ import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.websocketx.*;
+import io.netty.util.AttributeKey;
 import io.netty.util.CharsetUtil;
 import io.xdag.Kernel;
 import io.xdag.consensus.XdagPow;
@@ -44,7 +45,11 @@ import static io.xdag.utils.BasicUtils.extractIpAddress;
 @Slf4j
 @ChannelHandler.Sharable
 public class PoolHandShakeHandler extends SimpleChannelInboundHandler<Object> {
-    private WebSocketServerHandshaker handshaker;
+    // This handler is @Sharable (one instance across all channels), so per-connection handshake
+    // state must live on the channel, not in an instance field, or concurrent pool connections
+    // would clobber each other's handshaker.
+    private static final AttributeKey<WebSocketServerHandshaker> HANDSHAKER =
+            AttributeKey.valueOf("PoolWebSocketHandshaker");
     private final int port;
     // pool whitelist
     private final List<String> clientIPList;
@@ -93,22 +98,45 @@ public class PoolHandShakeHandler extends SimpleChannelInboundHandler<Object> {
                     HttpVersion.HTTP_1_1, HttpResponseStatus.BAD_REQUEST));
             return;
         }
+        // Reject the upgrade once the node is already serving the maximum number of pool
+        // connections, so a flood (notably when the whitelist is open via 0.0.0.0) cannot exhaust
+        // resources. Only handshaked pools are counted (see ChannelSupervise registration below).
+        if (ChannelSupervise.channelCount() >= WebSocketServer.MAX_POOL_CONNECTIONS) {
+            log.warn("Reject pool {}: max pool connections ({}) reached", clientIPWithPort,
+                    WebSocketServer.MAX_POOL_CONNECTIONS);
+            sendHttpResponse(ctx, req, new DefaultFullHttpResponse(
+                    HttpVersion.HTTP_1_1, HttpResponseStatus.SERVICE_UNAVAILABLE));
+            return;
+        }
         String uri = "ws://0.0.0.0:" + port + "/websocket";
         WebSocketServerHandshakerFactory wsFactory = new WebSocketServerHandshakerFactory(
                 uri, null, false);
-        handshaker = wsFactory.newHandshaker(req);
+        WebSocketServerHandshaker handshaker = wsFactory.newHandshaker(req);
         if (handshaker == null) {
             WebSocketServerHandshakerFactory.sendUnsupportedVersionResponse(ctx.channel());
         } else {
-            handshaker.handshake(ctx.channel(), req);
+            ctx.channel().attr(HANDSHAKER).set(handshaker);
+            // Supervise the channel only after the WebSocket handshake actually completes, so only
+            // whitelisted, fully-upgraded pool connections are tracked and broadcast to.
+            handshaker.handshake(ctx.channel(), req).addListener((ChannelFutureListener) future -> {
+                if (future.isSuccess()) {
+                    ChannelSupervise.addChannel(future.channel());
+                    log.debug("Pool {} handshake completed, channel supervised", clientIPWithPort);
+                } else {
+                    log.debug("WebSocket handshake failed for pool {}", clientIPWithPort, future.cause());
+                }
+            });
         }
     }
 
     @Override
     public void channelActive(ChannelHandlerContext ctx) {
+        // Do NOT supervise the channel here: at channelActive the connection has not passed the IP
+        // whitelist or completed the WebSocket handshake yet. Registering it only after a successful
+        // handshake (see handleHttpRequest) prevents unauthenticated/non-pool sockets from being
+        // tracked and broadcast to. channelInactive still removes it.
         log.debug("Pool {} join in. Pool channel id {}",
                 ctx.channel().remoteAddress().toString(), ctx.channel().id().toString());
-        ChannelSupervise.addChannel(ctx.channel());
     }
 
     @Override
@@ -127,7 +155,12 @@ public class PoolHandShakeHandler extends SimpleChannelInboundHandler<Object> {
     private void handlerWebSocketFrame(ChannelHandlerContext ctx, WebSocketFrame frame) {
         //  close command
         if (frame instanceof CloseWebSocketFrame) {
-            handshaker.close(ctx.channel(), (CloseWebSocketFrame) frame.retain());
+            WebSocketServerHandshaker handshaker = ctx.channel().attr(HANDSHAKER).get();
+            if (handshaker != null) {
+                handshaker.close(ctx.channel(), (CloseWebSocketFrame) frame.retain());
+            } else {
+                ctx.close();
+            }
             return;
         }
         // ping msg

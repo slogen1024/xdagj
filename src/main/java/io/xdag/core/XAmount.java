@@ -57,6 +57,9 @@ public class XAmount implements Comparable<XAmount> {
      * Create XAmount from long value
      */
     public static XAmount of(long n) {
+        if (n < 0) {
+            throw new IllegalArgumentException("XAmount cannot be negative: " + n);
+        }
         return new XAmount(n);
     }
 
@@ -64,7 +67,11 @@ public class XAmount implements Comparable<XAmount> {
      * Create XAmount from string value
      */
     public static XAmount of(String n) {
-        return new XAmount(Long.parseLong(n));
+        long nano = Long.parseLong(n);
+        if (nano < 0) {
+            throw new IllegalArgumentException("XAmount cannot be negative: " + n);
+        }
+        return new XAmount(nano);
     }
 
     /**
@@ -195,7 +202,9 @@ public class XAmount implements Comparable<XAmount> {
     public XAmount multiply(double a) throws ArithmeticException {
         BigDecimal b1 = BigDecimal.valueOf(this.nano);
         BigDecimal b2 = BigDecimal.valueOf(a);
-        return XAmount.of(b1.multiply(b2).longValue());
+        // FLOOR to whole nano (no fractional sub-units) and longValueExact so an overflow throws
+        // instead of silently wrapping the way longValue() would.
+        return new XAmount(b1.multiply(b2).setScale(0, FLOOR).longValueExact());
     }
 
     public XAmount divide(long a) throws ArithmeticException {

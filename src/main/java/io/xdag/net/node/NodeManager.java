@@ -103,7 +103,13 @@ public class NodeManager extends AbstractXdagLifecycle {
 
     @Override
     protected synchronized void doStop() {
-        connectFuture.cancel(true);
+        // Guard against stop() being called before start() (futures never scheduled).
+        if (connectFuture != null) {
+            connectFuture.cancel(true);
+        }
+        if (fetchFuture != null) {
+            fetchFuture.cancel(true);
+        }
         exec.shutdown();
         log.debug("Node manager stop...");
     }

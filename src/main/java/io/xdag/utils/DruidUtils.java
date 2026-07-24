@@ -42,10 +42,22 @@ public final class DruidUtils {
     private static DataSource dataSource;
 
     static {
-        try {
+        try (InputStream inputStream =
+                DruidUtils.class.getClassLoader().getResourceAsStream("druid.properties")) {
+            if (inputStream == null) {
+                throw new IllegalStateException("druid.properties not found on the classpath");
+            }
             Properties p = new Properties();
-            InputStream inputStream = DruidUtils.class.getClassLoader().getResourceAsStream("druid.properties");
             p.load(inputStream);
+            // Allow operators to inject real credentials without editing the packaged jar.
+            String envUser = System.getenv("XDAG_DB_USER");
+            if (envUser != null && !envUser.isEmpty()) {
+                p.setProperty("username", envUser);
+            }
+            String envPassword = System.getenv("XDAG_DB_PASSWORD");
+            if (envPassword != null && !envPassword.isEmpty()) {
+                p.setProperty("password", envPassword);
+            }
             dataSource = DruidDataSourceFactory.createDataSource(p);
         } catch (Exception e) {
             log.error(e.getMessage(), e);

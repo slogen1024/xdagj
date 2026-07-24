@@ -26,4 +26,4 @@ if [ ! -d "logs" ];then
 fi
 
 # start kernel
-java ${JAVA_OPTS} ${JAVA_HEAPDUMP} ${JAVA_GC_LOG} ${XDAGJ_VERSION} -cp .:${XDAG_JARNAME} io.xdag.Bootstrap "$@"
+java ${JAVA_OPTS} ${JAVA_HEAPDUMP} ${JAVA_GC_LOG} ${XDAGJ_VERSION} -cp .:${XDAG_JARNAME} io.xdag.Bootstrap ${XDAG_OPTS} "$@"

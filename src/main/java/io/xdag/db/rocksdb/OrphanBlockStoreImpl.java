@@ -82,6 +82,9 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
 
     private final ScheduledExecutorService cleaner = Executors.newSingleThreadScheduledExecutor();
 
+    /** Guards the read-modify-write of the single ORPHAN_SIZE counter key across all threads. */
+    private final Object orphanSizeLock = new Object();
+
     private final Kernel kernel;
 
     public OrphanBlockStoreImpl(KVSource<byte[], byte[]> orphan, Kernel kernel) {
@@ -126,6 +129,11 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
 
     @Override
     public void stop() {
+        // Stop the scheduled cleaner BEFORE closing the source, otherwise it keeps calling
+        // orphanSource after close -> use-after-close.
+        if (cleaner != null) {
+            cleaner.shutdownNow();
+        }
         orphanSource.close();
     }
 
@@ -150,8 +158,11 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
                     continue;
                 }
                 orphanSource.delete(entry.getKey().toArrayUnsafe());
-                long currentSize = BytesUtils.bytesToLong(orphanSource.get(ORPHAN_SIZE), 0, false);
-                orphanSource.put(ORPHAN_SIZE, BytesUtils.longToBytes(currentSize - 1, false));
+                long currentSize;
+                synchronized (orphanSizeLock) {
+                    currentSize = BytesUtils.bytesToLong(orphanSource.get(ORPHAN_SIZE), 0, false);
+                    orphanSource.put(ORPHAN_SIZE, BytesUtils.longToBytes(currentSize - 1, false));
+                }
                 log.debug("cleanExpiredOrphans orphan current size:{}", currentSize);
                 OrphanMeta meta = OrphanMeta.parse(entry.getKey().toArrayUnsafe(), value);
                 mainRef.remove(meta);
@@ -197,8 +208,11 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
             orphanSource.delete(key);
             orphanInsertTimeMap.remove(Bytes.wrap(key));
 
-            long currentsize = BytesUtils.bytesToLong(orphanSource.get(ORPHAN_SIZE), 0, false);
-            orphanSource.put(ORPHAN_SIZE, BytesUtils.longToBytes(currentsize - 1, false));
+            long currentsize;
+            synchronized (orphanSizeLock) {
+                currentsize = BytesUtils.bytesToLong(orphanSource.get(ORPHAN_SIZE), 0, false);
+                orphanSource.put(ORPHAN_SIZE, BytesUtils.longToBytes(currentsize - 1, false));
+            }
             log.debug("deleteByKey current orphan size: {}", currentsize);
         }
     }
@@ -269,8 +283,11 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
         if (orphanSource.get(key) == null) {
             orphanSource.put(key, value);
 
-            long currentSize = BytesUtils.bytesToLong(orphanSource.get(ORPHAN_SIZE), 0, false);
-            orphanSource.put(ORPHAN_SIZE, BytesUtils.longToBytes(currentSize + 1, false));
+            long currentSize;
+            synchronized (orphanSizeLock) {
+                currentSize = BytesUtils.bytesToLong(orphanSource.get(ORPHAN_SIZE), 0, false);
+                orphanSource.put(ORPHAN_SIZE, BytesUtils.longToBytes(currentSize + 1, false));
+            }
             log.debug("orphan current size:{}", currentSize);
         }
         long vipTxCount = vipTxMap.values().stream().mapToLong(Queue::size).sum();

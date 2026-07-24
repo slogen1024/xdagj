@@ -169,6 +169,28 @@ public class RandomX extends AbstractXdagLifecycle {
 
     @Override
     protected void doStop() {
+        // Release the native RandomX templates (each owns a JNA cache/VM) held by both memory slots
+        // so the off-heap memory is freed on shutdown rather than only on process exit.
+        // RandomXTemplate implements AutoCloseable; close() releases the underlying native handles.
+        for (RandomXMemory memory : globalMemory) {
+            if (memory == null) {
+                continue;
+            }
+            synchronized (memory) {
+                try {
+                    if (memory.getPoolTemplate() != null) {
+                        memory.getPoolTemplate().close();
+                        memory.setPoolTemplate(null);
+                    }
+                    if (memory.getBlockTemplate() != null) {
+                        memory.getBlockTemplate().close();
+                        memory.setBlockTemplate(null);
+                    }
+                } catch (Exception e) {
+                    log.error("Error while releasing RandomX native templates", e);
+                }
+            }
+        }
     }
 
 
@@ -180,7 +202,13 @@ public class RandomX extends AbstractXdagLifecycle {
             memory = globalMemory[(int) (randomXPoolMemIndex - 1) & 1];
         }
 
-        byte[] bytes = memory.poolTemplate.calculateHash(data.toArray());
+        // Guard the shared native RandomXTemplate: an in-flight calculateHash (pool/getShares
+        // thread) must never overlap a changeKey (import thread) during seed rotation. Lock on the
+        // memory slot, the same monitor used by randomXPoolUpdateSeed and doStop.
+        byte[] bytes;
+        synchronized (memory) {
+            bytes = memory.poolTemplate.calculateHash(data.toArray());
+        }
         hash = Bytes32.wrap(bytes);
 
         return hash;
@@ -208,42 +236,49 @@ public class RandomX extends AbstractXdagLifecycle {
         }
 
         log.debug("Use seed {}", Hex.toHexString(Arrays.reverse(memory.seed)));
-        hash = memory.blockTemplate.calculateHash(data);
+        // Guard the shared native RandomXTemplate against a concurrent changeKey (seed rotation).
+        synchronized (memory) {
+            hash = memory.blockTemplate.calculateHash(data);
+        }
 
         return hash;
     }
 
     public void randomXPoolUpdateSeed(long memIndex) {
         RandomXMemory rx_memory = globalMemory[(int) (memIndex) & 1];
-        // TODO: changeKey should re-initialize dataset
-        if (rx_memory.getPoolTemplate() == null) {
-            RandomXCache cache = new RandomXCache(flagSet);
-            cache.init(rx_memory.seed);
-            RandomXTemplate template = RandomXTemplate.builder()
-                    .cache(cache)
-                    .miningMode(config.getRandomxSpec().getRandomxFlag())
-                    .flags(flagSet)
-                    .build();
-            template.init();
-            rx_memory.setPoolTemplate(template);
-            rx_memory.getPoolTemplate().changeKey(rx_memory.seed);
-        } else {
-            rx_memory.getPoolTemplate().changeKey(rx_memory.seed);
-        }
+        // Lock the memory slot so changeKey never overlaps an in-flight calculateHash on the same
+        // native RandomXTemplate (see randomXPoolCalcHash / randomXBlockHash).
+        synchronized (rx_memory) {
+            // TODO: changeKey should re-initialize dataset
+            if (rx_memory.getPoolTemplate() == null) {
+                RandomXCache cache = new RandomXCache(flagSet);
+                cache.init(rx_memory.seed);
+                RandomXTemplate template = RandomXTemplate.builder()
+                        .cache(cache)
+                        .miningMode(config.getRandomxSpec().getRandomxFlag())
+                        .flags(flagSet)
+                        .build();
+                template.init();
+                rx_memory.setPoolTemplate(template);
+                rx_memory.getPoolTemplate().changeKey(rx_memory.seed);
+            } else {
+                rx_memory.getPoolTemplate().changeKey(rx_memory.seed);
+            }
 
-        if (rx_memory.getBlockTemplate() == null) {
-            RandomXCache cache = new RandomXCache(flagSet);
-            cache.init(rx_memory.seed);
-            RandomXTemplate template = RandomXTemplate.builder()
-                    .cache(cache)
-                    .miningMode(config.getRandomxSpec().getRandomxFlag())
-                    .flags(flagSet)
-                    .build();
-            template.init();
-            rx_memory.setBlockTemplate(template);
-            rx_memory.getBlockTemplate().changeKey(rx_memory.seed);
-        } else {
-            rx_memory.getBlockTemplate().changeKey(rx_memory.seed);
+            if (rx_memory.getBlockTemplate() == null) {
+                RandomXCache cache = new RandomXCache(flagSet);
+                cache.init(rx_memory.seed);
+                RandomXTemplate template = RandomXTemplate.builder()
+                        .cache(cache)
+                        .miningMode(config.getRandomxSpec().getRandomxFlag())
+                        .flags(flagSet)
+                        .build();
+                template.init();
+                rx_memory.setBlockTemplate(template);
+                rx_memory.getBlockTemplate().changeKey(rx_memory.seed);
+            } else {
+                rx_memory.getBlockTemplate().changeKey(rx_memory.seed);
+            }
         }
     }
 

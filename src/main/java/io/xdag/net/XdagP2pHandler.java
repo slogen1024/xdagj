@@ -82,6 +82,12 @@ import static io.xdag.config.Constants.BI_MAIN_REF;
 @Slf4j
 public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
 
+    /** Maximum number of blocks returned for a single BLOCKS_REQUEST, to bound reply size. */
+    private static final int MAX_BLOCKS_PER_REQUEST = 16384;
+
+    /** Absolute ceiling on remote block/main counts; anything beyond is treated as bogus. */
+    private static final long MAX_PLAUSIBLE_BLOCK_COUNT = 1L << 48;
+
     private static final ScheduledExecutorService exec = Executors
             .newSingleThreadScheduledExecutor(new ThreadFactory() {
                 private final AtomicInteger cnt = new AtomicInteger(0);
@@ -291,9 +297,11 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
     }
 
     protected void onPong() {
-        if (lastPing > 0) {
+        // getRemotePeer() is null before the handshake completes; guard against NPE.
+        Peer remotePeer = channel.getRemotePeer();
+        if (lastPing > 0 && remotePeer != null) {
             long latency = System.currentTimeMillis() - lastPing;
-            channel.getRemotePeer().setLatency(latency);
+            remotePeer.setLatency(latency);
         }
     }
 
@@ -378,16 +386,27 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
         long endTime = msg.getEndtime();
         long random = msg.getRandom();
 
-        // TODO: paulochen Processing multi-block requests
-        //        // If it's greater than the snapshot point, I can send it.
-        //        if (startTime > 1658318225407L) {
-        //            // TODO: If the request interval is too long, a new thread will be started to send the request; this is to prevent attacks.
+        // Validate the peer-supplied time range to avoid resource-exhaustion attacks:
+        // negative bounds, an inverted range, or an over-wide window are all rejected.
+        if (startTime < 0 || endTime < 0 || endTime < startTime
+                || (endTime - startTime) > REQUEST_BLOCKS_MAX_TIME) {
+            log.warn("Rejecting BLOCKS_REQUEST with invalid time range [{}, {}] from node {}",
+                    startTime, endTime, channel.getRemoteAddress());
+            return;
+        }
+
         log.debug("Send blocks between {} and {} to node {}",
                 FastDateFormat.getInstance("yyyy-MM-dd HH:mm:ss.SSS").format(XdagTime.xdagTimestampToMs(startTime)),
                 FastDateFormat.getInstance("yyyy-MM-dd HH:mm:ss.SSS").format(XdagTime.xdagTimestampToMs(endTime)),
                 channel.getRemoteAddress());
         List<Block> blocks = chain.getBlocksByTime(startTime, endTime);
+        int sent = 0;
         for (Block block : blocks) {
+            if (sent >= MAX_BLOCKS_PER_REQUEST) {
+                log.warn("BLOCKS_REQUEST reply truncated at {} blocks for node {}",
+                        MAX_BLOCKS_PER_REQUEST, channel.getRemoteAddress());
+                break;
+            }
             byte executionState = 0;
             if (chain.isTxBlock(block)) {
                 int flag = block.getInfo().getFlags() & ~(BI_OURS | BI_REMARK);
@@ -400,6 +419,7 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
             }
             SyncBlockMessage blockMsg = new SyncBlockMessage(block, 1, executionState);
             msgQueue.sendMessage(blockMsg);
+            sent++;
         }
         msgQueue.sendMessage(new BlocksReplyMessage(startTime, endTime, random, chain.getXdagStats()));
     }
@@ -513,6 +533,19 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
         // Confirm that the remote stats has been updated, used to check local state.
         syncMgr.getIsUpdateXdagStats().compareAndSet(false, true);
         XdagStats remoteXdagStats = message.getXdagStats();
+        if (remoteXdagStats == null) {
+            return;
+        }
+        // Reject implausible peer-supplied stats (negative or absurdly large counts) so a
+        // malicious peer cannot poison our local view of the network.
+        if (remoteXdagStats.getTotalnblocks() < 0 || remoteXdagStats.getTotalnmain() < 0
+                || remoteXdagStats.getTotalnhosts() < 0
+                || remoteXdagStats.getTotalnblocks() > MAX_PLAUSIBLE_BLOCK_COUNT
+                || remoteXdagStats.getTotalnmain() > MAX_PLAUSIBLE_BLOCK_COUNT) {
+            log.warn("Ignoring implausible remote XdagStats from node {}: {}",
+                    channel.getRemoteAddress(), remoteXdagStats);
+            return;
+        }
         chain.getXdagStats().update(remoteXdagStats);
     }
 

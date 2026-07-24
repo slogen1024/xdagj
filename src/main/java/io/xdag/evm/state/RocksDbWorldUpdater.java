@@ -50,6 +50,11 @@ import org.hyperledger.besu.evm.worldstate.WorldUpdater;
  *
  * <p>The Sub-project A executor is unchanged: {@code XdagEvmExecutor.deploy/call(WorldUpdater, ...)}
  * works against {@code new RocksDbWorldUpdater(evmStateStore)} exactly as it did against SimpleWorld.
+ *
+ * <p><b>Not thread-safe.</b> The {@code accounts} map and the mutable {@link RocksDbAccount} fields it
+ * holds carry no synchronization. The intended (and only supported) model is one updater per execution,
+ * confined to a single thread. Sharing an instance across threads will corrupt state. Allocate a fresh
+ * {@code RocksDbWorldUpdater} (or a child via {@link #updater()}) per execution rather than reusing one.
  */
 public class RocksDbWorldUpdater implements WorldUpdater {
 
@@ -117,11 +122,26 @@ public class RocksDbWorldUpdater implements WorldUpdater {
         if (getAccount(address) != null) {
             throw new IllegalStateException("Cannot create an account when one already exists");
         }
+        // S-28: guard against storage resurrection. getAccount() above returned null, so any cache
+        // entry that still exists is a pending deletion (Optional.empty) from this same updater. If the
+        // address was deleted here, or the store still holds slots under it, the freshly created account
+        // must wipe those prior slots at commit; otherwise the new account would inherit (resurrect) the
+        // old storage. clearStorage() sets the storageCleared flag the commit path honours — the just-
+        // created account's updatedStorage is empty, so nothing else is affected.
+        boolean previouslyDeletedHere = accounts.containsKey(address);
         RocksDbAccount account = parent != null
                 ? new RocksDbAccount((Account) null, address, nonce, balance, Bytes.EMPTY)
                 : new RocksDbAccount(store, address, nonce, balance, Bytes.EMPTY);
+        if (previouslyDeletedHere || hasPersistedStorage(address)) {
+            account.clearStorage();
+        }
         accounts.put(address, Optional.of(account));
         return account;
+    }
+
+    /** True if the underlying store still holds any storage slot keyed under {@code address}. */
+    private boolean hasPersistedStorage(Address address) {
+        return !store.prefixKeyLookup(EvmStateSchema.storagePrefix(address)).isEmpty();
     }
 
     @Override
@@ -155,12 +175,14 @@ public class RocksDbWorldUpdater implements WorldUpdater {
             });
             return;
         }
-        // Root: flush the whole delta to the store atomically.
+        // Root: flush the whole delta to the store in one atomic batchWrite.
         Map<byte[], byte[]> puts = new HashMap<>();
         Set<byte[]> deletes = new HashSet<>();
         accounts.forEach((address, optAccount) -> {
             if (optAccount.isEmpty()) {
+                // Deleted account (SELFDESTRUCT): drop its header and every storage slot.
                 deletes.add(EvmStateSchema.accountKey(address));
+                deletes.addAll(store.prefixKeyLookup(EvmStateSchema.storagePrefix(address)));
                 return;
             }
             RocksDbAccount account = optAccount.get();
@@ -171,8 +193,29 @@ public class RocksDbWorldUpdater implements WorldUpdater {
             if (code != null && !code.isEmpty()) {
                 puts.put(EvmStateSchema.codeKey(codeHash), code.toArray());
             }
-            account.getUpdatedStorage().forEach((slot, value) ->
-                    puts.put(EvmStateSchema.storageKey(address, slot), EvmStateSchema.encodeStorageValue(value)));
+
+            // Slots being (re)written this commit, by content — used to keep deletes disjoint.
+            Set<Bytes> writtenSlots = new HashSet<>();
+            account.getUpdatedStorage().forEach((slot, value) -> {
+                byte[] key = EvmStateSchema.storageKey(address, slot);
+                if (value == null || value.isZero()) {
+                    // Zero is "absent" in EVM semantics: remove the slot rather than store 32 zero bytes.
+                    deletes.add(key);
+                } else {
+                    puts.put(key, EvmStateSchema.encodeStorageValue(value));
+                    writtenSlots.add(Bytes.wrap(key));
+                }
+            });
+
+            // clearStorage()/account-reset: remove every persisted original slot that is not being
+            // rewritten with a fresh value in this same commit.
+            if (account.isStorageCleared()) {
+                for (byte[] original : store.prefixKeyLookup(EvmStateSchema.storagePrefix(address))) {
+                    if (!writtenSlots.contains(Bytes.wrap(original))) {
+                        deletes.add(original);
+                    }
+                }
+            }
         });
         store.batchWrite(puts, deletes);
         accounts = new HashMap<>();

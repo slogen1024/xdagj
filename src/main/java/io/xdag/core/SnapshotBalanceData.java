@@ -31,6 +31,7 @@ import java.io.IOException;
 import java.nio.ByteOrder;
 import java.util.Objects;
 import lombok.Data;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.time.FastDateFormat;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
@@ -41,6 +42,7 @@ import org.xerial.snappy.Snappy;
  * Class representing balance data for snapshot functionality
  */
 @Data
+@Slf4j
 public class SnapshotBalanceData {
 
     // Amount of balance
@@ -98,7 +100,7 @@ public class SnapshotBalanceData {
                 Bytes32 hash = Bytes32.wrap(uncompressed.slice(24));
                 return new SnapshotBalanceData(amount, time, hash.toArray(), flags);
             } catch (IOException e) {
-                e.printStackTrace();
+                log.error("Failed to uncompress snapshot balance data", e);
             }
         }
         return null;

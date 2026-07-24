@@ -28,12 +28,14 @@ import java.util.List;
 import java.util.Optional;
 import org.apache.tuweni.bytes.Bytes;
 import org.hyperledger.besu.datatypes.Address;
+import org.hyperledger.besu.datatypes.Hash;
 import org.hyperledger.besu.datatypes.Wei;
 import org.hyperledger.besu.evm.Code;
 import org.hyperledger.besu.evm.EVM;
 import org.hyperledger.besu.evm.MainnetEVMs;
 import org.hyperledger.besu.evm.account.MutableAccount;
 import org.hyperledger.besu.evm.fluent.SimpleBlockValues;
+import org.hyperledger.besu.evm.frame.BlockValues;
 import org.hyperledger.besu.evm.frame.MessageFrame;
 import org.hyperledger.besu.evm.internal.EvmConfiguration;
 import org.hyperledger.besu.evm.precompile.MainnetPrecompiledContracts;
@@ -60,8 +62,11 @@ public final class XdagEvmExecutor {
     private final EVM evm;
     private final MessageCallProcessor callProcessor;
     private final ContractCreationProcessor creationProcessor;
+    /** Upper bound on the gas a single message may request (S-25); see {@link EvmConfig#maxGasLimit()}. */
+    private final long maxGasLimit;
 
     public XdagEvmExecutor(EvmConfig config) {
+        this.maxGasLimit = config.maxGasLimit();
         // Shanghai interpreter for the configured chain id.
         this.evm = MainnetEVMs.shanghai(config.chainId(), EvmConfiguration.DEFAULT);
         // Shanghai adds no precompiles beyond Istanbul; the Istanbul registry is the correct set.
@@ -73,34 +78,64 @@ public final class XdagEvmExecutor {
     }
 
     /**
-     * Deploy a contract. {@code initCode} is the creation bytecode with any ABI-encoded constructor
-     * arguments appended (standard CREATE semantics). On success the runtime code is deposited at the
-     * derived address and that address is returned.
+     * Deploy a contract with a default (empty) block context. {@code initCode} is the creation
+     * bytecode with any ABI-encoded constructor arguments appended (standard CREATE semantics). On
+     * success the runtime code is deposited at the derived address and that address is returned.
+     *
+     * <p>The block context here is all-zero (number/timestamp/gasLimit = 0, coinbase = {@link
+     * Address#ZERO}), which is fine for tests and context-free deployments. PRODUCTION on-chain
+     * execution must call {@link #deploy(WorldUpdater, Address, Bytes, Wei, long, BlockValues, Address)}
+     * so the NUMBER/TIMESTAMP/GASLIMIT/COINBASE/PREVRANDAO opcodes observe the real block.
      */
     public XdagExecutionResult deploy(WorldUpdater parent, Address sender, Bytes initCode, Wei value, long gasLimit) {
+        return deploy(parent, sender, initCode, value, gasLimit, new SimpleBlockValues(), Address.ZERO);
+    }
+
+    /**
+     * Deploy a contract against an explicit block context (real block number/timestamp/coinbase/...),
+     * supplied by the on-chain caller so block-introspection opcodes read true values.
+     */
+    public XdagExecutionResult deploy(WorldUpdater parent, Address sender, Bytes initCode, Wei value, long gasLimit,
+                                      BlockValues blockValues, Address coinbase) {
+        requireGasWithinLimit(gasLimit);
         MutableAccount senderAccount = parent.getOrCreate(sender);
         long nonce = senderAccount.getNonce();
         Address contract = Address.contractAddress(sender, nonce);
         senderAccount.setNonce(nonce + 1);
 
         MessageFrame frame = buildFrame(MessageFrame.Type.CONTRACT_CREATION, parent.updater(),
-                sender, contract, contract, initCode, Bytes.EMPTY, value, gasLimit);
+                sender, contract, contract, initCode, Bytes.EMPTY, value, gasLimit, blockValues, coinbase);
         runToHalt(frame);
 
         boolean success = frame.getState() == MessageFrame.State.COMPLETED_SUCCESS;
-        if (success) {
-            parent.commit();
-        }
+        // S-24: persist the sender nonce bump whether or not execution succeeded, matching Ethereum
+        // (a failed transaction still consumes its nonce, preventing replay / contract-address reuse).
+        // On success the EVM has already pushed the execution's state changes up to `parent`, so this
+        // commit persists nonce + state. On failure the reverted child updater was never committed, so
+        // only the nonce bump lives on `parent`; committing therefore persists the nonce alone.
+        parent.commit();
         return collect(frame, gasLimit, success ? Optional.of(contract) : Optional.empty());
     }
 
-    /** Invoke a function on an existing contract (or send value to an account). */
-    public XdagExecutionResult call(WorldUpdater parent, Address sender, Address to, Bytes callData, Wei value, long gasLimit) {
+    /**
+     * Invoke a function on an existing contract (or send value to an account) with a default (empty)
+     * block context. PRODUCTION on-chain execution must call the
+     * {@link #call(WorldUpdater, Address, Address, Bytes, Wei, long, BlockValues, Address)} overload.
+     */
+    public XdagExecutionResult call(WorldUpdater parent, Address sender, Address to, Bytes callData, Wei value,
+                                    long gasLimit) {
+        return call(parent, sender, to, callData, value, gasLimit, new SimpleBlockValues(), Address.ZERO);
+    }
+
+    /** Invoke a contract against an explicit block context (real block number/timestamp/coinbase/...). */
+    public XdagExecutionResult call(WorldUpdater parent, Address sender, Address to, Bytes callData, Wei value,
+                                    long gasLimit, BlockValues blockValues, Address coinbase) {
+        requireGasWithinLimit(gasLimit);
         MutableAccount toAccount = parent.getAccount(to);
         Bytes code = (toAccount == null) ? Bytes.EMPTY : toAccount.getCode();
 
         MessageFrame frame = buildFrame(MessageFrame.Type.MESSAGE_CALL, parent.updater(),
-                sender, to, to, code, callData, value, gasLimit);
+                sender, to, to, code, callData, value, gasLimit, blockValues, coinbase);
         runToHalt(frame);
 
         boolean success = frame.getState() == MessageFrame.State.COMPLETED_SUCCESS;
@@ -119,7 +154,7 @@ public final class XdagEvmExecutor {
 
     private MessageFrame buildFrame(MessageFrame.Type type, WorldUpdater updater, Address sender,
                                     Address address, Address contract, Bytes code, Bytes input,
-                                    Wei value, long gas) {
+                                    Wei value, long gas, BlockValues blockValues, Address coinbase) {
         return MessageFrame.builder()
                 .type(type)
                 .worldUpdater(updater)
@@ -134,9 +169,11 @@ public final class XdagEvmExecutor {
                 .apparentValue(value)
                 .inputData(input)
                 .code(new Code(code))
-                .blockValues(new SimpleBlockValues())
-                .miningBeneficiary(Address.ZERO)
-                .blockHashLookup((frame, blockNumber) -> null)
+                .blockValues(blockValues)
+                .miningBeneficiary(coinbase)
+                // S-26: BLOCKHASH of an unknown/out-of-range block must yield zero, never null — a null
+                // would NPE inside Besu's BlockHashOperation. Sub-project B/C supplies a real lookup.
+                .blockHashLookup((frame, blockNumber) -> Hash.ZERO)
                 .completer(f -> {
                 })
                 .build();
@@ -144,13 +181,35 @@ public final class XdagEvmExecutor {
 
     private void runToHalt(MessageFrame initialFrame) {
         Deque<MessageFrame> stack = initialFrame.getMessageFrameStack();
-        while (!stack.isEmpty()) {
-            MessageFrame frame = stack.peek();
-            switch (frame.getType()) {
-                case CONTRACT_CREATION -> creationProcessor.process(frame, OperationTracer.NO_TRACING);
-                case MESSAGE_CALL -> callProcessor.process(frame, OperationTracer.NO_TRACING);
+        try {
+            while (!stack.isEmpty()) {
+                MessageFrame frame = stack.peek();
+                switch (frame.getType()) {
+                    case CONTRACT_CREATION -> creationProcessor.process(frame, OperationTracer.NO_TRACING);
+                    case MESSAGE_CALL -> callProcessor.process(frame, OperationTracer.NO_TRACING);
+                }
             }
+        } catch (RuntimeException e) {
+            // S-26: an unexpected processor/interpreter error must never crash the node. Degrade it to
+            // an exceptional halt (revert-like) that consumes all remaining gas. The caller's child
+            // world updater is not committed, so the failed execution leaks no state, and collect()
+            // then reports success == false.
+            long remaining = initialFrame.getRemainingGas();
+            if (remaining > 0L) {
+                initialFrame.decrementRemainingGas(remaining);
+            }
+            initialFrame.setState(MessageFrame.State.EXCEPTIONAL_HALT);
         }
+    }
+
+    /** Reject a gas limit that is non-positive or above the configured ceiling (S-25). */
+    private void requireGasWithinLimit(long gasLimit) {
+        if (gasLimit <= 0L || gasLimit > maxGasLimit) {
+            throw new IllegalArgumentException("gasLimit " + gasLimit + " out of range (1.." + maxGasLimit + ")");
+        }
+        // NOTE: transaction-style intrinsic gas (21000 base + per-calldata-byte + access list) is NOT
+        // charged here; this executor runs a single message. A future tx layer must deduct intrinsic
+        // gas from gasLimit before invoking deploy/call.
     }
 
     private XdagExecutionResult collect(MessageFrame frame, long gasLimit, Optional<Address> createdContract) {

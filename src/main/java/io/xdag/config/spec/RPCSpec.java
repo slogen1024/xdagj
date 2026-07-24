@@ -52,6 +52,9 @@ public interface RPCSpec {
 
     String getRpcHttpCorsOrigins();
 
+    /** Optional bearer token; when non-empty, every RPC request must present it. Empty disables auth. */
+    String getRpcHttpApiToken();
+
     int getRpcHttpMaxContentLength();
 
     int getRpcHttpBossThreads();

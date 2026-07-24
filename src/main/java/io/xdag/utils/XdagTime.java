@@ -41,6 +41,9 @@ public class XdagTime {
      * Convert milliseconds to XDAG timestamp
      */
     public static long msToXdagtimestamp(long ms) {
+        // NOTE: kept in double arithmetic intentionally. This is consensus-relevant time math
+        // and the floating-point division/ceil rounding must match the original behavior exactly;
+        // do not convert to integer arithmetic without verifying timestamps are bit-for-bit identical.
         double ms_tmp = (double) (ms << 10);
         return (long) Math.ceil(ms_tmp / 1000 + 0.5);
     }

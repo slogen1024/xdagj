@@ -114,16 +114,21 @@ public enum XdagState {
         return (byte) cmd;
     }
 
-    public void setState(XdagState state) {
+    // NOTE: these enum constants carry mutable cmd/temp state that is shared process-wide
+    // (the enum singleton is the live state holder used across threads). The mutators below
+    // are synchronized on the enum constant so the non-atomic save/restore in tempSet/rollback
+    // cannot interleave; callers must still be aware that every reference to a given XdagState
+    // constant observes the same shared mutable state.
+    public synchronized void setState(XdagState state) {
         this.cmd = state.asByte();
     }
 
-    public void tempSet(XdagState state) {
+    public synchronized void tempSet(XdagState state) {
         this.temp = this.cmd;
         this.cmd = state.asByte();
     }
 
-    public void rollback() {
+    public synchronized void rollback() {
         this.cmd = this.temp;
         this.temp = -1;
     }

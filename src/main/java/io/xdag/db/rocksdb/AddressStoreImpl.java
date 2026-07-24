@@ -32,7 +32,10 @@ import org.apache.tuweni.units.bigints.UInt64;
 
 @Slf4j
 public class AddressStoreImpl implements AddressStore {
-    private static final int ADDRESS_SIZE = 20; // Corrected constant name to uppercase
+    // Byte length of a raw address (used only for length validation). This is intentionally
+    // distinct from the inherited AddressStore.ADDRESS_SIZE = 0x10, which is the DB key byte under
+    // which the address-count record is stored and which SnapshotStoreImpl restores from.
+    private static final int ADDRESS_LEN = 20;
     private final KVSource<byte[], byte[]> addressSource; // Renamed for clarity
 
     // Constructor to initialize address source
@@ -113,7 +116,7 @@ public class AddressStoreImpl implements AddressStore {
 
     // TODO: Move calculation to application layer
     public void updateBalance(byte[] address, XAmount balance) {
-        if (address.length != ADDRESS_SIZE) {
+        if (address.length != ADDRESS_LEN) {
             log.debug("The address type is wrong");
             return;
         }

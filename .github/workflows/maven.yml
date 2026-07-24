@@ -13,6 +13,9 @@ on:
       - master
       - develop
 
+permissions:
+  contents: read
+
 jobs:
   build:
 

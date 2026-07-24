@@ -91,8 +91,14 @@ public class ConnectionLimitHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
         InetAddress address = ((InetSocketAddress) ctx.channel().remoteAddress()).getAddress();
-        AtomicInteger cnt = connectionCount.computeIfAbsent(address.getHostAddress(), k -> new AtomicInteger(0));
-        if (cnt.incrementAndGet() > maxInboundConnectionsPerIp) {
+        // Increment inside compute() so the map entry always reflects the increment atomically,
+        // keeping it consistent with the decrement-and-remove in channelInactive().
+        AtomicInteger cnt = connectionCount.compute(address.getHostAddress(), (k, v) -> {
+            AtomicInteger c = (v == null) ? new AtomicInteger(0) : v;
+            c.incrementAndGet();
+            return c;
+        });
+        if (cnt.get() > maxInboundConnectionsPerIp) {
             log.debug("Too many connections from: {}", address.getHostAddress());
             ctx.close();
         } else {
@@ -107,10 +113,10 @@ public class ConnectionLimitHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         InetAddress address = ((InetSocketAddress) ctx.channel().remoteAddress()).getAddress();
-        AtomicInteger cnt = connectionCount.computeIfAbsent(address.getHostAddress(), k -> new AtomicInteger(0));
-        if (cnt.decrementAndGet() <= 0) {
-            connectionCount.remove(address.getHostAddress());
-        }
+        // Decrement and remove atomically: the entry is dropped only when it actually reaches
+        // zero, so a concurrent channelActive() increment can never be lost (per-IP limit bypass).
+        connectionCount.computeIfPresent(address.getHostAddress(),
+                (k, cnt) -> cnt.decrementAndGet() <= 0 ? null : cnt);
         log.debug("Inactive channel with {}", address.getHostAddress());
         super.channelInactive(ctx);
     }

@@ -3,7 +3,7 @@
 - **Date:** 2026-06-06
 - **Branch:** `dev-evm` (off `develop` @ `5a0f1078`, JDK 21, v0.8.3)
 - **Status:** Draft for review
-- **Author:** slogen (+ Claude)
+- **Author:** Juliana (+ Claude)
 - **Goal of the program (user request D):** *Referencing TRON / ETH / BNB, complete XDAG EVM development and test cases so that USDT can be issued on the XDAG chain — end to end.*
 
 ---

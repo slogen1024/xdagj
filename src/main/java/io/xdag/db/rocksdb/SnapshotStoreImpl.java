@@ -344,6 +344,9 @@ public class SnapshotStoreImpl implements SnapshotStore {
         kryo.register(UInt64.class);
         kryo.register(XAmount.class);
         kryo.register(PreBlockInfo.class);
+        // Lock the registry: refuse to instantiate any class not registered above, so
+        // attacker-controlled stored bytes cannot trigger gadget-class instantiation on read.
+        kryo.setRegistrationRequired(true);
     }
 
 }

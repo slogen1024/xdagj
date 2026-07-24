@@ -62,10 +62,6 @@
 
     <repositories>
         <repository>
-            <id>bintray</id>
-            <url>https://jcenter.bintray.com</url>
-        </repository>
-        <repository>
             <id>maven_central</id>
             <name>Maven Central</name>
             <url>https://repo.maven.apache.org/maven2/</url>
@@ -83,13 +79,6 @@
             </snapshots>
         </repository>
     </repositories>
-
-    <pluginRepositories>
-        <pluginRepository>
-            <id>bintray</id>
-            <url>https://jcenter.bintray.com</url>
-        </pluginRepository>
-    </pluginRepositories>
 
     <build>
         <plugins>

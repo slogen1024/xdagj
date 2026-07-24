@@ -106,8 +106,11 @@ public class BlockchainImpl implements Blockchain {
     // Store for non-Extra orphan blocks
     private final OrphanBlockStore orphanBlockStore;
 
-    // In-memory pools and maps
-    private final LinkedHashMap<Bytes, Block> memOrphanPool = new LinkedHashMap<>();
+    // In-memory pools and maps. Wrapped in a synchronized map so that single get/containsKey
+    // calls from unlocked RPC/telnet readers (getBlockByHash, isExistInMem) are internally
+    // synchronized against the write-path mutations (tryToConnect/removeOrphan/processExtraBlock),
+    // while preserving LRU insertion-order semantics. Any view iteration must hold the map monitor.
+    private final Map<Bytes, Block> memOrphanPool = Collections.synchronizedMap(new LinkedHashMap<>());
     private final Map<Bytes, Integer> memOurBlocks = new ConcurrentHashMap<>();
 
     // Stats and status tracking
@@ -920,7 +923,11 @@ public class BlockchainImpl implements Blockchain {
     // Process extra blocks
     public void processExtraBlock() {
         if (memOrphanPool.size() > MAX_ALLOWED_EXTRA) {
-            Block reuse = memOrphanPool.entrySet().iterator().next().getValue();
+            // Iterating a synchronized-map view requires holding the map monitor.
+            Block reuse;
+            synchronized (memOrphanPool) {
+                reuse = memOrphanPool.entrySet().iterator().next().getValue();
+            }
             log.debug("Remove when extra too big");
             removeOrphan(reuse.getHashLow(), OrphanRemoveActions.ORPHAN_REMOVE_REUSE);
             xdagStats.nblocks--;
@@ -1889,6 +1896,10 @@ public class BlockchainImpl implements Blockchain {
     }
 
     private boolean verifySignature(MutableBytes subdata, Signature sig, List<PublicKey> publicKeys, BlockInfo blockInfo) {
+        // Reject non-canonical (malleable) signatures on every verify path, not only the snapshot one.
+        if (!sig.isCanonical()) {
+            return false;
+        }
         for (PublicKey publicKey : publicKeys) {
             byte[] publicKeyBytes = publicKey.toBytes().toArray();
             Bytes digest = Bytes.wrap(subdata, Bytes.wrap(publicKeyBytes));
@@ -2070,12 +2081,15 @@ public class BlockchainImpl implements Blockchain {
         if ((block.getInfo().flags & BI_OURS) != 0) {
             xdagStats.setBalance(amount.add(xdagStats.getBalance()));
         }
-        XAmount finalAmount = blockStore.getBlockInfoByHash(block.getHashLow()).getInfo().getAmount();
-        log.debug("Balance checker —— block:{} [old:{} add:{} fin:{}]",
-                block.getHashLow().toHexString(),
-                oldAmount.toDecimal(9, XUnit.XDAG).toPlainString(),
-                amount.toDecimal(9, XUnit.XDAG).toPlainString(),
-                finalAmount.toDecimal(9, XUnit.XDAG).toPlainString());
+        if (log.isDebugEnabled()) {
+            Block stored = blockStore.getBlockInfoByHash(block.getHashLow());
+            XAmount finalAmount = stored == null ? null : stored.getInfo().getAmount();
+            log.debug("Balance checker —— block:{} [old:{} add:{} fin:{}]",
+                    block.getHashLow().toHexString(),
+                    oldAmount.toDecimal(9, XUnit.XDAG).toPlainString(),
+                    amount.toDecimal(9, XUnit.XDAG).toPlainString(),
+                    finalAmount == null ? "null" : finalAmount.toDecimal(9, XUnit.XDAG).toPlainString());
+        }
     }
 
     private void subtractAndAccept(Block block, XAmount amount) {
@@ -2092,12 +2106,15 @@ public class BlockchainImpl implements Blockchain {
         if ((block.getInfo().flags & BI_OURS) != 0) {
             xdagStats.setBalance(xdagStats.getBalance().subtract(amount));
         }
-        XAmount finalAmount = blockStore.getBlockInfoByHash(block.getHashLow()).getInfo().getAmount();
-        log.debug("Balance checker —— block:{} [old:{} sub:{} fin:{}]",
-                block.getHashLow().toHexString(),
-                oldAmount.toDecimal(9, XUnit.XDAG).toPlainString(),
-                amount.toDecimal(9, XUnit.XDAG).toPlainString(),
-                finalAmount.toDecimal(9, XUnit.XDAG).toPlainString());
+        if (log.isDebugEnabled()) {
+            Block stored = blockStore.getBlockInfoByHash(block.getHashLow());
+            XAmount finalAmount = stored == null ? null : stored.getInfo().getAmount();
+            log.debug("Balance checker —— block:{} [old:{} sub:{} fin:{}]",
+                    block.getHashLow().toHexString(),
+                    oldAmount.toDecimal(9, XUnit.XDAG).toPlainString(),
+                    amount.toDecimal(9, XUnit.XDAG).toPlainString(),
+                    finalAmount == null ? "null" : finalAmount.toDecimal(9, XUnit.XDAG).toPlainString());
+        }
     }
 
     private void subtractAmount(Bytes addressHash, XAmount amount, Block block) {
@@ -2108,12 +2125,14 @@ public class BlockchainImpl implements Blockchain {
             log.error(e.getMessage(), e);
             log.debug("balance {}  amount {}  addressHsh {}  block {}", balance, amount, Base58.encodeCheck(addressHash), block.getHashLow());
         }
-        XAmount finalAmount = addressStore.getBalanceByAddress(addressHash.toArray());
-        log.debug("Balance checker —— Address:{} [old:{} sub:{} fin:{}]",
-                Base58.encodeCheck(addressHash),
-                balance.toDecimal(9, XUnit.XDAG).toPlainString(),
-                amount.toDecimal(9, XUnit.XDAG).toPlainString(),
-                finalAmount.toDecimal(9, XUnit.XDAG).toPlainString());
+        if (log.isDebugEnabled()) {
+            XAmount finalAmount = addressStore.getBalanceByAddress(addressHash.toArray());
+            log.debug("Balance checker —— Address:{} [old:{} sub:{} fin:{}]",
+                    Base58.encodeCheck(addressHash),
+                    balance.toDecimal(9, XUnit.XDAG).toPlainString(),
+                    amount.toDecimal(9, XUnit.XDAG).toPlainString(),
+                    finalAmount == null ? "null" : finalAmount.toDecimal(9, XUnit.XDAG).toPlainString());
+        }
         if ((block.getInfo().flags & BI_OURS) != 0) {
             xdagStats.setBalance(xdagStats.getBalance().subtract(amount));
         }
@@ -2127,12 +2146,14 @@ public class BlockchainImpl implements Blockchain {
             log.error(e.getMessage(), e);
             log.debug("balance {}  amount {}  addressHsh {}  block {}", balance, amount, Base58.encodeCheck(addressHash), block.getHashLow());
         }
-        XAmount finalAmount = addressStore.getBalanceByAddress(addressHash.toArray());
-        log.warn("Balance checker —— Address:{} [old:{} add:{} fin:{}]",
-                Base58.encodeCheck(addressHash),
-                balance.toDecimal(9, XUnit.XDAG).toPlainString(),
-                amount.toDecimal(9, XUnit.XDAG).toPlainString(),
-                finalAmount.toDecimal(9, XUnit.XDAG).toPlainString());
+        if (log.isDebugEnabled()) {
+            XAmount finalAmount = addressStore.getBalanceByAddress(addressHash.toArray());
+            log.debug("Balance checker —— Address:{} [old:{} add:{} fin:{}]",
+                    Base58.encodeCheck(addressHash),
+                    balance.toDecimal(9, XUnit.XDAG).toPlainString(),
+                    amount.toDecimal(9, XUnit.XDAG).toPlainString(),
+                    finalAmount == null ? "null" : finalAmount.toDecimal(9, XUnit.XDAG).toPlainString());
+        }
         if ((block.getInfo().flags & BI_OURS) != 0) {
             xdagStats.setBalance(amount.add(xdagStats.getBalance()));
         }
@@ -2145,12 +2166,15 @@ public class BlockchainImpl implements Blockchain {
         if (block.isSaved) {
             blockStore.saveBlockInfo(block.getInfo());
         }
-        XAmount finalAmount = blockStore.getBlockByHash(block.getHashLow(), false).getInfo().getAmount();
-        log.warn("Balance checker —— Block:{} [old:{} acc:{} fin:{}]",
-                block.getHashLow().toHexString(),
-                oldAmount.toDecimal(9, XUnit.XDAG).toPlainString(),
-                amount.toDecimal(9, XUnit.XDAG).toPlainString(),
-                finalAmount.toDecimal(9, XUnit.XDAG).toPlainString());
+        if (log.isDebugEnabled()) {
+            Block stored = blockStore.getBlockByHash(block.getHashLow(), false);
+            XAmount finalAmount = stored == null ? null : stored.getInfo().getAmount();
+            log.debug("Balance checker —— Block:{} [old:{} acc:{} fin:{}]",
+                    block.getHashLow().toHexString(),
+                    oldAmount.toDecimal(9, XUnit.XDAG).toPlainString(),
+                    amount.toDecimal(9, XUnit.XDAG).toPlainString(),
+                    finalAmount == null ? "null" : finalAmount.toDecimal(9, XUnit.XDAG).toPlainString());
+        }
         if ((block.getInfo().flags & BI_OURS) != 0) {
             xdagStats.setBalance(amount.add(xdagStats.getBalance()));
         }

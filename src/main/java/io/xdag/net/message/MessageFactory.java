@@ -73,7 +73,7 @@ public class MessageFactory {
                 case SYNC_BLOCK -> new SyncBlockMessage(body);
                 case SYNCBLOCK_REQUEST -> new SyncBlockRequestMessage(body);
             };
-        } catch (Exception e) {
+        } catch (Throwable e) {
             throw new MessageException("Failed to decode message", e);
         }
     }

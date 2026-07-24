@@ -41,6 +41,14 @@ import java.util.List;
 @Slf4j
 public class WebSocketServer extends AbstractXdagLifecycle {
 
+    // Upper bound on simultaneously supervised pool connections. Netty has no built-in
+    // max-connections handler, so rather than add a bespoke pipeline handler the limit is enforced
+    // cheaply during the HTTP upgrade in PoolHandShakeHandler#handleHttpRequest (it rejects new
+    // upgrades once ChannelSupervise.channelCount() reaches this value). The bound is deliberately
+    // generous: real deployments connect a handful of pools, so this only guards against a flood
+    // (notably when the whitelist is opened via 0.0.0.0).
+    public static final int MAX_POOL_CONNECTIONS = 1024;
+
     private final EventLoopGroup bossGroup;
     private final EventLoopGroup workerGroup;
     private final ChannelFuture webSocketChannel;
