@@ -123,6 +123,11 @@ public interface Config {
     RandomxSpec getRandomxSpec();
 
     /**
+     * Get the embedded-EVM specification configuration
+     */
+    EvmSpec getEvmSpec();
+
+    /**
      * Check if transaction history is enabled
      */
     boolean getEnableTxHistory();

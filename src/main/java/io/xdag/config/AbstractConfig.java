@@ -38,13 +38,15 @@ import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.SystemUtils;
 
+import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.util.*;
 
 @Slf4j
 @Getter
 @Setter
-public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, RPCSpec, SnapshotSpec, RandomxSpec, FundSpec {
+public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, RPCSpec, SnapshotSpec, RandomxSpec,
+        FundSpec, EvmSpec {
 
     protected String configName;
 
@@ -151,6 +153,15 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     // RandomX configuration
     protected boolean flag;
 
+    // Embedded-EVM configuration (spec §9); disabled unless the network conf opts in.
+    protected boolean evmEnabled = false;
+    protected long evmActivationHeight = 0;
+    protected long evmChainId = 0xCAFE; // 51966, provisional devnet id
+    protected long evmBlockGasLimit = 30_000_000L;
+    protected long evmTxPoolTtlSeconds = 3600;
+    protected int evmMaxP2pTxBytes = 131_072;
+    protected BigInteger evmMinGasPrice = BigInteger.valueOf(1_000_000_000L);
+
     protected AbstractConfig(String rootDir, String configName, Network network, short networkVersion) {
         this.rootDir = rootDir;
         this.configName = configName;
@@ -168,6 +179,46 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     @Override
     public RPCSpec getRPCSpec() {
         return this;
+    }
+
+    @Override
+    public EvmSpec getEvmSpec() {
+        return this;
+    }
+
+    @Override
+    public boolean isEvmEnabled() {
+        return evmEnabled;
+    }
+
+    @Override
+    public long getEvmActivationHeight() {
+        return evmActivationHeight;
+    }
+
+    @Override
+    public long getEvmChainId() {
+        return evmChainId;
+    }
+
+    @Override
+    public long getEvmBlockGasLimit() {
+        return evmBlockGasLimit;
+    }
+
+    @Override
+    public long getEvmTxPoolTtlSeconds() {
+        return evmTxPoolTtlSeconds;
+    }
+
+    @Override
+    public int getEvmMaxP2pTxBytes() {
+        return evmMaxP2pTxBytes;
+    }
+
+    @Override
+    public BigInteger getEvmMinGasPrice() {
+        return evmMinGasPrice;
     }
 
     @Override
@@ -275,6 +326,20 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
         }
         fundAddress = config.getString("fund.address");
         fundRation = config.hasPath("fund.ration") ? config.getDouble("fund.ration") : 5;
+
+        // Embedded-EVM section; every key optional, EVM off unless evm.enabled = true.
+        evmEnabled = config.hasPath("evm.enabled") && config.getBoolean("evm.enabled");
+        evmActivationHeight = config.hasPath("evm.activationHeight")
+                ? config.getLong("evm.activationHeight") : evmActivationHeight;
+        evmChainId = config.hasPath("evm.chainId") ? config.getLong("evm.chainId") : evmChainId;
+        evmBlockGasLimit = config.hasPath("evm.blockGasLimit")
+                ? config.getLong("evm.blockGasLimit") : evmBlockGasLimit;
+        evmTxPoolTtlSeconds = config.hasPath("evm.txPoolTtlSeconds")
+                ? config.getLong("evm.txPoolTtlSeconds") : evmTxPoolTtlSeconds;
+        evmMaxP2pTxBytes = config.hasPath("evm.maxP2pTxBytes")
+                ? config.getInt("evm.maxP2pTxBytes") : evmMaxP2pTxBytes;
+        evmMinGasPrice = config.hasPath("evm.minGasPrice")
+                ? BigInteger.valueOf(config.getLong("evm.minGasPrice")) : evmMinGasPrice;
         nodeRation = config.hasPath("node.ration") ? config.getDouble("node.ration") : 5;
         // S-30: tolerate a missing/trimmed whiteIPs list and skip malformed entries instead of aborting startup.
         List<String> whiteIpList = config.hasPath("node.whiteIPs")
