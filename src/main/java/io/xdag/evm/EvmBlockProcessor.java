@@ -1,0 +1,241 @@
+/*
+ * The MIT License (MIT)
+ *
+ * Copyright (c) 2020-2030 The XdagJ Developers
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+package io.xdag.evm;
+
+import io.xdag.db.rocksdb.KVSource;
+import io.xdag.evm.state.EvmMetaStore;
+import io.xdag.evm.state.EvmReceipt;
+import io.xdag.evm.state.RocksDbWorldUpdater;
+import io.xdag.evm.tx.EvmTransaction;
+import io.xdag.evm.tx.EvmTxStore;
+import io.xdag.evm.tx.IntrinsicGas;
+import java.math.BigInteger;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.tuweni.bytes.Bytes;
+import org.apache.tuweni.bytes.Bytes32;
+import org.hyperledger.besu.datatypes.Address;
+import org.hyperledger.besu.datatypes.Hash;
+import org.hyperledger.besu.datatypes.Wei;
+import org.hyperledger.besu.evm.account.Account;
+import org.hyperledger.besu.evm.account.MutableAccount;
+import org.hyperledger.besu.evm.fluent.SimpleBlockValues;
+import org.hyperledger.besu.evm.worldstate.WorldUpdater;
+
+/**
+ * Executes the EVM transactions referenced by one confirmed main block and checkpoints the outcome
+ * (spec §7). This is the whole consensus-facing EVM surface: {@code BlockchainImpl} only calls
+ * {@link #processMainBlock} from {@code setMain} and {@link #rollbackTo} after {@code unWindMain}.
+ *
+ * <p>v1 policies (see the B2b plan's deviation ledger): gas is metered for receipts but settled in
+ * native XDAG (ADR-007) — no wei purchase/refund/coinbase credit; a ref whose blob is absent is
+ * deterministically skipped; the per-height "state root" is a chained execution commitment
+ * {@code root_h = keccak256(root_prev || (txHash || status || gasUsed)...)}, not an MPT (P1).
+ *
+ * <p>Rollback is R1 Option A taken to its simplest correct form: wipe EVM_STATE entirely and replay
+ * every checkpointed height's tx list from the immutable EVM_TX blobs.
+ */
+@Slf4j
+public class EvmBlockProcessor {
+
+    private final XdagEvmExecutor executor;
+    private final BigInteger chainId;
+    private final long blockGasLimit;
+    private final KVSource<byte[], byte[]> stateStore;
+    private final EvmTxStore txStore;
+    private final EvmMetaStore metaStore;
+
+    public EvmBlockProcessor(EvmConfig config, KVSource<byte[], byte[]> stateStore,
+                             EvmTxStore txStore, EvmMetaStore metaStore) {
+        this.executor = new XdagEvmExecutor(config);
+        this.chainId = config.chainId();
+        this.blockGasLimit = config.maxGasLimit();
+        this.stateStore = stateStore;
+        this.txStore = txStore;
+        this.metaStore = metaStore;
+    }
+
+    /**
+     * Executes the given refs (DFS order from applyBlock) against the persisted world state and
+     * writes the EVM_META checkpoint. Refs without a stored blob are skipped (logged); if nothing
+     * is executable, no checkpoint is written.
+     */
+    public synchronized void processMainBlock(List<Bytes32> txRefs, long height, long timestampSeconds,
+                                              Bytes32 blockHash) {
+        if (txRefs == null || txRefs.isEmpty()) {
+            return;
+        }
+        List<Hash> executable = new ArrayList<>(txRefs.size());
+        for (Bytes32 refBytes : txRefs) {
+            Hash txHash = Hash.wrap(refBytes);
+            if (txStore.contains(txHash)) {
+                executable.add(txHash);
+            } else {
+                log.warn("EVM tx blob missing for ref {} in main block at height {}; skipping",
+                        txHash, height);
+            }
+        }
+        if (executable.isEmpty()) {
+            return;
+        }
+        Bytes32 root = executeList(executable, height, timestampSeconds, latestRoot());
+        metaStore.putHeightRecord(height, root, blockHash, executable.size(), timestampSeconds);
+        metaStore.putTxList(height, executable);
+        log.info("EVM main block {}: executed {} tx(s), root {}", height, executable.size(), root);
+    }
+
+    /**
+     * Reorg handling (Option A): truncate EVM_META above {@code height}, wipe the world state, and
+     * replay every remaining checkpointed height from the EVM_TX blobs. A replayed chained root that
+     * differs from its checkpoint indicates nondeterminism or corruption and is logged loudly.
+     */
+    public synchronized void rollbackTo(long height) {
+        log.info("EVM rollback to main height {}", height);
+        metaStore.removeAbove(height);
+        stateStore.reset();
+        Bytes32 previousRoot = Bytes32.ZERO;
+        for (long h : metaStore.txListHeights()) {
+            EvmMetaStore.HeightRecord record = metaStore.getHeightRecord(h).orElse(null);
+            if (record == null) {
+                log.error("EVM_META tx list without height record at {}; skipping replay entry", h);
+                continue;
+            }
+            Bytes32 replayedRoot = executeList(metaStore.getTxList(h), h, record.timestampSeconds(),
+                    previousRoot);
+            if (!replayedRoot.equals(record.stateRoot())) {
+                log.error("EVM replay root mismatch at height {}: stored {}, replayed {}",
+                        h, record.stateRoot(), replayedRoot);
+            }
+            previousRoot = replayedRoot;
+        }
+    }
+
+    /** The chained commitment of the most recent checkpoint, or zero before any EVM activity. */
+    private Bytes32 latestRoot() {
+        return metaStore.highestHeight()
+                .flatMap(metaStore::getHeightRecord)
+                .map(EvmMetaStore.HeightRecord::stateRoot)
+                .orElse(Bytes32.ZERO);
+    }
+
+    /** Executes one height's txs on a fresh root updater, commits, writes receipts, returns the root. */
+    private Bytes32 executeList(List<Hash> txHashes, long height, long timestampSeconds,
+                                Bytes32 previousRoot) {
+        RocksDbWorldUpdater root = new RocksDbWorldUpdater(stateStore);
+        List<Bytes> digest = new ArrayList<>(txHashes.size() + 1);
+        digest.add(previousRoot);
+        for (Hash txHash : txHashes) {
+            Bytes blob = txStore.get(txHash).orElse(null);
+            if (blob == null) {
+                // Only reachable in replay if EVM_TX was externally damaged; keep the trace honest.
+                log.error("EVM tx blob vanished for {} at height {}", txHash, height);
+                continue;
+            }
+            EvmReceipt receipt = executeOne(root, blob, height, timestampSeconds);
+            metaStore.putReceipt(txHash, receipt);
+            digest.add(Bytes.concatenate(txHash.getBytes(),
+                    Bytes.of((byte) receipt.status()),
+                    Bytes.ofUnsignedLong(receipt.gasUsed())));
+        }
+        root.commit();
+        return org.hyperledger.besu.crypto.Hash.keccak256(Bytes.concatenate(digest.toArray(new Bytes[0])));
+    }
+
+    /**
+     * Executes a single tx. Validation failure (undecodable, wrong chain, bad nonce, value not
+     * covered, gas out of bounds) produces a status-0 receipt with zero gas and no state change —
+     * the tx stays part of consensus history but burns nothing (v1; Ethereum-style gas burn needs
+     * the P1 wei settlement).
+     */
+    private EvmReceipt executeOne(RocksDbWorldUpdater root, Bytes rawRlp, long height,
+                                  long timestampSeconds) {
+        EvmTransaction tx;
+        try {
+            tx = EvmTransaction.decode(rawRlp);
+        } catch (RuntimeException e) {
+            return validationFailure("undecodable blob", e.getMessage());
+        }
+        if (!chainId.equals(tx.getChainId())) {
+            return validationFailure("wrong chain id", tx.getChainId().toString());
+        }
+        Address sender;
+        try {
+            sender = tx.getSender();
+        } catch (RuntimeException e) {
+            return validationFailure("signature recovery failed", e.getMessage());
+        }
+        if (tx.getGasLimit() > blockGasLimit) {
+            return validationFailure("gas limit above block gas limit", String.valueOf(tx.getGasLimit()));
+        }
+        long intrinsicGas;
+        try {
+            intrinsicGas = IntrinsicGas.compute(tx.getPayload(), tx.isContractCreation());
+        } catch (IllegalArgumentException e) {
+            return validationFailure("oversized initcode", e.getMessage());
+        }
+        if (intrinsicGas > tx.getGasLimit()) {
+            return validationFailure("intrinsic gas above tx gas limit", String.valueOf(intrinsicGas));
+        }
+        Account senderAccount = root.getAccount(sender);
+        long accountNonce = senderAccount == null ? 0L : senderAccount.getNonce();
+        Wei balance = senderAccount == null ? Wei.ZERO : senderAccount.getBalance();
+        if (tx.getNonce() != accountNonce) {
+            return validationFailure("nonce mismatch",
+                    tx.getNonce() + " vs account " + accountNonce);
+        }
+        if (balance.getAsBigInteger().compareTo(tx.getValue().getAsBigInteger()) < 0) {
+            return validationFailure("balance below value", balance.toString());
+        }
+
+        SimpleBlockValues blockValues = new SimpleBlockValues();
+        blockValues.setNumber(height);
+        blockValues.setTimestamp(timestampSeconds);
+        blockValues.setGasLimit(blockGasLimit);
+        long messageGas = tx.getGasLimit() - intrinsicGas;
+
+        XdagExecutionResult result;
+        if (tx.isContractCreation()) {
+            // deploy() bumps + commits the sender nonce itself, even when execution fails (S-24).
+            result = executor.deploy(root.updater(), sender, tx.getPayload(), tx.getValue(),
+                    messageGas, blockValues, Address.ZERO);
+        } else {
+            // Ethereum bumps the sender nonce before executing a call, and a revert keeps the bump:
+            // apply it on the root journal so discarding the per-tx child cannot undo it.
+            MutableAccount mutableSender = root.getOrCreate(sender);
+            mutableSender.setNonce(mutableSender.getNonce() + 1);
+            WorldUpdater txUpdater = root.updater();
+            result = executor.call(txUpdater, sender, tx.getTo().orElseThrow(), tx.getPayload(),
+                    tx.getValue(), messageGas, blockValues, Address.ZERO);
+        }
+        long gasUsed = intrinsicGas + result.gasUsed();
+        return new EvmReceipt(result.success() ? 1 : 0, gasUsed, result.createdContract(), result.logs());
+    }
+
+    private EvmReceipt validationFailure(String reason, String detail) {
+        log.warn("EVM tx validation failed ({}): {}", reason, detail);
+        return new EvmReceipt(0, 0L, Optional.empty(), List.of());
+    }
+}

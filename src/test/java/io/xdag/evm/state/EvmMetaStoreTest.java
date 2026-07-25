@@ -54,21 +54,22 @@ public class EvmMetaStoreTest {
     public void height_record_round_trip_and_highest() {
         assertTrue(store.highestHeight().isEmpty());
 
-        store.putHeightRecord(5L, rootA, blockA, 2);
-        store.putHeightRecord(9L, blockA, rootA, 0);
+        store.putHeightRecord(5L, rootA, blockA, 2, 1234L);
+        store.putHeightRecord(9L, blockA, rootA, 0, 5678L);
 
         EvmMetaStore.HeightRecord rec = store.getHeightRecord(5L).orElseThrow();
         assertEquals(rootA, rec.stateRoot());
         assertEquals(blockA, rec.blockHash());
         assertEquals(2, rec.txCount());
+        assertEquals(1234L, rec.timestampSeconds());
         assertEquals(Optional.of(9L), store.highestHeight());
     }
 
     @Test
     public void removeAbove_deletes_only_higher_heights() {
-        store.putHeightRecord(5L, rootA, blockA, 1);
-        store.putHeightRecord(6L, rootA, blockA, 1);
-        store.putHeightRecord(7L, rootA, blockA, 1);
+        store.putHeightRecord(5L, rootA, blockA, 1, 1L);
+        store.putHeightRecord(6L, rootA, blockA, 1, 2L);
+        store.putHeightRecord(7L, rootA, blockA, 1, 3L);
 
         store.removeAbove(5L);
 
@@ -87,7 +88,7 @@ public class EvmMetaStoreTest {
         store.putTxList(7L, List.of(tx1, tx2));
         assertEquals(List.of(tx1, tx2), store.getTxList(7L));
 
-        store.putHeightRecord(7L, rootA, blockA, 2);
+        store.putHeightRecord(7L, rootA, blockA, 2, 4L);
         store.removeAbove(6L);
         assertTrue("tx list must be truncated together with the height record", store.getTxList(7L).isEmpty());
         assertTrue(store.getHeightRecord(7L).isEmpty());

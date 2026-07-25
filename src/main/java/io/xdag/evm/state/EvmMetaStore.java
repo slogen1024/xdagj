@@ -47,7 +47,7 @@ public class EvmMetaStore {
     private static final byte PREFIX_HEIGHT = 0x00;
     private static final byte PREFIX_RECEIPT = 0x01;
     private static final byte PREFIX_TX_LIST = 0x02;
-    private static final int HEIGHT_RECORD_LENGTH = 32 + 32 + 4;
+    private static final int HEIGHT_RECORD_LENGTH = 32 + 32 + 4 + 8;
 
     private final KVSource<byte[], byte[]> store;
 
@@ -55,8 +55,8 @@ public class EvmMetaStore {
         this.store = store;
     }
 
-    /** Decoded per-height checkpoint record. */
-    public record HeightRecord(Bytes32 stateRoot, Bytes32 blockHash, int txCount) {
+    /** Decoded per-height checkpoint record; the timestamp feeds deterministic replay (TIMESTAMP opcode). */
+    public record HeightRecord(Bytes32 stateRoot, Bytes32 blockHash, int txCount, long timestampSeconds) {
     }
 
     private static byte[] heightKey(long height) {
@@ -80,12 +80,16 @@ public class EvmMetaStore {
         return Bytes.concatenate(Bytes.of(PREFIX_RECEIPT), txHash.getBytes()).toArray();
     }
 
-    public void putHeightRecord(long height, Bytes32 stateRoot, Bytes32 blockHash, int txCount) {
+    public void putHeightRecord(long height, Bytes32 stateRoot, Bytes32 blockHash, int txCount,
+                                long timestampSeconds) {
         byte[] value = new byte[HEIGHT_RECORD_LENGTH];
         System.arraycopy(stateRoot.toArray(), 0, value, 0, 32);
         System.arraycopy(blockHash.toArray(), 0, value, 32, 32);
         for (int i = 0; i < 4; i++) {
             value[64 + i] = (byte) (txCount >>> (24 - 8 * i));
+        }
+        for (int i = 0; i < 8; i++) {
+            value[68 + i] = (byte) (timestampSeconds >>> (56 - 8 * i));
         }
         store.put(heightKey(height), value);
     }
@@ -100,7 +104,9 @@ public class EvmMetaStore {
         }
         Bytes b = Bytes.wrap(raw);
         int txCount = b.getInt(64);
-        return Optional.of(new HeightRecord(Bytes32.wrap(b.slice(0, 32)), Bytes32.wrap(b.slice(32, 32)), txCount));
+        long timestampSeconds = b.getLong(68);
+        return Optional.of(new HeightRecord(Bytes32.wrap(b.slice(0, 32)), Bytes32.wrap(b.slice(32, 32)),
+                txCount, timestampSeconds));
     }
 
     /** The highest checkpointed main height, or empty before the first EVM main block. */
@@ -125,6 +131,16 @@ public class EvmMetaStore {
             parts[i] = txHashes.get(i).getBytes();
         }
         store.put(txListKey(height), Bytes.concatenate(parts).toArray());
+    }
+
+    /** All heights that have a recorded tx list, ascending — the replay schedule. */
+    public List<Long> txListHeights() {
+        List<Long> heights = new ArrayList<>();
+        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_TX_LIST})) {
+            heights.add(heightFromKey(key));
+        }
+        heights.sort(Long::compareTo);
+        return heights;
     }
 
     /** The ordered tx hashes executed at {@code height}; empty when none were recorded. */
