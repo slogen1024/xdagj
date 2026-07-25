@@ -62,7 +62,13 @@ import io.xdag.net.message.consensus.SumRequestMessage;
 import io.xdag.net.message.consensus.SyncBlockMessage;
 import io.xdag.net.message.consensus.SyncBlockRequestMessage;
 import io.xdag.net.message.consensus.XdagMessage;
+import io.xdag.evm.tx.EvmTxPool;
+import io.xdag.evm.tx.EvmTxStore;
+import org.hyperledger.besu.datatypes.Hash;
 import io.xdag.net.message.p2p.DisconnectMessage;
+import io.xdag.net.message.p2p.EvmTxBroadcastMessage;
+import io.xdag.net.message.p2p.EvmTxReplyMessage;
+import io.xdag.net.message.p2p.EvmTxRequestMessage;
 import io.xdag.net.message.p2p.HelloMessage;
 import io.xdag.net.message.p2p.InitMessage;
 import io.xdag.net.message.p2p.PingMessage;
@@ -320,6 +326,9 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
             case BLOCKEXT_REQUEST -> processBlockExtRequest((BlockExtRequestMessage) msg);
             case SYNC_BLOCK -> processSyncBlock((SyncBlockMessage) msg);
             case SYNCBLOCK_REQUEST -> processSyncBlockRequest((SyncBlockRequestMessage) msg);
+            case EVM_TX_BROADCAST -> processEvmTxBroadcast((EvmTxBroadcastMessage) msg);
+            case EVM_TX_REQUEST -> processEvmTxRequest((EvmTxRequestMessage) msg);
+            case EVM_TX_REPLY -> processEvmTxReply((EvmTxReplyMessage) msg);
             default -> throw new UnreachableException();
         }
     }
@@ -362,10 +371,56 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
         if (syncMgr.isSyncOld()) {
             return;
         }
+        requestMissingEvmBlob(block);
 
         log.debug("processNewBlock:{} from node {}", block.getHashLow(), channel.getRemoteAddress());
         BlockWrapper bw = new BlockWrapper(block, msg.getTtl() - 1, channel.getRemotePeer(), false);
         syncMgr.validateAndAddNewBlock(bw);
+    }
+
+    /** Spec §6.2: pull a referenced-but-unknown EVM tx blob from the peer that announced the block. */
+    private void requestMissingEvmBlob(Block block) {
+        EvmTxStore evmTxStore = kernel.getEvmTxStore();
+        if (block.getEvmTxRef() == null || evmTxStore == null) {
+            return;
+        }
+        Hash txHash = Hash.wrap(block.getEvmTxRef());
+        if (!evmTxStore.contains(txHash)) {
+            msgQueue.sendMessage(new EvmTxRequestMessage(block.getEvmTxRef()));
+        }
+    }
+
+    private void processEvmTxBroadcast(EvmTxBroadcastMessage msg) {
+        if (acceptEvmTxBlob(msg.getRawRlp()) == EvmTxPool.AddResult.ADDED) {
+            // First sight of this tx: relay to every other peer (dedup falls out of DUPLICATE).
+            for (Channel other : channelMgr.getActiveChannels()) {
+                if (other != channel) {
+                    other.getMsgQueue().sendMessage(new EvmTxBroadcastMessage(msg.getRawRlp()));
+                }
+            }
+        }
+    }
+
+    private void processEvmTxRequest(EvmTxRequestMessage msg) {
+        EvmTxStore evmTxStore = kernel.getEvmTxStore();
+        if (evmTxStore == null) {
+            return;
+        }
+        evmTxStore.get(Hash.wrap(msg.getTxHash()))
+                .ifPresent(rlp -> msgQueue.sendMessage(new EvmTxReplyMessage(rlp)));
+    }
+
+    private void processEvmTxReply(EvmTxReplyMessage msg) {
+        acceptEvmTxBlob(msg.getRawRlp());
+    }
+
+    /** Validates the size cap and feeds the blob to the pool; disabled EVM (null pool) drops it. */
+    private EvmTxPool.AddResult acceptEvmTxBlob(org.apache.tuweni.bytes.Bytes rawRlp) {
+        EvmTxPool evmTxPool = kernel.getEvmTxPool();
+        if (evmTxPool == null || rawRlp.size() > config.getEvmSpec().getEvmMaxP2pTxBytes()) {
+            return EvmTxPool.AddResult.INVALID_ENCODING;
+        }
+        return evmTxPool.add(rawRlp);
     }
 
     protected void processSyncBlock(SyncBlockMessage msg) {

@@ -26,6 +26,9 @@ package io.xdag.net.message;
 
 import io.xdag.net.message.consensus.*;
 import io.xdag.net.message.p2p.DisconnectMessage;
+import io.xdag.net.message.p2p.EvmTxBroadcastMessage;
+import io.xdag.net.message.p2p.EvmTxReplyMessage;
+import io.xdag.net.message.p2p.EvmTxRequestMessage;
 import io.xdag.net.message.p2p.HelloMessage;
 import io.xdag.net.message.p2p.InitMessage;
 import io.xdag.net.message.p2p.PingMessage;
@@ -72,6 +75,9 @@ public class MessageFactory {
                 case NEW_BLOCK -> new NewBlockMessage(body);
                 case SYNC_BLOCK -> new SyncBlockMessage(body);
                 case SYNCBLOCK_REQUEST -> new SyncBlockRequestMessage(body);
+                case EVM_TX_BROADCAST -> new EvmTxBroadcastMessage(body);
+                case EVM_TX_REQUEST -> new EvmTxRequestMessage(body);
+                case EVM_TX_REPLY -> new EvmTxReplyMessage(body);
             };
         } catch (Throwable e) {
             throw new MessageException("Failed to decode message", e);

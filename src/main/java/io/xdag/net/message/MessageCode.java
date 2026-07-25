@@ -85,7 +85,12 @@ public enum MessageCode {
 //    RECEIVE_BLOCK(0x17),
     NEW_BLOCK(0x18),
     SYNC_BLOCK(0x19),
-    SYNCBLOCK_REQUEST(0x1A);
+    SYNCBLOCK_REQUEST(0x1A),
+
+    // EVM tx gossip (spec §6.1)
+    EVM_TX_BROADCAST(0x1B),
+    EVM_TX_REQUEST(0x1C),
+    EVM_TX_REPLY(0x1D);
 
 
     private static final MessageCode[] map = new MessageCode[256];
