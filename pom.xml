@@ -560,6 +560,14 @@
             <artifactId>besu-crypto-algorithms</artifactId>
             <version>26.5.0</version>
         </dependency>
+        <!-- RLP codec for EIP-155 legacy transactions (io.xdag.evm.tx.EvmTransaction). Like
+             besu-crypto-algorithms, Besu publishes it runtime-scoped, so it must be declared
+             explicitly to reach the compile classpath. -->
+        <dependency>
+            <groupId>org.hyperledger.besu.internal</groupId>
+            <artifactId>besu-ethereum-rlp</artifactId>
+            <version>26.5.0</version>
+        </dependency>
 
     </dependencies>
 
