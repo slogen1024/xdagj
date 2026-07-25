@@ -121,9 +121,10 @@ public class EvmTxPool {
         if (tx.getNonce() != accountNonce) {
             return AddResult.NONCE_MISMATCH;
         }
-        BigInteger cost = tx.getValue().getAsBigInteger()
-                .add(BigInteger.valueOf(tx.getGasLimit()).multiply(tx.getGasPrice().getAsBigInteger()));
-        if (balance.getAsBigInteger().compareTo(cost) < 0) {
+        // ADR-007 (v1): gas settles in native XDAG, not wei — the EVM balance only needs to cover
+        // the transferred value. When P1 moves gas settlement into the EVM, restore
+        // value + gasLimit * gasPrice here.
+        if (balance.getAsBigInteger().compareTo(tx.getValue().getAsBigInteger()) < 0) {
             return AddResult.INSUFFICIENT_BALANCE;
         }
 

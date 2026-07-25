@@ -43,7 +43,7 @@ public class EvmConfigSectionTest {
         assertEquals(30_000_000L, spec.getEvmBlockGasLimit());
         assertEquals(3600L, spec.getEvmTxPoolTtlSeconds());
         assertEquals(131_072, spec.getEvmMaxP2pTxBytes());
-        assertEquals(BigInteger.valueOf(1_000_000_000L), spec.getEvmMinGasPrice());
+        assertEquals("ADR-007: placeholder gas prices are legal on devnet", BigInteger.ONE, spec.getEvmMinGasPrice());
     }
 
     @Test

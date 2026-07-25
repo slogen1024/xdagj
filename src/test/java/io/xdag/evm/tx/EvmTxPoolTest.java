@@ -113,10 +113,21 @@ public class EvmTxPoolTest {
     }
 
     @Test
-    public void insufficient_balance_rejected() {
-        // gasLimit * gasPrice alone exceeds the 1-ETH balance: 21000 * 10^15 = 2.1 * 10^19 > 10^18
-        EvmTransaction expensive = tx(key, 0, Wei.of(new BigInteger("1000000000000000")));
-        assertEquals(EvmTxPool.AddResult.INSUFFICIENT_BALANCE, pool.add(expensive.getRawRlp()));
+    public void insufficient_balance_rejected_on_value_only() {
+        // ADR-007: native XDAG settles gas, so the pool only requires balance >= value.
+        fund(sender, Wei.ZERO, 0L);
+        EvmTransaction broke = EvmTransaction.unsigned(0, Wei.of(2_000_000_000L), 21_000L,
+                Optional.of(Address.fromHexString("0x2222222222222222222222222222222222222222")),
+                Wei.of(5), Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+        assertEquals(EvmTxPool.AddResult.INSUFFICIENT_BALANCE, pool.add(broke.getRawRlp()));
+    }
+
+    @Test
+    public void gas_cost_alone_does_not_require_evm_balance() {
+        // Balance covers just the 1-wei value; a huge gasLimit*gasPrice must NOT reject (ADR-007).
+        fund(sender, Wei.of(1), 0L);
+        EvmTransaction expensiveGas = tx(key, 0, Wei.of(new BigInteger("1000000000000000")));
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(expensiveGas.getRawRlp()));
     }
 
     @Test
