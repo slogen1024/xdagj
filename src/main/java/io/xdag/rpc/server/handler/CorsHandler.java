@@ -29,7 +29,6 @@ import io.netty.handler.codec.http.*;
 import io.netty.util.AttributeKey;
 import lombok.extern.slf4j.Slf4j;
 
-import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -50,10 +49,14 @@ public class CorsHandler extends ChannelInboundHandlerAdapter {
     private static final String ALLOWED_METHODS = "GET, POST, OPTIONS";
 
     public CorsHandler(String corsDomainsString) {
+        allowedOrigins = new HashSet<>();
         if (corsDomainsString != null && !corsDomainsString.isEmpty()) {
-            allowedOrigins = new HashSet<>(Arrays.asList(corsDomainsString.split(",")));
-        } else {
-            allowedOrigins = new HashSet<>();
+            for (String part : corsDomainsString.split(",")) {
+                String origin = part.trim();
+                if (!origin.isEmpty()) {
+                    allowedOrigins.add(origin);
+                }
+            }
         }
     }
 

@@ -30,39 +30,25 @@ import lombok.Getter;
 @Getter
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class JsonRpcResponse {
-    // Getters and Setters
     @JsonProperty("jsonrpc")
     private String jsonrpc = "2.0";
 
     @JsonProperty("id")
-    private int id;
-    
+    private Object id;
+
     @JsonProperty("result")
     private Object result;
 
-
-    public JsonRpcResponse(int id, Object result) {
+    public JsonRpcResponse(Object id, Object result) {
         this.id = id;
         this.result = result;
     }
 
-    /**
-     * Creates a success response
-     * @param id the request id
-     * @param result the result object
-     * @return a new JsonRpcResponse with the result
-     */
-    public static JsonRpcResponse success(int id, Object result) {
+    public static JsonRpcResponse success(Object id, Object result) {
         return new JsonRpcResponse(id, result);
     }
 
-    /**
-     * Creates a notification response (without id)
-     * @param result the result object
-     * @return a new JsonRpcResponse without id
-     */
     public static JsonRpcResponse notification(Object result) {
-        return new JsonRpcResponse(1, result);
+        return new JsonRpcResponse(null, result);
     }
-
 }

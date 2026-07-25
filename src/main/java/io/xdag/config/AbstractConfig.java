@@ -364,6 +364,8 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
             rpcHttpHost = config.hasPath("rpc.http.host") ? config.getString("rpc.http.host") : "127.0.0.1";
             rpcHttpPort = config.hasPath("rpc.http.port") ? config.getInt("rpc.http.port") : 10001;
             rpcHttpApiToken = config.hasPath("rpc.http.apiToken") ? config.getString("rpc.http.apiToken").trim() : "";
+            rpcHttpCorsOrigins = config.hasPath("rpc.http.corsOrigins")
+                    ? config.getString("rpc.http.corsOrigins").trim() : "";
             if (rpcHttpApiToken.isEmpty() && !isLoopbackHost(rpcHttpHost)) {
                 log.warn("RPC HTTP is bound to non-loopback host '{}' WITHOUT rpc.http.apiToken set: "
                         + "money-moving methods are reachable unauthenticated. Set rpc.http.apiToken "

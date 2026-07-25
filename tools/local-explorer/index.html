@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>XDAG Local Explorer</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="logo">XDAG</span>
+      <span class="sub">Local Explorer</span>
+    </div>
+    <div class="rpc-box">
+      <label for="rpcUrl">RPC</label>
+      <input id="rpcUrl" type="text" value="http://127.0.0.1:10001" spellcheck="false" />
+      <button id="btnRefresh" type="button">Refresh</button>
+    </div>
+  </header>
+
+  <main class="grid">
+    <section class="panel" id="statusPanel">
+      <h2>Network</h2>
+      <div id="statusError" class="error" hidden></div>
+      <dl id="statusGrid" class="kv"></dl>
+    </section>
+
+    <section class="panel" id="lookupPanel">
+      <h2>Lookup</h2>
+      <form id="lookupForm" class="lookup">
+        <input id="lookupInput" type="text" placeholder="height / hash / address" spellcheck="false" />
+        <button type="submit">Go</button>
+      </form>
+      <div class="hint">高度数字 → 主块；64 hex → 块/交易；Base58 → 余额</div>
+    </section>
+
+    <section class="panel span-2" id="blocksPanel">
+      <h2>Latest Main Blocks</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Height</th>
+              <th>Hash</th>
+              <th>Time</th>
+              <th>Balance</th>
+              <th>State</th>
+            </tr>
+          </thead>
+          <tbody id="blocksBody">
+            <tr><td colspan="5" class="muted">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel span-2" id="detailPanel">
+      <h2>Detail</h2>
+      <pre id="detailOut" class="detail">Select a block or run a lookup.</pre>
+    </section>
+  </main>
+
+  <footer class="foot">
+    Devnet only · native XDAG data · no eth_* yet
+  </footer>
+
+  <script src="app.js?v=2"></script>
+</body>
+</html>

@@ -33,35 +33,25 @@ import org.apache.commons.lang3.StringUtils;
 @Setter
 @Getter
 public class JsonRpcRequest {
-    // Getters and Setters
     @JsonProperty("jsonrpc")
     private String jsonrpc = "2.0";
-    
+
     @JsonProperty("method")
     private String method;
-    
+
     @JsonProperty("params")
     private Object[] params;
-    
-    @JsonProperty("id")
-    private int id;
 
-    /**
-     * Validate the JSON-RPC request
-     * @throws JsonRpcException if the request is invalid
-     */
+    /** JSON-RPC 2.0 id may be string, number, or null — must not be Java int (Date.now overflows). */
+    @JsonProperty("id")
+    private Object id;
+
     public void validate() throws JsonRpcException {
-        // Check JSON-RPC version
         if (StringUtils.isBlank(jsonrpc) || !jsonrpc.equals("2.0")) {
             throw JsonRpcException.invalidRequest("Invalid JSON-RPC version, must be '2.0'");
         }
-
-        // Check method
         if (StringUtils.isBlank(method)) {
             throw JsonRpcException.invalidRequest("Method cannot be null or empty");
         }
-
-        // ID can be any valid JSON value or null according to JSON-RPC 2.0 spec
-        // No validation needed for id
     }
 }

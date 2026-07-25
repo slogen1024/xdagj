@@ -27,3 +27,4 @@ src/main/resources/xdag-mainnet.conf
 dependency-reduced-pom.xml
 pool
 .claude/settings.local.json
+/devnet.bak-smoke

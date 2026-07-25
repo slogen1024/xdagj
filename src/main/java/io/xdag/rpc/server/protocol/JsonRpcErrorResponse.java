@@ -23,25 +23,24 @@
  */
 package io.xdag.rpc.server.protocol;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.xdag.rpc.error.JsonRpcError;
 import lombok.Getter;
 
-/**
- *
- */
 @Getter
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public class JsonRpcErrorResponse {
     @JsonProperty("jsonrpc")
     private String jsonrpc = "2.0";
 
     @JsonProperty("id")
-    private int id;
+    private Object id;
 
     @JsonProperty("error")
     private JsonRpcError error;
 
-    public JsonRpcErrorResponse(int id, JsonRpcError error) {
+    public JsonRpcErrorResponse(Object id, JsonRpcError error) {
         this.id = id;
         this.error = error;
     }

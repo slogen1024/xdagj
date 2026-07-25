@@ -152,9 +152,20 @@ public class XdagCli extends Launcher {
         setConfig(config);
         // move old args
         List<String> argsList = Lists.newArrayList();
-        for (String arg : args) {
+        for (int i = 0; i < args.length; i++) {
+            String arg = args[i];
             if (Strings.CS.equalsAny(arg, "-d", "-t")) {
-                // only devnet or testnet
+                // only network selection flags — already applied in buildConfig
+            } else if ("-f".equals(arg)) {
+                // rootDir already applied in Config.changePara; skip value too
+                if (i + 1 < args.length) {
+                    i++;
+                }
+            } else if ("-p".equals(arg) || "-r".equals(arg) || "-tag".equals(arg)) {
+                // same: consumed by changePara
+                if (i + 1 < args.length) {
+                    i++;
+                }
             } else {
                 argsList.add(arg);
             }
