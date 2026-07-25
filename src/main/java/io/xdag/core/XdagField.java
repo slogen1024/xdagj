@@ -98,8 +98,9 @@ public class XdagField implements Cloneable {
         XDAG_FIELD_OUTPUT(0x0D),
         // Transaction nonce field
         XDAG_FIELD_TRANSACTION_NONCE(0x0E),
-        // Reserved field 6
-        XDAG_FIELD_RESERVE6(0x0F);
+        // EVM transaction reference: the 32-byte keccak256 hash of a signed EIP-155 RLP blob
+        // stored in the EVM_TX side store. Raw big-endian hash, no amount prefix (formerly RESERVE6).
+        XDAG_FIELD_EVM_TX_REF(0x0F);
 
         private static final Map<Integer, FieldType> intToTypeMap = new HashMap<>();
 

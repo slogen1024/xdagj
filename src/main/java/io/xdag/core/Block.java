@@ -85,6 +85,8 @@ public class Block implements Cloneable {
      * Main block nonce records miner address and nonce
      */
     private Bytes32 nonce;
+    /** Raw 32-byte EVM tx hash carried in an XDAG_FIELD_EVM_TX_REF field; null when absent. */
+    private Bytes32 evmTxRef;
     private XdagBlock xdagBlock;
     private boolean parsed;
     private boolean isOurs;
@@ -104,6 +106,21 @@ public class Block implements Cloneable {
             int defKeyIndex,
             XAmount fee,
             UInt64 txNonce) {
+        this(config, timestamp, links, pendings, mining, keys, remark, defKeyIndex, fee, txNonce, null);
+    }
+
+    public Block(
+            Config config,
+            long timestamp,
+            List<Address> links,
+            List<Address> pendings,
+            boolean mining,
+            List<ECKeyPair> keys,
+            String remark,
+            int defKeyIndex,
+            XAmount fee,
+            UInt64 txNonce,
+            Bytes32 evmTxRef) {
         parsed = true;
         info = new BlockInfo();
         this.info.setTimestamp(timestamp);
@@ -145,6 +162,11 @@ public class Block implements Cloneable {
                     outputs.add(pending);
                 }
             }
+        }
+
+        if (evmTxRef != null) {
+            this.evmTxRef = evmTxRef;
+            setType(XDAG_FIELD_EVM_TX_REF, lenghth++);
         }
 
         if (StringUtils.isAsciiPrintable(remark)) {
@@ -252,6 +274,9 @@ public class Block implements Cloneable {
                 throw new IllegalArgumentException("xdagBlock field:" + i + " is null");
             }
             switch (field.getType()) {
+                // Raw big-endian 32-byte EVM tx hash; deliberately NOT an Address/link (Address
+                // fields only carry 24-byte hashlows) and never written with .reverse().
+                case XDAG_FIELD_EVM_TX_REF -> this.evmTxRef = Bytes32.wrap(field.getData());
                 case XDAG_FIELD_TRANSACTION_NONCE -> txNonceField = new TxAddress(field);
                 case XDAG_FIELD_IN -> inputs.add(new Address(field, false));
                 case XDAG_FIELD_INPUT -> inputs.add(new Address(field, true));
@@ -357,6 +382,10 @@ public class Block implements Cloneable {
         }
         for (Address link : all) {
             encoder.writeField(link.getData().reverse().toArray());
+        }
+        // Must mirror the constructor's setType order: links, then the EVM tx ref, then remark.
+        if (evmTxRef != null) {
+            encoder.writeField(evmTxRef.toArray());
         }
         if (info.getRemark() != null) {
             encoder.write(info.getRemark());
