@@ -34,6 +34,7 @@ import io.xdag.config.MainnetConfig;
 import io.xdag.core.XdagField.FieldType;
 import io.xdag.consensus.RandomX;
 import io.xdag.crypto.core.CryptoProvider;
+import io.xdag.evm.EvmBlockProcessor;
 import io.xdag.crypto.encoding.Base58;
 import io.xdag.crypto.hash.HashUtils;
 import io.xdag.crypto.keys.ECKeyPair;
@@ -993,6 +994,7 @@ public class BlockchainImpl implements Blockchain {
         log.debug("Unwind main to block,{}", block == null ? "null" : block.getHashLow().toHexString());
         if (xdagTopStatus.getTop() != null) {
             log.debug("now pretop : {}", xdagTopStatus.getPreTop() == null ? "null" : Bytes32.wrap(xdagTopStatus.getPreTop()).toHexString());
+            long lowestUnwoundMainHeight = -1;
             for (Block tmp = getBlockByHash(Bytes32.wrap(xdagTopStatus.getTop()), true); tmp != null
                     && !blockEqual(block, tmp); tmp = getMaxDiffLink(tmp, true)) {
                 BlockInfo info = blockStore.getBlockInfo(tmp.getHashLow());
@@ -1004,6 +1006,11 @@ public class BlockchainImpl implements Blockchain {
                 if ((tmp.getInfo().flags & BI_EXTRA) == 0) rollTx(tmp);
                 // Update corresponding flag information
                 if ((tmp.getInfo().flags & BI_MAIN) != 0) {
+                    // Capture before unSetMain: it zeroes the height.
+                    long unwoundHeight = tmp.getInfo().getHeight();
+                    if (lowestUnwoundMainHeight < 0 || unwoundHeight < lowestUnwoundMainHeight) {
+                        lowestUnwoundMainHeight = unwoundHeight;
+                    }
                     unSetMain(tmp);
                     // Fix: Need to update block info in database like height 210729
                     blockStore.saveBlockInfo(tmp.getInfo());
@@ -1015,6 +1022,15 @@ public class BlockchainImpl implements Blockchain {
                 log.debug("roll txBlock:{}", txBlock.getHashLow());
             }
             rollTxList.clear();
+
+            // EVM reorg: one rollback for the whole unwind (spec §7.4), replaying up to the last
+            // main height that stays canonical.
+            if (lowestUnwoundMainHeight > 0) {
+                EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
+                if (evmProcessor != null) {
+                    evmProcessor.rollbackTo(lowestUnwoundMainHeight - 1);
+                }
+            }
         }
     }
 
@@ -1027,9 +1043,11 @@ public class BlockchainImpl implements Blockchain {
     }
 
     /**
-     * Execute block and return gas fee
+     * Execute block and return gas fee. Blocks that reach BI_APPLIED and carry an EVM tx ref have
+     * the ref appended to {@code evmRefs} in DFS visit order — the deterministic execution order
+     * the EVM processor consumes at setMain (spec §7.2).
      */
-    private XAmount applyBlock(boolean flag, Block block) {
+    private XAmount applyBlock(boolean flag, Block block, List<Bytes32> evmRefs) {
         // Block already processed
         if ((block.getInfo().flags & BI_MAIN_REF) != 0) {
             return XAmount.ZERO.subtract(XAmount.ONE);
@@ -1040,6 +1058,7 @@ public class BlockchainImpl implements Blockchain {
         List<Address> links = block.getLinks();
         if (links == null || links.isEmpty()) {
             updateBlockFlag(block, BI_APPLIED, true);
+            collectEvmRef(block, evmRefs);
             return XAmount.ZERO;
         }
 
@@ -1054,7 +1073,7 @@ public class BlockchainImpl implements Blockchain {
                 ref = getBlockByHash(link.getAddress(), true);
                 ref.getInfo().setFee(XAmount.ZERO);
 
-                XAmount childGas = applyBlock(false, ref);
+                XAmount childGas = applyBlock(false, ref, evmRefs);
 
                 int refFlag = ref.getInfo().getFlags() & ~(BI_OURS | BI_REMARK);
                 int executionState = 0;
@@ -1157,6 +1176,7 @@ public class BlockchainImpl implements Blockchain {
 
 
         updateBlockFlag(block, BI_APPLIED, true);
+        collectEvmRef(block, evmRefs);
 
 //        XAmount totalFee = gasCollected.add(blockGas);
 //        block.getInfo().setFee(totalFee);
@@ -1171,6 +1191,13 @@ public class BlockchainImpl implements Blockchain {
         } else {
             // If the transaction block has become the main block, then get blockGas; otherwise, return gasCollected.
             return ((gasCollected.compareTo(XAmount.ZERO) == 0) && (blockGas.compareTo(XAmount.ZERO) > 0)) ? blockGas : gasCollected;
+        }
+    }
+
+    /** Appends an applied block's EVM tx ref (if any) to the collector, in DFS visit order. */
+    private static void collectEvmRef(Block block, List<Bytes32> evmRefs) {
+        if (evmRefs != null && block.getEvmTxRef() != null) {
+            evmRefs.add(block.getEvmTxRef());
         }
     }
 
@@ -1286,13 +1313,23 @@ public class BlockchainImpl implements Blockchain {
             xdagStats.nmain++;
 
             // Recursively execute blocks referenced by main block and get fees
-            XAmount mainBlockFee = applyBlock(true, block); //the mainBlock may have tx, return the fee to itself.
+            List<Bytes32> evmRefs = new ArrayList<>();
+            XAmount mainBlockFee = applyBlock(true, block, evmRefs); //the mainBlock may have tx, return the fee to itself.
             if (mainBlockFee.compareTo(XAmount.ZERO) < 0) {// normal mainBlock will not go into this
                 return;
             } else {
                 acceptAmount(block, mainBlockFee); //add the fee
                 block.getInfo().setFee(mainBlockFee);
                 blockStore.saveBlockInfo(block.getInfo());
+            }
+
+            // EVM finality is aligned with main-block confirmation (spec §7.1): execute the refs
+            // collected during the DFS, in visit order, against the persisted EVM world state.
+            EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
+            if (evmProcessor != null && !evmRefs.isEmpty()) {
+                long timestampSeconds = XdagTime.xdagTimestampToMs(block.getTimestamp()) / 1000;
+                evmProcessor.processMainBlock(evmRefs, mainNumber, timestampSeconds,
+                        Bytes32.wrap(block.getInfo().getHash()));
             }
             // Main block REF points to itself
             // TODO: Add fee

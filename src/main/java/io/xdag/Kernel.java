@@ -97,6 +97,12 @@ public class Kernel {
 
     protected RandomX randomx;
 
+    // Embedded EVM services (null unless evm.enabled = true for this network)
+    protected io.xdag.evm.tx.EvmTxStore evmTxStore;
+    protected io.xdag.evm.state.EvmMetaStore evmMetaStore;
+    protected io.xdag.evm.tx.EvmTxPool evmTxPool;
+    protected io.xdag.evm.EvmBlockProcessor evmBlockProcessor;
+
     // Running status flag
     protected AtomicBoolean isRunning = new AtomicBoolean(false);
     
