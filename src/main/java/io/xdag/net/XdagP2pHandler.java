@@ -62,6 +62,7 @@ import io.xdag.net.message.consensus.SumRequestMessage;
 import io.xdag.net.message.consensus.SyncBlockMessage;
 import io.xdag.net.message.consensus.SyncBlockRequestMessage;
 import io.xdag.net.message.consensus.XdagMessage;
+import io.xdag.evm.EvmBlockProcessor;
 import io.xdag.evm.tx.EvmTxPool;
 import io.xdag.evm.tx.EvmTxStore;
 import org.hyperledger.besu.datatypes.Hash;
@@ -391,7 +392,7 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
     }
 
     private void processEvmTxBroadcast(EvmTxBroadcastMessage msg) {
-        if (acceptEvmTxBlob(msg.getRawRlp()) == EvmTxPool.AddResult.ADDED) {
+        if (ingestEvmTxBlob(msg.getRawRlp())) {
             // First sight of this tx: relay to every other peer (dedup falls out of DUPLICATE).
             for (Channel other : channelMgr.getActiveChannels()) {
                 if (other != channel) {
@@ -411,21 +412,46 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
     }
 
     private void processEvmTxReply(EvmTxReplyMessage msg) {
-        acceptEvmTxBlob(msg.getRawRlp());
+        ingestEvmTxBlob(msg.getRawRlp());
     }
 
-    /** Validates the size cap and feeds the blob to the pool; disabled EVM (null pool) drops it. */
-    private EvmTxPool.AddResult acceptEvmTxBlob(org.apache.tuweni.bytes.Bytes rawRlp) {
+    /**
+     * Feeds a gossiped blob to both the consensus store (to satisfy a referenced-but-missing ref,
+     * then resume deferred execution) and the mempool (for future block inclusion). Only blobs the
+     * processor is actually awaiting are persisted, so unsolicited junk cannot fill the disk.
+     *
+     * @return true if the blob was newly accepted into the mempool (drives broadcast relay)
+     */
+    private boolean ingestEvmTxBlob(org.apache.tuweni.bytes.Bytes rawRlp) {
         EvmTxPool evmTxPool = kernel.getEvmTxPool();
-        if (evmTxPool == null || rawRlp.size() > config.getEvmSpec().getEvmMaxP2pTxBytes()) {
-            return EvmTxPool.AddResult.INVALID_ENCODING;
+        EvmTxStore evmTxStore = kernel.getEvmTxStore();
+        EvmBlockProcessor evmProcessor = kernel.getEvmBlockProcessor();
+        if (evmTxPool == null || evmTxStore == null
+                || rawRlp.size() > config.getEvmSpec().getEvmMaxP2pTxBytes()) {
+            return false;
         }
-        return evmTxPool.add(rawRlp);
+        // Consensus path: if a deferred main block is waiting for exactly this blob, store it and
+        // resume execution in height order (I4 convergence).
+        if (evmProcessor != null) {
+            Hash txHash;
+            try {
+                txHash = Hash.hash(rawRlp);
+            } catch (RuntimeException e) {
+                return false;
+            }
+            if (evmProcessor.isAwaitingBlob(txHash)) {
+                evmTxStore.putRaw(txHash, rawRlp);
+                evmProcessor.onBlobsAvailable();
+            }
+        }
+        // Mempool path: offer for future inclusion (its own validation + size cap apply).
+        return evmTxPool.add(rawRlp) == EvmTxPool.AddResult.ADDED;
     }
 
     protected void processSyncBlock(SyncBlockMessage msg) {
         Block block = msg.getBlock();
         chain.putSyncTxStatus(block.getHashLow(), msg.getExecutionState());
+        requestMissingEvmBlob(block); // a block arriving via sync also needs its referenced blob
         log.debug("processSyncBlock:{}  from node {}", block.getHashLow(), channel.getRemoteAddress());
         BlockWrapper bw = new BlockWrapper(block, msg.getTtl() - 1, channel.getRemotePeer(), true);
         syncMgr.validateAndAddNewBlock(bw);

@@ -47,12 +47,19 @@ public class EvmMetaStore {
     private static final byte PREFIX_HEIGHT = 0x00;
     private static final byte PREFIX_RECEIPT = 0x01;
     private static final byte PREFIX_TX_LIST = 0x02;
+    /** Main heights whose EVM execution is deferred until a referenced blob arrives (I4 stall queue). */
+    private static final byte PREFIX_PENDING = 0x03;
     private static final int HEIGHT_RECORD_LENGTH = 32 + 32 + 4 + 8;
+    private static final int PENDING_HEADER_LENGTH = 32 + 8; // blockHash(32) | timestampSeconds(8)
 
     private final KVSource<byte[], byte[]> store;
 
     public EvmMetaStore(KVSource<byte[], byte[]> store) {
         this.store = store;
+    }
+
+    /** A deferred main block: its identity, timestamp, and the tx refs awaiting blobs (I4). */
+    public record PendingBlock(Bytes32 blockHash, long timestampSeconds, List<Bytes32> refs) {
     }
 
     /** Decoded per-height checkpoint record; the timestamp feeds deterministic replay (TIMESTAMP opcode). */
@@ -160,9 +167,59 @@ public class EvmMetaStore {
         return hashes;
     }
 
+    private static byte[] pendingKey(long height) {
+        byte[] key = heightKey(height);
+        key[0] = PREFIX_PENDING;
+        return key;
+    }
+
+    /** Records a main block whose EVM execution is deferred until its blobs arrive (I4). */
+    public void putPending(long height, Bytes32 blockHash, long timestampSeconds, List<Bytes32> refs) {
+        Bytes[] parts = new Bytes[refs.size() + 2];
+        parts[0] = blockHash;
+        parts[1] = Bytes.ofUnsignedLong(timestampSeconds);
+        for (int i = 0; i < refs.size(); i++) {
+            parts[i + 2] = refs.get(i);
+        }
+        store.put(pendingKey(height), Bytes.concatenate(parts).toArray());
+    }
+
+    /** Deferred main heights, ascending — execution must resume in this order (I4 stall queue). */
+    public List<Long> pendingHeights() {
+        List<Long> heights = new ArrayList<>();
+        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_PENDING})) {
+            heights.add(heightFromKey(key));
+        }
+        heights.sort(Long::compareTo);
+        return heights;
+    }
+
+    public Optional<PendingBlock> getPending(long height) {
+        byte[] raw = store.get(pendingKey(height));
+        if (raw == null) {
+            return Optional.empty();
+        }
+        if (raw.length < PENDING_HEADER_LENGTH || (raw.length - PENDING_HEADER_LENGTH) % 32 != 0) {
+            throw new IllegalStateException("corrupt EVM_META pending record: " + raw.length + " bytes");
+        }
+        Bytes b = Bytes.wrap(raw);
+        Bytes32 blockHash = Bytes32.wrap(b.slice(0, 32));
+        long timestampSeconds = b.getLong(32);
+        List<Bytes32> refs = new ArrayList<>((raw.length - PENDING_HEADER_LENGTH) / 32);
+        for (int off = PENDING_HEADER_LENGTH; off < raw.length; off += 32) {
+            refs.add(Bytes32.wrap(b.slice(off, 32)));
+        }
+        return Optional.of(new PendingBlock(blockHash, timestampSeconds, refs));
+    }
+
+    public void removePending(long height) {
+        store.delete(pendingKey(height));
+    }
+
     /**
-     * Deletes every height record, tx list, and per-tx receipt strictly above {@code height} (reorg
-     * truncation). Receipts must go too, otherwise a reorged-out tx keeps advertising a stale
+     * Deletes every height record, tx list, per-tx receipt, and pending record strictly above
+     * {@code height} (reorg truncation). Receipts must go too, otherwise a reorged-out tx keeps
+     * advertising a stale
      * success/contract-address through {@link #getReceipt}.
      */
     public void removeAbove(long height) {
@@ -175,6 +232,11 @@ public class EvmMetaStore {
             }
         }
         for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_HEIGHT})) {
+            if (heightFromKey(key) > height) {
+                store.delete(key);
+            }
+        }
+        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_PENDING})) {
             if (heightFromKey(key) > height) {
                 store.delete(key);
             }

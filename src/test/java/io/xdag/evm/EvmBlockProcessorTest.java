@@ -223,12 +223,102 @@ public class EvmBlockProcessorTest {
     }
 
     @Test
-    public void missing_blob_is_skipped_without_checkpoint() {
-        Bytes32 unknown = Bytes32.wrap(Hash.hash(Bytes.of(0x77)).getBytes());
-        processor.processMainBlock(List.of(unknown), 1L, 1001L, BLOCK_HASH_1);
+    public void missing_blob_stalls_the_height_then_drains_when_the_blob_arrives() {
+        // I4: a referenced-but-missing blob must NOT be skipped-and-forgotten (that diverges nodes).
+        // The height stalls with no checkpoint; once the blob is stored, draining executes it.
+        EvmTransaction deploy = EvmTransaction.unsigned(0L, Wei.of(1), 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo); // NOT put into txStore yet
+        Bytes32 ref = ref(deploy);
 
-        assertTrue(metaStore.getHeightRecord(1L).isEmpty());
-        assertTrue(metaStore.getTxList(1L).isEmpty());
+        processor.processMainBlock(List.of(ref), 1L, 1001L, BLOCK_HASH_1);
+        assertTrue("no checkpoint while the blob is missing", metaStore.getHeightRecord(1L).isEmpty());
+        assertTrue(metaStore.getReceipt(deploy.getHash()).isEmpty());
+        assertEquals("height is queued, not dropped", List.of(1L), metaStore.pendingHeights());
+        assertTrue(processor.isAwaitingBlob(deploy.getHash()));
+
+        // Blob arrives (as it would over P2P); draining now finalizes the stalled height.
+        txStore.put(deploy);
+        processor.onBlobsAvailable();
+
+        assertEquals(1, (int) metaStore.getReceipt(deploy.getHash()).orElseThrow().status());
+        assertTrue("no longer pending", metaStore.pendingHeights().isEmpty());
+        assertEquals(1, metaStore.getHeightRecord(1L).orElseThrow().txCount());
+        assertEquals(RUNTIME, account(
+                metaStore.getReceipt(deploy.getHash()).orElseThrow().contractAddress().orElseThrow()).getCode());
+    }
+
+    @Test
+    public void later_heights_queue_behind_a_stalled_one_and_drain_in_order() {
+        // A missing blob at height 1 must hold back height 2 even if height 2's blob is present —
+        // otherwise execution order (and thus state) would differ from a node that had both blobs.
+        EvmTransaction deploy = EvmTransaction.unsigned(0L, Wei.of(1), 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);
+        // deploy's blob withheld; deploy2 (nonce 1) present.
+        EvmTransaction deploy2 = storedTx(1, Optional.empty(), INIT_CODE, 200_000L);
+
+        processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);
+        processor.processMainBlock(List.of(ref(deploy2)), 2L, 1002L, BLOCK_HASH_2);
+        assertEquals("both heights queued in order", List.of(1L, 2L), metaStore.pendingHeights());
+        assertTrue("height 2 must not jump ahead", metaStore.getReceipt(deploy2.getHash()).isEmpty());
+
+        txStore.put(deploy);
+        processor.onBlobsAvailable();
+
+        assertTrue("both drained", metaStore.pendingHeights().isEmpty());
+        assertEquals(1, (int) metaStore.getReceipt(deploy.getHash()).orElseThrow().status());
+        assertEquals(1, (int) metaStore.getReceipt(deploy2.getHash()).orElseThrow().status());
+        // Deterministic: identical to a node that had both blobs and executed 1 then 2 directly.
+        assertEquals(2L, account(deploy.getSender()).getNonce());
+    }
+
+    @Test
+    public void stall_then_drain_matches_direct_execution_root() {
+        // Determinism proof: stalled-then-drained roots equal roots from never-stalled execution.
+        EvmTransaction d1 = EvmTransaction.unsigned(0L, Wei.of(1), 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);
+        EvmTransaction d2 = EvmTransaction.unsigned(1L, Wei.of(1), 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);
+
+        // Node A: both blobs present, no stall.
+        txStore.put(d1);
+        txStore.put(d2);
+        processor.processMainBlock(List.of(ref(d1)), 1L, 1001L, BLOCK_HASH_1);
+        processor.processMainBlock(List.of(ref(d2)), 2L, 1002L, BLOCK_HASH_2);
+        Bytes32 directRoot1 = metaStore.getHeightRecord(1L).orElseThrow().stateRoot();
+        Bytes32 directRoot2 = metaStore.getHeightRecord(2L).orElseThrow().stateRoot();
+
+        // Node B: same inputs, but d1 missing until after both heights are seen.
+        InMemoryKVSource stateB = new InMemoryKVSource();
+        EvmTxStore txB = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore metaB = new EvmMetaStore(new InMemoryKVSource());
+        RocksDbWorldUpdater seed = new RocksDbWorldUpdater(stateB);
+        seed.createAccount(sender, 0L, Wei.fromEth(1));
+        seed.commit();
+        EvmBlockProcessor procB = new EvmBlockProcessor(EvmConfig.devnet(), stateB, txB, metaB);
+        txB.put(d2); // d1 withheld
+        procB.processMainBlock(List.of(ref(d1)), 1L, 1001L, BLOCK_HASH_1);
+        procB.processMainBlock(List.of(ref(d2)), 2L, 1002L, BLOCK_HASH_2);
+        txB.put(d1);
+        procB.onBlobsAvailable();
+
+        assertEquals(directRoot1, metaB.getHeightRecord(1L).orElseThrow().stateRoot());
+        assertEquals(directRoot2, metaB.getHeightRecord(2L).orElseThrow().stateRoot());
+    }
+
+    @Test
+    public void rollback_discards_pending_heights_above_the_fork() {
+        EvmTransaction executed = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        // A distinct nonce-1 tx whose blob is withheld, so height 2 stalls.
+        EvmTransaction deploy = EvmTransaction.unsigned(1L, Wei.of(1), 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);
+        processor.processMainBlock(List.of(ref(executed)), 1L, 1001L, BLOCK_HASH_1);
+        processor.processMainBlock(List.of(ref(deploy)), 2L, 1002L, BLOCK_HASH_2);
+        assertEquals(List.of(2L), metaStore.pendingHeights());
+
+        processor.rollbackTo(1L);
+
+        assertTrue("pending above the fork is discarded", metaStore.pendingHeights().isEmpty());
+        assertTrue(processor.isAwaitingBlob(deploy.getHash()) == false);
     }
 
     @Test

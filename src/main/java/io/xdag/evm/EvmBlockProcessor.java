@@ -89,9 +89,14 @@ public class EvmBlockProcessor {
     }
 
     /**
-     * Executes the given refs (DFS order from applyBlock) against the persisted world state and
-     * writes the EVM_META checkpoint. Refs without a stored blob are skipped (logged); if nothing
-     * is executable, no checkpoint is written.
+     * Called from {@code setMain} for each confirmed main block that carries EVM tx refs.
+     *
+     * <p>Execution is strictly in height order and requires every referenced blob to be present. If
+     * a blob is missing — or an earlier height is already stalled waiting for one — the block is
+     * <b>deferred</b> (persisted to the pending queue), NOT skipped. Skipping would let a node that
+     * has the blob and one that doesn't produce different state forever; deferring instead leaves
+     * the blob-less node merely <i>behind</i>, and {@link #onBlobsAvailable()} resumes execution in
+     * order once the blobs arrive. Native consensus is unaffected either way (I4).
      */
     public synchronized void processMainBlock(List<Bytes32> txRefs, long height, long timestampSeconds,
                                               Bytes32 blockHash) {
@@ -104,6 +109,61 @@ public class EvmBlockProcessor {
                     txRefs.size(), height, activationHeight);
             return;
         }
+        if (!metaStore.pendingHeights().isEmpty() || !allBlobsPresent(txRefs)) {
+            metaStore.putPending(height, blockHash, timestampSeconds, txRefs);
+            log.warn("Deferring EVM execution of main block at height {} ({} ref(s)) until blobs arrive",
+                    height, txRefs.size());
+            return;
+        }
+        executeAndCheckpoint(txRefs, height, timestampSeconds, blockHash);
+    }
+
+    /**
+     * Resumes deferred execution after new blobs are stored (e.g. an EVM_TX_REPLY over P2P). Runs
+     * stalled heights in ascending order for as long as each one's blobs are all present, stopping
+     * at the first still-incomplete height so ordering is never violated.
+     */
+    public synchronized void onBlobsAvailable() {
+        for (long height : metaStore.pendingHeights()) {
+            EvmMetaStore.PendingBlock pending = metaStore.getPending(height).orElse(null);
+            if (pending == null) {
+                continue;
+            }
+            if (!allBlobsPresent(pending.refs())) {
+                return; // the lowest incomplete height blocks everything above it
+            }
+            executeAndCheckpoint(pending.refs(), height, pending.timestampSeconds(), pending.blockHash());
+            metaStore.removePending(height);
+        }
+    }
+
+    /** True if some deferred height references {@code txHash} and its blob is not yet stored. */
+    public synchronized boolean isAwaitingBlob(Hash txHash) {
+        if (txStore.contains(txHash)) {
+            return false;
+        }
+        Bytes32 target = Bytes32.wrap(txHash.getBytes());
+        for (long height : metaStore.pendingHeights()) {
+            EvmMetaStore.PendingBlock pending = metaStore.getPending(height).orElse(null);
+            if (pending != null && pending.refs().contains(target)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean allBlobsPresent(List<Bytes32> txRefs) {
+        for (Bytes32 refBytes : txRefs) {
+            if (!txStore.contains(Hash.wrap(refBytes))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Executes a confirmed (or drained) main block's refs and writes its EVM_META checkpoint. */
+    private void executeAndCheckpoint(List<Bytes32> txRefs, long height, long timestampSeconds,
+                                      Bytes32 blockHash) {
         List<Hash> candidates = new ArrayList<>(txRefs.size());
         Set<Hash> seen = new HashSet<>();
         for (Bytes32 refBytes : txRefs) {
@@ -122,8 +182,9 @@ public class EvmBlockProcessor {
             if (txStore.contains(txHash)) {
                 candidates.add(txHash);
             } else {
-                log.warn("EVM tx blob missing for ref {} in main block at height {}; skipping",
-                        txHash, height);
+                // Guarded against by the caller's allBlobsPresent gate; only reachable if the blob
+                // was evicted between the gate and here.
+                log.error("EVM tx blob vanished for ref {} at height {}; skipping", txHash, height);
             }
         }
         if (candidates.isEmpty()) {
@@ -131,7 +192,7 @@ public class EvmBlockProcessor {
         }
         ExecutionOutcome outcome = executeList(candidates, height, timestampSeconds, latestRoot());
         if (outcome.executed().isEmpty()) {
-            // Everything was over-budget or its blob vanished — no state changed, no checkpoint.
+            // Everything was over-budget — no state changed, no checkpoint.
             return;
         }
         metaStore.putHeightRecord(height, outcome.root(), blockHash, outcome.executed().size(),
