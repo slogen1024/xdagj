@@ -160,10 +160,17 @@ public class EvmMetaStore {
         return hashes;
     }
 
-    /** Deletes every height record and tx list strictly above {@code height} (reorg truncation). */
+    /**
+     * Deletes every height record, tx list, and per-tx receipt strictly above {@code height} (reorg
+     * truncation). Receipts must go too, otherwise a reorged-out tx keeps advertising a stale
+     * success/contract-address through {@link #getReceipt}.
+     */
     public void removeAbove(long height) {
         for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_TX_LIST})) {
             if (heightFromKey(key) > height) {
+                for (Hash txHash : getTxList(heightFromKey(key))) {
+                    store.delete(receiptKey(txHash));
+                }
                 store.delete(key);
             }
         }

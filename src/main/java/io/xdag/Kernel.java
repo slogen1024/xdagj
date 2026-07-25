@@ -204,7 +204,7 @@ public class Kernel {
                     config.getEvmSpec().getEvmTxPoolTtlSeconds(),
                     () -> System.currentTimeMillis() / 1000);
             evmBlockProcessor = new io.xdag.evm.EvmBlockProcessor(evmConfig, evmStateSource,
-                    evmTxStore, evmMetaStore);
+                    evmTxStore, evmMetaStore, config.getEvmSpec().getEvmActivationHeight());
             log.info("EVM services init (chain id {}).", evmChainId);
         }
 

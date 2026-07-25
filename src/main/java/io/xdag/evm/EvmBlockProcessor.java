@@ -32,8 +32,10 @@ import io.xdag.evm.tx.EvmTxStore;
 import io.xdag.evm.tx.IntrinsicGas;
 import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
@@ -64,15 +66,23 @@ public class EvmBlockProcessor {
     private final XdagEvmExecutor executor;
     private final BigInteger chainId;
     private final long blockGasLimit;
+    private final long activationHeight;
     private final KVSource<byte[], byte[]> stateStore;
     private final EvmTxStore txStore;
     private final EvmMetaStore metaStore;
 
+    /** Always-active processor (activation height 0) — used by tests and always-on networks. */
     public EvmBlockProcessor(EvmConfig config, KVSource<byte[], byte[]> stateStore,
                              EvmTxStore txStore, EvmMetaStore metaStore) {
+        this(config, stateStore, txStore, metaStore, 0L);
+    }
+
+    public EvmBlockProcessor(EvmConfig config, KVSource<byte[], byte[]> stateStore,
+                             EvmTxStore txStore, EvmMetaStore metaStore, long activationHeight) {
         this.executor = new XdagEvmExecutor(config);
         this.chainId = config.chainId();
         this.blockGasLimit = config.maxGasLimit();
+        this.activationHeight = activationHeight;
         this.stateStore = stateStore;
         this.txStore = txStore;
         this.metaStore = metaStore;
@@ -88,23 +98,47 @@ public class EvmBlockProcessor {
         if (txRefs == null || txRefs.isEmpty()) {
             return;
         }
-        List<Hash> executable = new ArrayList<>(txRefs.size());
+        if (height < activationHeight) {
+            // Before the EVM hard fork, an EVM_TX_REF field carries no consensus meaning (spec §3.1).
+            log.warn("Ignoring {} EVM tx ref(s) in pre-activation main block at height {} (activates at {})",
+                    txRefs.size(), height, activationHeight);
+            return;
+        }
+        List<Hash> candidates = new ArrayList<>(txRefs.size());
+        Set<Hash> seen = new HashSet<>();
         for (Bytes32 refBytes : txRefs) {
             Hash txHash = Hash.wrap(refBytes);
+            if (!seen.add(txHash)) {
+                // Duplicate ref within this same block — execute once (spec §7.5).
+                continue;
+            }
+            if (metaStore.getReceipt(txHash).isPresent()) {
+                // Already executed on the canonical chain: a re-reference must not run it twice,
+                // which would overwrite the original receipt with this run's outcome (spec §7.5).
+                log.warn("EVM tx {} already executed on the canonical chain; skipping re-reference "
+                        + "at height {}", txHash, height);
+                continue;
+            }
             if (txStore.contains(txHash)) {
-                executable.add(txHash);
+                candidates.add(txHash);
             } else {
                 log.warn("EVM tx blob missing for ref {} in main block at height {}; skipping",
                         txHash, height);
             }
         }
-        if (executable.isEmpty()) {
+        if (candidates.isEmpty()) {
             return;
         }
-        Bytes32 root = executeList(executable, height, timestampSeconds, latestRoot());
-        metaStore.putHeightRecord(height, root, blockHash, executable.size(), timestampSeconds);
-        metaStore.putTxList(height, executable);
-        log.info("EVM main block {}: executed {} tx(s), root {}", height, executable.size(), root);
+        ExecutionOutcome outcome = executeList(candidates, height, timestampSeconds, latestRoot());
+        if (outcome.executed().isEmpty()) {
+            // Everything was over-budget or its blob vanished — no state changed, no checkpoint.
+            return;
+        }
+        metaStore.putHeightRecord(height, outcome.root(), blockHash, outcome.executed().size(),
+                timestampSeconds);
+        metaStore.putTxList(height, outcome.executed());
+        log.info("EVM main block {}: executed {} tx(s), root {}", height, outcome.executed().size(),
+                outcome.root());
     }
 
     /**
@@ -123,8 +157,10 @@ public class EvmBlockProcessor {
                 log.error("EVM_META tx list without height record at {}; skipping replay entry", h);
                 continue;
             }
+            // The stored list is already the deduped, budget-filtered executed set, so replay is a
+            // faithful re-run (the budget re-applies as a no-op).
             Bytes32 replayedRoot = executeList(metaStore.getTxList(h), h, record.timestampSeconds(),
-                    previousRoot);
+                    previousRoot).root();
             if (!replayedRoot.equals(record.stateRoot())) {
                 log.error("EVM replay root mismatch at height {}: stored {}, replayed {}",
                         h, record.stateRoot(), replayedRoot);
@@ -141,12 +177,24 @@ public class EvmBlockProcessor {
                 .orElse(Bytes32.ZERO);
     }
 
-    /** Executes one height's txs on a fresh root updater, commits, writes receipts, returns the root. */
-    private Bytes32 executeList(List<Hash> txHashes, long height, long timestampSeconds,
-                                Bytes32 previousRoot) {
+    /** The world root plus the txs that actually executed (survived the per-block gas budget). */
+    private record ExecutionOutcome(Bytes32 root, List<Hash> executed) {
+    }
+
+    /**
+     * Executes one height's txs on a fresh root updater, commits, writes receipts, and returns the
+     * chained root plus the executed subset. A deterministic per-main-block gas budget bounds the
+     * total work: once the sum of tx gas limits would exceed {@code blockGasLimit}, further refs are
+     * skipped (no receipt, absent from the tx list) so they stay executable in a later block. This
+     * caps the synchronous EVM work one block can force onto the import thread.
+     */
+    private ExecutionOutcome executeList(List<Hash> txHashes, long height, long timestampSeconds,
+                                         Bytes32 previousRoot) {
         RocksDbWorldUpdater root = new RocksDbWorldUpdater(stateStore);
         List<Bytes> digest = new ArrayList<>(txHashes.size() + 1);
         digest.add(previousRoot);
+        List<Hash> executed = new ArrayList<>(txHashes.size());
+        long gasBudget = blockGasLimit;
         for (Hash txHash : txHashes) {
             Bytes blob = txStore.get(txHash).orElse(null);
             if (blob == null) {
@@ -154,14 +202,35 @@ public class EvmBlockProcessor {
                 log.error("EVM tx blob vanished for {} at height {}", txHash, height);
                 continue;
             }
+            long txGasLimit = peekGasLimit(blob); // -1 when undecodable (executeOne records the failure)
+            if (txGasLimit > gasBudget) {
+                log.warn("EVM tx {} gas limit {} exceeds remaining block budget {} at height {}; skipping",
+                        txHash, txGasLimit, gasBudget, height);
+                continue;
+            }
+            if (txGasLimit > 0) {
+                gasBudget -= txGasLimit;
+            }
             EvmReceipt receipt = executeOne(root, blob, height, timestampSeconds);
             metaStore.putReceipt(txHash, receipt);
+            executed.add(txHash);
             digest.add(Bytes.concatenate(txHash.getBytes(),
                     Bytes.of((byte) receipt.status()),
                     Bytes.ofUnsignedLong(receipt.gasUsed())));
         }
         root.commit();
-        return org.hyperledger.besu.crypto.Hash.keccak256(Bytes.concatenate(digest.toArray(new Bytes[0])));
+        Bytes32 chainedRoot =
+                org.hyperledger.besu.crypto.Hash.keccak256(Bytes.concatenate(digest.toArray(new Bytes[0])));
+        return new ExecutionOutcome(chainedRoot, executed);
+    }
+
+    /** Decodes just the gas limit for budget accounting; -1 if the blob cannot be decoded. */
+    private static long peekGasLimit(Bytes blob) {
+        try {
+            return EvmTransaction.decode(blob).getGasLimit();
+        } catch (RuntimeException e) {
+            return -1L;
+        }
     }
 
     /**
@@ -214,28 +283,79 @@ public class EvmBlockProcessor {
         blockValues.setNumber(height);
         blockValues.setTimestamp(timestampSeconds);
         blockValues.setGasLimit(blockGasLimit);
+        // Message execution gets whatever gas survives the intrinsic charge. The single most common
+        // Ethereum tx — a 21000-gas value transfer — leaves exactly zero, which is legal: it moves
+        // value to a codeless account with no opcodes to run. Anything that must run code (a CREATE,
+        // or a CALL to a contract) needs at least one gas unit and fails out-of-gas at zero.
         long messageGas = tx.getGasLimit() - intrinsicGas;
 
-        XdagExecutionResult result;
-        if (tx.isContractCreation()) {
-            // deploy() bumps + commits the sender nonce itself, even when execution fails (S-24).
-            result = executor.deploy(root.updater(), sender, tx.getPayload(), tx.getValue(),
-                    messageGas, blockValues, Address.ZERO);
-        } else {
-            // Ethereum bumps the sender nonce before executing a call, and a revert keeps the bump:
+        // Defense in depth (C1): a tx-level throw must NEVER escape into setMain, where it would
+        // abort native consensus mid-update. Any unexpected failure degrades to a status-0 receipt.
+        try {
+            if (tx.isContractCreation()) {
+                if (messageGas <= 0L) {
+                    bumpNonce(root, sender); // Ethereum still burns the nonce on a failed create
+                    return failedReceipt(intrinsicGas);
+                }
+                // deploy() bumps + commits the sender nonce itself, even when execution fails (S-24).
+                XdagExecutionResult result = executor.deploy(root.updater(), sender, tx.getPayload(),
+                        tx.getValue(), messageGas, blockValues, Address.ZERO);
+                return receiptOf(result, intrinsicGas);
+            }
+            // CALL. Ethereum bumps the sender nonce before executing, and a revert keeps the bump:
             // apply it on the root journal so discarding the per-tx child cannot undo it.
-            MutableAccount mutableSender = root.getOrCreate(sender);
-            mutableSender.setNonce(mutableSender.getNonce() + 1);
-            WorldUpdater txUpdater = root.updater();
-            result = executor.call(txUpdater, sender, tx.getTo().orElseThrow(), tx.getPayload(),
+            bumpNonce(root, sender);
+            Address to = tx.getTo().orElseThrow();
+            if (messageGas <= 0L) {
+                return zeroGasCall(root, sender, to, tx.getValue(), intrinsicGas);
+            }
+            XdagExecutionResult result = executor.call(root.updater(), sender, to, tx.getPayload(),
                     tx.getValue(), messageGas, blockValues, Address.ZERO);
+            return receiptOf(result, intrinsicGas);
+        } catch (RuntimeException e) {
+            log.error("EVM execution threw for a tx at height {}; recording a failed receipt to "
+                    + "protect native consensus", height, e);
+            return failedReceipt(intrinsicGas);
         }
-        long gasUsed = intrinsicGas + result.gasUsed();
-        return new EvmReceipt(result.success() ? 1 : 0, gasUsed, result.createdContract(), result.logs());
     }
 
     private EvmReceipt validationFailure(String reason, String detail) {
         log.warn("EVM tx validation failed ({}): {}", reason, detail);
         return new EvmReceipt(0, 0L, Optional.empty(), List.of());
+    }
+
+    private static EvmReceipt receiptOf(XdagExecutionResult result, long intrinsicGas) {
+        return new EvmReceipt(result.success() ? 1 : 0, intrinsicGas + result.gasUsed(),
+                result.createdContract(), result.logs());
+    }
+
+    /** A failed message that still consumed intrinsic gas (no state, no contract, no logs). */
+    private static EvmReceipt failedReceipt(long intrinsicGas) {
+        return new EvmReceipt(0, intrinsicGas, Optional.empty(), List.of());
+    }
+
+    private static void bumpNonce(RocksDbWorldUpdater root, Address sender) {
+        MutableAccount account = root.getOrCreate(sender);
+        account.setNonce(account.getNonce() + 1);
+    }
+
+    /**
+     * A message call with no gas left to run code: succeeds as a bare value transfer to a codeless
+     * account, otherwise fails out-of-gas. The sender nonce was already bumped by the caller.
+     */
+    private EvmReceipt zeroGasCall(RocksDbWorldUpdater root, Address sender, Address to, Wei value,
+                                   long intrinsicGas) {
+        Account target = root.getAccount(to);
+        boolean hasCode = target != null && target.getCode() != null && !target.getCode().isEmpty();
+        if (hasCode) {
+            return failedReceipt(intrinsicGas); // executing the code would need gas we don't have
+        }
+        WorldUpdater child = root.updater();
+        MutableAccount from = child.getOrCreate(sender);
+        MutableAccount recipient = child.getOrCreate(to);
+        from.setBalance(from.getBalance().subtract(value));
+        recipient.setBalance(recipient.getBalance().add(value));
+        child.commit();
+        return new EvmReceipt(1, intrinsicGas, Optional.empty(), List.of());
     }
 }

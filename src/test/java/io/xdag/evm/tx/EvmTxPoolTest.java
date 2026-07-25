@@ -190,6 +190,37 @@ public class EvmTxPoolTest {
     }
 
     @Test
+    public void new_nonce_replaces_stale_sender_entry_regardless_of_price() {
+        // After a tx confirms, the account nonce advances; the sender's next-nonce tx must not be
+        // locked out by the now-stale lower-price entry still cached under the same sender.
+        EvmTransaction first = tx(key, 0, Wei.of(5_000_000_000L));
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(first.getRawRlp()));
+
+        fund(sender, Wei.fromEth(1), 1L); // simulate `first` having been executed: account nonce -> 1
+        EvmTransaction next = tx(key, 1, Wei.of(1_000_000_000L)); // lower price, but a NEW nonce
+        assertEquals(EvmTxPool.AddResult.REPLACED, pool.add(next.getRawRlp()));
+        assertEquals(1, pool.size());
+        assertEquals(next.getHash(), pool.selectTransactions(10).getFirst().getHash());
+    }
+
+    @Test
+    public void pool_rejects_when_full_but_accepts_after_expiry_frees_a_slot() {
+        // Fill the pool to capacity with distinct senders, then a fresh sender is rejected...
+        for (int i = 0; i < EvmTxPool.MAX_POOL_SIZE; i++) {
+            KeyPair k = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(1000 + i)));
+            fund(Address.extract(k.getPublicKey()), Wei.fromEth(1), 0L);
+            assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(k, 0, Wei.of(2_000_000_000L)).getRawRlp()));
+        }
+        KeyPair overflowKey = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(999_999)));
+        fund(Address.extract(overflowKey.getPublicKey()), Wei.fromEth(1), 0L);
+        assertEquals(EvmTxPool.AddResult.POOL_FULL, pool.add(tx(overflowKey, 0, Wei.of(2_000_000_000L)).getRawRlp()));
+
+        // ...but once the existing entries expire, add() opportunistically evicts and admits it.
+        clock[0] += 3601L;
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(overflowKey, 0, Wei.of(2_000_000_000L)).getRawRlp()));
+    }
+
+    @Test
     public void remove_drops_pool_entry() {
         EvmTransaction t = tx(key, 0, Wei.of(2_000_000_000L));
         pool.add(t.getRawRlp());

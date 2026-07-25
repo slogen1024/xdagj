@@ -129,6 +129,87 @@ public class EvmBlockProcessorTest {
     }
 
     @Test
+    public void plain_transfer_at_exactly_21000_gas_succeeds_and_moves_value() {
+        // C1 regression: messageGas == 0 must execute as a pure value transfer, never throw out
+        // of setMain. This is the single most common Ethereum transaction shape.
+        Address recipient = Address.fromHexString("0x9999999999999999999999999999999999999999");
+        EvmTransaction transfer = EvmTransaction.unsigned(0L, Wei.of(1), 21_000L,
+                Optional.of(recipient), Wei.of(12_345L), Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+        txStore.put(transfer);
+
+        processor.processMainBlock(List.of(ref(transfer)), 1L, 1001L, BLOCK_HASH_1);
+
+        EvmReceipt receipt = metaStore.getReceipt(transfer.getHash()).orElseThrow();
+        assertEquals(1, receipt.status());
+        assertEquals(21_000L, receipt.gasUsed());
+        assertEquals(Wei.of(12_345L), account(recipient).getBalance());
+        assertEquals(1L, account(sender).getNonce());
+    }
+
+    @Test
+    public void zero_message_gas_call_to_contract_code_fails_cleanly() {
+        // 21000 gas cannot run a single opcode: out-of-gas revert, nonce bumped, value untouched.
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);
+        Address contract = metaStore.getReceipt(deploy.getHash()).orElseThrow().contractAddress().orElseThrow();
+
+        EvmTransaction starved = EvmTransaction.unsigned(1L, Wei.of(1), 21_000L,
+                Optional.of(contract), Wei.ZERO, Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+        txStore.put(starved);
+        processor.processMainBlock(List.of(ref(starved)), 2L, 1002L, BLOCK_HASH_2);
+
+        assertEquals(0, (int) metaStore.getReceipt(starved.getHash()).orElseThrow().status());
+        assertEquals("out-of-gas call still burns the nonce", 2L, account(sender).getNonce());
+        assertEquals(UInt256.ZERO, account(contract).getStorageValue(UInt256.ZERO));
+    }
+
+    @Test
+    public void duplicate_ref_is_not_re_executed_and_keeps_the_original_receipt() {
+        // I1: a hostile link block re-referencing an executed tx must not falsify its receipt.
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);
+        EvmReceipt original = metaStore.getReceipt(deploy.getHash()).orElseThrow();
+        assertEquals(1, original.status());
+
+        processor.processMainBlock(List.of(ref(deploy), ref(deploy)), 2L, 1002L, BLOCK_HASH_2);
+
+        assertEquals("receipt must be first-write-wins", 1,
+                (int) metaStore.getReceipt(deploy.getHash()).orElseThrow().status());
+        assertTrue("a block of only duplicates checkpoints nothing", metaStore.getHeightRecord(2L).isEmpty());
+    }
+
+    @Test
+    public void per_block_aggregate_gas_budget_skips_excess_refs() {
+        // I2: the sum of tx gas limits per main block is capped at the block gas limit.
+        EvmTransaction big = storedTx(0, Optional.empty(), INIT_CODE, 30_000_000L);
+        EvmTransaction excess = storedTx(1, Optional.of(
+                Address.fromHexString("0x9999999999999999999999999999999999999999")), Bytes.EMPTY, 21_000L);
+
+        processor.processMainBlock(List.of(ref(big), ref(excess)), 1L, 1001L, BLOCK_HASH_1);
+
+        assertTrue("first tx fills the whole budget", metaStore.getReceipt(big.getHash()).isPresent());
+        assertTrue("over-budget ref is deterministically skipped, no receipt",
+                metaStore.getReceipt(excess.getHash()).isEmpty());
+        assertEquals(List.of(big.getHash()), metaStore.getTxList(1L));
+        assertEquals("skipped ref stays executable later", 0,
+                (int) new RocksDbWorldUpdater(stateSource).getAccount(sender).getNonce() - 1);
+    }
+
+    @Test
+    public void rollback_erases_receipts_of_reorged_out_transactions() {
+        // M2: without receipt truncation, a reorged-out deploy would keep advertising success.
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);
+        EvmTransaction deploy2 = storedTx(1, Optional.empty(), INIT_CODE, 200_000L);
+        processor.processMainBlock(List.of(ref(deploy2)), 2L, 1002L, BLOCK_HASH_2);
+
+        processor.rollbackTo(1L);
+
+        assertTrue("reorged-out receipt must vanish", metaStore.getReceipt(deploy2.getHash()).isEmpty());
+        assertTrue("still-canonical receipt survives", metaStore.getReceipt(deploy.getHash()).isPresent());
+    }
+
+    @Test
     public void nonce_mismatch_yields_failed_receipt_and_no_state_change() {
         EvmTransaction badNonce = storedTx(7, Optional.empty(), INIT_CODE, 200_000L);
         processor.processMainBlock(List.of(ref(badNonce)), 1L, 1001L, BLOCK_HASH_1);
@@ -148,6 +229,22 @@ public class EvmBlockProcessorTest {
 
         assertTrue(metaStore.getHeightRecord(1L).isEmpty());
         assertTrue(metaStore.getTxList(1L).isEmpty());
+    }
+
+    @Test
+    public void refs_below_activation_height_do_not_execute() {
+        // M1: the EVM hard-fork gate. A processor activated at height 5 ignores refs in earlier
+        // main blocks even when their blobs are present.
+        EvmBlockProcessor gated = new EvmBlockProcessor(EvmConfig.devnet(), stateSource, txStore,
+                metaStore, 5L);
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+
+        gated.processMainBlock(List.of(ref(deploy)), 4L, 1001L, BLOCK_HASH_1);
+        assertTrue("pre-activation block executes nothing", metaStore.getHeightRecord(4L).isEmpty());
+        assertTrue(metaStore.getReceipt(deploy.getHash()).isEmpty());
+
+        gated.processMainBlock(List.of(ref(deploy)), 5L, 1002L, BLOCK_HASH_2);
+        assertEquals(1, (int) metaStore.getReceipt(deploy.getHash()).orElseThrow().status());
     }
 
     @Test

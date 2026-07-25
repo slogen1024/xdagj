@@ -52,8 +52,12 @@ public class EvmTxPool {
 
     public enum AddResult {
         ADDED, REPLACED, DUPLICATE, INVALID_ENCODING, WRONG_CHAIN_ID, INVALID_SIGNATURE,
-        GAS_LIMIT_TOO_HIGH, INTRINSIC_GAS_TOO_LOW, UNDERPRICED, NONCE_MISMATCH, INSUFFICIENT_BALANCE
+        GAS_LIMIT_TOO_HIGH, INTRINSIC_GAS_TOO_LOW, UNDERPRICED, NONCE_MISMATCH, INSUFFICIENT_BALANCE,
+        POOL_FULL
     }
+
+    /** Hard cap on distinct pending txs; a P2P-exposed pool must bound its memory (spec §6 DoS). */
+    public static final int MAX_POOL_SIZE = 4096;
 
     private record PoolEntry(EvmTransaction tx, Address sender, long addedAtSeconds) {
     }
@@ -83,6 +87,8 @@ public class EvmTxPool {
     }
 
     public synchronized AddResult add(Bytes rawRlp) {
+        // Opportunistic eviction keeps the size cap honest without a background timer.
+        evictExpired();
         EvmTransaction tx;
         try {
             tx = EvmTransaction.decode(rawRlp);
@@ -135,12 +141,20 @@ public class EvmTxPool {
         PoolEntry existing = bySender.get(sender);
         boolean replaced = false;
         if (existing != null) {
-            // Same (sender, nonce) slot: replace-by-fee only for a strictly higher gas price.
-            if (tx.getGasPrice().compareTo(existing.tx().getGasPrice()) <= 0) {
-                return AddResult.UNDERPRICED;
+            if (existing.tx().getNonce() == tx.getNonce()) {
+                // Genuine same-slot competition: replace-by-fee only for a strictly higher gas price.
+                if (tx.getGasPrice().compareTo(existing.tx().getGasPrice()) <= 0) {
+                    return AddResult.UNDERPRICED;
+                }
             }
+            // Otherwise the cached entry is for a different nonce. Under strict nonce equality only
+            // one nonce is valid per sender at a time, so this new (validated) tx's nonce is the live
+            // one and the cached entry is stale — evict it regardless of price.
             byHash.remove(existing.tx().getHash());
             replaced = true;
+        } else if (byHash.size() >= MAX_POOL_SIZE) {
+            // A new sender slot would grow the pool past its cap.
+            return AddResult.POOL_FULL;
         }
         PoolEntry entry = new PoolEntry(tx, sender, clockSeconds.getAsLong());
         byHash.put(hash, entry);
