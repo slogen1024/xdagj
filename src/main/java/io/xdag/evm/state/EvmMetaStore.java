@@ -24,6 +24,8 @@
 package io.xdag.evm.state;
 
 import io.xdag.db.rocksdb.KVSource;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
@@ -44,6 +46,7 @@ public class EvmMetaStore {
 
     private static final byte PREFIX_HEIGHT = 0x00;
     private static final byte PREFIX_RECEIPT = 0x01;
+    private static final byte PREFIX_TX_LIST = 0x02;
     private static final int HEIGHT_RECORD_LENGTH = 32 + 32 + 4;
 
     private final KVSource<byte[], byte[]> store;
@@ -109,8 +112,45 @@ public class EvmMetaStore {
         return max < 0 ? Optional.empty() : Optional.of(max);
     }
 
-    /** Deletes every height record strictly above {@code height} (reorg truncation). */
+    private static byte[] txListKey(long height) {
+        byte[] key = heightKey(height);
+        key[0] = PREFIX_TX_LIST;
+        return key;
+    }
+
+    /** Persists the exact execution order of a main block's txs — the replay script for reorgs. */
+    public void putTxList(long height, List<Hash> txHashes) {
+        Bytes[] parts = new Bytes[txHashes.size()];
+        for (int i = 0; i < txHashes.size(); i++) {
+            parts[i] = txHashes.get(i).getBytes();
+        }
+        store.put(txListKey(height), Bytes.concatenate(parts).toArray());
+    }
+
+    /** The ordered tx hashes executed at {@code height}; empty when none were recorded. */
+    public List<Hash> getTxList(long height) {
+        byte[] raw = store.get(txListKey(height));
+        if (raw == null || raw.length == 0) {
+            return List.of();
+        }
+        if (raw.length % 32 != 0) {
+            throw new IllegalStateException("corrupt EVM_META tx list: " + raw.length + " bytes");
+        }
+        List<Hash> hashes = new ArrayList<>(raw.length / 32);
+        Bytes b = Bytes.wrap(raw);
+        for (int off = 0; off < raw.length; off += 32) {
+            hashes.add(Hash.wrap(Bytes32.wrap(b.slice(off, 32))));
+        }
+        return hashes;
+    }
+
+    /** Deletes every height record and tx list strictly above {@code height} (reorg truncation). */
     public void removeAbove(long height) {
+        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_TX_LIST})) {
+            if (heightFromKey(key) > height) {
+                store.delete(key);
+            }
+        }
         for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_HEIGHT})) {
             if (heightFromKey(key) > height) {
                 store.delete(key);

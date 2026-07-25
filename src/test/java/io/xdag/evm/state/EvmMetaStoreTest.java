@@ -79,6 +79,21 @@ public class EvmMetaStoreTest {
     }
 
     @Test
+    public void tx_list_round_trips_in_order_and_is_removed_with_height() {
+        Hash tx1 = Hash.hash(Bytes.of(1));
+        Hash tx2 = Hash.hash(Bytes.of(2));
+        assertTrue(store.getTxList(7L).isEmpty());
+
+        store.putTxList(7L, List.of(tx1, tx2));
+        assertEquals(List.of(tx1, tx2), store.getTxList(7L));
+
+        store.putHeightRecord(7L, rootA, blockA, 2);
+        store.removeAbove(6L);
+        assertTrue("tx list must be truncated together with the height record", store.getTxList(7L).isEmpty());
+        assertTrue(store.getHeightRecord(7L).isEmpty());
+    }
+
+    @Test
     public void receipt_round_trip_with_logs_and_contract_address() {
         Hash txHash = Hash.hash(Bytes.of(1, 2, 3));
         Address contract = Address.fromHexString("0x1111111111111111111111111111111111111111");
