@@ -57,5 +57,17 @@ public enum DatabaseName {
      * Keys are prefixed within this single store (see io.xdag.evm.state.EvmStateSchema):
      * 0x00|address -> account record, 0x01|codeHash -> code, 0x02|address|slot -> storage value.
      */
-    EVM_STATE
+    EVM_STATE,
+
+    /**
+     * Signed EIP-155 RLP transaction blobs keyed by tx hash (see io.xdag.evm.tx.EvmTxStore):
+     * 0x00|txHash -> raw signed RLP. Referenced from blocks via XDAG_FIELD_EVM_TX_REF.
+     */
+    EVM_TX,
+
+    /**
+     * Per-main-block EVM execution metadata (see io.xdag.evm.state.EvmMetaStore):
+     * 0x00|mainHeight -> stateRoot|blockHash|txCount, 0x01|txHash -> receipt RLP.
+     */
+    EVM_META
 }
