@@ -184,6 +184,30 @@ public class Kernel {
         randomx = new RandomX(config);
         randomx.start();
 
+        // Initialize the embedded EVM (spec §8) ahead of the blockchain so setMain can execute refs.
+        if (config.getEvmSpec().isEvmEnabled()) {
+            KVSource<byte[], byte[]> evmStateSource = dbFactory.getDB(DatabaseName.EVM_STATE);
+            evmStateSource.init();
+            KVSource<byte[], byte[]> evmTxSource = dbFactory.getDB(DatabaseName.EVM_TX);
+            evmTxSource.init();
+            KVSource<byte[], byte[]> evmMetaSource = dbFactory.getDB(DatabaseName.EVM_META);
+            evmMetaSource.init();
+            java.math.BigInteger evmChainId = java.math.BigInteger.valueOf(config.getEvmSpec().getEvmChainId());
+            io.xdag.evm.EvmConfig evmConfig = new io.xdag.evm.EvmConfig(
+                    org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI, evmChainId,
+                    config.getEvmSpec().getEvmBlockGasLimit());
+            evmTxStore = new io.xdag.evm.tx.EvmTxStore(evmTxSource);
+            evmMetaStore = new io.xdag.evm.state.EvmMetaStore(evmMetaSource);
+            evmTxPool = new io.xdag.evm.tx.EvmTxPool(evmTxStore, evmStateSource, evmChainId,
+                    config.getEvmSpec().getEvmBlockGasLimit(),
+                    org.hyperledger.besu.datatypes.Wei.of(config.getEvmSpec().getEvmMinGasPrice()),
+                    config.getEvmSpec().getEvmTxPoolTtlSeconds(),
+                    () -> System.currentTimeMillis() / 1000);
+            evmBlockProcessor = new io.xdag.evm.EvmBlockProcessor(evmConfig, evmStateSource,
+                    evmTxStore, evmMetaStore);
+            log.info("EVM services init (chain id {}).", evmChainId);
+        }
+
         // Initialize blockchain
         blockchain = new BlockchainImpl(this);
         XdagStats xdagStats = blockchain.getXdagStats();
