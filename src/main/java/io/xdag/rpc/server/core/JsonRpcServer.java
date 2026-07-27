@@ -37,15 +37,21 @@ import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.logging.LogLevel;
 import io.netty.handler.logging.LoggingHandler;
+import io.xdag.Kernel;
+import io.xdag.config.spec.EvmSpec;
 import io.xdag.config.spec.RPCSpec;
+import io.xdag.evm.EvmConfig;
 import io.xdag.rpc.api.XdagApi;
 import io.xdag.rpc.server.handler.AuthHandler;
 import io.xdag.rpc.server.handler.CorsHandler;
+import io.xdag.rpc.server.handler.EthRequestHandler;
 import io.xdag.rpc.server.handler.JsonRequestHandler;
 import io.xdag.rpc.server.handler.JsonRpcHandler;
 import io.xdag.rpc.server.handler.JsonRpcRequestHandler;
 import lombok.extern.slf4j.Slf4j;
+import org.hyperledger.besu.evm.EvmSpecVersion;
 
+import java.math.BigInteger;
 import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.List;
@@ -54,14 +60,16 @@ import java.util.List;
 public class JsonRpcServer {
     private final RPCSpec rpcSpec;
     private final XdagApi xdagApi;
+    private final Kernel kernel;
     private Channel channel;
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
 
 
-    public JsonRpcServer(final RPCSpec rpcSpec, final XdagApi xdagApi) {
+    public JsonRpcServer(final RPCSpec rpcSpec, final XdagApi xdagApi, final Kernel kernel) {
         this.rpcSpec = rpcSpec;
         this.xdagApi = xdagApi;
+        this.kernel = kernel;
     }
 
     public void start() {
@@ -69,6 +77,15 @@ public class JsonRpcServer {
             // Create request handlers
             List<JsonRpcRequestHandler> handlers = new ArrayList<>();
             handlers.add(new JsonRequestHandler(xdagApi));
+
+            // Register the read-only eth_* handler when the embedded EVM is enabled (sub-project C1).
+            EvmSpec evmSpec = kernel.getConfig().getEvmSpec();
+            if (evmSpec.isEvmEnabled() && kernel.getEvmStateStore() != null) {
+                EvmConfig evmConfig = new EvmConfig(EvmSpecVersion.SHANGHAI,
+                        BigInteger.valueOf(evmSpec.getEvmChainId()), evmSpec.getEvmBlockGasLimit());
+                handlers.add(new EthRequestHandler(kernel.getEvmStateStore(), evmConfig,
+                        evmSpec.getEvmMinGasPrice(), kernel.getBlockchain()));
+            }
 
             // Create SSL context (if HTTPS is enabled)
 //            final SslContext sslCtx;

@@ -98,6 +98,7 @@ public class Kernel {
     protected RandomX randomx;
 
     // Embedded EVM services (null unless evm.enabled = true for this network)
+    protected io.xdag.db.rocksdb.KVSource<byte[], byte[]> evmStateStore;
     protected io.xdag.evm.tx.EvmTxStore evmTxStore;
     protected io.xdag.evm.state.EvmMetaStore evmMetaStore;
     protected io.xdag.evm.tx.EvmTxPool evmTxPool;
@@ -188,6 +189,7 @@ public class Kernel {
         if (config.getEvmSpec().isEvmEnabled()) {
             KVSource<byte[], byte[]> evmStateSource = dbFactory.getDB(DatabaseName.EVM_STATE);
             evmStateSource.init();
+            this.evmStateStore = evmStateSource; // retained so the eth RPC handler can read world state
             KVSource<byte[], byte[]> evmTxSource = dbFactory.getDB(DatabaseName.EVM_TX);
             evmTxSource.init();
             KVSource<byte[], byte[]> evmMetaSource = dbFactory.getDB(DatabaseName.EVM_META);

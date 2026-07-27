@@ -97,7 +97,7 @@ public class XdagApiImpl extends AbstractXdagLifecycle implements XdagApi {
         this.kernel = kernel;
         this.blockchain = kernel.getBlockchain();
         this.rpcSpec = kernel.getConfig().getRPCSpec();
-        this.server = new JsonRpcServer(rpcSpec, this);
+        this.server = new JsonRpcServer(rpcSpec, this, kernel);
 
         validateConfiguration();
     }
