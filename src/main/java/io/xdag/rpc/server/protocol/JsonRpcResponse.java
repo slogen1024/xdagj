@@ -36,7 +36,10 @@ public class JsonRpcResponse {
     @JsonProperty("id")
     private Object id;
 
+    // JSON-RPC 2.0 requires a success response to carry "result", even when the value is null
+    // (e.g. eth_getTransactionReceipt for a not-yet-mined tx). Force it past the class NON_NULL.
     @JsonProperty("result")
+    @JsonInclude(JsonInclude.Include.ALWAYS)
     private Object result;
 
     public JsonRpcResponse(Object id, Object result) {

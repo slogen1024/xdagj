@@ -285,7 +285,38 @@ public class EthRequestHandlerTest {
         assertEquals("0x0", obj.get("nonce"));
         assertEquals(tx.getSender().getBytes().toHexString(), obj.get("from"));
 
+        // v must be the EIP-155 canonical value (chainId*2 + 35 + recId), not the bare recId.
+        BigInteger expectedV = BigInteger.valueOf(0xCAFE).shiftLeft(1)
+                .add(BigInteger.valueOf(35L + tx.getSignature().getRecId()));
+        assertEquals(EthHex.quantity(expectedV), obj.get("v"));
+
         assertNull(h.handle(request("eth_getTransactionByHash", "0x" + "11".repeat(32))));
+    }
+
+    @Test
+    public void eth_getBlockByNumber_earliest_and_missing_block_do_not_500() throws Exception {
+        InMemoryKVSource stateStore = new InMemoryKVSource();
+        EvmTxStore txStore = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore metaStore = new EvmMetaStore(new InMemoryKVSource());
+        Blockchain bc = Mockito.mock(Blockchain.class);
+        Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(10L);
+        // Height 0 has no block (pruned/genesis); height 1 exists but its parent (0) does not.
+        Block block1 = Mockito.mock(Block.class);
+        Mockito.when(block1.getHash()).thenReturn(Bytes32.fromHexString("0x" + "cd".repeat(32)));
+        Mockito.when(block1.getTimestamp()).thenReturn(0L);
+        Mockito.when(bc.getBlockByHeight(0L)).thenReturn(null);
+        Mockito.when(bc.getBlockByHeight(1L)).thenReturn(block1);
+        EthRequestHandler h = new EthRequestHandler(stateStore,
+                new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
+                        BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc,
+                null, null, txStore, metaStore, 1024L);
+
+        assertNull("earliest with no block-0 must return null, not 500",
+                h.handle(request("eth_getBlockByNumber", "earliest", false)));
+        Map<?, ?> block1Obj = (Map<?, ?>) h.handle(request("eth_getBlockByNumber", "0x1", false));
+        assertEquals("0x1", block1Obj.get("number"));
+        assertEquals("null parent falls back to the zero hash", "0x" + "0".repeat(64),
+                block1Obj.get("parentHash"));
     }
 
     @Test

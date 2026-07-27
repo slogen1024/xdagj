@@ -23,6 +23,7 @@
  */
 package io.xdag.rpc.server.protocol;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.xdag.rpc.error.JsonRpcError;
 import org.junit.Test;
 import static org.junit.Assert.*;
@@ -38,6 +39,14 @@ public class JsonRpcResponseTest {
         assertEquals("2.0", response.getJsonrpc());
         assertEquals(id, response.getId());
         assertEquals(result, response.getResult());
+    }
+
+    @Test
+    public void nullResultSerializesAsExplicitNull() throws Exception {
+        // JSON-RPC 2.0 requires the "result" key even when null (e.g. eth_getTransactionReceipt for
+        // an unmined tx); ethers/web3 treat an absent result as a malformed response.
+        String json = new ObjectMapper().writeValueAsString(JsonRpcResponse.success(1, null));
+        assertTrue("result key must be present as null: " + json, json.contains("\"result\":null"));
     }
 
     @Test

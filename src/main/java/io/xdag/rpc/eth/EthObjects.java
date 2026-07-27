@@ -58,7 +58,10 @@ public final class EthObjects {
         m.put("gas", EthHex.quantity(tx.getGasLimit()));
         m.put("input", EthHex.data(tx.getPayload()));
         m.put("chainId", EthHex.quantity(tx.getChainId()));
-        m.put("v", EthHex.quantity(BigInteger.valueOf(tx.getSignature().getRecId())));
+        // EIP-155 canonical v = chainId*2 + 35 + recId (not the bare recId), so a client can
+        // reconstruct/verify the raw signed tx from this object.
+        m.put("v", EthHex.quantity(tx.getChainId().shiftLeft(1)
+                .add(BigInteger.valueOf(35L + tx.getSignature().getRecId()))));
         m.put("r", EthHex.quantity(tx.getSignature().getR()));
         m.put("s", EthHex.quantity(tx.getSignature().getS()));
         m.put("type", "0x0");

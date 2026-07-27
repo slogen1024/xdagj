@@ -176,8 +176,9 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
             };
         } catch (JsonRpcException e) {
             throw e;
-        } catch (IllegalArgumentException e) {
-            throw JsonRpcException.invalidParams(e.getMessage());
+        } catch (IllegalArgumentException | ClassCastException e) {
+            // Malformed params (bad hex/address, wrong JSON type in a filter) are the client's fault.
+            throw JsonRpcException.invalidParams(e.getMessage() == null ? "invalid params" : e.getMessage());
         } catch (RuntimeException e) {
             log.error("eth RPC error handling {}", method, e);
             throw JsonRpcException.internalError("internal error");
@@ -327,10 +328,13 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
 
     private Map<String, Object> buildBlock(long height, boolean fullTx) {
         Block block = blockchain.getBlockByHeight(height);
+        if (block == null) {
+            return null; // e.g. "earliest"/height 0 on a pruned chain: no such block to report
+        }
+        String zeroHash = "0x" + "0".repeat(64);
         String hash = EthHex.data(block.getHash());
-        String parentHash = height > 0
-                ? EthHex.data(blockchain.getBlockByHeight(height - 1).getHash())
-                : "0x" + "0".repeat(64);
+        Block parent = height > 0 ? blockchain.getBlockByHeight(height - 1) : null;
+        String parentHash = parent == null ? zeroHash : EthHex.data(parent.getHash());
         long timestampSeconds = io.xdag.utils.XdagTime.xdagTimestampToMs(block.getTimestamp()) / 1000;
         Optional<EvmMetaStore.HeightRecord> record =
                 evmMetaStore == null ? Optional.empty() : evmMetaStore.getHeightRecord(height);
