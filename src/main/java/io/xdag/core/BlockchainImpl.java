@@ -35,6 +35,7 @@ import io.xdag.core.XdagField.FieldType;
 import io.xdag.consensus.RandomX;
 import io.xdag.crypto.core.CryptoProvider;
 import io.xdag.evm.EvmBlockProcessor;
+import io.xdag.evm.state.EvmMetaStore;
 import io.xdag.crypto.encoding.Base58;
 import io.xdag.crypto.hash.HashUtils;
 import io.xdag.crypto.keys.ECKeyPair;
@@ -1465,8 +1466,34 @@ public class BlockchainImpl implements Blockchain {
         if (CollectionUtils.isNotEmpty(orphans)) {
             refs.addAll(orphans);
         }
+        Bytes32 evmTxRef = selectEvmTxRef(16 - res - orphans.size());
         return new Block(kernel.getConfig(), sendTime[0], null, refs, true, null,
-                kernel.getConfig().getNodeSpec().getNodeTag(), -1, XAmount.ZERO, null);
+                kernel.getConfig().getNodeSpec().getNodeTag(), -1, XAmount.ZERO, null, evmTxRef);
+    }
+
+    /**
+     * Picks one EVM transaction hash to attach to a mined main block (C2), or null when the EVM is
+     * disabled, no field slot is free, or no eligible tx exists. Skips txs that already have a
+     * receipt (already executed on the canonical chain — re-packing wastes a field slot; B2b would
+     * dedup-skip it anyway). Never throws into mining: any failure logs and yields null.
+     */
+    private Bytes32 selectEvmTxRef(int freeFields) {
+        try {
+            if (freeFields < 1 || kernel.getEvmTxPool() == null) {
+                return null;
+            }
+            EvmMetaStore metaStore = kernel.getEvmMetaStore();
+            for (io.xdag.evm.tx.EvmTransaction tx : kernel.getEvmTxPool().selectTransactions(8)) {
+                if (metaStore != null && metaStore.getReceipt(tx.getHash()).isPresent()) {
+                    continue; // already executed on the canonical chain
+                }
+                return Bytes32.wrap(tx.getHash().getBytes());
+            }
+            return null;
+        } catch (RuntimeException e) {
+            log.warn("EVM tx selection failed while building a main block; packing none", e);
+            return null;
+        }
     }
 
     public Block createLinkBlock(String remark, boolean isRoll) {
