@@ -90,10 +90,13 @@ public class JsonRpcHandlerTest {
 
         // Verify response
         assertNotNull(response);
-        assertEquals(HttpResponseStatus.INTERNAL_SERVER_ERROR, response.status());
+        // JSON-RPC 2.0 transport: protocol errors are reported as HTTP 200 with an error body,
+        // not an HTTP error status (required by eth tooling such as MetaMask/ethers).
+        assertEquals(HttpResponseStatus.OK, response.status());
         assertEquals("http://localhost:3000", response.headers().get(HttpHeaderNames.ACCESS_CONTROL_ALLOW_ORIGIN));
         String content = response.content().toString(StandardCharsets.UTF_8);
-//        assertTrue(content.contains("Request too large");
+        assertTrue("oversized request must carry the invalid-request error code",
+                content.contains("\"code\":-32600"));
     }
 
     @Test
@@ -112,10 +115,11 @@ public class JsonRpcHandlerTest {
 
         // Verify response
         assertNotNull(response);
-        assertEquals(HttpResponseStatus.INTERNAL_SERVER_ERROR, response.status());
+        // JSON-RPC 2.0 transport: HTTP 200 with an error body (see testRequestSizeTooLarge).
+        assertEquals(HttpResponseStatus.OK, response.status());
         assertEquals("http://localhost:3000", response.headers().get(HttpHeaderNames.ACCESS_CONTROL_ALLOW_ORIGIN));
         String content = response.content().toString(StandardCharsets.UTF_8);
-//        assertTrue(content.contains("Only POST method is allowed");
+        assertTrue("non-POST must carry the invalid-request error code", content.contains("\"code\":-32600"));
     }
 
     @Test
@@ -134,10 +138,12 @@ public class JsonRpcHandlerTest {
 
         // Verify response
         assertNotNull(response);
-        assertEquals(HttpResponseStatus.INTERNAL_SERVER_ERROR, response.status());
+        // JSON-RPC 2.0 transport: HTTP 200 with an error body (see testRequestSizeTooLarge).
+        assertEquals(HttpResponseStatus.OK, response.status());
         assertEquals("http://localhost:3000", response.headers().get(HttpHeaderNames.ACCESS_CONTROL_ALLOW_ORIGIN));
         String content = response.content().toString(StandardCharsets.UTF_8);
-//        assertTrue(content.contains("Content-Type must be application/json");
+        assertTrue("wrong content-type must carry the invalid-request error code",
+                content.contains("\"code\":-32600"));
     }
 
     @Test
@@ -158,10 +164,11 @@ public class JsonRpcHandlerTest {
 
         // Verify response
         assertNotNull(response);
-        assertEquals(HttpResponseStatus.INTERNAL_SERVER_ERROR, response.status());
+        // JSON-RPC 2.0 transport: HTTP 200 with a parse-error body (see testRequestSizeTooLarge).
+        assertEquals(HttpResponseStatus.OK, response.status());
         assertEquals("http://localhost:3000", response.headers().get(HttpHeaderNames.ACCESS_CONTROL_ALLOW_ORIGIN));
         String content = response.content().toString(StandardCharsets.UTF_8);
-//        assertTrue(content.contains("Invalid JSON request");
+        assertTrue("malformed JSON must carry the parse-error code", content.contains("\"code\":-32700"));
     }
 
     @Test
