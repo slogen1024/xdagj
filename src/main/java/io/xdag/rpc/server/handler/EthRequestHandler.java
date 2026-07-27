@@ -169,6 +169,8 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
                 case "eth_sendRawTransaction" -> sendRawTransaction(request);
                 case "eth_getTransactionByHash" -> getTransactionByHash(request);
                 case "eth_getTransactionReceipt" -> getTransactionReceipt(request);
+                case "eth_getBlockByNumber" -> getBlockByNumber(request);
+                case "eth_getBlockByHash" -> getBlockByHash(request);
                 default -> throw JsonRpcException.methodNotFound(method);
             };
         } catch (JsonRpcException e) {
@@ -280,6 +282,70 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
             out.add(EthObjects.log(log, loc.height(), blockHash, tx.getHash(), loc.index(), logIndex++));
         }
         return out;
+    }
+
+    private Object getBlockByNumber(JsonRpcRequest request) {
+        long head = blockchain.getLatestMainBlockNumber();
+        long height = resolveHeight(stringParam(request, 0), head);
+        if (height < 0 || height > head) {
+            return null;
+        }
+        boolean fullTx = request.getParams().length > 1 && Boolean.TRUE.equals(request.getParams()[1]);
+        return buildBlock(height, fullTx);
+    }
+
+    private Object getBlockByHash(JsonRpcRequest request) {
+        Block block = blockchain.getBlockByHash(Bytes32.wrap(EthHex.decodeData(stringParam(request, 0))), false);
+        if (block == null) {
+            return null;
+        }
+        long height = block.getInfo().getHeight();
+        if (height <= 0) {
+            return null; // not a confirmed main block
+        }
+        boolean fullTx = request.getParams().length > 1 && Boolean.TRUE.equals(request.getParams()[1]);
+        return buildBlock(height, fullTx);
+    }
+
+    /** Resolves a block tag ("latest"/.../hex) to a height; -1 for an unparseable/negative value. */
+    private long resolveHeight(String tag, long head) {
+        if (tag == null || tag.isBlank()) {
+            return head;
+        }
+        return switch (tag) {
+            case "latest", "pending", "safe", "finalized" -> head;
+            case "earliest" -> 0L;
+            default -> EthHex.decodeQuantity(tag).longValueExact();
+        };
+    }
+
+    private Map<String, Object> buildBlock(long height, boolean fullTx) {
+        Block block = blockchain.getBlockByHeight(height);
+        String hash = EthHex.data(block.getHash());
+        String parentHash = height > 0
+                ? EthHex.data(blockchain.getBlockByHeight(height - 1).getHash())
+                : "0x" + "0".repeat(64);
+        long timestampSeconds = io.xdag.utils.XdagTime.xdagTimestampToMs(block.getTimestamp()) / 1000;
+        Optional<EvmMetaStore.HeightRecord> record =
+                evmMetaStore == null ? Optional.empty() : evmMetaStore.getHeightRecord(height);
+        String stateRoot = record.map(r -> EthHex.data(r.stateRoot())).orElse("0x" + "0".repeat(64));
+        List<Hash> txHashes = evmMetaStore == null ? List.of() : evmMetaStore.getTxList(height);
+
+        List<Object> txs = new ArrayList<>();
+        long gasUsed = 0L;
+        for (int i = 0; i < txHashes.size(); i++) {
+            Hash txHash = txHashes.get(i);
+            Optional<EvmReceipt> receipt = evmMetaStore.getReceipt(txHash);
+            gasUsed += receipt.map(EvmReceipt::gasUsed).orElse(0L);
+            if (fullTx) {
+                evmTxStore.getDecoded(txHash)
+                        .ifPresent(tx -> txs.add(EthObjects.transaction(tx, height, hash, txs.size())));
+            } else {
+                txs.add(EthHex.data(txHash.getBytes()));
+            }
+        }
+        return EthObjects.block(height, hash, parentHash, timestampSeconds,
+                evmConfig.maxGasLimit(), gasUsed, stateRoot, txs);
     }
 
     /** Loads an account from the latest EVM_STATE; null when absent. Read-only (never committed). */

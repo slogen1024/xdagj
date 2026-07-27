@@ -86,6 +86,33 @@ public final class EthObjects {
         return m;
     }
 
+    public static Map<String, Object> block(long number, String hash, String parentHash,
+                                            long timestampSeconds, long gasLimit, long gasUsed,
+                                            String stateRoot, List<Object> transactions) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("number", EthHex.quantity(number));
+        m.put("hash", hash);
+        m.put("parentHash", parentHash);
+        m.put("nonce", "0x0000000000000000");
+        m.put("sha3Uncles", "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347");
+        m.put("logsBloom", ZERO_BLOOM);
+        m.put("transactionsRoot", stateRoot);
+        m.put("stateRoot", stateRoot);
+        m.put("receiptsRoot", stateRoot);
+        m.put("miner", "0x" + "0".repeat(40));
+        m.put("difficulty", "0x0");
+        m.put("totalDifficulty", "0x0");
+        m.put("extraData", "0x");
+        m.put("size", "0x0");
+        m.put("gasLimit", EthHex.quantity(gasLimit));
+        m.put("gasUsed", EthHex.quantity(gasUsed));
+        m.put("timestamp", EthHex.quantity(timestampSeconds));
+        m.put("transactions", transactions);
+        m.put("uncles", List.of());
+        m.put("baseFeePerGas", "0x0");
+        return m;
+    }
+
     public static Map<String, Object> log(Log log, long blockNumber, String blockHash, Hash txHash,
                                           int txIndex, int logIndex) {
         Map<String, Object> m = new LinkedHashMap<>();

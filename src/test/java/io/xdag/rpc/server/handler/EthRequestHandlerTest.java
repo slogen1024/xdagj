@@ -309,4 +309,36 @@ public class EthRequestHandlerTest {
 
         assertNull(h.handle(request("eth_getTransactionReceipt", "0x" + "11".repeat(32))));
     }
+
+    @Test
+    public void eth_getBlockByNumber_hash_array_and_full_tx() throws Exception {
+        InMemoryKVSource stateStore = new InMemoryKVSource();
+        EvmTxStore txStore = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore metaStore = new EvmMetaStore(new InMemoryKVSource());
+        EvmTransaction tx = signedTx(0, BigInteger.valueOf(0xCAFE));
+        txStore.put(tx);
+        metaStore.putTxList(3L, List.of(tx.getHash()));
+        EthRequestHandler h = queryHandler(stateStore, txStore, metaStore, 10L);
+
+        Map<?, ?> hashesBlock = (Map<?, ?>) h.handle(request("eth_getBlockByNumber", "0x3", false));
+        assertEquals("0x3", hashesBlock.get("number"));
+        assertEquals(List.of(tx.getHash().getBytes().toHexString()), hashesBlock.get("transactions"));
+
+        Map<?, ?> fullBlock = (Map<?, ?>) h.handle(request("eth_getBlockByNumber", "0x3", true));
+        List<?> full = (List<?>) fullBlock.get("transactions");
+        assertEquals(1, full.size());
+        assertEquals(tx.getHash().getBytes().toHexString(), ((Map<?, ?>) full.get(0)).get("hash"));
+    }
+
+    @Test
+    public void eth_getBlockByNumber_empty_and_out_of_range() throws Exception {
+        InMemoryKVSource stateStore = new InMemoryKVSource();
+        EvmTxStore txStore = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore metaStore = new EvmMetaStore(new InMemoryKVSource());
+        EthRequestHandler h = queryHandler(stateStore, txStore, metaStore, 10L);
+
+        Map<?, ?> empty = (Map<?, ?>) h.handle(request("eth_getBlockByNumber", "0x2", false));
+        assertTrue(((List<?>) empty.get("transactions")).isEmpty()); // no EVM txs at height 2
+        assertNull(h.handle(request("eth_getBlockByNumber", "0x63", false))); // 99 > head 10
+    }
 }
