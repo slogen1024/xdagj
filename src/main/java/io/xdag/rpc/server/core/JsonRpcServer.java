@@ -78,13 +78,21 @@ public class JsonRpcServer {
             List<JsonRpcRequestHandler> handlers = new ArrayList<>();
             handlers.add(new JsonRequestHandler(xdagApi));
 
-            // Register the read-only eth_* handler when the embedded EVM is enabled (sub-project C1).
+            // Register the eth_* handler when the embedded EVM is enabled (sub-projects C1/C2).
             EvmSpec evmSpec = kernel.getConfig().getEvmSpec();
             if (evmSpec.isEvmEnabled() && kernel.getEvmStateStore() != null) {
                 EvmConfig evmConfig = new EvmConfig(EvmSpecVersion.SHANGHAI,
                         BigInteger.valueOf(evmSpec.getEvmChainId()), evmSpec.getEvmBlockGasLimit());
+                // Broadcast an accepted eth tx to every connected peer (C2 write path).
+                java.util.function.Consumer<org.apache.tuweni.bytes.Bytes> broadcaster = rlp -> {
+                    for (io.xdag.net.Channel ch : kernel.getChannelMgr().getActiveChannels()) {
+                        ch.getMessageQueue().sendMessage(
+                                new io.xdag.net.message.p2p.EvmTxBroadcastMessage(rlp));
+                    }
+                };
                 handlers.add(new EthRequestHandler(kernel.getEvmStateStore(), evmConfig,
-                        evmSpec.getEvmMinGasPrice(), kernel.getBlockchain()));
+                        evmSpec.getEvmMinGasPrice(), kernel.getBlockchain(),
+                        kernel.getEvmTxPool(), broadcaster));
             }
 
             // Create SSL context (if HTTPS is enabled)

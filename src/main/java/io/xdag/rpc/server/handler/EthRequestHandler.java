@@ -29,6 +29,8 @@ import io.xdag.evm.EvmConfig;
 import io.xdag.evm.XdagEvmExecutor;
 import io.xdag.evm.XdagExecutionResult;
 import io.xdag.evm.state.RocksDbWorldUpdater;
+import io.xdag.evm.tx.EvmTransaction;
+import io.xdag.evm.tx.EvmTxPool;
 import io.xdag.evm.tx.IntrinsicGas;
 import io.xdag.rpc.eth.EthHex;
 import io.xdag.rpc.error.JsonRpcException;
@@ -37,6 +39,7 @@ import java.math.BigInteger;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.units.bigints.UInt256;
@@ -54,21 +57,28 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
     private static final Set<String> SUPPORTED = Set.of(
             "eth_chainId", "net_version", "web3_clientVersion", "eth_gasPrice", "eth_blockNumber",
             "eth_getBalance", "eth_getTransactionCount", "eth_getCode", "eth_getStorageAt",
-            "eth_call", "eth_estimateGas", "eth_accounts", "net_listening");
+            "eth_call", "eth_estimateGas", "eth_accounts", "net_listening", "eth_sendRawTransaction");
 
     private final KVSource<byte[], byte[]> evmStateStore;
     private final EvmConfig evmConfig;
     private final BigInteger minGasPriceWei;
     private final Blockchain blockchain;
     private final XdagEvmExecutor executor;
+    /** Null when EVM writes are not enabled; then eth_sendRawTransaction errors. */
+    private final EvmTxPool evmTxPool;
+    /** Publishes an accepted blob to peers; null-safe no-op when absent. */
+    private final Consumer<Bytes> broadcaster;
 
     public EthRequestHandler(KVSource<byte[], byte[]> evmStateStore, EvmConfig evmConfig,
-                             BigInteger minGasPriceWei, Blockchain blockchain) {
+                             BigInteger minGasPriceWei, Blockchain blockchain,
+                             EvmTxPool evmTxPool, Consumer<Bytes> broadcaster) {
         this.evmStateStore = evmStateStore;
         this.evmConfig = evmConfig;
         this.minGasPriceWei = minGasPriceWei;
         this.blockchain = blockchain;
         this.executor = new XdagEvmExecutor(evmConfig);
+        this.evmTxPool = evmTxPool;
+        this.broadcaster = broadcaster;
     }
 
     @Override
@@ -135,6 +145,7 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
                     long intrinsic = IntrinsicGas.compute(args.data(), args.to() == null);
                     yield EthHex.quantity(intrinsic + r.gasUsed());
                 }
+                case "eth_sendRawTransaction" -> sendRawTransaction(request);
                 default -> throw JsonRpcException.methodNotFound(method);
             };
         } catch (JsonRpcException e) {
@@ -145,6 +156,46 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
             log.error("eth RPC error handling {}", method, e);
             throw JsonRpcException.internalError("internal error");
         }
+    }
+
+    /**
+     * eth_sendRawTransaction (C2): validate + enqueue the signed EIP-155 blob, gossip it, and return
+     * the Ethereum tx hash. A duplicate returns its hash without re-broadcast (Ethereum idempotency);
+     * any pool rejection maps to a specific invalid-params error.
+     */
+    private String sendRawTransaction(JsonRpcRequest request) {
+        if (evmTxPool == null) {
+            throw JsonRpcException.internalError("EVM transactions are not enabled");
+        }
+        Bytes rlp = EthHex.decodeData(stringParam(request, 0));
+        String hash;
+        try {
+            hash = EthHex.data(EvmTransaction.decode(rlp).getHash().getBytes());
+        } catch (RuntimeException e) {
+            throw JsonRpcException.invalidParams("invalid transaction RLP");
+        }
+        EvmTxPool.AddResult result = evmTxPool.add(rlp);
+        switch (result) {
+            case ADDED, REPLACED -> {
+                if (broadcaster != null) {
+                    broadcaster.accept(rlp);
+                }
+                return hash;
+            }
+            case DUPLICATE -> {
+                return hash; // Ethereum idempotency: known tx returns its hash, no re-broadcast
+            }
+            case INVALID_ENCODING -> throw JsonRpcException.invalidParams("invalid transaction RLP");
+            case WRONG_CHAIN_ID -> throw JsonRpcException.invalidParams("wrong chain id");
+            case INVALID_SIGNATURE -> throw JsonRpcException.invalidParams("invalid signature");
+            case GAS_LIMIT_TOO_HIGH -> throw JsonRpcException.invalidParams("gas limit exceeds block gas limit");
+            case INTRINSIC_GAS_TOO_LOW -> throw JsonRpcException.invalidParams("intrinsic gas exceeds gas limit");
+            case UNDERPRICED -> throw JsonRpcException.invalidParams("transaction underpriced");
+            case NONCE_MISMATCH -> throw JsonRpcException.invalidParams("nonce mismatch");
+            case INSUFFICIENT_BALANCE -> throw JsonRpcException.invalidParams("insufficient balance for value");
+            case POOL_FULL -> throw JsonRpcException.invalidParams("transaction pool is full");
+        }
+        throw JsonRpcException.internalError("unreachable add result");
     }
 
     /** Loads an account from the latest EVM_STATE; null when absent. Read-only (never committed). */

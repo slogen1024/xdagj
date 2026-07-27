@@ -31,13 +31,21 @@ import io.xdag.core.Blockchain;
 import io.xdag.evm.EvmConfig;
 import io.xdag.evm.state.InMemoryKVSource;
 import io.xdag.evm.state.RocksDbWorldUpdater;
+import io.xdag.evm.tx.EvmTransaction;
+import io.xdag.evm.tx.EvmTxPool;
+import io.xdag.evm.tx.EvmTxStore;
 import io.xdag.rpc.eth.EthHex;
 import io.xdag.rpc.error.JsonRpcException;
 import io.xdag.rpc.server.protocol.JsonRpcRequest;
 import java.math.BigInteger;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import java.util.function.Consumer;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.units.bigints.UInt256;
+import org.hyperledger.besu.crypto.KeyPair;
+import org.hyperledger.besu.crypto.SECP256K1;
 import org.hyperledger.besu.datatypes.Address;
 import org.hyperledger.besu.datatypes.Wei;
 import org.hyperledger.besu.evm.account.MutableAccount;
@@ -56,7 +64,7 @@ public class EthRequestHandlerTest {
         handler = new EthRequestHandler(new InMemoryKVSource(),
                 new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
                         BigInteger.valueOf(0xCAFE), 30_000_000L),
-                BigInteger.valueOf(1_000_000_000L), blockchain);
+                BigInteger.valueOf(1_000_000_000L), blockchain, null, null);
     }
 
     private JsonRpcRequest request(String method, Object... params) {
@@ -87,7 +95,78 @@ public class EthRequestHandlerTest {
         Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(head);
         return new EthRequestHandler(store,
                 new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
-                        BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc);
+                        BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, null, null);
+    }
+
+    private EvmTxPool poolFor(InMemoryKVSource stateStore) {
+        return new EvmTxPool(new EvmTxStore(new InMemoryKVSource()), stateStore,
+                BigInteger.valueOf(0xCAFE), 30_000_000L, Wei.ONE, 3600L, () -> 1000L);
+    }
+
+    private EvmTransaction signedTx(long nonce, BigInteger chainId) {
+        SECP256K1 algo = new SECP256K1();
+        KeyPair key = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
+        return EvmTransaction.unsigned(nonce, Wei.ONE, 100_000L, Optional.empty(),
+                Wei.ZERO, Bytes.fromHexString("0x6001600155"), chainId).sign(key, algo);
+    }
+
+    private EthRequestHandler writeHandler(InMemoryKVSource stateStore, EvmTxPool pool, List<Bytes> broadcasts) {
+        Blockchain bc = Mockito.mock(Blockchain.class);
+        Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(1L);
+        Consumer<Bytes> broadcaster = broadcasts::add;
+        return new EthRequestHandler(stateStore,
+                new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
+                        BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, pool, broadcaster);
+    }
+
+    private void fundSender(InMemoryKVSource stateStore) {
+        RocksDbWorldUpdater w = new RocksDbWorldUpdater(stateStore);
+        w.createAccount(Address.fromHexString("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"),
+                0L, Wei.fromEth(1));
+        w.commit();
+    }
+
+    @Test
+    public void eth_sendRawTransaction_enqueues_broadcasts_and_returns_hash() throws Exception {
+        InMemoryKVSource stateStore = new InMemoryKVSource();
+        fundSender(stateStore);
+        EvmTxPool pool = poolFor(stateStore);
+        List<Bytes> broadcasts = new ArrayList<>();
+        EthRequestHandler h = writeHandler(stateStore, pool, broadcasts);
+
+        EvmTransaction tx = signedTx(0, BigInteger.valueOf(0xCAFE));
+        String result = (String) h.handle(request("eth_sendRawTransaction", tx.getRawRlp().toHexString()));
+
+        assertEquals(tx.getHash().getBytes().toHexString(), result);
+        assertEquals(1, pool.size());
+        assertEquals(1, broadcasts.size());
+        assertEquals(tx.getRawRlp(), broadcasts.get(0));
+    }
+
+    @Test
+    public void eth_sendRawTransaction_duplicate_returns_hash_without_rebroadcast() throws Exception {
+        InMemoryKVSource stateStore = new InMemoryKVSource();
+        fundSender(stateStore);
+        EvmTxPool pool = poolFor(stateStore);
+        List<Bytes> broadcasts = new ArrayList<>();
+        EthRequestHandler h = writeHandler(stateStore, pool, broadcasts);
+
+        EvmTransaction tx = signedTx(0, BigInteger.valueOf(0xCAFE));
+        h.handle(request("eth_sendRawTransaction", tx.getRawRlp().toHexString()));
+        String again = (String) h.handle(request("eth_sendRawTransaction", tx.getRawRlp().toHexString()));
+
+        assertEquals(tx.getHash().getBytes().toHexString(), again);
+        assertEquals("duplicate must not re-broadcast", 1, broadcasts.size());
+    }
+
+    @Test
+    public void eth_sendRawTransaction_wrong_chain_id_errors() {
+        InMemoryKVSource stateStore = new InMemoryKVSource();
+        EvmTxPool pool = poolFor(stateStore);
+        EthRequestHandler h = writeHandler(stateStore, pool, new ArrayList<>());
+        EvmTransaction wrong = signedTx(0, BigInteger.ONE); // mainnet chain id, pool expects 0xCAFE
+        assertThrows(JsonRpcException.class,
+                () -> h.handle(request("eth_sendRawTransaction", wrong.getRawRlp().toHexString())));
     }
 
     @Test
