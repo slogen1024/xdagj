@@ -27,6 +27,7 @@ import io.xdag.core.Blockchain;
 import io.xdag.db.rocksdb.KVSource;
 import io.xdag.evm.EvmConfig;
 import io.xdag.evm.XdagEvmExecutor;
+import io.xdag.evm.state.RocksDbWorldUpdater;
 import io.xdag.rpc.eth.EthHex;
 import io.xdag.rpc.error.JsonRpcException;
 import io.xdag.rpc.server.protocol.JsonRpcRequest;
@@ -34,6 +35,10 @@ import java.math.BigInteger;
 import java.util.List;
 import java.util.Set;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.tuweni.bytes.Bytes;
+import org.apache.tuweni.units.bigints.UInt256;
+import org.hyperledger.besu.datatypes.Address;
+import org.hyperledger.besu.evm.account.Account;
 
 /** Serves the read-only Ethereum JSON-RPC surface (sub-project C1) over the EVM_STATE world state. */
 @Slf4j
@@ -81,6 +86,32 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
                 case "eth_blockNumber" -> EthHex.quantity(blockchain.getLatestMainBlockNumber());
                 case "eth_accounts" -> List.of();
                 case "net_listening" -> Boolean.TRUE;
+                case "eth_getBalance" -> {
+                    Address addr = addressParam(request, 0);
+                    validateBlockTag(request, 1);
+                    Account a = account(addr);
+                    yield EthHex.quantity(a == null ? BigInteger.ZERO : a.getBalance().getAsBigInteger());
+                }
+                case "eth_getTransactionCount" -> {
+                    Address addr = addressParam(request, 0);
+                    validateBlockTag(request, 1);
+                    Account a = account(addr);
+                    yield EthHex.quantity(a == null ? 0L : a.getNonce());
+                }
+                case "eth_getCode" -> {
+                    Address addr = addressParam(request, 0);
+                    validateBlockTag(request, 1);
+                    Account a = account(addr);
+                    yield EthHex.data(a == null ? Bytes.EMPTY : a.getCode());
+                }
+                case "eth_getStorageAt" -> {
+                    Address addr = addressParam(request, 0);
+                    UInt256 slot = UInt256.valueOf(EthHex.decodeQuantity(stringParam(request, 1)));
+                    validateBlockTag(request, 2);
+                    Account a = account(addr);
+                    UInt256 value = a == null ? UInt256.ZERO : a.getStorageValue(slot);
+                    yield EthHex.data(value.toBytes());
+                }
                 default -> throw JsonRpcException.methodNotFound(method);
             };
         } catch (JsonRpcException e) {
@@ -90,6 +121,47 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
         } catch (RuntimeException e) {
             log.error("eth RPC error handling {}", method, e);
             throw JsonRpcException.internalError("internal error");
+        }
+    }
+
+    /** Loads an account from the latest EVM_STATE; null when absent. Read-only (never committed). */
+    private Account account(Address address) {
+        return new RocksDbWorldUpdater(evmStateStore).getAccount(address);
+    }
+
+    private Address addressParam(JsonRpcRequest request, int index) {
+        return EthHex.decodeAddress(stringParam(request, index));
+    }
+
+    private String stringParam(JsonRpcRequest request, int index) {
+        Object[] params = request.getParams();
+        if (params == null || params.length <= index || !(params[index] instanceof String s)) {
+            throw new IllegalArgumentException("missing string parameter at index " + index);
+        }
+        return s;
+    }
+
+    /**
+     * Validates the block tag (default "latest" when omitted/null): only the current committed state
+     * is available. "latest"/"pending"/"earliest"/"safe"/"finalized" and the head height pass; any
+     * other explicit height throws (no archival state in v1).
+     */
+    private void validateBlockTag(JsonRpcRequest request, int index) {
+        Object[] params = request.getParams();
+        if (params == null || params.length <= index || params[index] == null
+                || !(params[index] instanceof String tag) || tag.isBlank()) {
+            return; // default: latest
+        }
+        switch (tag) {
+            case "latest", "pending", "earliest", "safe", "finalized" -> {
+            }
+            default -> {
+                BigInteger requested = EthHex.decodeQuantity(tag);
+                if (!requested.equals(BigInteger.valueOf(blockchain.getLatestMainBlockNumber()))) {
+                    throw new IllegalArgumentException(
+                            "historical state is not available (no archive node in v1)");
+                }
+            }
         }
     }
 }
