@@ -161,6 +161,7 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected long evmTxPoolTtlSeconds = 3600;
     protected int evmMaxP2pTxBytes = 131_072;
     protected BigInteger evmMinGasPrice = BigInteger.valueOf(1_000_000_000L);
+    protected long evmMaxLogScanRange = 1024;
 
     protected AbstractConfig(String rootDir, String configName, Network network, short networkVersion) {
         this.rootDir = rootDir;
@@ -219,6 +220,11 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     @Override
     public BigInteger getEvmMinGasPrice() {
         return evmMinGasPrice;
+    }
+
+    @Override
+    public long getEvmMaxLogScanRange() {
+        return evmMaxLogScanRange;
     }
 
     @Override
@@ -340,6 +346,8 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
                 ? config.getInt("evm.maxP2pTxBytes") : evmMaxP2pTxBytes;
         evmMinGasPrice = config.hasPath("evm.minGasPrice")
                 ? BigInteger.valueOf(config.getLong("evm.minGasPrice")) : evmMinGasPrice;
+        evmMaxLogScanRange = config.hasPath("evm.maxLogScanRange")
+                ? config.getLong("evm.maxLogScanRange") : evmMaxLogScanRange;
         nodeRation = config.hasPath("node.ration") ? config.getDouble("node.ration") : 5;
         // S-30: tolerate a missing/trimmed whiteIPs list and skip malformed entries instead of aborting startup.
         List<String> whiteIpList = config.hasPath("node.whiteIPs")

@@ -49,4 +49,7 @@ public interface EvmSpec {
 
     /** Minimum gas price in wei a pool/miner accepts. */
     BigInteger getEvmMinGasPrice();
+
+    /** Maximum block span an eth_getLogs query may scan (DoS guard). */
+    long getEvmMaxLogScanRange();
 }
