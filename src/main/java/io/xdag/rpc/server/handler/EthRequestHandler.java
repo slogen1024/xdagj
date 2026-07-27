@@ -171,6 +171,7 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
                 case "eth_getTransactionReceipt" -> getTransactionReceipt(request);
                 case "eth_getBlockByNumber" -> getBlockByNumber(request);
                 case "eth_getBlockByHash" -> getBlockByHash(request);
+                case "eth_getLogs" -> getLogs(request);
                 default -> throw JsonRpcException.methodNotFound(method);
             };
         } catch (JsonRpcException e) {
@@ -346,6 +347,91 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
         }
         return EthObjects.block(height, hash, parentHash, timestampSeconds,
                 evmConfig.maxGasLimit(), gasUsed, stateRoot, txs);
+    }
+
+    private Object getLogs(JsonRpcRequest request) {
+        Object[] params = request.getParams();
+        if (params == null || params.length < 1 || !(params[0] instanceof Map<?, ?> filter)) {
+            throw JsonRpcException.invalidParams("missing filter object");
+        }
+        long head = blockchain.getLatestMainBlockNumber();
+        long from = filter.get("fromBlock") == null ? head
+                : resolveHeight((String) filter.get("fromBlock"), head);
+        long to = filter.get("toBlock") == null ? head : resolveHeight((String) filter.get("toBlock"), head);
+        if (from < 0 || to < 0 || to < from) {
+            throw JsonRpcException.invalidParams("invalid block range");
+        }
+        if (to - from + 1 > maxLogScanRange) {
+            throw JsonRpcException.invalidParams("log query range exceeds " + maxLogScanRange + " blocks");
+        }
+        Set<Address> addressFilter = parseAddressFilter(filter.get("address"));
+        List<Bytes32> topic0 = parseTopic0(filter.get("topics"));
+
+        List<Object> out = new ArrayList<>();
+        for (long height = from; height <= Math.min(to, head) && evmMetaStore != null; height++) {
+            List<Hash> txHashes = evmMetaStore.getTxList(height);
+            String blockHash = txHashes.isEmpty() ? null : blockHashAt(height);
+            int logIndex = 0;
+            for (int i = 0; i < txHashes.size(); i++) {
+                Hash txHash = txHashes.get(i);
+                Optional<EvmReceipt> receipt = evmMetaStore.getReceipt(txHash);
+                if (receipt.isEmpty()) {
+                    continue;
+                }
+                for (Log log : receipt.get().logs()) {
+                    if (matches(log, addressFilter, topic0)) {
+                        out.add(EthObjects.log(log, height, blockHash, txHash, i, logIndex));
+                    }
+                    logIndex++;
+                }
+            }
+        }
+        return out;
+    }
+
+    private Set<Address> parseAddressFilter(Object address) {
+        if (address == null) {
+            return Set.of();
+        }
+        Set<Address> set = new java.util.HashSet<>();
+        if (address instanceof List<?> list) {
+            for (Object a : list) {
+                set.add(EthHex.decodeAddress((String) a));
+            }
+        } else {
+            set.add(EthHex.decodeAddress((String) address));
+        }
+        return set;
+    }
+
+    /** v1: only topic[0] is filtered (exact match); a null/absent topics list matches everything. */
+    private List<Bytes32> parseTopic0(Object topics) {
+        if (!(topics instanceof List<?> list) || list.isEmpty() || list.get(0) == null) {
+            return List.of();
+        }
+        Object first = list.get(0);
+        List<Bytes32> out = new ArrayList<>();
+        if (first instanceof List<?> alts) {
+            for (Object t : alts) {
+                out.add(Bytes32.wrap(EthHex.decodeData((String) t)));
+            }
+        } else {
+            out.add(Bytes32.wrap(EthHex.decodeData((String) first)));
+        }
+        return out;
+    }
+
+    private boolean matches(Log log, Set<Address> addresses, List<Bytes32> topic0) {
+        if (!addresses.isEmpty() && !addresses.contains(log.getLogger())) {
+            return false;
+        }
+        if (!topic0.isEmpty()) {
+            if (log.getTopics().isEmpty()) {
+                return false;
+            }
+            return topic0.contains(Bytes32.wrap(log.getTopics().get(0).getBytes()));
+        }
+        return true;
     }
 
     /** Loads an account from the latest EVM_STATE; null when absent. Read-only (never committed). */

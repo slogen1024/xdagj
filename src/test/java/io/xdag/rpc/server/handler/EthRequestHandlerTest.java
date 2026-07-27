@@ -54,6 +54,8 @@ import org.hyperledger.besu.crypto.KeyPair;
 import org.hyperledger.besu.crypto.SECP256K1;
 import org.hyperledger.besu.datatypes.Address;
 import org.hyperledger.besu.datatypes.Hash;
+import org.hyperledger.besu.datatypes.Log;
+import org.hyperledger.besu.datatypes.LogTopic;
 import org.hyperledger.besu.datatypes.Wei;
 import org.hyperledger.besu.evm.account.MutableAccount;
 import org.junit.Before;
@@ -340,5 +342,39 @@ public class EthRequestHandlerTest {
         Map<?, ?> empty = (Map<?, ?>) h.handle(request("eth_getBlockByNumber", "0x2", false));
         assertTrue(((List<?>) empty.get("transactions")).isEmpty()); // no EVM txs at height 2
         assertNull(h.handle(request("eth_getBlockByNumber", "0x63", false))); // 99 > head 10
+    }
+
+    @Test
+    public void eth_getLogs_filters_by_address_and_topic_and_caps_range() throws Exception {
+        InMemoryKVSource stateStore = new InMemoryKVSource();
+        EvmTxStore txStore = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore metaStore = new EvmMetaStore(new InMemoryKVSource());
+        EvmTransaction tx = signedTx(0, BigInteger.valueOf(0xCAFE));
+        txStore.put(tx);
+        metaStore.putTxList(4L, List.of(tx.getHash()));
+        Address emitter = Address.fromHexString("0x4444444444444444444444444444444444444444");
+        Bytes32 topic = Bytes32.fromHexString("0x" + "aa".repeat(32));
+        Log log = new Log(emitter, Bytes.fromHexString("0xbeef"), List.of(LogTopic.wrap(topic)));
+        metaStore.putReceipt(tx.getHash(), new EvmReceipt(1, 21_000L, Optional.empty(), List.of(log)));
+        EthRequestHandler h = queryHandler(stateStore, txStore, metaStore, 10L);
+
+        java.util.Map<String, Object> filter = new java.util.HashMap<>();
+        filter.put("fromBlock", "0x4");
+        filter.put("toBlock", "0x4");
+        filter.put("address", emitter.toHexString());
+        List<?> hits = (List<?>) h.handle(request("eth_getLogs", filter));
+        assertEquals(1, hits.size());
+        assertEquals(emitter.getBytes().toHexString(), ((Map<?, ?>) hits.get(0)).get("address"));
+
+        // address that emitted nothing -> no hits
+        java.util.Map<String, Object> other = new java.util.HashMap<>(filter);
+        other.put("address", "0x5555555555555555555555555555555555555555");
+        assertTrue(((List<?>) h.handle(request("eth_getLogs", other))).isEmpty());
+
+        // range over the cap -> error (maxLogScanRange default 1024)
+        java.util.Map<String, Object> wide = new java.util.HashMap<>();
+        wide.put("fromBlock", "0x0");
+        wide.put("toBlock", "0x2000"); // 8192 > 1024
+        assertThrows(JsonRpcException.class, () -> h.handle(request("eth_getLogs", wide)));
     }
 }
