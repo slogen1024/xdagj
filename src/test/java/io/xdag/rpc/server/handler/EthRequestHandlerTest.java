@@ -31,6 +31,7 @@ import io.xdag.core.Blockchain;
 import io.xdag.evm.EvmConfig;
 import io.xdag.evm.state.InMemoryKVSource;
 import io.xdag.evm.state.RocksDbWorldUpdater;
+import io.xdag.rpc.eth.EthHex;
 import io.xdag.rpc.error.JsonRpcException;
 import io.xdag.rpc.server.protocol.JsonRpcRequest;
 import java.math.BigInteger;
@@ -131,5 +132,35 @@ public class EthRequestHandlerTest {
         assertEquals(List.of(), handler.handle(request("eth_accounts")));
         assertEquals(Boolean.TRUE, handler.handle(request("net_listening")));
         assertTrue(((String) handler.handle(request("web3_clientVersion"))).startsWith("xdagj/"));
+    }
+
+    @Test
+    public void eth_call_runs_against_ephemeral_state_and_returns_data() throws Exception {
+        InMemoryKVSource store = new InMemoryKVSource();
+        seedState(store);
+        EthRequestHandler h = handlerOver(store, 10L);
+
+        java.util.Map<String, Object> call = new java.util.HashMap<>();
+        call.put("to", contractHex());
+        call.put("data", "0x");
+        String result = (String) h.handle(request("eth_call", call, "latest"));
+        assertEquals(BigInteger.valueOf(42), EthHex.decodeQuantity(result)); // contract returns 42
+
+        // Calling an EOA (no code) returns empty data.
+        java.util.Map<String, Object> toEoa = new java.util.HashMap<>();
+        toEoa.put("to", eoaHex());
+        assertEquals("0x", h.handle(request("eth_call", toEoa, "latest")));
+    }
+
+    @Test
+    public void eth_estimateGas_is_at_least_intrinsic() throws Exception {
+        InMemoryKVSource store = new InMemoryKVSource();
+        seedState(store);
+        EthRequestHandler h = handlerOver(store, 10L);
+
+        java.util.Map<String, Object> call = new java.util.HashMap<>();
+        call.put("to", contractHex());
+        String result = (String) h.handle(request("eth_estimateGas", call));
+        assertTrue(EthHex.decodeQuantity(result).longValueExact() >= 21_000L);
     }
 }

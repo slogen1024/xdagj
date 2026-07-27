@@ -27,18 +27,23 @@ import io.xdag.core.Blockchain;
 import io.xdag.db.rocksdb.KVSource;
 import io.xdag.evm.EvmConfig;
 import io.xdag.evm.XdagEvmExecutor;
+import io.xdag.evm.XdagExecutionResult;
 import io.xdag.evm.state.RocksDbWorldUpdater;
+import io.xdag.evm.tx.IntrinsicGas;
 import io.xdag.rpc.eth.EthHex;
 import io.xdag.rpc.error.JsonRpcException;
 import io.xdag.rpc.server.protocol.JsonRpcRequest;
 import java.math.BigInteger;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.units.bigints.UInt256;
 import org.hyperledger.besu.datatypes.Address;
+import org.hyperledger.besu.datatypes.Wei;
 import org.hyperledger.besu.evm.account.Account;
+import org.hyperledger.besu.evm.worldstate.WorldUpdater;
 
 /** Serves the read-only Ethereum JSON-RPC surface (sub-project C1) over the EVM_STATE world state. */
 @Slf4j
@@ -112,6 +117,24 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
                     UInt256 value = a == null ? UInt256.ZERO : a.getStorageValue(slot);
                     yield EthHex.data(value.toBytes());
                 }
+                case "eth_call" -> {
+                    validateBlockTag(request, 1);
+                    XdagExecutionResult r = simulate(callObject(request, 0));
+                    if (!r.success()) {
+                        throw JsonRpcException.internalError(revertMessage(r));
+                    }
+                    yield EthHex.data(r.returnData());
+                }
+                case "eth_estimateGas" -> {
+                    // block tag optional for estimateGas (index 1 if present, unused for latest-only)
+                    CallArgs args = callObject(request, 0);
+                    XdagExecutionResult r = simulate(args);
+                    if (!r.success()) {
+                        throw JsonRpcException.internalError(revertMessage(r));
+                    }
+                    long intrinsic = IntrinsicGas.compute(args.data(), args.to() == null);
+                    yield EthHex.quantity(intrinsic + r.gasUsed());
+                }
                 default -> throw JsonRpcException.methodNotFound(method);
             };
         } catch (JsonRpcException e) {
@@ -127,6 +150,39 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
     /** Loads an account from the latest EVM_STATE; null when absent. Read-only (never committed). */
     private Account account(Address address) {
         return new RocksDbWorldUpdater(evmStateStore).getAccount(address);
+    }
+
+    /** Parsed eth_call / eth_estimateGas arguments. {@code to == null} means contract creation. */
+    private record CallArgs(Address from, Address to, Bytes data, Wei value, long gas) {
+    }
+
+    private CallArgs callObject(JsonRpcRequest request, int index) {
+        Object[] params = request.getParams();
+        if (params == null || params.length <= index || !(params[index] instanceof Map<?, ?> map)) {
+            throw new IllegalArgumentException("missing call object at index " + index);
+        }
+        Address from = map.get("from") == null ? Address.ZERO : EthHex.decodeAddress((String) map.get("from"));
+        Address to = map.get("to") == null ? null : EthHex.decodeAddress((String) map.get("to"));
+        Object dataHex = map.get("data") != null ? map.get("data") : map.get("input");
+        Bytes data = dataHex == null ? Bytes.EMPTY : EthHex.decodeData((String) dataHex);
+        Wei value = map.get("value") == null ? Wei.ZERO : Wei.of(EthHex.decodeQuantity((String) map.get("value")));
+        long gas = map.get("gas") == null ? evmConfig.maxGasLimit()
+                : EthHex.decodeQuantity((String) map.get("gas")).longValueExact();
+        return new CallArgs(from, to, data, value, gas);
+    }
+
+    /** Runs the call on a fresh, never-committed updater so EVM_STATE is not mutated (ADR-005). */
+    private XdagExecutionResult simulate(CallArgs args) {
+        WorldUpdater updater = new RocksDbWorldUpdater(evmStateStore);
+        return args.to() == null
+                ? executor.deploy(updater, args.from(), args.data(), args.value(), args.gas())
+                : executor.call(updater, args.from(), args.to(), args.data(), args.value(), args.gas());
+    }
+
+    private static String revertMessage(XdagExecutionResult result) {
+        return result.revertReason()
+                .map(r -> "execution reverted: " + r.toHexString())
+                .orElse("execution reverted");
     }
 
     private Address addressParam(JsonRpcRequest request, int index) {
