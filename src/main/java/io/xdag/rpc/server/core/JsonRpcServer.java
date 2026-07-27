@@ -92,7 +92,9 @@ public class JsonRpcServer {
                 };
                 handlers.add(new EthRequestHandler(kernel.getEvmStateStore(), evmConfig,
                         evmSpec.getEvmMinGasPrice(), kernel.getBlockchain(),
-                        kernel.getEvmTxPool(), broadcaster));
+                        kernel.getEvmTxPool(), broadcaster,
+                        kernel.getEvmTxStore(), kernel.getEvmMetaStore(),
+                        evmSpec.getEvmMaxLogScanRange()));
             }
 
             // Create SSL context (if HTTPS is enabled)

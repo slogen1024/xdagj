@@ -44,7 +44,7 @@ public class JsonRpcServerWiringTest {
         Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(1L);
         EthRequestHandler eth = new EthRequestHandler(new InMemoryKVSource(),
                 new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
-                        BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, null, null);
+                        BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, null, null, null, null, 1024L);
 
         assertTrue(eth.supportsMethod("eth_chainId"));
         JsonRpcRequest r = new JsonRpcRequest();

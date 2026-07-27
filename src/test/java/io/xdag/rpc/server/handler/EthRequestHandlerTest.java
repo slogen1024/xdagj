@@ -24,11 +24,15 @@
 package io.xdag.rpc.server.handler;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import io.xdag.core.Block;
 import io.xdag.core.Blockchain;
 import io.xdag.evm.EvmConfig;
+import io.xdag.evm.state.EvmMetaStore;
+import io.xdag.evm.state.EvmReceipt;
 import io.xdag.evm.state.InMemoryKVSource;
 import io.xdag.evm.state.RocksDbWorldUpdater;
 import io.xdag.evm.tx.EvmTransaction;
@@ -40,13 +44,16 @@ import io.xdag.rpc.server.protocol.JsonRpcRequest;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.Consumer;
 import org.apache.tuweni.bytes.Bytes;
+import org.apache.tuweni.bytes.Bytes32;
 import org.apache.tuweni.units.bigints.UInt256;
 import org.hyperledger.besu.crypto.KeyPair;
 import org.hyperledger.besu.crypto.SECP256K1;
 import org.hyperledger.besu.datatypes.Address;
+import org.hyperledger.besu.datatypes.Hash;
 import org.hyperledger.besu.datatypes.Wei;
 import org.hyperledger.besu.evm.account.MutableAccount;
 import org.junit.Before;
@@ -64,7 +71,7 @@ public class EthRequestHandlerTest {
         handler = new EthRequestHandler(new InMemoryKVSource(),
                 new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
                         BigInteger.valueOf(0xCAFE), 30_000_000L),
-                BigInteger.valueOf(1_000_000_000L), blockchain, null, null);
+                BigInteger.valueOf(1_000_000_000L), blockchain, null, null, null, null, 1024L);
     }
 
     private JsonRpcRequest request(String method, Object... params) {
@@ -95,7 +102,7 @@ public class EthRequestHandlerTest {
         Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(head);
         return new EthRequestHandler(store,
                 new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
-                        BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, null, null);
+                        BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, null, null, null, null, 1024L);
     }
 
     private EvmTxPool poolFor(InMemoryKVSource stateStore) {
@@ -116,7 +123,7 @@ public class EthRequestHandlerTest {
         Consumer<Bytes> broadcaster = broadcasts::add;
         return new EthRequestHandler(stateStore,
                 new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
-                        BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, pool, broadcaster);
+                        BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, pool, broadcaster, null, null, 1024L);
     }
 
     private void fundSender(InMemoryKVSource stateStore) {
@@ -241,5 +248,65 @@ public class EthRequestHandlerTest {
         call.put("to", contractHex());
         String result = (String) h.handle(request("eth_estimateGas", call));
         assertTrue(EthHex.decodeQuantity(result).longValueExact() >= 21_000L);
+    }
+
+    /** Builds a handler with meta+tx stores and a blockchain stub that returns a block per height. */
+    private EthRequestHandler queryHandler(InMemoryKVSource stateStore, EvmTxStore txStore,
+                                           EvmMetaStore metaStore, long head) {
+        Blockchain bc = Mockito.mock(Blockchain.class);
+        Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(head);
+        Block block = Mockito.mock(Block.class);
+        Mockito.when(block.getHash()).thenReturn(Bytes32.fromHexString("0x" + "ab".repeat(32)));
+        Mockito.when(block.getTimestamp()).thenReturn(0L);
+        Mockito.when(bc.getBlockByHeight(Mockito.anyLong())).thenReturn(block);
+        return new EthRequestHandler(stateStore,
+                new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
+                        BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc,
+                null, null, txStore, metaStore, 1024L);
+    }
+
+    @Test
+    public void eth_getTransactionByHash_returns_located_tx() throws Exception {
+        InMemoryKVSource stateStore = new InMemoryKVSource();
+        EvmTxStore txStore = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore metaStore = new EvmMetaStore(new InMemoryKVSource());
+        EvmTransaction tx = signedTx(0, BigInteger.valueOf(0xCAFE));
+        txStore.put(tx);
+        metaStore.putTxList(5L, List.of(tx.getHash()));
+        EthRequestHandler h = queryHandler(stateStore, txStore, metaStore, 10L);
+
+        Map<?, ?> obj = (Map<?, ?>) h.handle(request("eth_getTransactionByHash",
+                tx.getHash().getBytes().toHexString()));
+        assertEquals(tx.getHash().getBytes().toHexString(), obj.get("hash"));
+        assertEquals("0x5", obj.get("blockNumber"));
+        assertEquals("0x0", obj.get("transactionIndex"));
+        assertEquals("0x0", obj.get("nonce"));
+        assertEquals(tx.getSender().getBytes().toHexString(), obj.get("from"));
+
+        assertNull(h.handle(request("eth_getTransactionByHash", "0x" + "11".repeat(32))));
+    }
+
+    @Test
+    public void eth_getTransactionReceipt_returns_status_and_logs() throws Exception {
+        InMemoryKVSource stateStore = new InMemoryKVSource();
+        EvmTxStore txStore = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore metaStore = new EvmMetaStore(new InMemoryKVSource());
+        EvmTransaction tx = signedTx(0, BigInteger.valueOf(0xCAFE));
+        txStore.put(tx);
+        metaStore.putTxList(5L, List.of(tx.getHash()));
+        Address created = Address.fromHexString("0x3333333333333333333333333333333333333333");
+        metaStore.putReceipt(tx.getHash(), new EvmReceipt(1, 53_000L, Optional.of(created), List.of()));
+        EthRequestHandler h = queryHandler(stateStore, txStore, metaStore, 10L);
+
+        Map<?, ?> r = (Map<?, ?>) h.handle(request("eth_getTransactionReceipt",
+                tx.getHash().getBytes().toHexString()));
+        assertEquals("0x1", r.get("status"));
+        assertEquals("0xcf08", r.get("gasUsed")); // 53000
+        assertEquals("0xcf08", r.get("cumulativeGasUsed"));
+        assertEquals(created.getBytes().toHexString(), r.get("contractAddress"));
+        assertEquals("0x5", r.get("blockNumber"));
+        assertTrue(((List<?>) r.get("logs")).isEmpty());
+
+        assertNull(h.handle(request("eth_getTransactionReceipt", "0x" + "11".repeat(32))));
     }
 }

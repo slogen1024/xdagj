@@ -23,27 +23,37 @@
  */
 package io.xdag.rpc.server.handler;
 
+import io.xdag.core.Block;
 import io.xdag.core.Blockchain;
 import io.xdag.db.rocksdb.KVSource;
 import io.xdag.evm.EvmConfig;
 import io.xdag.evm.XdagEvmExecutor;
 import io.xdag.evm.XdagExecutionResult;
+import io.xdag.evm.state.EvmMetaStore;
+import io.xdag.evm.state.EvmReceipt;
 import io.xdag.evm.state.RocksDbWorldUpdater;
 import io.xdag.evm.tx.EvmTransaction;
 import io.xdag.evm.tx.EvmTxPool;
+import io.xdag.evm.tx.EvmTxStore;
 import io.xdag.evm.tx.IntrinsicGas;
 import io.xdag.rpc.eth.EthHex;
+import io.xdag.rpc.eth.EthObjects;
 import io.xdag.rpc.error.JsonRpcException;
 import io.xdag.rpc.server.protocol.JsonRpcRequest;
 import java.math.BigInteger;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Consumer;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.tuweni.bytes.Bytes;
+import org.apache.tuweni.bytes.Bytes32;
 import org.apache.tuweni.units.bigints.UInt256;
 import org.hyperledger.besu.datatypes.Address;
+import org.hyperledger.besu.datatypes.Hash;
+import org.hyperledger.besu.datatypes.Log;
 import org.hyperledger.besu.datatypes.Wei;
 import org.hyperledger.besu.evm.account.Account;
 import org.hyperledger.besu.evm.worldstate.WorldUpdater;
@@ -57,7 +67,9 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
     private static final Set<String> SUPPORTED = Set.of(
             "eth_chainId", "net_version", "web3_clientVersion", "eth_gasPrice", "eth_blockNumber",
             "eth_getBalance", "eth_getTransactionCount", "eth_getCode", "eth_getStorageAt",
-            "eth_call", "eth_estimateGas", "eth_accounts", "net_listening", "eth_sendRawTransaction");
+            "eth_call", "eth_estimateGas", "eth_accounts", "net_listening", "eth_sendRawTransaction",
+            "eth_getTransactionByHash", "eth_getTransactionReceipt", "eth_getBlockByNumber",
+            "eth_getBlockByHash", "eth_getLogs");
 
     private final KVSource<byte[], byte[]> evmStateStore;
     private final EvmConfig evmConfig;
@@ -68,10 +80,16 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
     private final EvmTxPool evmTxPool;
     /** Publishes an accepted blob to peers; null-safe no-op when absent. */
     private final Consumer<Bytes> broadcaster;
+    /** Null when EVM disabled; query methods return null without it. */
+    private final EvmTxStore evmTxStore;
+    private final EvmMetaStore evmMetaStore;
+    /** eth_getLogs range cap (used in getLogs). */
+    private final long maxLogScanRange;
 
     public EthRequestHandler(KVSource<byte[], byte[]> evmStateStore, EvmConfig evmConfig,
-                             BigInteger minGasPriceWei, Blockchain blockchain,
-                             EvmTxPool evmTxPool, Consumer<Bytes> broadcaster) {
+                             BigInteger minGasPriceWei, Blockchain blockchain, EvmTxPool evmTxPool,
+                             Consumer<Bytes> broadcaster, EvmTxStore evmTxStore, EvmMetaStore evmMetaStore,
+                             long maxLogScanRange) {
         this.evmStateStore = evmStateStore;
         this.evmConfig = evmConfig;
         this.minGasPriceWei = minGasPriceWei;
@@ -79,6 +97,9 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
         this.executor = new XdagEvmExecutor(evmConfig);
         this.evmTxPool = evmTxPool;
         this.broadcaster = broadcaster;
+        this.evmTxStore = evmTxStore;
+        this.evmMetaStore = evmMetaStore;
+        this.maxLogScanRange = maxLogScanRange;
     }
 
     @Override
@@ -146,6 +167,8 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
                     yield EthHex.quantity(intrinsic + r.gasUsed());
                 }
                 case "eth_sendRawTransaction" -> sendRawTransaction(request);
+                case "eth_getTransactionByHash" -> getTransactionByHash(request);
+                case "eth_getTransactionReceipt" -> getTransactionReceipt(request);
                 default -> throw JsonRpcException.methodNotFound(method);
             };
         } catch (JsonRpcException e) {
@@ -196,6 +219,67 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
             case POOL_FULL -> throw JsonRpcException.invalidParams("transaction pool is full");
         }
         throw JsonRpcException.internalError("unreachable add result");
+    }
+
+    private record TxLocation(long height, int index) {
+    }
+
+    /** Linear scan of EVM_META tx lists for the tx's (height, index); empty if not on-chain (C3 §2.1). */
+    private Optional<TxLocation> locate(Hash txHash) {
+        if (evmMetaStore == null) {
+            return Optional.empty();
+        }
+        for (long height : evmMetaStore.txListHeights()) {
+            int idx = evmMetaStore.getTxList(height).indexOf(txHash);
+            if (idx >= 0) {
+                return Optional.of(new TxLocation(height, idx));
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** The one true eth block-hash for a height: the XDAG main block's full hash (C3 §2.0). */
+    private String blockHashAt(long height) {
+        return EthHex.data(blockchain.getBlockByHeight(height).getHash());
+    }
+
+    private Object getTransactionByHash(JsonRpcRequest request) {
+        Hash txHash = Hash.wrap(Bytes32.wrap(EthHex.decodeData(stringParam(request, 0))));
+        Optional<TxLocation> loc = locate(txHash);
+        if (loc.isEmpty() || evmTxStore == null) {
+            return null;
+        }
+        Optional<EvmTransaction> tx = evmTxStore.getDecoded(txHash);
+        return tx.<Object>map(t -> EthObjects.transaction(t, loc.get().height(),
+                blockHashAt(loc.get().height()), loc.get().index())).orElse(null);
+    }
+
+    private Object getTransactionReceipt(JsonRpcRequest request) {
+        Hash txHash = Hash.wrap(Bytes32.wrap(EthHex.decodeData(stringParam(request, 0))));
+        Optional<TxLocation> loc = locate(txHash);
+        if (loc.isEmpty() || evmTxStore == null || evmMetaStore == null) {
+            return null;
+        }
+        Optional<EvmTransaction> tx = evmTxStore.getDecoded(txHash);
+        Optional<EvmReceipt> receipt = evmMetaStore.getReceipt(txHash);
+        if (tx.isEmpty() || receipt.isEmpty()) {
+            return null;
+        }
+        String blockHash = blockHashAt(loc.get().height());
+        List<Object> logs = buildLogs(receipt.get(), tx.get(), loc.get(), blockHash, 0);
+        return EthObjects.receipt(tx.get(), receipt.get(), loc.get().height(), blockHash,
+                loc.get().index(), logs);
+    }
+
+    /** Builds the log objects for one tx's receipt, numbering logIndex from {@code startLogIndex}. */
+    private List<Object> buildLogs(EvmReceipt receipt, EvmTransaction tx, TxLocation loc,
+                                   String blockHash, int startLogIndex) {
+        List<Object> out = new ArrayList<>();
+        int logIndex = startLogIndex;
+        for (Log log : receipt.logs()) {
+            out.add(EthObjects.log(log, loc.height(), blockHash, tx.getHash(), loc.index(), logIndex++));
+        }
+        return out;
     }
 
     /** Loads an account from the latest EVM_STATE; null when absent. Read-only (never committed). */
