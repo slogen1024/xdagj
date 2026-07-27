@@ -241,9 +241,14 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
         return Optional.empty();
     }
 
-    /** The one true eth block-hash for a height: the XDAG main block's full hash (C3 §2.0). */
+    /**
+     * The one true eth block-hash for a height: the XDAG main block's full hash (C3 §2.0). Falls
+     * back to the zero hash if the block is momentarily unresolvable, so a query never 500s over
+     * missing block metadata.
+     */
     private String blockHashAt(long height) {
-        return EthHex.data(blockchain.getBlockByHeight(height).getHash());
+        Block block = blockchain.getBlockByHeight(height);
+        return block == null ? "0x" + "0".repeat(64) : EthHex.data(block.getHash());
     }
 
     private Object getTransactionByHash(JsonRpcRequest request) {

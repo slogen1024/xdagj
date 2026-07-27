@@ -181,4 +181,28 @@ public class MinerPackingSeamTest {
         assertEquals(UInt256.ZERO,
                 new RocksDbWorldUpdater(evmStateSource).getAccount(contract).getStorageValue(UInt256.ZERO));
     }
+
+    @Test
+    public void receipt_is_queryable_after_execution() throws Exception {
+        EvmTransaction deployTx = EvmTransaction.unsigned(0L, Wei.ONE, 200_000L, java.util.Optional.empty(),
+                Wei.ZERO, INIT_CODE, BigInteger.valueOf(0xCAFE)).sign(evmKey, algo);
+        evmTxStore.put(deployTx);
+        evmTxPool.add(deployTx.getRawRlp());
+        Block mainBlock = blockchain.createMainBlock();
+        evmBlockProcessor.processMainBlock(List.of(mainBlock.getEvmTxRef()), 1L, 1001L,
+                Bytes32.wrap(mainBlock.getHashLow()));
+
+        // Query the receipt through the eth handler over the same stores (C3 write->query loop).
+        io.xdag.rpc.server.handler.EthRequestHandler h = new io.xdag.rpc.server.handler.EthRequestHandler(
+                evmStateSource, EvmConfig.devnet(), BigInteger.ONE, blockchain, evmTxPool, null,
+                evmTxStore, evmMetaStore, 1024L);
+        io.xdag.rpc.server.protocol.JsonRpcRequest req = new io.xdag.rpc.server.protocol.JsonRpcRequest();
+        req.setMethod("eth_getTransactionReceipt");
+        req.setParams(new Object[]{deployTx.getHash().getBytes().toHexString()});
+        req.setId(1);
+
+        java.util.Map<?, ?> receipt = (java.util.Map<?, ?>) h.handle(req);
+        assertEquals("0x1", receipt.get("status"));
+        assertNotNull(receipt.get("contractAddress"));
+    }
 }
