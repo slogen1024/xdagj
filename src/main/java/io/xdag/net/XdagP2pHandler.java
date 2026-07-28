@@ -95,6 +95,9 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
     /** Absolute ceiling on remote block/main counts; anything beyond is treated as bogus. */
     private static final long MAX_PLAUSIBLE_BLOCK_COUNT = 1L << 48;
 
+    /** How often each peer connection re-requests the blobs a deferred EVM height still lacks (I4). */
+    private static final long EVM_BLOB_RETRY_SECONDS = 15;
+
     private static final ScheduledExecutorService exec = Executors
             .newSingleThreadScheduledExecutor(new ThreadFactory() {
                 private final AtomicInteger cnt = new AtomicInteger(0);
@@ -123,6 +126,7 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
 
     private ScheduledFuture<?> getNodes = null;
     private ScheduledFuture<?> pingPong = null;
+    private ScheduledFuture<?> evmBlobRetry = null;
 
     private byte[] secret = CryptoProvider.nextBytes(InitMessage.SECRET_LENGTH);
     private long timestamp = System.currentTimeMillis();
@@ -178,6 +182,11 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
         if (pingPong != null) {
             pingPong.cancel(false);
             pingPong = null;
+        }
+
+        if (evmBlobRetry != null) {
+            evmBlobRetry.cancel(false);
+            evmBlobRetry = null;
         }
 
         super.channelInactive(ctx);
@@ -359,6 +368,12 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
             // start ping pong
             pingPong = exec.scheduleAtFixedRate(() -> msgQueue.sendMessage(new PingMessage()),
                     channel.isInbound() ? 1 : 0, 1, TimeUnit.MINUTES);
+
+            // I4 convergence: periodically re-request from this peer any blob a deferred EVM height
+            // still lacks, so a stalled height self-heals (dropped request / reply-before-defer /
+            // peer joined late). No-op when EVM is disabled or nothing is pending.
+            evmBlobRetry = exec.scheduleAtFixedRate(this::requestPendingEvmBlobs,
+                    EVM_BLOB_RETRY_SECONDS, EVM_BLOB_RETRY_SECONDS, TimeUnit.SECONDS);
         } else {
             msgQueue.disconnect(ReasonCode.HANDSHAKE_EXISTS);
         }
@@ -388,6 +403,28 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
         Hash txHash = Hash.wrap(block.getEvmTxRef());
         if (!evmTxStore.contains(txHash)) {
             msgQueue.sendMessage(new EvmTxRequestMessage(block.getEvmTxRef()));
+        }
+    }
+
+    /**
+     * I4 convergence: re-request from this peer every blob that a deferred (pending) EVM height still
+     * lacks, so a stalled height self-heals — a dropped {@link EvmTxRequestMessage}, a reply that
+     * arrived before the block was deferred, or a peer that connected after the defer. Runs on the
+     * shared scheduler once per {@link #EVM_BLOB_RETRY_SECONDS}. No-op when EVM is disabled
+     * ({@code evmBlockProcessor == null}) or nothing is pending. Any failure is swallowed so a single
+     * bad tick cannot cancel the periodic task.
+     */
+    private void requestPendingEvmBlobs() {
+        EvmBlockProcessor evmProcessor = kernel.getEvmBlockProcessor();
+        if (evmProcessor == null) {
+            return;
+        }
+        try {
+            for (Bytes32 ref : evmProcessor.pendingMissingBlobHashes()) {
+                msgQueue.sendMessage(new EvmTxRequestMessage(ref));
+            }
+        } catch (RuntimeException e) {
+            log.debug("requestPendingEvmBlobs failed for node {}: {}", channel.getRemoteAddress(), e.toString());
         }
     }
 

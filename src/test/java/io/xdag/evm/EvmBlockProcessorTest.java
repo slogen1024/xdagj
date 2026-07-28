@@ -248,6 +248,25 @@ public class EvmBlockProcessorTest {
     }
 
     @Test
+    public void pending_missing_blob_hashes_lists_only_absent_refs_across_pending_heights() {
+        // I4 convergence: the retry loop asks peers for exactly the blobs pending heights still lack.
+        EvmTransaction a = EvmTransaction.unsigned(0L, Wei.of(1), 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);   // withheld
+        EvmTransaction b = EvmTransaction.unsigned(1L, Wei.of(1), 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);   // withheld
+        assertTrue(processor.pendingMissingBlobHashes().isEmpty());
+
+        processor.processMainBlock(List.of(ref(a)), 1L, 1001L, BLOCK_HASH_1);
+        processor.processMainBlock(List.of(ref(b)), 2L, 1002L, BLOCK_HASH_2);
+        assertEquals("both pending heights' blobs are missing",
+                List.of(ref(a), ref(b)), processor.pendingMissingBlobHashes());
+
+        // Once a's blob arrives, only the still-missing b remains requested.
+        txStore.put(a);
+        assertEquals(List.of(ref(b)), processor.pendingMissingBlobHashes());
+    }
+
+    @Test
     public void later_heights_queue_behind_a_stalled_one_and_drain_in_order() {
         // A missing blob at height 1 must hold back height 2 even if height 2's blob is present —
         // otherwise execution order (and thus state) would differ from a node that had both blobs.

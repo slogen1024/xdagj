@@ -35,8 +35,11 @@ import org.hyperledger.besu.datatypes.Hash;
  * The EVM_META store: per-main-block execution metadata (spec §4.3).
  *
  * <pre>
- *   0x00 | mainHeight(8 BE) -> stateRoot(32) | blockHash(32) | txCount(4 BE)
+ *   0x00 | mainHeight(8 BE) -> stateRoot(32) | blockHash(32) | txCount(4 BE) | timestamp(8 BE)
  *   0x01 | txHash(32)       -> receipt RLP
+ *   0x02 | mainHeight(8 BE) -> concatenated txHash(32) execution order (reorg replay script)
+ *   0x03 | mainHeight(8 BE) -> deferred (I4) pending block: blockHash(32) | timestamp(8 BE) | refs
+ *   0x04 | txHash(32)       -> mainHeight(8 BE) | index(4 BE)  (reverse index for eth_getTransaction*)
  * </pre>
  *
  * Height records are the reorg checkpoints: {@link #removeAbove(long)} truncates everything past a
@@ -49,8 +52,11 @@ public class EvmMetaStore {
     private static final byte PREFIX_TX_LIST = 0x02;
     /** Main heights whose EVM execution is deferred until a referenced blob arrives (I4 stall queue). */
     private static final byte PREFIX_PENDING = 0x03;
+    /** Reverse index txHash -> (height, index) so eth_getTransaction* resolves in one point lookup. */
+    private static final byte PREFIX_TX_LOCATION = 0x04;
     private static final int HEIGHT_RECORD_LENGTH = 32 + 32 + 4 + 8;
     private static final int PENDING_HEADER_LENGTH = 32 + 8; // blockHash(32) | timestampSeconds(8)
+    private static final int LOCATION_RECORD_LENGTH = 8 + 4; // height(8 BE) | index(4 BE)
 
     private final KVSource<byte[], byte[]> store;
 
@@ -64,6 +70,10 @@ public class EvmMetaStore {
 
     /** Decoded per-height checkpoint record; the timestamp feeds deterministic replay (TIMESTAMP opcode). */
     public record HeightRecord(Bytes32 stateRoot, Bytes32 blockHash, int txCount, long timestampSeconds) {
+    }
+
+    /** Where a tx sits on the canonical chain: its main height and index within that height's ordered list. */
+    public record TxLocation(long height, int index) {
     }
 
     private static byte[] heightKey(long height) {
@@ -135,9 +145,45 @@ public class EvmMetaStore {
     public void putTxList(long height, List<Hash> txHashes) {
         Bytes[] parts = new Bytes[txHashes.size()];
         for (int i = 0; i < txHashes.size(); i++) {
-            parts[i] = txHashes.get(i).getBytes();
+            Hash txHash = txHashes.get(i);
+            parts[i] = txHash.getBytes();
+            // Maintain the reverse index in lock-step with the tx list (its sole writer): a tx is
+            // deduplicated across the chain, so each txHash maps to exactly one (height, index).
+            store.put(locationKey(txHash), encodeLocation(height, i));
         }
         store.put(txListKey(height), Bytes.concatenate(parts).toArray());
+    }
+
+    private static byte[] locationKey(Hash txHash) {
+        return Bytes.concatenate(Bytes.of(PREFIX_TX_LOCATION), txHash.getBytes()).toArray();
+    }
+
+    private static byte[] encodeLocation(long height, int index) {
+        byte[] value = new byte[LOCATION_RECORD_LENGTH];
+        for (int i = 0; i < 8; i++) {
+            value[i] = (byte) (height >>> (56 - 8 * i));
+        }
+        for (int i = 0; i < 4; i++) {
+            value[8 + i] = (byte) (index >>> (24 - 8 * i));
+        }
+        return value;
+    }
+
+    /**
+     * O(1) reverse lookup of a tx's canonical (height, index); empty if the tx is not on the chain.
+     * Backs eth_getTransactionByHash / eth_getTransactionReceipt, replacing a full-history scan of
+     * every height's tx list — the previous scan let a bogus hash force an unbounded walk per call.
+     */
+    public Optional<TxLocation> findTxLocation(Hash txHash) {
+        byte[] raw = store.get(locationKey(txHash));
+        if (raw == null) {
+            return Optional.empty();
+        }
+        if (raw.length != LOCATION_RECORD_LENGTH) {
+            throw new IllegalStateException("corrupt EVM_META tx location: " + raw.length + " bytes");
+        }
+        Bytes b = Bytes.wrap(raw);
+        return Optional.of(new TxLocation(b.getLong(0), b.getInt(8)));
     }
 
     /** All heights that have a recorded tx list, ascending — the replay schedule. */
@@ -217,16 +263,17 @@ public class EvmMetaStore {
     }
 
     /**
-     * Deletes every height record, tx list, per-tx receipt, and pending record strictly above
-     * {@code height} (reorg truncation). Receipts must go too, otherwise a reorged-out tx keeps
-     * advertising a stale
-     * success/contract-address through {@link #getReceipt}.
+     * Deletes every height record, tx list, per-tx receipt, reverse-index entry, and pending record
+     * strictly above {@code height} (reorg truncation). Receipts and reverse-index entries must go
+     * too, otherwise a reorged-out tx keeps advertising a stale success/contract-address through
+     * {@link #getReceipt} or a stale (height, index) through {@link #findTxLocation}.
      */
     public void removeAbove(long height) {
         for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_TX_LIST})) {
             if (heightFromKey(key) > height) {
                 for (Hash txHash : getTxList(heightFromKey(key))) {
                     store.delete(receiptKey(txHash));
+                    store.delete(locationKey(txHash));
                 }
                 store.delete(key);
             }

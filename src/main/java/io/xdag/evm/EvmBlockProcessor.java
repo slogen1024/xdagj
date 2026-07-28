@@ -137,6 +137,30 @@ public class EvmBlockProcessor {
         }
     }
 
+    /**
+     * The distinct tx hashes that deferred (pending) heights reference but whose blobs are not yet
+     * stored, lowest height first, in ref order. The P2P layer periodically re-requests these from
+     * peers so a stalled EVM height converges (I4): the retry self-heals a dropped request or a blob
+     * reply that arrived before the block was deferred. Empty when nothing is pending or all blobs
+     * are present.
+     */
+    public synchronized List<Bytes32> pendingMissingBlobHashes() {
+        List<Bytes32> missing = new ArrayList<>();
+        Set<Bytes32> seen = new HashSet<>();
+        for (long height : metaStore.pendingHeights()) {
+            EvmMetaStore.PendingBlock pending = metaStore.getPending(height).orElse(null);
+            if (pending == null) {
+                continue;
+            }
+            for (Bytes32 ref : pending.refs()) {
+                if (!txStore.contains(Hash.wrap(ref)) && seen.add(ref)) {
+                    missing.add(ref);
+                }
+            }
+        }
+        return missing;
+    }
+
     /** True if some deferred height references {@code txHash} and its blob is not yet stored. */
     public synchronized boolean isAwaitingBlob(Hash txHash) {
         if (txStore.contains(txHash)) {

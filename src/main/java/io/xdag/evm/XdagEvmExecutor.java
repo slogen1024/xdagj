@@ -97,6 +97,25 @@ public final class XdagEvmExecutor {
      */
     public XdagExecutionResult deploy(WorldUpdater parent, Address sender, Bytes initCode, Wei value, long gasLimit,
                                       BlockValues blockValues, Address coinbase) {
+        return executeDeploy(parent, sender, initCode, value, gasLimit, blockValues, coinbase, true);
+    }
+
+    /**
+     * Read-only contract creation for {@code eth_call}/{@code eth_estimateGas}: runs exactly like
+     * {@link #deploy} but NEVER commits, so neither the sender nonce bump nor the deployed code is
+     * persisted to {@code parent} (and therefore never to the backing store). The caller MUST discard
+     * {@code parent} afterwards. This is the only safe way to drive the executor from a JSON-RPC
+     * simulation — passing a child updater does not help, because the executor commits its {@code
+     * parent}, which would flush the child into the root store.
+     */
+    public XdagExecutionResult simulateDeploy(WorldUpdater parent, Address sender, Bytes initCode, Wei value,
+                                              long gasLimit) {
+        return executeDeploy(parent, sender, initCode, value, gasLimit, new SimpleBlockValues(), Address.ZERO, false);
+    }
+
+    private XdagExecutionResult executeDeploy(WorldUpdater parent, Address sender, Bytes initCode, Wei value,
+                                              long gasLimit, BlockValues blockValues, Address coinbase,
+                                              boolean commit) {
         requireGasWithinLimit(gasLimit);
         MutableAccount senderAccount = parent.getOrCreate(sender);
         long nonce = senderAccount.getNonce();
@@ -113,7 +132,10 @@ public final class XdagEvmExecutor {
         // On success the EVM has already pushed the execution's state changes up to `parent`, so this
         // commit persists nonce + state. On failure the reverted child updater was never committed, so
         // only the nonce bump lives on `parent`; committing therefore persists the nonce alone.
-        parent.commit();
+        // Simulation (commit == false, eth_call/eth_estimateGas) skips this entirely — nothing persists.
+        if (commit) {
+            parent.commit();
+        }
         return collect(frame, gasLimit, success ? Optional.of(contract) : Optional.empty());
     }
 
@@ -130,6 +152,22 @@ public final class XdagEvmExecutor {
     /** Invoke a contract against an explicit block context (real block number/timestamp/coinbase/...). */
     public XdagExecutionResult call(WorldUpdater parent, Address sender, Address to, Bytes callData, Wei value,
                                     long gasLimit, BlockValues blockValues, Address coinbase) {
+        return executeCall(parent, sender, to, callData, value, gasLimit, blockValues, coinbase, true);
+    }
+
+    /**
+     * Read-only invocation for {@code eth_call}/{@code eth_estimateGas}: runs exactly like {@link #call}
+     * but NEVER commits, so no state change (SSTORE, balance transfer, SELFDESTRUCT, ...) reaches
+     * {@code parent} or the backing store. The caller MUST discard {@code parent} afterwards.
+     */
+    public XdagExecutionResult simulateCall(WorldUpdater parent, Address sender, Address to, Bytes callData,
+                                            Wei value, long gasLimit) {
+        return executeCall(parent, sender, to, callData, value, gasLimit, new SimpleBlockValues(), Address.ZERO,
+                false);
+    }
+
+    private XdagExecutionResult executeCall(WorldUpdater parent, Address sender, Address to, Bytes callData, Wei value,
+                                            long gasLimit, BlockValues blockValues, Address coinbase, boolean commit) {
         requireGasWithinLimit(gasLimit);
         MutableAccount toAccount = parent.getAccount(to);
         Bytes code = (toAccount == null) ? Bytes.EMPTY : toAccount.getCode();
@@ -139,7 +177,8 @@ public final class XdagEvmExecutor {
         runToHalt(frame);
 
         boolean success = frame.getState() == MessageFrame.State.COMPLETED_SUCCESS;
-        if (success) {
+        // Simulation (commit == false) never persists, so eth_call/eth_estimateGas stay side-effect-free.
+        if (commit && success) {
             parent.commit();
         }
         return collect(frame, gasLimit, Optional.empty());

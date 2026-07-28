@@ -25,6 +25,7 @@ package io.xdag.evm.state;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import io.xdag.evm.EvmConfig;
@@ -94,5 +95,57 @@ public class RocksDbWorldStateTest {
         // Reload and confirm the slot was persisted by the executor's commit.
         RocksDbWorldUpdater reopened = new RocksDbWorldUpdater(store);
         assertEquals(UInt256.valueOf(42), reopened.getAccount(addr).getStorageValue(UInt256.ZERO));
+    }
+
+    @Test
+    public void simulated_call_executes_but_never_persists_storage() {
+        // Regression for the eth_call/eth_estimateGas state-mutation bug: a simulated call must run
+        // to completion (so it can return data / a gas figure) yet leave the store byte-for-byte
+        // unchanged. Before the fix the executor committed the root updater and this SSTORE landed on
+        // disk, letting an unauthenticated eth_call rewrite contract storage out-of-band from consensus.
+        XdagEvmExecutor evm = new XdagEvmExecutor(EvmConfig.devnet());
+
+        // Seed: fund sender, place SSTORE bytecode (slot0 = 42) at the contract; slot0 starts absent.
+        RocksDbWorldUpdater seed = new RocksDbWorldUpdater(store);
+        WorldUpdater u = seed.updater();
+        u.createAccount(sender, 0L, Wei.fromEth(1));
+        MutableAccount c = u.createAccount(addr, 1L, Wei.ZERO);
+        c.setCode(Bytes.fromHexString("0x602a600055")); // PUSH1 0x2a PUSH1 0x00 SSTORE
+        u.commit();
+        seed.commit();
+
+        var result = evm.simulateCall(new RocksDbWorldUpdater(store), sender, addr, Bytes.EMPTY, Wei.ZERO,
+                1_000_000L);
+        assertTrue("the simulated SSTORE still executes in memory", result.success());
+
+        // Nothing was written: slot0 is still absent (zero), not 42.
+        RocksDbWorldUpdater reopened = new RocksDbWorldUpdater(store);
+        assertEquals("eth_call must not mutate persistent EVM state",
+                UInt256.ZERO, reopened.getAccount(addr).getStorageValue(UInt256.ZERO));
+    }
+
+    @Test
+    public void simulated_deploy_executes_but_never_persists_nonce_or_code() {
+        // Regression: eth_estimateGas of a contract creation must not bump the sender nonce or deposit
+        // code on disk. Before the fix deploy() committed unconditionally, so even a simulated deploy
+        // persisted the nonce bump and the deployed code.
+        XdagEvmExecutor evm = new XdagEvmExecutor(EvmConfig.devnet());
+
+        RocksDbWorldUpdater seed = new RocksDbWorldUpdater(store);
+        WorldUpdater u = seed.updater();
+        u.createAccount(sender, 0L, Wei.fromEth(1));
+        u.commit();
+        seed.commit();
+
+        // Minimal init code returning empty runtime: PUSH1 0x00 PUSH1 0x00 RETURN.
+        Bytes initCode = Bytes.fromHexString("0x60006000f3");
+        var result = evm.simulateDeploy(new RocksDbWorldUpdater(store), sender, initCode, Wei.ZERO, 1_000_000L);
+        assertTrue(result.success());
+
+        RocksDbWorldUpdater reopened = new RocksDbWorldUpdater(store);
+        assertEquals("eth_estimateGas of a deploy must not bump the on-disk sender nonce",
+                0L, reopened.getAccount(sender).getNonce());
+        assertNull("a simulated deploy must not persist any contract account",
+                reopened.getAccount(Address.contractAddress(sender, 0L)));
     }
 }

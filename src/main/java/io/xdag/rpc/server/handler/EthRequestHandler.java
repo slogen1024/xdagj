@@ -225,21 +225,13 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
         throw JsonRpcException.internalError("unreachable add result");
     }
 
-    private record TxLocation(long height, int index) {
-    }
-
-    /** Linear scan of EVM_META tx lists for the tx's (height, index); empty if not on-chain (C3 §2.1). */
-    private Optional<TxLocation> locate(Hash txHash) {
-        if (evmMetaStore == null) {
-            return Optional.empty();
-        }
-        for (long height : evmMetaStore.txListHeights()) {
-            int idx = evmMetaStore.getTxList(height).indexOf(txHash);
-            if (idx >= 0) {
-                return Optional.of(new TxLocation(height, idx));
-            }
-        }
-        return Optional.empty();
+    /**
+     * O(1) reverse-index lookup of the tx's (height, index); empty if not on-chain (C3 §2.1). This
+     * replaces a full scan of every height's tx list, which let a bogus hash force an unbounded
+     * per-call walk of the whole chain (RPC DoS).
+     */
+    private Optional<EvmMetaStore.TxLocation> locate(Hash txHash) {
+        return evmMetaStore == null ? Optional.empty() : evmMetaStore.findTxLocation(txHash);
     }
 
     /**
@@ -254,7 +246,7 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
 
     private Object getTransactionByHash(JsonRpcRequest request) {
         Hash txHash = Hash.wrap(Bytes32.wrap(EthHex.decodeData(stringParam(request, 0))));
-        Optional<TxLocation> loc = locate(txHash);
+        Optional<EvmMetaStore.TxLocation> loc = locate(txHash);
         if (loc.isEmpty() || evmTxStore == null) {
             return null;
         }
@@ -265,7 +257,7 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
 
     private Object getTransactionReceipt(JsonRpcRequest request) {
         Hash txHash = Hash.wrap(Bytes32.wrap(EthHex.decodeData(stringParam(request, 0))));
-        Optional<TxLocation> loc = locate(txHash);
+        Optional<EvmMetaStore.TxLocation> loc = locate(txHash);
         if (loc.isEmpty() || evmTxStore == null || evmMetaStore == null) {
             return null;
         }
@@ -281,7 +273,7 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
     }
 
     /** Builds the log objects for one tx's receipt, numbering logIndex from {@code startLogIndex}. */
-    private List<Object> buildLogs(EvmReceipt receipt, EvmTransaction tx, TxLocation loc,
+    private List<Object> buildLogs(EvmReceipt receipt, EvmTransaction tx, EvmMetaStore.TxLocation loc,
                                    String blockHash, int startLogIndex) {
         List<Object> out = new ArrayList<>();
         int logIndex = startLogIndex;
@@ -467,12 +459,16 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
         return new CallArgs(from, to, data, value, gas);
     }
 
-    /** Runs the call on a fresh, never-committed updater so EVM_STATE is not mutated (ADR-005). */
+    /**
+     * Runs the call/creation through the executor's simulation path, which NEVER commits, so
+     * eth_call/eth_estimateGas cannot mutate the persistent EVM_STATE (ADR-005). The fresh root
+     * updater is discarded when this method returns.
+     */
     private XdagExecutionResult simulate(CallArgs args) {
         WorldUpdater updater = new RocksDbWorldUpdater(evmStateStore);
         return args.to() == null
-                ? executor.deploy(updater, args.from(), args.data(), args.value(), args.gas())
-                : executor.call(updater, args.from(), args.to(), args.data(), args.value(), args.gas());
+                ? executor.simulateDeploy(updater, args.from(), args.data(), args.value(), args.gas())
+                : executor.simulateCall(updater, args.from(), args.to(), args.data(), args.value(), args.gas());
     }
 
     private static String revertMessage(XdagExecutionResult result) {

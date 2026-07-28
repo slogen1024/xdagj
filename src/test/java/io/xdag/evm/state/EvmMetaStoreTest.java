@@ -95,6 +95,38 @@ public class EvmMetaStoreTest {
     }
 
     @Test
+    public void find_tx_location_returns_height_and_index_and_empty_for_unknown() {
+        // The eth_getTransactionByHash / getTransactionReceipt reverse index (replaces the former
+        // O(total-txs) full-history scan): putTxList records each tx's (height, position within the
+        // height's ordered list); a hash never seen on chain resolves to empty in one point lookup.
+        Hash tx1 = Hash.hash(Bytes.of(1));
+        Hash tx2 = Hash.hash(Bytes.of(2));
+        Hash unknown = Hash.hash(Bytes.of(99));
+        assertTrue(store.findTxLocation(tx1).isEmpty());
+
+        store.putTxList(7L, List.of(tx1, tx2));
+
+        assertEquals(new EvmMetaStore.TxLocation(7L, 0), store.findTxLocation(tx1).orElseThrow());
+        assertEquals(new EvmMetaStore.TxLocation(7L, 1), store.findTxLocation(tx2).orElseThrow());
+        assertTrue("a hash never on chain must not be found", store.findTxLocation(unknown).isEmpty());
+    }
+
+    @Test
+    public void find_tx_location_is_cleared_by_removeAbove() {
+        // Reorg truncation must drop the reverse-index entries together with the tx list, or a
+        // reorged-out tx would keep resolving to a stale (height, index) through findTxLocation.
+        Hash keep = Hash.hash(Bytes.of(1));
+        Hash drop = Hash.hash(Bytes.of(2));
+        store.putTxList(5L, List.of(keep));
+        store.putTxList(6L, List.of(drop));
+
+        store.removeAbove(5L);
+
+        assertEquals(new EvmMetaStore.TxLocation(5L, 0), store.findTxLocation(keep).orElseThrow());
+        assertTrue("index for a reorged-out tx must be gone", store.findTxLocation(drop).isEmpty());
+    }
+
+    @Test
     public void receipt_round_trip_with_logs_and_contract_address() {
         Hash txHash = Hash.hash(Bytes.of(1, 2, 3));
         Address contract = Address.fromHexString("0x1111111111111111111111111111111111111111");
