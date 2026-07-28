@@ -112,6 +112,12 @@ public final class EvmTransaction {
         if (v.compareTo(EIP155_V_BASE) < 0) {
             throw new IllegalArgumentException("unprotected (pre-EIP-155) transaction rejected, v=" + v);
         }
+        // EIP-2: reject the high-s half of every signature. Without this, the malleated twin
+        // (r, n-s, v^recId) recovers the same sender and has the same effect but a DIFFERENT tx hash,
+        // so both could be relayed/stored/referenced under distinct hashes.
+        if (s.compareTo(SECP.getHalfCurveOrder()) > 0) {
+            throw new IllegalArgumentException("non-canonical (high-s) signature rejected");
+        }
         // v = chainId * 2 + 35 + recId, recId in {0, 1}
         BigInteger shifted = v.subtract(EIP155_V_BASE);
         byte recId = (byte) (shifted.testBit(0) ? 1 : 0);

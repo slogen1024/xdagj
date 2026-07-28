@@ -96,6 +96,54 @@ public class EvmTransactionTest {
         assertThrows(IllegalArgumentException.class, () -> EvmTransaction.decode(unprotectedRlp));
     }
 
+    /** secp256k1 group order n. */
+    private static final BigInteger SECP256K1_N = new BigInteger(
+            "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141", 16);
+
+    @Test
+    public void rejects_high_s_malleated_signature() {
+        // A valid low-s tx, then its malleated twin (r, n-s, v with recId flipped) — same sender,
+        // same effect, DIFFERENT hash. EIP-2 requires rejecting s > n/2.
+        SECP256K1 algo = new SECP256K1();
+        KeyPair key = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(12345)));
+        EvmTransaction signed = EvmTransaction.unsigned(0L, Wei.of(1_000_000_000L), 100_000L,
+                Optional.of(Address.fromHexString("0x3535353535353535353535353535353535353535")),
+                Wei.ONE, Bytes.EMPTY, DEVNET_CHAIN_ID).sign(key, algo);
+
+        BigInteger r = signed.getSignature().getR();
+        BigInteger lowS = signed.getSignature().getS();
+        assertTrue("sign() must already produce a canonical low-s signature",
+                lowS.compareTo(SECP256K1_N.shiftRight(1)) <= 0);
+
+        // The canonical (low-s) form still decodes fine.
+        EvmTransaction.decode(signed.getRawRlp());
+
+        // The high-s twin must be rejected.
+        BigInteger highS = SECP256K1_N.subtract(lowS);
+        int flippedRecId = signed.getSignature().getRecId() ^ 1;
+        BigInteger malleatedV = DEVNET_CHAIN_ID.shiftLeft(1).add(BigInteger.valueOf(35L + flippedRecId));
+        Bytes malleated = reencode(signed, malleatedV, r, highS);
+        assertThrows(IllegalArgumentException.class, () -> EvmTransaction.decode(malleated));
+    }
+
+    /** Re-encodes a signed tx's body with explicit (v, r, s) — mirrors the EIP-155 signed layout. */
+    private static Bytes reencode(EvmTransaction tx, BigInteger v, BigInteger r, BigInteger s) {
+        org.hyperledger.besu.ethereum.rlp.BytesValueRLPOutput out =
+                new org.hyperledger.besu.ethereum.rlp.BytesValueRLPOutput();
+        out.startList();
+        out.writeLongScalar(tx.getNonce());
+        out.writeBigIntegerScalar(tx.getGasPrice().getAsBigInteger());
+        out.writeLongScalar(tx.getGasLimit());
+        out.writeBytes(tx.getTo().map(a -> (Bytes) a.getBytes()).orElse(Bytes.EMPTY));
+        out.writeBigIntegerScalar(tx.getValue().getAsBigInteger());
+        out.writeBytes(tx.getPayload());
+        out.writeBigIntegerScalar(v);
+        out.writeBigIntegerScalar(r);
+        out.writeBigIntegerScalar(s);
+        out.endList();
+        return out.encoded();
+    }
+
     @Test
     public void rejects_garbage_rlp() {
         assertThrows(RuntimeException.class,
