@@ -24,6 +24,7 @@
 package io.xdag.evm.state;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -31,6 +32,7 @@ import static org.junit.Assert.assertTrue;
 import io.xdag.evm.EvmConfig;
 import io.xdag.evm.XdagEvmExecutor;
 import org.apache.tuweni.bytes.Bytes;
+import org.apache.tuweni.bytes.Bytes32;
 import org.apache.tuweni.units.bigints.UInt256;
 import org.hyperledger.besu.datatypes.Address;
 import org.hyperledger.besu.datatypes.Wei;
@@ -73,6 +75,31 @@ public class RocksDbWorldStateTest {
         assertEquals(Bytes.fromHexString("0x602a600055"), reloaded.getCode());
         assertEquals(UInt256.valueOf(42), reloaded.getStorageValue(UInt256.ZERO));
         assertEquals(UInt256.valueOf(1000), reloaded.getStorageValue(UInt256.ONE));
+    }
+
+    @Test
+    public void commit_digest_reflects_persisted_state_and_child_returns_zero() {
+        // Phase-1 world-state commitment: commitAndDigest() returns a deterministic keccak over exactly
+        // the (puts, deletes) it persists, so folding it into the chained state root makes a balance /
+        // storage divergence change the root — the pre-fix root over (txHash, status, gasUsed) could not.
+        Bytes32 rich = digestOfNewAccount(Wei.fromEth(2));
+        Bytes32 richAgain = digestOfNewAccount(Wei.fromEth(2));
+        Bytes32 poor = digestOfNewAccount(Wei.fromEth(1));
+
+        assertEquals("identical persisted state must yield an identical digest", rich, richAgain);
+        assertNotEquals("a balance-only difference must change the digest", rich, poor);
+        assertNotEquals("a non-empty delta must not digest to zero", Bytes32.ZERO, rich);
+
+        // Only the root touches the store; a child updater persists nothing, so it has no delta.
+        RocksDbWorldUpdater root = new RocksDbWorldUpdater(new InMemoryKVSource());
+        assertEquals(Bytes32.ZERO, ((RocksDbWorldUpdater) root.updater()).commitAndDigest());
+    }
+
+    /** Persists one fresh account with the given balance to an empty store; returns the commit digest. */
+    private Bytes32 digestOfNewAccount(Wei balance) {
+        RocksDbWorldUpdater root = new RocksDbWorldUpdater(new InMemoryKVSource());
+        root.createAccount(addr, 1L, balance);
+        return root.commitAndDigest();
     }
 
     @Test

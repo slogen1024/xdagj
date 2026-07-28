@@ -102,6 +102,36 @@ public class EvmBlockProcessorTest {
     private static final Bytes32 BLOCK_HASH_3 = Bytes32.fromHexString("0x" + "03".repeat(32));
 
     @Test
+    public void chained_root_folds_in_world_state_not_just_the_execution_log() {
+        // Two nodes execute the SAME signed tx (identical txHash, status, gasUsed) but from different
+        // starting balances. The pre-fix root — keccak over (txHash, status, gasUsed) only — was
+        // identical on both, hiding the divergence. Folding the persisted world-state delta in makes
+        // the roots differ, so the replay self-check can catch a state-only fork.
+        Address recipient = Address.fromHexString("0x00000000000000000000000000000000000000aa");
+        EvmTransaction transfer = EvmTransaction.unsigned(0L, Wei.of(1), 21_000L, Optional.of(recipient),
+                Wei.of(1000), Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+
+        Bytes32 rootRich = rootAfterTransfer(transfer, Wei.fromEth(2));
+        Bytes32 rootPoor = rootAfterTransfer(transfer, Wei.fromEth(1));
+
+        assertNotEquals("a balance-only divergence must change the chained state root", rootRich, rootPoor);
+    }
+
+    /** Runs {@code tx} at height 1 on a fresh processor whose sender starts with {@code senderBalance}. */
+    private Bytes32 rootAfterTransfer(EvmTransaction tx, Wei senderBalance) {
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmTxStore txs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor proc = new EvmBlockProcessor(EvmConfig.devnet(), state, txs, meta);
+        RocksDbWorldUpdater world = new RocksDbWorldUpdater(state);
+        world.createAccount(sender, 0L, senderBalance);
+        world.commit();
+        txs.put(tx);
+        proc.processMainBlock(List.of(ref(tx)), 1L, 1001L, BLOCK_HASH_1);
+        return meta.getHeightRecord(1L).orElseThrow().stateRoot();
+    }
+
+    @Test
     public void deploy_then_call_persists_state_receipts_and_checkpoints() {
         EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
         processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);

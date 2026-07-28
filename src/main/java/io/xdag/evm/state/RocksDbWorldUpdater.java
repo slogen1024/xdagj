@@ -25,13 +25,17 @@ package io.xdag.evm.state;
 
 import io.xdag.db.rocksdb.KVSource;
 import io.xdag.evm.state.EvmStateSchema.AccountRecord;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import org.apache.tuweni.bytes.Bytes;
+import org.apache.tuweni.bytes.Bytes32;
 import org.hyperledger.besu.datatypes.Address;
 import org.hyperledger.besu.datatypes.Hash;
 import org.hyperledger.besu.datatypes.Wei;
@@ -166,6 +170,18 @@ public class RocksDbWorldUpdater implements WorldUpdater {
 
     @Override
     public void commit() {
+        commitAndDigest();
+    }
+
+    /**
+     * Flushes this updater like {@link #commit()} and returns a deterministic keccak digest of exactly
+     * the {@code (puts, deletes)} persisted by this commit — the world-state commitment the consensus
+     * layer folds into the chained state root so a balance/storage divergence changes the root
+     * (EvmBlockProcessor). A child updater ({@code parent != null}) only pushes changes up to its
+     * parent and writes nothing to the store, so it has no persisted delta and returns
+     * {@link Bytes32#ZERO}; only the root commit touches the store.
+     */
+    public Bytes32 commitAndDigest() {
         if (parent != null) {
             // In-memory child: push changes up to the parent, exactly like SimpleWorld.
             accounts.forEach((address, account) -> {
@@ -173,7 +189,7 @@ public class RocksDbWorldUpdater implements WorldUpdater {
                     parent.accounts.put(address, account);
                 }
             });
-            return;
+            return Bytes32.ZERO;
         }
         // Root: flush the whole delta to the store in one atomic batchWrite.
         Map<byte[], byte[]> puts = new HashMap<>();
@@ -217,8 +233,42 @@ public class RocksDbWorldUpdater implements WorldUpdater {
                 }
             }
         });
+        Bytes32 delta = stateDelta(puts, deletes);
         store.batchWrite(puts, deletes);
         accounts = new HashMap<>();
+        return delta;
+    }
+
+    /** Domain tags separating the puts section from the deletes section inside the delta digest. */
+    private static final byte STATE_DELTA_PUT_TAG = 0x01;
+    private static final byte STATE_DELTA_DELETE_TAG = 0x00;
+
+    /**
+     * A deterministic keccak over the exact {@code (puts, deletes)} of one root commit, independent of
+     * HashMap iteration order: keys are sorted lexicographically (unsigned), every key and value is
+     * length-framed so no concatenation is ambiguous, and the two sections are domain-separated. Two
+     * nodes that persist the same world-state delta get the same digest; any diverging byte — a
+     * balance, nonce, code hash, a written storage slot, or a removed key — changes it.
+     */
+    private static Bytes32 stateDelta(Map<byte[], byte[]> puts, Set<byte[]> deletes) {
+        List<Bytes> parts = new ArrayList<>();
+        parts.add(Bytes.of(STATE_DELTA_PUT_TAG));
+        puts.entrySet().stream()
+                .sorted((a, b) -> Arrays.compareUnsigned(a.getKey(), b.getKey()))
+                .forEach(e -> {
+                    parts.add(framed(e.getKey()));
+                    parts.add(framed(e.getValue()));
+                });
+        parts.add(Bytes.of(STATE_DELTA_DELETE_TAG));
+        deletes.stream()
+                .sorted(Arrays::compareUnsigned)
+                .forEach(key -> parts.add(framed(key)));
+        return org.hyperledger.besu.crypto.Hash.keccak256(Bytes.concatenate(parts.toArray(new Bytes[0])));
+    }
+
+    /** Length-prefixes a byte array (8-byte big-endian length ‖ bytes) so concatenation is unambiguous. */
+    private static Bytes framed(byte[] value) {
+        return Bytes.concatenate(Bytes.ofUnsignedLong(value.length), Bytes.wrap(value));
     }
 
     @Override

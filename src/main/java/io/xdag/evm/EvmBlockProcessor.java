@@ -54,8 +54,11 @@ import org.hyperledger.besu.evm.worldstate.WorldUpdater;
  *
  * <p>v1 policies (see the B2b plan's deviation ledger): gas is metered for receipts but settled in
  * native XDAG (ADR-007) — no wei purchase/refund/coinbase credit; a ref whose blob is absent is
- * deterministically skipped; the per-height "state root" is a chained execution commitment
- * {@code root_h = keccak256(root_prev || (txHash || status || gasUsed)...)}, not an MPT (P1).
+ * deterministically skipped; the per-height "state root" is a chained commitment
+ * {@code root_h = keccak256(root_prev || (txHash || status || gasUsed)... || stateDelta_h)} where
+ * {@code stateDelta_h} digests exactly the (puts, deletes) persisted that height (Phase 1). It commits
+ * the world-state delta so a balance/storage-only fork changes the root, but it is still a hash-chain
+ * over deltas, not an absolute-state MPT root — no membership proofs / light-client support yet (P2).
  *
  * <p>Rollback is R1 Option A taken to its simplest correct form: wipe EVM_STATE entirely and replay
  * every checkpointed height's tx list from the immutable EVM_TX blobs.
@@ -303,7 +306,11 @@ public class EvmBlockProcessor {
                     Bytes.of((byte) receipt.status()),
                     Bytes.ofUnsignedLong(receipt.gasUsed())));
         }
-        root.commit();
+        // Fold the persisted world-state delta into the chained root (Phase 1): the digest is a keccak
+        // over exactly the (puts, deletes) this commit writes, so two nodes diverging on any balance or
+        // storage — even with identical (txHash, status, gasUsed) — now produce different roots, which
+        // the replay self-check in rollbackTo can detect.
+        digest.add(root.commitAndDigest());
         Bytes32 chainedRoot =
                 org.hyperledger.besu.crypto.Hash.keccak256(Bytes.concatenate(digest.toArray(new Bytes[0])));
         return new ExecutionOutcome(chainedRoot, executed);
