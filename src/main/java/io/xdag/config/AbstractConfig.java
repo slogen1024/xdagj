@@ -30,6 +30,7 @@ import io.xdag.Network;
 import io.xdag.config.spec.*;
 import io.xdag.core.XAmount;
 import io.xdag.core.XdagField;
+import io.xdag.evm.GenesisAllocEntry;
 import io.xdag.net.Capability;
 import io.xdag.net.CapabilityTreeSet;
 import io.xdag.net.message.MessageCode;
@@ -37,6 +38,8 @@ import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.SystemUtils;
+import org.hyperledger.besu.datatypes.Address;
+import org.hyperledger.besu.datatypes.Wei;
 
 import java.math.BigInteger;
 import java.net.InetSocketAddress;
@@ -162,6 +165,7 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected int evmMaxP2pTxBytes = 131_072;
     protected BigInteger evmMinGasPrice = BigInteger.valueOf(1_000_000_000L);
     protected long evmMaxLogScanRange = 1024;
+    protected List<GenesisAllocEntry> evmGenesisAlloc = List.of();
 
     protected AbstractConfig(String rootDir, String configName, Network network, short networkVersion) {
         this.rootDir = rootDir;
@@ -225,6 +229,11 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     @Override
     public long getEvmMaxLogScanRange() {
         return evmMaxLogScanRange;
+    }
+
+    @Override
+    public List<GenesisAllocEntry> getEvmGenesisAlloc() {
+        return evmGenesisAlloc;
     }
 
     @Override
@@ -348,6 +357,16 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
                 ? BigInteger.valueOf(config.getLong("evm.minGasPrice")) : evmMinGasPrice;
         evmMaxLogScanRange = config.hasPath("evm.maxLogScanRange")
                 ? config.getLong("evm.maxLogScanRange") : evmMaxLogScanRange;
+        if (config.hasPath("evm.alloc")) {
+            // Funding on-ramp: each { address, balance(wei, decimal string) } pre-funds an EVM account
+            // at genesis. Parsed here so a malformed address or balance aborts startup, not mid-run.
+            List<GenesisAllocEntry> alloc = new ArrayList<>();
+            for (var entry : config.getConfigList("evm.alloc")) {
+                alloc.add(new GenesisAllocEntry(Address.fromHexString(entry.getString("address")),
+                        Wei.of(new BigInteger(entry.getString("balance")))));
+            }
+            evmGenesisAlloc = List.copyOf(alloc);
+        }
         nodeRation = config.hasPath("node.ration") ? config.getDouble("node.ration") : 5;
         // S-30: tolerate a missing/trimmed whiteIPs list and skip malformed entries instead of aborting startup.
         List<String> whiteIpList = config.hasPath("node.whiteIPs")

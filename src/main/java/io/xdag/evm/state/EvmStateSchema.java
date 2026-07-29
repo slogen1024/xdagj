@@ -45,11 +45,18 @@ public final class EvmStateSchema {
     public static final byte PREFIX_ACCOUNT = 0x00;
     public static final byte PREFIX_CODE = 0x01;
     public static final byte PREFIX_STORAGE = 0x02;
+    /** Single-byte marker recording that the genesis allocation has been seeded (funding on-ramp). */
+    public static final byte PREFIX_GENESIS = 0x03;
 
     /** Fixed on-disk size of an account record: nonce(8) || balance(32) || codeHash(32). */
     public static final int ACCOUNT_RECORD_LENGTH = 8 + 32 + 32;
 
     private EvmStateSchema() {
+    }
+
+    /** The reserved 1-byte key whose presence means the genesis allocation is already in EVM_STATE. */
+    public static byte[] genesisMarkerKey() {
+        return new byte[]{PREFIX_GENESIS};
     }
 
     public static byte[] accountKey(Address address) {

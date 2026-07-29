@@ -132,6 +132,66 @@ public class EvmBlockProcessorTest {
     }
 
     @Test
+    public void genesis_alloc_credits_configured_balance_and_is_idempotent() {
+        // The funding on-ramp: configured genesis balances are seeded into EVM_STATE exactly once. A
+        // second seed (e.g. a node restart) must NOT reset a balance that transactions have changed.
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmBlockProcessor proc = new EvmBlockProcessor(EvmConfig.devnet(), state,
+                new EvmTxStore(new InMemoryKVSource()), new EvmMetaStore(new InMemoryKVSource()), 0L,
+                List.of(new GenesisAllocEntry(sender, Wei.fromEth(3))));
+
+        proc.seedGenesisIfAbsent();
+        assertEquals(Wei.fromEth(3), new RocksDbWorldUpdater(state).getAccount(sender).getBalance());
+
+        // Change the balance, then re-seed (as on restart): the marker is present, so it is a no-op.
+        RocksDbWorldUpdater w = new RocksDbWorldUpdater(state);
+        w.getAccount(sender).setBalance(Wei.fromEth(1));
+        w.commit();
+        proc.seedGenesisIfAbsent();
+        assertEquals("re-seeding must not reset a changed balance",
+                Wei.fromEth(1), new RocksDbWorldUpdater(state).getAccount(sender).getBalance());
+    }
+
+    @Test
+    public void genesis_funded_account_can_pay_gas_for_a_deploy() {
+        // Closes the loop with gas settlement: a genesis-funded sender has the wei to pay for gas, so
+        // its deploy succeeds. Without the on-ramp the sender is broke and the deploy would fail.
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmTxStore txs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor proc = new EvmBlockProcessor(EvmConfig.devnet(), state, txs, meta, 0L,
+                List.of(new GenesisAllocEntry(sender, Wei.fromEth(1))));
+
+        EvmTransaction deploy = EvmTransaction.unsigned(0L, Wei.of(1), 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);
+        txs.put(deploy);
+        proc.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);
+
+        assertEquals("genesis-funded deploy must succeed", 1,
+                meta.getReceipt(deploy.getHash()).orElseThrow().status());
+    }
+
+    @Test
+    public void genesis_is_restored_after_a_reorg_wipe() {
+        // rollbackTo wipes EVM_STATE entirely; genesis must be re-seeded before replay, or the funded
+        // accounts would vanish and every replayed tx would fail for lack of a gas balance.
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmTxStore txs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor proc = new EvmBlockProcessor(EvmConfig.devnet(), state, txs, meta, 0L,
+                List.of(new GenesisAllocEntry(sender, Wei.fromEth(2))));
+
+        EvmTransaction deploy = EvmTransaction.unsigned(0L, Wei.of(1), 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);
+        txs.put(deploy);
+        proc.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);
+
+        proc.rollbackTo(0L); // unwind the only executed height back to genesis
+        assertEquals("genesis balance must be restored after the wipe", Wei.fromEth(2),
+                new RocksDbWorldUpdater(state).getAccount(sender).getBalance());
+    }
+
+    @Test
     public void gas_fee_charged_at_gasprice_with_unused_gas_refunded() {
         // 缺口2 / Path α: the sender pays exactly gasUsed * gasPrice (burned); the unused gas is
         // refunded, so the balance drop equals receipt.gasUsed * gasPrice — no more, no less.

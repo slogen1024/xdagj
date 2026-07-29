@@ -23,7 +23,9 @@
  */
 package io.xdag.config.spec;
 
+import io.xdag.evm.GenesisAllocEntry;
 import java.math.BigInteger;
+import java.util.List;
 
 /**
  * The Embedded-EVM specification section in the configuration (spec §9). All values come from the
@@ -52,4 +54,7 @@ public interface EvmSpec {
 
     /** Maximum block span an eth_getLogs query may scan (DoS guard). */
     long getEvmMaxLogScanRange();
+
+    /** Genesis pre-funding (the funding on-ramp): addresses credited with wei at chain genesis. */
+    List<GenesisAllocEntry> getEvmGenesisAlloc();
 }

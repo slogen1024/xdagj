@@ -26,6 +26,7 @@ package io.xdag.evm;
 import io.xdag.db.rocksdb.KVSource;
 import io.xdag.evm.state.EvmMetaStore;
 import io.xdag.evm.state.EvmReceipt;
+import io.xdag.evm.state.EvmStateSchema;
 import io.xdag.evm.state.RocksDbWorldUpdater;
 import io.xdag.evm.tx.EvmTransaction;
 import io.xdag.evm.tx.EvmTxStore;
@@ -74,15 +75,23 @@ public class EvmBlockProcessor {
     private final KVSource<byte[], byte[]> stateStore;
     private final EvmTxStore txStore;
     private final EvmMetaStore metaStore;
+    /** Genesis pre-funding seeded once into EVM_STATE by {@link #seedGenesisIfAbsent()} (on-ramp). */
+    private final List<GenesisAllocEntry> genesisAlloc;
 
-    /** Always-active processor (activation height 0) — used by tests and always-on networks. */
+    /** Always-active processor (activation height 0), no genesis alloc — used by tests. */
     public EvmBlockProcessor(EvmConfig config, KVSource<byte[], byte[]> stateStore,
                              EvmTxStore txStore, EvmMetaStore metaStore) {
-        this(config, stateStore, txStore, metaStore, 0L);
+        this(config, stateStore, txStore, metaStore, 0L, List.of());
     }
 
     public EvmBlockProcessor(EvmConfig config, KVSource<byte[], byte[]> stateStore,
                              EvmTxStore txStore, EvmMetaStore metaStore, long activationHeight) {
+        this(config, stateStore, txStore, metaStore, activationHeight, List.of());
+    }
+
+    public EvmBlockProcessor(EvmConfig config, KVSource<byte[], byte[]> stateStore,
+                             EvmTxStore txStore, EvmMetaStore metaStore, long activationHeight,
+                             List<GenesisAllocEntry> genesisAlloc) {
         this.executor = new XdagEvmExecutor(config);
         this.chainId = config.chainId();
         this.blockGasLimit = config.maxGasLimit();
@@ -90,6 +99,28 @@ public class EvmBlockProcessor {
         this.stateStore = stateStore;
         this.txStore = txStore;
         this.metaStore = metaStore;
+        this.genesisAlloc = List.copyOf(genesisAlloc);
+    }
+
+    /**
+     * Seeds the configured genesis allocation into EVM_STATE exactly once per chain lifetime, guarded
+     * by a marker key. On a fresh chain this credits the pre-funded accounts before any tx executes;
+     * after a reorg wipe ({@link #rollbackTo} resets EVM_STATE) the marker is gone, so it restores the
+     * allocation before replay re-applies the tx history — otherwise the funded balances would vanish
+     * and every replayed tx would fail for lack of gas. A normal restart finds the marker present and
+     * does nothing, preserving balances that transactions have since changed. Idempotent and safe to
+     * call from every execution entry point.
+     */
+    public synchronized void seedGenesisIfAbsent() {
+        if (stateStore.get(EvmStateSchema.genesisMarkerKey()) != null) {
+            return;
+        }
+        RocksDbWorldUpdater world = new RocksDbWorldUpdater(stateStore);
+        for (GenesisAllocEntry entry : genesisAlloc) {
+            world.getOrCreate(entry.address()).setBalance(entry.balance()); // last-wins on duplicates
+        }
+        world.commit();
+        stateStore.put(EvmStateSchema.genesisMarkerKey(), new byte[]{1});
     }
 
     /**
@@ -192,6 +223,7 @@ public class EvmBlockProcessor {
     /** Executes a confirmed (or drained) main block's refs and writes its EVM_META checkpoint. */
     private void executeAndCheckpoint(List<Bytes32> txRefs, long height, long timestampSeconds,
                                       Bytes32 blockHash) {
+        seedGenesisIfAbsent(); // fund the genesis accounts before the first tx reads their balance
         List<Hash> candidates = new ArrayList<>(txRefs.size());
         Set<Hash> seen = new HashSet<>();
         for (Bytes32 refBytes : txRefs) {
@@ -239,6 +271,7 @@ public class EvmBlockProcessor {
         log.info("EVM rollback to main height {}", height);
         metaStore.removeAbove(height);
         stateStore.reset();
+        seedGenesisIfAbsent(); // the reset wiped the marker + funded balances; restore before replay
         Bytes32 previousRoot = Bytes32.ZERO;
         for (long h : metaStore.txListHeights()) {
             EvmMetaStore.HeightRecord record = metaStore.getHeightRecord(h).orElse(null);

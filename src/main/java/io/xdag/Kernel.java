@@ -206,7 +206,11 @@ public class Kernel {
                     config.getEvmSpec().getEvmTxPoolTtlSeconds(),
                     () -> System.currentTimeMillis() / 1000);
             evmBlockProcessor = new io.xdag.evm.EvmBlockProcessor(evmConfig, evmStateSource,
-                    evmTxStore, evmMetaStore, config.getEvmSpec().getEvmActivationHeight());
+                    evmTxStore, evmMetaStore, config.getEvmSpec().getEvmActivationHeight(),
+                    config.getEvmSpec().getEvmGenesisAlloc());
+            // Seed the genesis allocation now so pre-funded balances are visible to the eth RPC before
+            // the first EVM main block (idempotent; a restart with the marker present is a no-op).
+            evmBlockProcessor.seedGenesisIfAbsent();
             log.info("EVM services init (chain id {}).", evmChainId);
         }
 

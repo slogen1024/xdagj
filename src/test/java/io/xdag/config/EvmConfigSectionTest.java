@@ -28,7 +28,11 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import io.xdag.config.spec.EvmSpec;
+import io.xdag.evm.GenesisAllocEntry;
 import java.math.BigInteger;
+import java.util.List;
+import org.hyperledger.besu.datatypes.Address;
+import org.hyperledger.besu.datatypes.Wei;
 import org.junit.Test;
 
 /** The evm HOCON section (spec §9): devnet enabled with the provisional chain id, mainnet/testnet off. */
@@ -51,5 +55,21 @@ public class EvmConfigSectionTest {
     public void mainnet_and_testnet_default_to_disabled() {
         assertFalse(new MainnetConfig().getEvmSpec().isEvmEnabled());
         assertFalse(new TestnetConfig().getEvmSpec().isEvmEnabled());
+    }
+
+    @Test
+    public void devnet_funds_the_standard_test_address_in_genesis_alloc() {
+        // The funding on-ramp: devnet pre-funds the standard test address (private key 1); the other
+        // networks fund nothing at genesis.
+        List<GenesisAllocEntry> alloc = new DevnetConfig().getEvmSpec().getEvmGenesisAlloc();
+        assertEquals(1, alloc.size());
+        assertEquals(Address.fromHexString("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"),
+                alloc.get(0).address());
+        assertEquals(Wei.of(new BigInteger("1000000000000000000000000")), alloc.get(0).balance());
+
+        assertTrue("testnet funds nothing at genesis",
+                new TestnetConfig().getEvmSpec().getEvmGenesisAlloc().isEmpty());
+        assertTrue("mainnet funds nothing at genesis",
+                new MainnetConfig().getEvmSpec().getEvmGenesisAlloc().isEmpty());
     }
 }
