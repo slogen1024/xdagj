@@ -34,6 +34,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 import org.hyperledger.besu.datatypes.Address;
@@ -193,7 +194,10 @@ public class RocksDbWorldUpdater implements WorldUpdater {
         }
         // Root: flush the whole delta to the store in one atomic batchWrite.
         Map<byte[], byte[]> puts = new HashMap<>();
-        Set<byte[]> deletes = new HashSet<>();
+        // Content-addressed (NOT a reference-equality HashSet): a key reached by more than one path —
+        // e.g. a slot both zeroed this commit and swept by clearStorage — must appear exactly once, so
+        // the state-root digest counts it once and stays an injective function of the persisted delta.
+        Set<byte[]> deletes = new TreeSet<>(Arrays::compareUnsigned);
         accounts.forEach((address, optAccount) -> {
             if (optAccount.isEmpty()) {
                 // Deleted account (SELFDESTRUCT): drop its header and every storage slot.

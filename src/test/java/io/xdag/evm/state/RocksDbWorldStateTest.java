@@ -103,6 +103,41 @@ public class RocksDbWorldStateTest {
     }
 
     @Test
+    public void commit_digest_counts_a_deleted_slot_once_regardless_of_path() {
+        // Regression for the reference-equality `deletes` set: a storage slot that is both zeroed AND
+        // cleared in the same commit must be digested ONCE — identically to a commit that only clears
+        // it — since both persist the byte-identical world state. Before the fix the double-add path
+        // digested the key twice, making the state root depend on an implementation accident.
+        UInt256 slot = UInt256.valueOf(5);
+        Bytes32 clearOnly = digestOfResurrection(slot, false);
+        Bytes32 zeroThenClear = digestOfResurrection(slot, true);
+
+        assertEquals("a deleted slot must be digested once regardless of how it was reached",
+                clearOnly, zeroThenClear);
+    }
+
+    /**
+     * Persists {@code addr} with a non-zero {@code slot}, then in a fresh updater deletes and re-creates
+     * the account (which sets isStorageCleared), optionally also writing the slot to zero — the exact
+     * combination that made the buggy reference-set add the slot key to `deletes` twice. Returns the
+     * commit digest.
+     */
+    private Bytes32 digestOfResurrection(UInt256 slot, boolean alsoZeroTheSlot) {
+        InMemoryKVSource s = new InMemoryKVSource();
+        RocksDbWorldUpdater seed = new RocksDbWorldUpdater(s);
+        seed.createAccount(addr, 1L, Wei.ZERO).setStorageValue(slot, UInt256.valueOf(100));
+        seed.commit();
+
+        RocksDbWorldUpdater root = new RocksDbWorldUpdater(s);
+        root.deleteAccount(addr);
+        MutableAccount recreated = root.createAccount(addr, 2L, Wei.ZERO); // isStorageCleared() set
+        if (alsoZeroTheSlot) {
+            recreated.setStorageValue(slot, UInt256.ZERO); // zero-write of a slot the store still holds
+        }
+        return root.commitAndDigest();
+    }
+
+    @Test
     public void evm_execution_persists_storage_via_executor() {
         XdagEvmExecutor evm = new XdagEvmExecutor(EvmConfig.devnet());
 
