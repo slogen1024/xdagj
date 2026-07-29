@@ -132,6 +132,27 @@ public class EvmBlockProcessorTest {
     }
 
     @Test
+    public void gas_fee_charged_at_gasprice_with_unused_gas_refunded() {
+        // 缺口2 / Path α: the sender pays exactly gasUsed * gasPrice (burned); the unused gas is
+        // refunded, so the balance drop equals receipt.gasUsed * gasPrice — no more, no less.
+        Wei gasPrice = Wei.of(1_000L);
+        long gasLimit = 200_000L;
+        EvmTransaction deploy = EvmTransaction.unsigned(0L, gasPrice, gasLimit, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);
+        txStore.put(deploy);
+
+        BigInteger before = account(sender).getBalance().getAsBigInteger();
+        processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);
+
+        long gasUsed = metaStore.getReceipt(deploy.getHash()).orElseThrow().gasUsed();
+        assertTrue("the deploy must use less than its 200k limit so the refund path is exercised",
+                gasUsed < gasLimit);
+        BigInteger fee = BigInteger.valueOf(gasUsed).multiply(gasPrice.getAsBigInteger());
+        assertEquals("sender pays exactly gasUsed * gasPrice (value is zero)",
+                before.subtract(fee), account(sender).getBalance().getAsBigInteger());
+    }
+
+    @Test
     public void deploy_then_call_persists_state_receipts_and_checkpoints() {
         EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
         processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);

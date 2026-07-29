@@ -114,7 +114,7 @@ public class EvmTxPoolTest {
 
     @Test
     public void insufficient_balance_rejected_on_value_only() {
-        // ADR-007: native XDAG settles gas, so the pool only requires balance >= value.
+        // A zero balance cannot even cover the transferred value (let alone the gas fee).
         fund(sender, Wei.ZERO, 0L);
         EvmTransaction broke = EvmTransaction.unsigned(0, Wei.of(2_000_000_000L), 21_000L,
                 Optional.of(Address.fromHexString("0x2222222222222222222222222222222222222222")),
@@ -123,11 +123,12 @@ public class EvmTxPoolTest {
     }
 
     @Test
-    public void gas_cost_alone_does_not_require_evm_balance() {
-        // Balance covers just the 1-wei value; a huge gasLimit*gasPrice must NOT reject (ADR-007).
+    public void insufficient_balance_for_the_gas_fee_is_rejected() {
+        // Gas now settles in EVM wei (缺口2): the sender must cover value + gasLimit * gasPrice. A
+        // balance covering only the 1-wei value but not the gas fee is rejected (ADR-007 allowed it).
         fund(sender, Wei.of(1), 0L);
         EvmTransaction expensiveGas = tx(key, 0, Wei.of(new BigInteger("1000000000000000")));
-        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(expensiveGas.getRawRlp()));
+        assertEquals(EvmTxPool.AddResult.INSUFFICIENT_BALANCE, pool.add(expensiveGas.getRawRlp()));
     }
 
     @Test

@@ -169,6 +169,11 @@ public class EvmConsensusIntegrationTest {
         evmTxStore.put(deployTx);
         Bytes32 evmRef = Bytes32.wrap(deployTx.getHash().getBytes());
 
+        // Gas now settles in EVM wei (缺口2), so the deployer must be funded to cover gasLimit*gasPrice.
+        RocksDbWorldUpdater funding = new RocksDbWorldUpdater(evmStateSource);
+        funding.createAccount(deployTx.getSender(), 0L, Wei.fromEth(1));
+        funding.commit();
+
         long generateTime = 1600616700000L;
         Block addressBlock = generateAddressBlock(config, poolKey, generateTime);
         assertSame(IMPORTED_BEST, blockchain.tryToConnect(addressBlock));

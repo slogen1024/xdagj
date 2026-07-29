@@ -52,9 +52,10 @@ import org.hyperledger.besu.evm.worldstate.WorldUpdater;
  * (spec §7). This is the whole consensus-facing EVM surface: {@code BlockchainImpl} only calls
  * {@link #processMainBlock} from {@code setMain} and {@link #rollbackTo} after {@code unWindMain}.
  *
- * <p>v1 policies (see the B2b plan's deviation ledger): gas is metered for receipts but settled in
- * native XDAG (ADR-007) — no wei purchase/refund/coinbase credit; a ref whose blob is absent is
- * deterministically skipped; the per-height "state root" is a chained commitment
+ * <p>v1 policies (see the B2b plan's deviation ledger): gas settles in EVM wei (缺口2 / Path α) —
+ * the sender is debited gasLimit*gasPrice upfront, refunded the unused gas, and the net gasUsed*gasPrice
+ * is burned (no coinbase credit yet — P2); a ref whose blob is absent is deterministically skipped;
+ * the per-height "state root" is a chained commitment
  * {@code root_h = keccak256(root_prev || (txHash || status || gasUsed)... || stateDelta_h)} where
  * {@code stateDelta_h} digests exactly the (puts, deletes) persisted that height (Phase 1). It commits
  * the world-state delta so a balance/storage-only fork changes the root, but it is still a hash-chain
@@ -360,6 +361,14 @@ public class EvmBlockProcessor {
         if (intrinsicGas > tx.getGasLimit()) {
             return validationFailure("intrinsic gas above tx gas limit", String.valueOf(intrinsicGas));
         }
+        // A zero gas price would make gas free again; reject it so settlement below cannot be bypassed
+        // by a hand-crafted carrier that references a gasPrice==0 tx (the pool already floors gasPrice
+        // at minGasPrice, but execution must not trust that). Re-checking minGasPrice itself needs the
+        // config threaded in (follow-up); this closes the fully-free case with no new dependency.
+        BigInteger gasPriceWei = tx.getGasPrice().getAsBigInteger();
+        if (gasPriceWei.signum() == 0) {
+            return validationFailure("zero gas price", tx.getGasPrice().toString());
+        }
         Account senderAccount = root.getAccount(sender);
         long accountNonce = senderAccount == null ? 0L : senderAccount.getNonce();
         Wei balance = senderAccount == null ? Wei.ZERO : senderAccount.getBalance();
@@ -367,9 +376,15 @@ public class EvmBlockProcessor {
             return validationFailure("nonce mismatch",
                     tx.getNonce() + " vs account " + accountNonce);
         }
-        if (balance.getAsBigInteger().compareTo(tx.getValue().getAsBigInteger()) < 0) {
-            return validationFailure("balance below value", balance.toString());
+        // Gas settles in EVM wei (缺口2 / Path α): the sender must cover value + the maximum gas fee
+        // (gasLimit * gasPrice). The full fee is debited upfront and the unused gas refunded after
+        // execution, so a revert or out-of-gas still pays for the gas it burned. The net charge
+        // (gasUsed * gasPrice) is burned, not credited to a coinbase (v1; ADR-007 routing is P2).
+        BigInteger maxFee = gasPriceWei.multiply(BigInteger.valueOf(tx.getGasLimit()));
+        if (balance.getAsBigInteger().compareTo(tx.getValue().getAsBigInteger().add(maxFee)) < 0) {
+            return validationFailure("balance below value + gas fee", balance.toString());
         }
+        adjustBalance(root, sender, maxFee.negate()); // upfront gas debit, charged even on revert/OOG
 
         SimpleBlockValues blockValues = new SimpleBlockValues();
         blockValues.setNumber(height);
@@ -383,32 +398,49 @@ public class EvmBlockProcessor {
 
         // Defense in depth (C1): a tx-level throw must NEVER escape into setMain, where it would
         // abort native consensus mid-update. Any unexpected failure degrades to a status-0 receipt.
+        EvmReceipt receipt;
         try {
             if (tx.isContractCreation()) {
                 if (messageGas <= 0L) {
                     bumpNonce(root, sender); // Ethereum still burns the nonce on a failed create
-                    return failedReceipt(intrinsicGas);
+                    receipt = failedReceipt(intrinsicGas);
+                } else {
+                    // deploy() bumps + commits the sender nonce itself, even when execution fails (S-24).
+                    XdagExecutionResult result = executor.deploy(root.updater(), sender, tx.getPayload(),
+                            tx.getValue(), messageGas, blockValues, Address.ZERO);
+                    receipt = receiptOf(result, intrinsicGas);
                 }
-                // deploy() bumps + commits the sender nonce itself, even when execution fails (S-24).
-                XdagExecutionResult result = executor.deploy(root.updater(), sender, tx.getPayload(),
-                        tx.getValue(), messageGas, blockValues, Address.ZERO);
-                return receiptOf(result, intrinsicGas);
+            } else {
+                // CALL. Ethereum bumps the sender nonce before executing, and a revert keeps the bump:
+                // apply it on the root journal so discarding the per-tx child cannot undo it.
+                bumpNonce(root, sender);
+                Address to = tx.getTo().orElseThrow();
+                if (messageGas <= 0L) {
+                    receipt = zeroGasCall(root, sender, to, tx.getValue(), intrinsicGas);
+                } else {
+                    XdagExecutionResult result = executor.call(root.updater(), sender, to, tx.getPayload(),
+                            tx.getValue(), messageGas, blockValues, Address.ZERO);
+                    receipt = receiptOf(result, intrinsicGas);
+                }
             }
-            // CALL. Ethereum bumps the sender nonce before executing, and a revert keeps the bump:
-            // apply it on the root journal so discarding the per-tx child cannot undo it.
-            bumpNonce(root, sender);
-            Address to = tx.getTo().orElseThrow();
-            if (messageGas <= 0L) {
-                return zeroGasCall(root, sender, to, tx.getValue(), intrinsicGas);
-            }
-            XdagExecutionResult result = executor.call(root.updater(), sender, to, tx.getPayload(),
-                    tx.getValue(), messageGas, blockValues, Address.ZERO);
-            return receiptOf(result, intrinsicGas);
         } catch (RuntimeException e) {
             log.error("EVM execution threw for a tx at height {}; recording a failed receipt to "
                     + "protect native consensus", height, e);
-            return failedReceipt(intrinsicGas);
+            receipt = failedReceipt(intrinsicGas);
         }
+        // Refund the gas the tx did not consume; the sender's net gas cost is gasUsed * gasPrice.
+        long gasUsed = Math.min(receipt.gasUsed(), tx.getGasLimit());
+        BigInteger refund = gasPriceWei.multiply(BigInteger.valueOf(tx.getGasLimit() - gasUsed));
+        if (refund.signum() > 0) {
+            adjustBalance(root, sender, refund);
+        }
+        return receipt;
+    }
+
+    /** Adds {@code deltaWei} (may be negative) to {@code sender}'s balance on the root journal. */
+    private static void adjustBalance(RocksDbWorldUpdater root, Address sender, BigInteger deltaWei) {
+        MutableAccount account = root.getOrCreate(sender);
+        account.setBalance(Wei.of(account.getBalance().getAsBigInteger().add(deltaWei)));
     }
 
     private EvmReceipt validationFailure(String reason, String detail) {

@@ -127,10 +127,12 @@ public class EvmTxPool {
         if (tx.getNonce() != accountNonce) {
             return AddResult.NONCE_MISMATCH;
         }
-        // ADR-007 (v1): gas settles in native XDAG, not wei — the EVM balance only needs to cover
-        // the transferred value. When P1 moves gas settlement into the EVM, restore
-        // value + gasLimit * gasPrice here.
-        if (balance.getAsBigInteger().compareTo(tx.getValue().getAsBigInteger()) < 0) {
+        // Gas settles in EVM wei (缺口2 / Path α): the sender must cover the transferred value plus the
+        // maximum gas fee (gasLimit * gasPrice). The unused gas is refunded when the tx executes; the
+        // net charge (gasUsed * gasPrice) is burned. EvmBlockProcessor re-checks this at execution.
+        BigInteger maxCost = tx.getValue().getAsBigInteger()
+                .add(tx.getGasPrice().getAsBigInteger().multiply(BigInteger.valueOf(tx.getGasLimit())));
+        if (balance.getAsBigInteger().compareTo(maxCost) < 0) {
             return AddResult.INSUFFICIENT_BALANCE;
         }
 
