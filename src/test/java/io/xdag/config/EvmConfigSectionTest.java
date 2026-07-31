@@ -25,8 +25,10 @@ package io.xdag.config;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import com.typesafe.config.ConfigFactory;
 import io.xdag.config.spec.EvmSpec;
 import io.xdag.evm.GenesisAllocEntry;
 import java.math.BigInteger;
@@ -71,5 +73,32 @@ public class EvmConfigSectionTest {
                 new TestnetConfig().getEvmSpec().getEvmGenesisAlloc().isEmpty());
         assertTrue("mainnet funds nothing at genesis",
                 new MainnetConfig().getEvmSpec().getEvmGenesisAlloc().isEmpty());
+    }
+
+    private static final String A1 = "0x1111111111111111111111111111111111111111";
+    private static final String A2 = "0x2222222222222222222222222222222222222222";
+
+    @Test
+    public void evm_alloc_parses_valid_entries_and_defaults_to_empty() {
+        assertTrue("absent alloc -> empty", AbstractConfig.parseEvmAlloc(ConfigFactory.empty()).isEmpty());
+        List<GenesisAllocEntry> alloc = AbstractConfig.parseEvmAlloc(ConfigFactory.parseString(
+                "evm.alloc=[{address=\"" + A1 + "\",balance=\"1\"},{address=\"" + A2 + "\",balance=\"2\"}]"));
+        assertEquals(2, alloc.size());
+        assertEquals(Wei.of(1), alloc.get(0).balance());
+    }
+
+    @Test
+    public void evm_alloc_rejects_duplicate_zero_negative_and_oversized() {
+        assertThrows("duplicate address", IllegalArgumentException.class, () -> AbstractConfig.parseEvmAlloc(
+                ConfigFactory.parseString("evm.alloc=[{address=\"" + A1 + "\",balance=\"1\"},"
+                        + "{address=\"" + A1 + "\",balance=\"2\"}]")));
+        assertThrows("zero balance", IllegalArgumentException.class, () -> AbstractConfig.parseEvmAlloc(
+                ConfigFactory.parseString("evm.alloc=[{address=\"" + A1 + "\",balance=\"0\"}]")));
+        assertThrows("negative balance", IllegalArgumentException.class, () -> AbstractConfig.parseEvmAlloc(
+                ConfigFactory.parseString("evm.alloc=[{address=\"" + A1 + "\",balance=\"-1\"}]")));
+        // 2^256 is one past the Wei ceiling (max is 2^256-1).
+        String overMax = BigInteger.TWO.pow(256).toString();
+        assertThrows("balance > 2^256-1", IllegalArgumentException.class, () -> AbstractConfig.parseEvmAlloc(
+                ConfigFactory.parseString("evm.alloc=[{address=\"" + A1 + "\",balance=\"" + overMax + "\"}]")));
     }
 }

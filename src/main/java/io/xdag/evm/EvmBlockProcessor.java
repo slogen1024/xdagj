@@ -71,6 +71,7 @@ public class EvmBlockProcessor {
     private final XdagEvmExecutor executor;
     private final BigInteger chainId;
     private final long blockGasLimit;
+    private final BigInteger minGasPrice;
     private final long activationHeight;
     private final KVSource<byte[], byte[]> stateStore;
     private final EvmTxStore txStore;
@@ -95,6 +96,7 @@ public class EvmBlockProcessor {
         this.executor = new XdagEvmExecutor(config);
         this.chainId = config.chainId();
         this.blockGasLimit = config.maxGasLimit();
+        this.minGasPrice = config.minGasPrice();
         this.activationHeight = activationHeight;
         this.stateStore = stateStore;
         this.txStore = txStore;
@@ -394,13 +396,13 @@ public class EvmBlockProcessor {
         if (intrinsicGas > tx.getGasLimit()) {
             return validationFailure("intrinsic gas above tx gas limit", String.valueOf(intrinsicGas));
         }
-        // A zero gas price would make gas free again; reject it so settlement below cannot be bypassed
-        // by a hand-crafted carrier that references a gasPrice==0 tx (the pool already floors gasPrice
-        // at minGasPrice, but execution must not trust that). Re-checking minGasPrice itself needs the
-        // config threaded in (follow-up); this closes the fully-free case with no new dependency.
+        // Re-check the gas-price floor at execution — the pool enforces minGasPrice, but a hand-crafted
+        // carrier can reference a tx that skipped the pool, so execution must not trust it. Rejecting
+        // anything below minGasPrice (and explicitly zero, in case a network sets minGasPrice = 0)
+        // stops an underpriced tx from buying near-free compute.
         BigInteger gasPriceWei = tx.getGasPrice().getAsBigInteger();
-        if (gasPriceWei.signum() == 0) {
-            return validationFailure("zero gas price", tx.getGasPrice().toString());
+        if (gasPriceWei.signum() == 0 || gasPriceWei.compareTo(minGasPrice) < 0) {
+            return validationFailure("gas price below minimum", tx.getGasPrice().toString());
         }
         Account senderAccount = root.getAccount(sender);
         long accountNonce = senderAccount == null ? 0L : senderAccount.getNonce();
@@ -417,8 +419,6 @@ public class EvmBlockProcessor {
         if (balance.getAsBigInteger().compareTo(tx.getValue().getAsBigInteger().add(maxFee)) < 0) {
             return validationFailure("balance below value + gas fee", balance.toString());
         }
-        adjustBalance(root, sender, maxFee.negate()); // upfront gas debit, charged even on revert/OOG
-
         SimpleBlockValues blockValues = new SimpleBlockValues();
         blockValues.setNumber(height);
         blockValues.setTimestamp(timestampSeconds);
@@ -429,10 +429,14 @@ public class EvmBlockProcessor {
         // or a CALL to a contract) needs at least one gas unit and fails out-of-gas at zero.
         long messageGas = tx.getGasLimit() - intrinsicGas;
 
-        // Defense in depth (C1): a tx-level throw must NEVER escape into setMain, where it would
-        // abort native consensus mid-update. Any unexpected failure degrades to a status-0 receipt.
-        EvmReceipt receipt;
+        // Defense in depth (C1): the upfront gas debit, execution, AND the refund all run inside this
+        // guard, so no balance-arithmetic or interpreter error can escape into setMain and abort native
+        // consensus — any unexpected failure degrades to a status-0 receipt. The debit and refund are
+        // provably non-underflowing (the affordability check above; the refund is additive), so the
+        // reachable paths (success, revert, out-of-gas) behave exactly as before.
         try {
+            adjustBalance(root, sender, maxFee.negate()); // upfront gas debit, charged even on revert/OOG
+            EvmReceipt receipt;
             if (tx.isContractCreation()) {
                 if (messageGas <= 0L) {
                     bumpNonce(root, sender); // Ethereum still burns the nonce on a failed create
@@ -456,24 +460,35 @@ public class EvmBlockProcessor {
                     receipt = receiptOf(result, intrinsicGas);
                 }
             }
+            // Refund the gas the tx did not consume; the sender's net gas cost is gasUsed * gasPrice.
+            long gasUsed = Math.min(receipt.gasUsed(), tx.getGasLimit());
+            BigInteger refund = gasPriceWei.multiply(BigInteger.valueOf(tx.getGasLimit() - gasUsed));
+            if (refund.signum() > 0) {
+                adjustBalance(root, sender, refund);
+            }
+            return receipt;
         } catch (RuntimeException e) {
             log.error("EVM execution threw for a tx at height {}; recording a failed receipt to "
                     + "protect native consensus", height, e);
-            receipt = failedReceipt(intrinsicGas);
+            return failedReceipt(intrinsicGas);
         }
-        // Refund the gas the tx did not consume; the sender's net gas cost is gasUsed * gasPrice.
-        long gasUsed = Math.min(receipt.gasUsed(), tx.getGasLimit());
-        BigInteger refund = gasPriceWei.multiply(BigInteger.valueOf(tx.getGasLimit() - gasUsed));
-        if (refund.signum() > 0) {
-            adjustBalance(root, sender, refund);
-        }
-        return receipt;
     }
 
-    /** Adds {@code deltaWei} (may be negative) to {@code sender}'s balance on the root journal. */
+    /**
+     * Adds {@code deltaWei} (may be negative) to {@code sender}'s balance on the root journal. Callers
+     * must ensure the result is non-negative (the executeOne affordability check does). If it is not,
+     * this throws a descriptive error instead of {@code Wei.of}'s opaque one; because every caller runs
+     * inside executeOne's C1 guard, that throw degrades to a status-0 receipt rather than aborting
+     * native consensus.
+     */
     private static void adjustBalance(RocksDbWorldUpdater root, Address sender, BigInteger deltaWei) {
         MutableAccount account = root.getOrCreate(sender);
-        account.setBalance(Wei.of(account.getBalance().getAsBigInteger().add(deltaWei)));
+        BigInteger updated = account.getBalance().getAsBigInteger().add(deltaWei);
+        if (updated.signum() < 0) {
+            throw new IllegalStateException("EVM balance underflow for " + sender + ": "
+                    + account.getBalance().getAsBigInteger() + " + (" + deltaWei + ")");
+        }
+        account.setBalance(Wei.of(updated));
     }
 
     private EvmReceipt validationFailure(String reason, String detail) {

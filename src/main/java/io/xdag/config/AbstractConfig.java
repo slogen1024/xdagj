@@ -236,6 +236,33 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
         return evmGenesisAlloc;
     }
 
+    /**
+     * Parses and validates the {@code evm.alloc} genesis-funding list (the on-ramp). Rejects a
+     * duplicate address, a non-positive balance, or a balance above the wei ceiling (2^256-1) with a
+     * clear error, so a config mistake aborts startup rather than seeding a broken genesis. An
+     * absent/empty list yields an empty allocation.
+     */
+    static List<GenesisAllocEntry> parseEvmAlloc(com.typesafe.config.Config config) {
+        if (!config.hasPath("evm.alloc")) {
+            return List.of();
+        }
+        List<GenesisAllocEntry> alloc = new ArrayList<>();
+        Set<Address> seen = new HashSet<>();
+        for (com.typesafe.config.Config entry : config.getConfigList("evm.alloc")) {
+            Address address = Address.fromHexString(entry.getString("address"));
+            BigInteger balance = new BigInteger(entry.getString("balance"));
+            if (balance.signum() <= 0 || balance.bitLength() > 256) {
+                throw new IllegalArgumentException(
+                        "evm.alloc balance must be in 1..2^256-1: " + entry.getString("balance"));
+            }
+            if (!seen.add(address)) {
+                throw new IllegalArgumentException("evm.alloc duplicate address: " + address);
+            }
+            alloc.add(new GenesisAllocEntry(address, Wei.of(balance)));
+        }
+        return List.copyOf(alloc);
+    }
+
     @Override
     public SnapshotSpec getSnapshotSpec() {
         return this;
@@ -357,16 +384,7 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
                 ? BigInteger.valueOf(config.getLong("evm.minGasPrice")) : evmMinGasPrice;
         evmMaxLogScanRange = config.hasPath("evm.maxLogScanRange")
                 ? config.getLong("evm.maxLogScanRange") : evmMaxLogScanRange;
-        if (config.hasPath("evm.alloc")) {
-            // Funding on-ramp: each { address, balance(wei, decimal string) } pre-funds an EVM account
-            // at genesis. Parsed here so a malformed address or balance aborts startup, not mid-run.
-            List<GenesisAllocEntry> alloc = new ArrayList<>();
-            for (var entry : config.getConfigList("evm.alloc")) {
-                alloc.add(new GenesisAllocEntry(Address.fromHexString(entry.getString("address")),
-                        Wei.of(new BigInteger(entry.getString("balance")))));
-            }
-            evmGenesisAlloc = List.copyOf(alloc);
-        }
+        evmGenesisAlloc = parseEvmAlloc(config);
         nodeRation = config.hasPath("node.ration") ? config.getDouble("node.ration") : 5;
         // S-30: tolerate a missing/trimmed whiteIPs list and skip malformed entries instead of aborting startup.
         List<String> whiteIpList = config.hasPath("node.whiteIPs")

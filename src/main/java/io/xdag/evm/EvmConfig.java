@@ -50,18 +50,27 @@ public final class EvmConfig {
     /** Default ceiling on the gas a single message may request (Ethereum-style block gas limit). */
     public static final long DEFAULT_MAX_GAS_LIMIT = 30_000_000L;
 
+    /** Default minimum gas price in wei; execution rejects any tx priced below it (anti-spam floor). */
+    public static final BigInteger DEFAULT_MIN_GAS_PRICE = BigInteger.ONE;
+
     private final EvmSpecVersion fork;
     private final BigInteger chainId;
     private final long maxGasLimit;
+    private final BigInteger minGasPrice;
 
     public EvmConfig(EvmSpecVersion fork, BigInteger chainId) {
         this(fork, chainId, DEFAULT_MAX_GAS_LIMIT);
     }
 
     public EvmConfig(EvmSpecVersion fork, BigInteger chainId, long maxGasLimit) {
+        this(fork, chainId, maxGasLimit, DEFAULT_MIN_GAS_PRICE);
+    }
+
+    public EvmConfig(EvmSpecVersion fork, BigInteger chainId, long maxGasLimit, BigInteger minGasPrice) {
         this.fork = fork;
         this.chainId = chainId;
         this.maxGasLimit = maxGasLimit;
+        this.minGasPrice = minGasPrice;
     }
 
     /** Mainnet configuration: Shanghai fork + provisional mainnet chain id. */
@@ -90,5 +99,10 @@ public final class EvmConfig {
     /** Upper bound on the gas a single deploy/call may request (S-25 ceiling). */
     public long maxGasLimit() {
         return maxGasLimit;
+    }
+
+    /** Minimum gas price in wei; execution rejects any tx priced below it (anti-spam floor). */
+    public BigInteger minGasPrice() {
+        return minGasPrice;
     }
 }

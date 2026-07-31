@@ -45,6 +45,7 @@ import org.hyperledger.besu.crypto.SECP256K1;
 import org.hyperledger.besu.datatypes.Address;
 import org.hyperledger.besu.datatypes.Hash;
 import org.hyperledger.besu.datatypes.Wei;
+import org.hyperledger.besu.evm.EvmSpecVersion;
 import org.hyperledger.besu.evm.account.Account;
 import org.hyperledger.besu.evm.account.MutableAccount;
 import org.junit.Before;
@@ -189,6 +190,54 @@ public class EvmBlockProcessorTest {
         proc.rollbackTo(0L); // unwind the only executed height back to genesis
         assertEquals("genesis balance must be restored after the wipe", Wei.fromEth(2),
                 new RocksDbWorldUpdater(state).getAccount(sender).getBalance());
+    }
+
+    @Test
+    public void gas_price_below_minimum_is_rejected_at_execution_without_charging() {
+        // Fix: execution re-checks gasPrice >= minGasPrice (not just != 0), so a hand-crafted carrier
+        // referencing an underpriced tx cannot buy near-free compute below the network floor.
+        EvmConfig highFloor = new EvmConfig(EvmSpecVersion.SHANGHAI, BigInteger.valueOf(0xCAFE),
+                30_000_000L, BigInteger.valueOf(1_000));
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmTxStore txs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor proc = new EvmBlockProcessor(highFloor, state, txs, meta);
+        RocksDbWorldUpdater w = new RocksDbWorldUpdater(state);
+        w.createAccount(sender, 0L, Wei.fromEth(1));
+        w.commit();
+
+        EvmTransaction underpriced = EvmTransaction.unsigned(0L, Wei.of(1), 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo); // gasPrice 1 < minGasPrice 1000
+        txs.put(underpriced);
+        proc.processMainBlock(List.of(ref(underpriced)), 1L, 1001L, BLOCK_HASH_1);
+
+        assertEquals("underpriced tx must be rejected with a status-0 receipt", 0,
+                meta.getReceipt(underpriced.getHash()).orElseThrow().status());
+        assertEquals("a rejected tx must not be charged any gas", Wei.fromEth(1),
+                account(sender).getBalance());
+    }
+
+    @Test
+    public void a_tx_that_cannot_afford_gas_is_rejected_without_charging_the_sender() {
+        // Affordability guard: a sender that covers the value but not the gas fee gets a status-0
+        // receipt and is NOT partially debited (the check returns before the upfront gas debit).
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmTxStore txs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor proc = new EvmBlockProcessor(EvmConfig.devnet(), state, txs, meta);
+        RocksDbWorldUpdater w = new RocksDbWorldUpdater(state);
+        w.createAccount(sender, 0L, Wei.of(500)); // covers value 100, not 200000*1 gas
+        w.commit();
+
+        EvmTransaction tx = EvmTransaction.unsigned(0L, Wei.of(1), 200_000L,
+                Optional.of(Address.fromHexString("0x00000000000000000000000000000000000000aa")),
+                Wei.of(100), Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+        txs.put(tx);
+        proc.processMainBlock(List.of(ref(tx)), 1L, 1001L, BLOCK_HASH_1);
+
+        assertEquals(0, meta.getReceipt(tx.getHash()).orElseThrow().status());
+        assertEquals("sender must not be charged when the tx is rejected", Wei.of(500),
+                account(sender).getBalance());
     }
 
     @Test
