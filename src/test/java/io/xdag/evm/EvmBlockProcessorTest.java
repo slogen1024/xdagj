@@ -262,6 +262,54 @@ public class EvmBlockProcessorTest {
     }
 
     @Test
+    public void genesis_misconfig_changes_the_root_even_when_the_account_is_untouched() {
+        // Phase 2, chain origin: two nodes disagree on account X's genesis balance, but the executed
+        // tx never touches X. Phase 1 alone missed this (X's delta never appears in any height). Folding
+        // the genesis-alloc digest into the chain origin makes the roots differ, catching the misconfig.
+        Address x = Address.fromHexString("0x00000000000000000000000000000000000000ff");
+        EvmTransaction tx = EvmTransaction.unsigned(0L, Wei.of(1), 21_000L,
+                Optional.of(Address.fromHexString("0x00000000000000000000000000000000000000aa")),
+                Wei.of(1), Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+
+        Bytes32 rootA = rootWithAlloc(tx, List.of(
+                new GenesisAllocEntry(sender, Wei.fromEth(2)), new GenesisAllocEntry(x, Wei.fromEth(5))));
+        Bytes32 rootB = rootWithAlloc(tx, List.of(
+                new GenesisAllocEntry(sender, Wei.fromEth(2)), new GenesisAllocEntry(x, Wei.fromEth(9))));
+
+        assertNotEquals("a genesis-alloc difference on an untouched account must change the root",
+                rootA, rootB);
+    }
+
+    @Test
+    public void the_block_height_is_folded_into_the_chained_root() {
+        // Phase 2: the same tx executed as the first height at height 1 vs height 2 must produce
+        // different roots — the chain commits to which height executed, not just the tx outcomes.
+        EvmTransaction tx = EvmTransaction.unsigned(0L, Wei.of(1), 21_000L,
+                Optional.of(Address.fromHexString("0x00000000000000000000000000000000000000aa")),
+                Wei.of(1), Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+        List<GenesisAllocEntry> alloc = List.of(new GenesisAllocEntry(sender, Wei.fromEth(2)));
+
+        Bytes32 atHeight1 = rootAtHeight(tx, alloc, 1L);
+        Bytes32 atHeight2 = rootAtHeight(tx, alloc, 2L);
+
+        assertNotEquals("the height must be committed in the root", atHeight1, atHeight2);
+    }
+
+    private Bytes32 rootWithAlloc(EvmTransaction tx, List<GenesisAllocEntry> alloc) {
+        return rootAtHeight(tx, alloc, 1L);
+    }
+
+    private Bytes32 rootAtHeight(EvmTransaction tx, List<GenesisAllocEntry> alloc, long height) {
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmTxStore txs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor proc = new EvmBlockProcessor(EvmConfig.devnet(), state, txs, meta, 0L, alloc);
+        txs.put(tx);
+        proc.processMainBlock(List.of(ref(tx)), height, 1001L, BLOCK_HASH_1);
+        return meta.getHeightRecord(height).orElseThrow().stateRoot();
+    }
+
+    @Test
     public void deploy_then_call_persists_state_receipts_and_checkpoints() {
         EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
         processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);

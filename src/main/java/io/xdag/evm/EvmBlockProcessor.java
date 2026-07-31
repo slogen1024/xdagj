@@ -33,6 +33,7 @@ import io.xdag.evm.tx.EvmTxStore;
 import io.xdag.evm.tx.IntrinsicGas;
 import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
@@ -274,7 +275,7 @@ public class EvmBlockProcessor {
         metaStore.removeAbove(height);
         stateStore.reset();
         seedGenesisIfAbsent(); // the reset wiped the marker + funded balances; restore before replay
-        Bytes32 previousRoot = Bytes32.ZERO;
+        Bytes32 previousRoot = genesisRoot();
         for (long h : metaStore.txListHeights()) {
             EvmMetaStore.HeightRecord record = metaStore.getHeightRecord(h).orElse(null);
             if (record == null) {
@@ -293,12 +294,29 @@ public class EvmBlockProcessor {
         }
     }
 
-    /** The chained commitment of the most recent checkpoint, or zero before any EVM activity. */
+    /** The chained commitment of the most recent checkpoint, or the genesis origin before any EVM tx. */
     private Bytes32 latestRoot() {
         return metaStore.highestHeight()
                 .flatMap(metaStore::getHeightRecord)
                 .map(EvmMetaStore.HeightRecord::stateRoot)
-                .orElse(Bytes32.ZERO);
+                .orElse(genesisRoot());
+    }
+
+    /**
+     * The chain origin: a deterministic keccak over the configured genesis allocation (each entry as
+     * address(20) ‖ balance(32), sorted by address). A node misconfigured with a different {@code
+     * evm.alloc} gets a different origin, so every subsequent chained root diverges immediately — the
+     * genesis is now committed, not merely reflected once an account is touched. Pure function of the
+     * config (independent of the store); an empty alloc yields keccak of empty, a fixed constant.
+     */
+    private Bytes32 genesisRoot() {
+        List<Bytes> parts = new ArrayList<>(genesisAlloc.size());
+        genesisAlloc.stream()
+                .sorted((a, b) -> Arrays.compareUnsigned(a.address().getBytes().toArray(),
+                        b.address().getBytes().toArray()))
+                .forEach(e -> parts.add(Bytes.concatenate(e.address().getBytes(),
+                        Bytes32.leftPad(e.balance().toBytes()))));
+        return org.hyperledger.besu.crypto.Hash.keccak256(Bytes.concatenate(parts.toArray(new Bytes[0])));
     }
 
     /** The world root plus the txs that actually executed (survived the per-block gas budget). */
@@ -315,8 +333,9 @@ public class EvmBlockProcessor {
     private ExecutionOutcome executeList(List<Hash> txHashes, long height, long timestampSeconds,
                                          Bytes32 previousRoot) {
         RocksDbWorldUpdater root = new RocksDbWorldUpdater(stateStore);
-        List<Bytes> digest = new ArrayList<>(txHashes.size() + 1);
+        List<Bytes> digest = new ArrayList<>(txHashes.size() + 2);
         digest.add(previousRoot);
+        digest.add(Bytes.ofUnsignedLong(height)); // Phase 2: commit which height executed, not just outcomes
         List<Hash> executed = new ArrayList<>(txHashes.size());
         long gasBudget = blockGasLimit;
         for (Hash txHash : txHashes) {
