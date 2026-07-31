@@ -76,11 +76,12 @@ public class EvmBlockProcessorTest {
         stateSource = new InMemoryKVSource();
         txStore = new EvmTxStore(new InMemoryKVSource());
         metaStore = new EvmMetaStore(new InMemoryKVSource());
-        processor = new EvmBlockProcessor(EvmConfig.devnet(), stateSource, txStore, metaStore);
-
-        RocksDbWorldUpdater world = new RocksDbWorldUpdater(stateSource);
-        world.createAccount(sender, 0L, Wei.fromEth(1));
-        world.commit();
+        // Fund the sender via genesis alloc (the production on-ramp) so its balance survives a
+        // rollback's reset+replay. An out-of-band createAccount would be wiped by stateStore.reset()
+        // now that gas is charged, which would break the replay.
+        processor = new EvmBlockProcessor(EvmConfig.devnet(), stateSource, txStore, metaStore, 0L,
+                List.of(new GenesisAllocEntry(sender, Wei.fromEth(1))));
+        processor.seedGenesisIfAbsent();
     }
 
     private EvmTransaction storedTx(long nonce, Optional<Address> to, Bytes payload, long gasLimit) {
@@ -214,7 +215,7 @@ public class EvmBlockProcessorTest {
         assertEquals("underpriced tx must be rejected with a status-0 receipt", 0,
                 meta.getReceipt(underpriced.getHash()).orElseThrow().status());
         assertEquals("a rejected tx must not be charged any gas", Wei.fromEth(1),
-                account(sender).getBalance());
+                new RocksDbWorldUpdater(state).getAccount(sender).getBalance());
     }
 
     @Test
@@ -237,7 +238,7 @@ public class EvmBlockProcessorTest {
 
         assertEquals(0, meta.getReceipt(tx.getHash()).orElseThrow().status());
         assertEquals("sender must not be charged when the tx is rejected", Wei.of(500),
-                account(sender).getBalance());
+                new RocksDbWorldUpdater(state).getAccount(sender).getBalance());
     }
 
     @Test
@@ -535,10 +536,10 @@ public class EvmBlockProcessorTest {
         InMemoryKVSource stateB = new InMemoryKVSource();
         EvmTxStore txB = new EvmTxStore(new InMemoryKVSource());
         EvmMetaStore metaB = new EvmMetaStore(new InMemoryKVSource());
-        RocksDbWorldUpdater seed = new RocksDbWorldUpdater(stateB);
-        seed.createAccount(sender, 0L, Wei.fromEth(1));
-        seed.commit();
-        EvmBlockProcessor procB = new EvmBlockProcessor(EvmConfig.devnet(), stateB, txB, metaB);
+        // Node B must share Node A's genesis config to reach the same roots (both fund sender at genesis).
+        EvmBlockProcessor procB = new EvmBlockProcessor(EvmConfig.devnet(), stateB, txB, metaB, 0L,
+                List.of(new GenesisAllocEntry(sender, Wei.fromEth(1))));
+        procB.seedGenesisIfAbsent();
         txB.put(d2); // d1 withheld
         procB.processMainBlock(List.of(ref(d1)), 1L, 1001L, BLOCK_HASH_1);
         procB.processMainBlock(List.of(ref(d2)), 2L, 1002L, BLOCK_HASH_2);
