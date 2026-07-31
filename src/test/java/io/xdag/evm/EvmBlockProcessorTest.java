@@ -310,6 +310,23 @@ public class EvmBlockProcessorTest {
     }
 
     @Test
+    public void state_root_comparison_detects_agreement_divergence_and_unknown() {
+        // P2P divergence detection (Phase 2): after executing a height the node exposes its (height,
+        // root) to gossip, and compares a peer's claim — a matching root AGREEs, a different root
+        // DIVERGEs, and a height this node has not executed is UNKNOWN (behind / no EVM txs).
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);
+
+        EvmBlockProcessor.StateRootAt latest = processor.latestExecutedStateRoot().orElseThrow();
+        assertEquals(1L, latest.height());
+        assertEquals(EvmBlockProcessor.RootComparison.AGREE, processor.compareStateRoot(1L, latest.root()));
+        assertEquals(EvmBlockProcessor.RootComparison.DIVERGE,
+                processor.compareStateRoot(1L, Bytes32.fromHexString("0x" + "99".repeat(32))));
+        assertEquals(EvmBlockProcessor.RootComparison.UNKNOWN,
+                processor.compareStateRoot(999L, latest.root()));
+    }
+
+    @Test
     public void deploy_then_call_persists_state_receipts_and_checkpoints() {
         EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
         processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);

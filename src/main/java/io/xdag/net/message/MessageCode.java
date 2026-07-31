@@ -90,7 +90,9 @@ public enum MessageCode {
     // EVM tx gossip (spec §6.1)
     EVM_TX_BROADCAST(0x1B),
     EVM_TX_REQUEST(0x1C),
-    EVM_TX_REPLY(0x1D);
+    EVM_TX_REPLY(0x1D),
+    // EVM state-root gossip: a node's (height, chained root) for cross-node divergence detection.
+    EVM_STATE_ROOT(0x1E);
 
 
     private static final MessageCode[] map = new MessageCode[256];
