@@ -82,18 +82,48 @@
 
     <build>
         <plugins>
+            <!-- Fail fast unless a JDK 21 toolchain is registered (see misc/toolchains.xml). -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-toolchains-plugin</artifactId>
+                <version>3.2.0</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>toolchain</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <toolchains>
+                        <jdk>
+                            <version>21</version>
+                        </jdk>
+                    </toolchains>
+                </configuration>
+            </plugin>
+
             <!-- compile -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.14.0</version>
                 <configuration>
-                    <source>${maven.compiler.source}</source>
-                    <target>${maven.compiler.target}</target>
+                    <release>${maven.compiler.source}</release>
                     <fork>true</fork>
                     <meminitial>1024m</meminitial>
                     <maxmem>2048m</maxmem>
                     <skip>false</skip>
+                    <jdkToolchain>
+                        <version>21</version>
+                    </jdkToolchain>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                            <version>${lombok.version}</version>
+                        </path>
+                    </annotationProcessorPaths>
                 </configuration>
             </plugin>
 
@@ -103,6 +133,9 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.3</version>
                 <configuration>
+                    <jdkToolchain>
+                        <version>21</version>
+                    </jdkToolchain>
                     <argLine>-javaagent:${project.build.directory}/agents/byte-buddy-agent.jar -Xmx2048m</argLine>
                     <excludes>
                         <exclude>${surefire.test.excludes}</exclude>

@@ -4,11 +4,24 @@
 
 ## 1. 工具链
 
+要求 **JDK 21**（Maven 默认若落到 JDK 26，Lombok 会挂，表现为满屏 `cannot find symbol: log / getXxx`）。
+
+构建通过 Maven Toolchains 强制使用 JDK 21，即使 `mvn` 进程本身跑在别的 JDK 上：
+
+```bash
+# 一次性：注册本机 JDK 21（Homebrew 路径已写好）
+cp misc/toolchains.xml ~/.m2/toolchains.xml
+# 或手动合并其中的 <toolchain> 段
+
+java -version   # Maven 宿主 JDK 任意；编译/测试走 toolchain 21
+mvn -version    # 需 3.9.x
+```
+
+可选：本地 shell 也固定 21，避免直接跑 `java -jar` 时踩坑：
+
 ```bash
 export JAVA_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
 export PATH="$JAVA_HOME/bin:/opt/homebrew/bin:$PATH"
-java -version   # 需 21.x
-mvn -version    # 需 3.9.x
 ```
 
 RandomX 建议可用内存 **> 5.5G**。
