@@ -51,6 +51,17 @@
     detailOut.textContent = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
   }
 
+  // A single full-width table row for empty/error states — built as a node, never HTML.
+  function messageRow(text) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 5;
+    td.className = "muted";
+    td.textContent = text;
+    tr.appendChild(td);
+    return tr;
+  }
+
   function renderStatus(status, height, netType) {
     const rows = [
       ["netType", netType],
@@ -66,46 +77,57 @@
       ["ourSupply", status?.ourSupply],
       ["netSupply", status?.netSupply],
     ];
-    statusGrid.innerHTML = rows
-      .map(([k, v]) => `<dt>${k}</dt><dd>${v == null || v === "" ? "—" : v}</dd>`)
-      .join("");
+    // Build with textContent, never innerHTML: RPC-sourced values must never be parsed as HTML.
+    statusGrid.replaceChildren();
+    for (const [k, v] of rows) {
+      const dt = document.createElement("dt");
+      dt.textContent = k;
+      const dd = document.createElement("dd");
+      dd.textContent = v == null || v === "" ? "—" : String(v);
+      statusGrid.append(dt, dd);
+    }
   }
 
   function renderBlocks(blocks) {
     if (!blocks || blocks.length === 0) {
-      blocksBody.innerHTML = `<tr><td colspan="5" class="muted">No main blocks yet</td></tr>`;
+      blocksBody.replaceChildren(messageRow("No main blocks yet"));
       return;
     }
-    blocksBody.innerHTML = blocks
-      .map((b) => {
-        const hash = b.hash || b.address || "";
-        return `<tr data-hash="${hash}" data-height="${b.height ?? ""}">
-          <td>${b.height ?? "—"}</td>
-          <td class="hash">${shortHash(hash)}</td>
-          <td>${fmtTime(b.blockTime)}</td>
-          <td>${b.balance ?? "—"}</td>
-          <td>${b.state ?? "—"}</td>
-        </tr>`;
-      })
-      .join("");
+    blocksBody.replaceChildren();
+    for (const b of blocks) {
+      const hash = b.hash || b.address || "";
+      const tr = document.createElement("tr");
+      const cells = [
+        [b.height ?? "—", null],
+        [shortHash(hash), "hash"],
+        [fmtTime(b.blockTime), null],
+        [b.balance ?? "—", null],
+        [b.state ?? "—", null],
+      ];
+      for (const [text, cls] of cells) {
+        const td = document.createElement("td");
+        if (cls) td.className = cls;
+        td.textContent = String(text);
+        tr.appendChild(td);
+      }
+      // Capture hash/height in the closure rather than data-* attributes — no HTML sink at all.
+      tr.addEventListener("click", () => openDetail(hash, b.height));
+      blocksBody.appendChild(tr);
+    }
+  }
 
-    blocksBody.querySelectorAll("tr[data-hash]").forEach((tr) => {
-      tr.addEventListener("click", async () => {
-        const hash = tr.getAttribute("data-hash");
-        const height = tr.getAttribute("data-height");
-        try {
-          let detail;
-          if (hash && hash.length >= 16) {
-            detail = await rpc("xdag_getBlockByHash", [hash, 1]);
-          } else if (height) {
-            detail = await rpc("xdag_getBlockByNumber", [String(height), 1]);
-          }
-          showDetail(detail);
-        } catch (e) {
-          showDetail(`Error: ${e.message}`);
-        }
-      });
-    });
+  async function openDetail(hash, height) {
+    try {
+      let detail;
+      if (hash && hash.length >= 16) {
+        detail = await rpc("xdag_getBlockByHash", [hash, 1]);
+      } else if (height != null && height !== "") {
+        detail = await rpc("xdag_getBlockByNumber", [String(height), 1]);
+      }
+      showDetail(detail);
+    } catch (e) {
+      showDetail(`Error: ${e.message}`);
+    }
   }
 
   async function refresh() {
@@ -122,8 +144,8 @@
     } catch (e) {
       statusError.hidden = false;
       statusError.textContent = `RPC failed: ${e.message}. Is the node running at ${rpcUrl()}?`;
-      statusGrid.innerHTML = "";
-      blocksBody.innerHTML = `<tr><td colspan="5" class="muted">Unavailable</td></tr>`;
+      statusGrid.replaceChildren();
+      blocksBody.replaceChildren(messageRow("Unavailable"));
     }
   }
 

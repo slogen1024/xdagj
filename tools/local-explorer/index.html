@@ -3,6 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!--
+    Defense-in-depth CSP: no inline scripts/styles, no plugins, no framing. connect-src stays
+    open to http/https because the RPC endpoint is user-configurable, but every other sink is
+    locked down so a stray value that ever reached the DOM still could not load or run code.
+  -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src http: https:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
   <title>XDAG Local Explorer</title>
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -65,6 +72,6 @@
     Devnet only · native XDAG data · no eth_* yet
   </footer>
 
-  <script src="app.js?v=2"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>
