@@ -25,13 +25,13 @@ package io.xdag.rpc.server.handler;
 
 import io.xdag.core.Block;
 import io.xdag.core.Blockchain;
-import io.xdag.db.rocksdb.KVSource;
 import io.xdag.evm.EvmConfig;
 import io.xdag.evm.XdagEvmExecutor;
 import io.xdag.evm.XdagExecutionResult;
 import io.xdag.evm.state.EvmMetaStore;
 import io.xdag.evm.state.EvmReceipt;
-import io.xdag.evm.state.RocksDbWorldUpdater;
+import io.xdag.evm.state.HistoricalStateReader;
+import io.xdag.evm.state.StateUnavailableException;
 import io.xdag.evm.tx.EvmTransaction;
 import io.xdag.evm.tx.EvmTxPool;
 import io.xdag.evm.tx.EvmTxStore;
@@ -71,7 +71,6 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
             "eth_getTransactionByHash", "eth_getTransactionReceipt", "eth_getBlockByNumber",
             "eth_getBlockByHash", "eth_getLogs");
 
-    private final KVSource<byte[], byte[]> evmStateStore;
     private final EvmConfig evmConfig;
     private final BigInteger minGasPriceWei;
     private final Blockchain blockchain;
@@ -85,12 +84,13 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
     private final EvmMetaStore evmMetaStore;
     /** eth_getLogs range cap (used in getLogs). */
     private final long maxLogScanRange;
+    /** Reconstructs past world state within the retained window for block-tag reads (C4). */
+    private final HistoricalStateReader historical;
 
-    public EthRequestHandler(KVSource<byte[], byte[]> evmStateStore, EvmConfig evmConfig,
+    public EthRequestHandler(EvmConfig evmConfig,
                              BigInteger minGasPriceWei, Blockchain blockchain, EvmTxPool evmTxPool,
                              Consumer<Bytes> broadcaster, EvmTxStore evmTxStore, EvmMetaStore evmMetaStore,
-                             long maxLogScanRange) {
-        this.evmStateStore = evmStateStore;
+                             long maxLogScanRange, HistoricalStateReader historical) {
         this.evmConfig = evmConfig;
         this.minGasPriceWei = minGasPriceWei;
         this.blockchain = blockchain;
@@ -100,6 +100,7 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
         this.evmTxStore = evmTxStore;
         this.evmMetaStore = evmMetaStore;
         this.maxLogScanRange = maxLogScanRange;
+        this.historical = historical;
     }
 
     @Override
@@ -124,42 +125,36 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
                 case "net_listening" -> Boolean.TRUE;
                 case "eth_getBalance" -> {
                     Address addr = addressParam(request, 0);
-                    validateBlockTag(request, 1);
-                    Account a = account(addr);
+                    Account a = account(addr, request, 1);
                     yield EthHex.quantity(a == null ? BigInteger.ZERO : a.getBalance().getAsBigInteger());
                 }
                 case "eth_getTransactionCount" -> {
                     Address addr = addressParam(request, 0);
-                    validateBlockTag(request, 1);
-                    Account a = account(addr);
+                    Account a = account(addr, request, 1);
                     yield EthHex.quantity(a == null ? 0L : a.getNonce());
                 }
                 case "eth_getCode" -> {
                     Address addr = addressParam(request, 0);
-                    validateBlockTag(request, 1);
-                    Account a = account(addr);
+                    Account a = account(addr, request, 1);
                     yield EthHex.data(a == null ? Bytes.EMPTY : a.getCode());
                 }
                 case "eth_getStorageAt" -> {
                     Address addr = addressParam(request, 0);
                     UInt256 slot = UInt256.valueOf(EthHex.decodeQuantity(stringParam(request, 1)));
-                    validateBlockTag(request, 2);
-                    Account a = account(addr);
+                    Account a = account(addr, request, 2);
                     UInt256 value = a == null ? UInt256.ZERO : a.getStorageValue(slot);
                     yield EthHex.data(value.toBytes());
                 }
                 case "eth_call" -> {
-                    validateBlockTag(request, 1);
-                    XdagExecutionResult r = simulate(callObject(request, 0));
+                    XdagExecutionResult r = simulate(callObject(request, 0), historicalWorld(request, 1));
                     if (!r.success()) {
                         throw JsonRpcException.internalError(revertMessage(r));
                     }
                     yield EthHex.data(r.returnData());
                 }
                 case "eth_estimateGas" -> {
-                    // block tag optional for estimateGas (index 1 if present, unused for latest-only)
                     CallArgs args = callObject(request, 0);
-                    XdagExecutionResult r = simulate(args);
+                    XdagExecutionResult r = simulate(args, historicalWorld(request, 1));
                     if (!r.success()) {
                         throw JsonRpcException.internalError(revertMessage(r));
                     }
@@ -179,6 +174,10 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
         } catch (IllegalArgumentException | ClassCastException e) {
             // Malformed params (bad hex/address, wrong JSON type in a filter) are the client's fault.
             throw JsonRpcException.invalidParams(e.getMessage() == null ? "invalid params" : e.getMessage());
+        } catch (StateUnavailableException e) {
+            // The requested block tag resolves outside the retained history window (matches geth -32000).
+            throw JsonRpcException.serverError("state at block " + EthHex.quantity(e.getHeight())
+                    + " is not available (node retains a bounded history window)");
         } catch (RuntimeException e) {
             log.error("eth RPC error handling {}", method, e);
             throw JsonRpcException.internalError("internal error");
@@ -435,9 +434,27 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
         return true;
     }
 
-    /** Loads an account from the latest EVM_STATE; null when absent. Read-only (never committed). */
-    private Account account(Address address) {
-        return new RocksDbWorldUpdater(evmStateStore).getAccount(address);
+    /** The latest executed EVM height (state anchor); 0 when no EVM tx has executed (genesis only). */
+    private long evmHead() {
+        return evmMetaStore == null ? 0L : evmMetaStore.highestHeight().orElse(0L);
+    }
+
+    /** The block tag at {@code index}, defaulting to "latest" when omitted/blank. */
+    private String tagParam(JsonRpcRequest request, int index) {
+        Object[] params = request.getParams();
+        return params != null && params.length > index && params[index] instanceof String s && !s.isBlank()
+                ? s : "latest";
+    }
+
+    /** A read-only world at the height named by the block tag at {@code index} (C4). */
+    private WorldUpdater historicalWorld(JsonRpcRequest request, int index) {
+        long head = evmHead();
+        return historical.worldAt(resolveHeight(tagParam(request, index), head), head);
+    }
+
+    /** Loads an account at the block tag's height; null when absent. Read-only (never committed). */
+    private Account account(Address address, JsonRpcRequest request, int tagIndex) {
+        return historicalWorld(request, tagIndex).getAccount(address);
     }
 
     /** Parsed eth_call / eth_estimateGas arguments. {@code to == null} means contract creation. */
@@ -461,11 +478,10 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
 
     /**
      * Runs the call/creation through the executor's simulation path, which NEVER commits, so
-     * eth_call/eth_estimateGas cannot mutate the persistent EVM_STATE (ADR-005). The fresh root
-     * updater is discarded when this method returns.
+     * eth_call/eth_estimateGas cannot mutate the EVM_STATE (ADR-005). The updater is a read-only
+     * historical world (C4); it is discarded when this method returns.
      */
-    private XdagExecutionResult simulate(CallArgs args) {
-        WorldUpdater updater = new RocksDbWorldUpdater(evmStateStore);
+    private XdagExecutionResult simulate(CallArgs args, WorldUpdater updater) {
         return args.to() == null
                 ? executor.simulateDeploy(updater, args.from(), args.data(), args.value(), args.gas())
                 : executor.simulateCall(updater, args.from(), args.to(), args.data(), args.value(), args.gas());
@@ -487,29 +503,5 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
             throw new IllegalArgumentException("missing string parameter at index " + index);
         }
         return s;
-    }
-
-    /**
-     * Validates the block tag (default "latest" when omitted/null): only the current committed state
-     * is available. "latest"/"pending"/"earliest"/"safe"/"finalized" and the head height pass; any
-     * other explicit height throws (no archival state in v1).
-     */
-    private void validateBlockTag(JsonRpcRequest request, int index) {
-        Object[] params = request.getParams();
-        if (params == null || params.length <= index || params[index] == null
-                || !(params[index] instanceof String tag) || tag.isBlank()) {
-            return; // default: latest
-        }
-        switch (tag) {
-            case "latest", "pending", "earliest", "safe", "finalized" -> {
-            }
-            default -> {
-                BigInteger requested = EthHex.decodeQuantity(tag);
-                if (!requested.equals(BigInteger.valueOf(blockchain.getLatestMainBlockNumber()))) {
-                    throw new IllegalArgumentException(
-                            "historical state is not available (no archive node in v1)");
-                }
-            }
-        }
     }
 }

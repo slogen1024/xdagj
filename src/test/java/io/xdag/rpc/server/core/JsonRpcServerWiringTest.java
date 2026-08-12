@@ -28,6 +28,8 @@ import static org.junit.Assert.assertTrue;
 
 import io.xdag.core.Blockchain;
 import io.xdag.evm.EvmConfig;
+import io.xdag.evm.state.EvmStateJournal;
+import io.xdag.evm.state.HistoricalStateReader;
 import io.xdag.evm.state.InMemoryKVSource;
 import io.xdag.rpc.server.handler.EthRequestHandler;
 import io.xdag.rpc.server.protocol.JsonRpcRequest;
@@ -42,9 +44,11 @@ public class JsonRpcServerWiringTest {
     public void eth_handler_answers_eth_namespace() throws Exception {
         Blockchain bc = Mockito.mock(Blockchain.class);
         Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(1L);
-        EthRequestHandler eth = new EthRequestHandler(new InMemoryKVSource(),
+        InMemoryKVSource state = new InMemoryKVSource();
+        EthRequestHandler eth = new EthRequestHandler(
                 new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
-                        BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, null, null, null, null, 1024L);
+                        BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, null, null, null, null, 1024L,
+                new HistoricalStateReader(state, new EvmStateJournal(new InMemoryKVSource()), 128));
 
         assertTrue(eth.supportsMethod("eth_chainId"));
         JsonRpcRequest r = new JsonRpcRequest();

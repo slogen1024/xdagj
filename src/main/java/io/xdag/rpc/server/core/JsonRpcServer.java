@@ -90,11 +90,16 @@ public class JsonRpcServer {
                                 new io.xdag.net.message.p2p.EvmTxBroadcastMessage(rlp));
                     }
                 };
-                handlers.add(new EthRequestHandler(kernel.getEvmStateStore(), evmConfig,
+                // Reconstruct past world state within the retained window so eth_* reads honor a
+                // historical block tag (sub-project C4), instead of always reading the latest store.
+                io.xdag.evm.state.HistoricalStateReader historical =
+                        new io.xdag.evm.state.HistoricalStateReader(kernel.getEvmStateStore(),
+                                kernel.getEvmStateJournal(), evmSpec.getEvmStateHistoryWindow());
+                handlers.add(new EthRequestHandler(evmConfig,
                         evmSpec.getEvmMinGasPrice(), kernel.getBlockchain(),
                         kernel.getEvmTxPool(), broadcaster,
                         kernel.getEvmTxStore(), kernel.getEvmMetaStore(),
-                        evmSpec.getEvmMaxLogScanRange()));
+                        evmSpec.getEvmMaxLogScanRange(), historical));
             }
 
             // Create SSL context (if HTTPS is enabled)

@@ -33,6 +33,8 @@ import io.xdag.core.Blockchain;
 import io.xdag.evm.EvmConfig;
 import io.xdag.evm.state.EvmMetaStore;
 import io.xdag.evm.state.EvmReceipt;
+import io.xdag.evm.state.EvmStateJournal;
+import io.xdag.evm.state.HistoricalStateReader;
 import io.xdag.evm.state.InMemoryKVSource;
 import io.xdag.evm.state.RocksDbWorldUpdater;
 import io.xdag.evm.tx.EvmTransaction;
@@ -70,10 +72,12 @@ public class EthRequestHandlerTest {
     public void setUp() {
         Blockchain blockchain = Mockito.mock(Blockchain.class);
         Mockito.when(blockchain.getLatestMainBlockNumber()).thenReturn(4096L);
-        handler = new EthRequestHandler(new InMemoryKVSource(),
+        InMemoryKVSource store = new InMemoryKVSource();
+        handler = new EthRequestHandler(
                 new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
                         BigInteger.valueOf(0xCAFE), 30_000_000L),
-                BigInteger.valueOf(1_000_000_000L), blockchain, null, null, null, null, 1024L);
+                BigInteger.valueOf(1_000_000_000L), blockchain, null, null, null, null, 1024L,
+                new HistoricalStateReader(store, new EvmStateJournal(new InMemoryKVSource()), 128));
     }
 
     private JsonRpcRequest request(String method, Object... params) {
@@ -102,9 +106,10 @@ public class EthRequestHandlerTest {
     private EthRequestHandler handlerOver(InMemoryKVSource store, long head) {
         Blockchain bc = Mockito.mock(Blockchain.class);
         Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(head);
-        return new EthRequestHandler(store,
+        return new EthRequestHandler(
                 new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
-                        BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, null, null, null, null, 1024L);
+                        BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, null, null, null, null, 1024L,
+                new HistoricalStateReader(store, new EvmStateJournal(new InMemoryKVSource()), 128));
     }
 
     private EvmTxPool poolFor(InMemoryKVSource stateStore) {
@@ -123,9 +128,10 @@ public class EthRequestHandlerTest {
         Blockchain bc = Mockito.mock(Blockchain.class);
         Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(1L);
         Consumer<Bytes> broadcaster = broadcasts::add;
-        return new EthRequestHandler(stateStore,
+        return new EthRequestHandler(
                 new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
-                        BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, pool, broadcaster, null, null, 1024L);
+                        BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, pool, broadcaster, null, null,
+                1024L, new HistoricalStateReader(stateStore, new EvmStateJournal(new InMemoryKVSource()), 128));
     }
 
     private void fundSender(InMemoryKVSource stateStore) {
@@ -195,13 +201,47 @@ public class EthRequestHandlerTest {
     }
 
     @Test
-    public void historical_block_height_is_rejected() {
+    public void block_height_above_evm_head_is_unavailable() {
+        // handlerOver has no evmMetaStore, so evmHead == 0: only the anchor height (latest/0x0/earliest)
+        // resolves to the live store; any height above it falls outside the window and maps to -32000.
         EthRequestHandler h = handlerOver(new InMemoryKVSource(), 10L);
-        // A past height (5 != head 10) has no archival state.
         assertThrows(JsonRpcException.class,
                 () -> h.handle(request("eth_getBalance", eoaHex(), "0x5")));
-        // The head height as an explicit hex is fine.
-        assertEquals("0x0", h.handle(request("eth_getBalance", eoaHex(), "0xa")));
+        // latest == earliest == 0x0 == evmHead(0): the live store, empty account -> 0.
+        assertEquals("0x0", h.handle(request("eth_getBalance", eoaHex(), "latest")));
+        assertEquals("0x0", h.handle(request("eth_getBalance", eoaHex(), "0x0")));
+    }
+
+    @Test
+    public void getBalanceAtHistoricalHeightReadsJournal() throws Exception {
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmStateJournal journal = new EvmStateJournal(new InMemoryKVSource());
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+
+        // Height 1: eoa = 100 wei; journal the prior (absent). Height 2: eoa = 250.
+        RocksDbWorldUpdater w1 = new RocksDbWorldUpdater(state);
+        w1.createAccount(eoa, 0L, Wei.of(100));
+        List<EvmStateJournal.Entry> j1 = new ArrayList<>();
+        w1.commitAndDigest(j1);
+        journal.putHeightJournal(1, j1);
+
+        RocksDbWorldUpdater w2 = new RocksDbWorldUpdater(state);
+        w2.getAccount(eoa).setBalance(Wei.of(250));
+        List<EvmStateJournal.Entry> j2 = new ArrayList<>();
+        w2.commitAndDigest(j2);
+        journal.putHeightJournal(2, j2);
+
+        meta.putHeightRecord(2, Bytes32.ZERO, Bytes32.ZERO, 1, 0); // evmHead = 2
+        HistoricalStateReader historical = new HistoricalStateReader(state, journal, 128);
+        Blockchain bc = Mockito.mock(Blockchain.class);
+        EthRequestHandler h = new EthRequestHandler(
+                new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
+                        BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, null, null,
+                new EvmTxStore(new InMemoryKVSource()), meta, 1024L, historical);
+
+        // Latest -> 250; height 0x1 -> 100.
+        assertEquals("0xfa", h.handle(request("eth_getBalance", eoaHex(), "latest"))); // 250
+        assertEquals("0x64", h.handle(request("eth_getBalance", eoaHex(), "0x1")));    // 100
     }
 
     @Test
@@ -261,10 +301,11 @@ public class EthRequestHandlerTest {
         Mockito.when(block.getHash()).thenReturn(Bytes32.fromHexString("0x" + "ab".repeat(32)));
         Mockito.when(block.getTimestamp()).thenReturn(0L);
         Mockito.when(bc.getBlockByHeight(Mockito.anyLong())).thenReturn(block);
-        return new EthRequestHandler(stateStore,
+        return new EthRequestHandler(
                 new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
                         BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc,
-                null, null, txStore, metaStore, 1024L);
+                null, null, txStore, metaStore, 1024L,
+                new HistoricalStateReader(stateStore, new EvmStateJournal(new InMemoryKVSource()), 128));
     }
 
     @Test
@@ -306,10 +347,11 @@ public class EthRequestHandlerTest {
         Mockito.when(block1.getTimestamp()).thenReturn(0L);
         Mockito.when(bc.getBlockByHeight(0L)).thenReturn(null);
         Mockito.when(bc.getBlockByHeight(1L)).thenReturn(block1);
-        EthRequestHandler h = new EthRequestHandler(stateStore,
+        EthRequestHandler h = new EthRequestHandler(
                 new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
                         BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc,
-                null, null, txStore, metaStore, 1024L);
+                null, null, txStore, metaStore, 1024L,
+                new HistoricalStateReader(stateStore, new EvmStateJournal(new InMemoryKVSource()), 128));
 
         assertNull("earliest with no block-0 must return null, not 500",
                 h.handle(request("eth_getBlockByNumber", "earliest", false)));

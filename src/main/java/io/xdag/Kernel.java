@@ -101,6 +101,7 @@ public class Kernel {
     protected io.xdag.db.rocksdb.KVSource<byte[], byte[]> evmStateStore;
     protected io.xdag.evm.tx.EvmTxStore evmTxStore;
     protected io.xdag.evm.state.EvmMetaStore evmMetaStore;
+    protected io.xdag.evm.state.EvmStateJournal evmStateJournal;
     protected io.xdag.evm.tx.EvmTxPool evmTxPool;
     protected io.xdag.evm.EvmBlockProcessor evmBlockProcessor;
 
@@ -189,11 +190,14 @@ public class Kernel {
         if (config.getEvmSpec().isEvmEnabled()) {
             KVSource<byte[], byte[]> evmStateSource = dbFactory.getDB(DatabaseName.EVM_STATE);
             evmStateSource.init();
-            this.evmStateStore = evmStateSource; // retained so the eth RPC handler can read world state
+            this.evmStateStore = evmStateSource; // retained so JsonRpcServer can build the HistoricalStateReader
             KVSource<byte[], byte[]> evmTxSource = dbFactory.getDB(DatabaseName.EVM_TX);
             evmTxSource.init();
             KVSource<byte[], byte[]> evmMetaSource = dbFactory.getDB(DatabaseName.EVM_META);
             evmMetaSource.init();
+            KVSource<byte[], byte[]> evmJournalSource = dbFactory.getDB(DatabaseName.EVM_STATE_JOURNAL);
+            evmJournalSource.init();
+            evmStateJournal = new io.xdag.evm.state.EvmStateJournal(evmJournalSource);
             java.math.BigInteger evmChainId = java.math.BigInteger.valueOf(config.getEvmSpec().getEvmChainId());
             io.xdag.evm.EvmConfig evmConfig = new io.xdag.evm.EvmConfig(
                     org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI, evmChainId,
@@ -207,7 +211,8 @@ public class Kernel {
                     () -> System.currentTimeMillis() / 1000);
             evmBlockProcessor = new io.xdag.evm.EvmBlockProcessor(evmConfig, evmStateSource,
                     evmTxStore, evmMetaStore, config.getEvmSpec().getEvmActivationHeight(),
-                    config.getEvmSpec().getEvmGenesisAlloc());
+                    config.getEvmSpec().getEvmGenesisAlloc(),
+                    evmStateJournal, config.getEvmSpec().getEvmStateHistoryWindow());
             // Seed the genesis allocation now so pre-funded balances are visible to the eth RPC before
             // the first EVM main block (idempotent; a restart with the marker present is a no-op).
             evmBlockProcessor.seedGenesisIfAbsent();
