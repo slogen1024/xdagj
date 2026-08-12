@@ -69,5 +69,13 @@ public enum DatabaseName {
      * Per-main-block EVM execution metadata (see io.xdag.evm.state.EvmMetaStore):
      * 0x00|mainHeight -> stateRoot|blockHash|txCount, 0x01|txHash -> receipt RLP.
      */
-    EVM_META
+    EVM_META,
+
+    /**
+     * Reverse-delta undo journal for bounded historical state (sub-project C4):
+     * height(8 BE) -> length-framed list of (stateKey, priorValue|tombstone) captured at that height's
+     * root commit. Node-local; not consensus data. Only the most recent evm.stateHistoryWindow heights
+     * are retained (see io.xdag.evm.state.EvmStateJournal).
+     */
+    EVM_STATE_JOURNAL
 }
