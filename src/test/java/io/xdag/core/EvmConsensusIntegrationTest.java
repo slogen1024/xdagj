@@ -50,8 +50,12 @@ import io.xdag.db.rocksdb.OrphanBlockStoreImpl;
 import io.xdag.db.rocksdb.RocksdbFactory;
 import io.xdag.evm.EvmBlockProcessor;
 import io.xdag.evm.EvmConfig;
+import io.xdag.evm.GenesisAllocEntry;
 import io.xdag.evm.state.EvmMetaStore;
 import io.xdag.evm.state.EvmReceipt;
+import io.xdag.evm.state.EvmStateJournal;
+import io.xdag.evm.state.HistoricalStateReader;
+import io.xdag.evm.state.InMemoryKVSource;
 import io.xdag.evm.state.RocksDbWorldUpdater;
 import io.xdag.evm.tx.EvmTransaction;
 import io.xdag.evm.tx.EvmTxStore;
@@ -68,6 +72,7 @@ import org.hyperledger.besu.crypto.KeyPair;
 import org.hyperledger.besu.crypto.SECP256K1;
 import org.hyperledger.besu.datatypes.Address;
 import org.hyperledger.besu.datatypes.Wei;
+import org.hyperledger.besu.evm.worldstate.WorldUpdater;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
@@ -220,5 +225,103 @@ public class EvmConsensusIntegrationTest {
         // EVM_META checkpoint at the carrier's main height.
         assertEquals(List.of(deployTx.getHash()), evmMetaStore.getTxList(carrierHeight));
         assertEquals(1, evmMetaStore.getHeightRecord(carrierHeight).orElseThrow().txCount());
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // C4 capstone: historical state must survive across heights AND a reorg, driving the REAL
+    // EvmBlockProcessor (with a journal) and reading through HistoricalStateReader.
+    // ---------------------------------------------------------------------------------------------
+
+    /** Fixed EVM signer whose address is both funded at genesis and used to sign every transfer. */
+    private static final SECP256K1 EVM_ALGO = new SECP256K1();
+    private static final KeyPair SENDER_KEY = EVM_ALGO.createKeyPair(EVM_ALGO.createPrivateKey(BigInteger.ONE));
+    private static final Address SENDER = Address.extract(SENDER_KEY.getPublicKey());
+    /** Codeless EOA (not in the genesis alloc) paid by the canonical branch, so a zero-gas transfer
+     *  settles. The reorg branch pays RECIPIENT_B instead, giving that tx a genuinely different hash. */
+    private static final Address RECIPIENT_A = Address.fromHexString("0x00000000000000000000000000000000000000aa");
+    private static final Address RECIPIENT_B = Address.fromHexString("0x00000000000000000000000000000000000000bb");
+    private static final long HISTORY_WINDOW = 128;
+    private static final long TRANSFER_VALUE = 1_000L;
+    private static final long TRANSFER_GAS_LIMIT = 21_000L; // exactly intrinsic: messageGas == 0
+    private static final long TRANSFER_GAS_PRICE = 1L;
+    /** Net debit per transfer = value + gasUsed * gasPrice; gasUsed == gasLimit here ONLY because the
+     *  gas limit is exactly intrinsic (21000), so nothing is refunded. Raising the limit would break this. */
+    private static final long TRANSFER_DEBIT = TRANSFER_VALUE + TRANSFER_GAS_LIMIT * TRANSFER_GAS_PRICE;
+
+    @Test
+    public void historicalStateSurvivesAcrossHeightsAndReorg() {
+        EvmStateJournal journal = new EvmStateJournal(new InMemoryKVSource());
+        EvmBlockProcessor proc = newProcessorWithJournal(journal, HISTORY_WINDOW);
+        HistoricalStateReader reader = new HistoricalStateReader(evmStateSource, journal, (int) HISTORY_WINDOW);
+
+        // Two heights on the canonical branch: nonce n-1 pays RECIPIENT_A, each debiting SENDER.
+        long b1 = executeTransferBlock(proc, 1, 0L, RECIPIENT_A);
+        long b2 = executeTransferBlock(proc, 2, 1L, RECIPIENT_A);
+        assertTrue("each transfer must debit the sender", b2 < b1);
+        assertEquals(b1 - TRANSFER_DEBIT, b2);
+
+        // Historical read: at height 1 the sender still shows its post-height-1 balance, reconstructed
+        // by overlaying height 2's reverse-delta journal onto the live store (head == 2, target == 1).
+        assertEquals(b1, senderBalance(reader.worldAt(1, 2)));
+
+        // Reorg to height 1: rollbackTo wipes EVM_STATE, clears the journal, re-seeds the genesis
+        // funding, and replays height 1 from the immutable EVM_TX blob (regenerating its journal).
+        proc.rollbackTo(1);
+        assertEquals("post-rollback live state must be back at the height-1 balance",
+                b1, senderBalance(reader.worldAt(1, 1)));
+
+        // A genuinely different height-2 transfer (same nonce 1, different recipient => different tx
+        // hash) forms the second branch. History at head must reflect it: worldAt(2, 2) short-circuits
+        // to the live store, so b2b == the reconstructed head balance, proving the stale journal is gone.
+        long b2b = executeTransferBlock(proc, 2, 1L, RECIPIENT_B);
+        assertEquals(b1 - TRANSFER_DEBIT, b2b);
+        assertEquals(b2b, senderBalance(reader.worldAt(2, 2)));
+
+        // The reorg genuinely SWITCHED branches (not merely "didn't crash"): RECIPIENT_B, absent before
+        // the reorg, now holds exactly one transfer, while RECIPIENT_A holds only its height-1 transfer —
+        // the abandoned first-branch height-2 payment to A was reverted by rollbackTo(1) (else A would
+        // show 2 * TRANSFER_VALUE). This is the assertion that proves the second branch actually took.
+        RocksDbWorldUpdater live = new RocksDbWorldUpdater(evmStateSource);
+        assertEquals(TRANSFER_VALUE,
+                live.getAccount(RECIPIENT_B).getBalance().getAsBigInteger().longValueExact());
+        assertEquals(TRANSFER_VALUE,
+                live.getAccount(RECIPIENT_A).getBalance().getAsBigInteger().longValueExact());
+    }
+
+    /**
+     * Builds the SAME processor {@link #setUp} wires (devnet config over the shared {@code evmStateSource}
+     * / {@code evmTxStore} / {@code evmMetaStore}), but via the 8-arg journal ctor: activation height 0,
+     * a genesis allocation that funds {@link #SENDER}, the supplied reverse-delta journal, and the C4
+     * window. The processor and {@link HistoricalStateReader} therefore read the exact same
+     * {@code evmStateSource} instance.
+     */
+    private EvmBlockProcessor newProcessorWithJournal(EvmStateJournal journal, long window) {
+        return new EvmBlockProcessor(EvmConfig.devnet(), evmStateSource, evmTxStore, evmMetaStore,
+                0L, List.of(new GenesisAllocEntry(SENDER, Wei.fromEth(1))), journal, (int) window);
+    }
+
+    /**
+     * Signs one value transfer from {@link #SENDER} (empty payload, gas limit == intrinsic so the
+     * message runs zero gas and settles as a bare transfer), stores its blob, then drives the REAL
+     * processor at {@code height} exactly as {@code BlockchainImpl.setMain} would — packing the tx
+     * hash as the sole EVM ref of a confirmed main block. Returns SENDER's post-execution balance read
+     * from the live {@code evmStateSource}.
+     */
+    private long executeTransferBlock(EvmBlockProcessor proc, long height, long nonce, Address recipient) {
+        EvmTransaction transfer = EvmTransaction.unsigned(nonce, Wei.of(TRANSFER_GAS_PRICE),
+                TRANSFER_GAS_LIMIT, Optional.of(recipient), Wei.of(TRANSFER_VALUE), Bytes.EMPTY,
+                EvmConfig.DEVNET_CHAIN_ID).sign(SENDER_KEY, EVM_ALGO);
+        evmTxStore.put(transfer);
+        Bytes32 ref = Bytes32.wrap(transfer.getHash().getBytes());
+        Bytes32 blockHash = HashUtils.sha256(Bytes.ofUnsignedLong(height));
+        proc.processMainBlock(List.of(ref), height, height * 64L, blockHash);
+
+        EvmReceipt receipt = evmMetaStore.getReceipt(transfer.getHash()).orElseThrow();
+        assertEquals("transfer must execute successfully", 1, receipt.status());
+        return senderBalance(new RocksDbWorldUpdater(evmStateSource));
+    }
+
+    private static long senderBalance(WorldUpdater world) {
+        return world.getAccount(SENDER).getBalance().getAsBigInteger().longValueExact();
     }
 }
