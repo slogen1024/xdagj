@@ -54,6 +54,15 @@ public class EvmConfigSectionTest {
     }
 
     @Test
+    public void stateHistoryWindow_reads_from_evm_section() {
+        // C4 window: devnet conf sets 128; the field default also happens to be 128.
+        assertEquals(128, new DevnetConfig().getEvmSpec().getEvmStateHistoryWindow());
+        // Mainnet and testnet also carry the explicit 128 in their conf files.
+        assertEquals(128, new MainnetConfig().getEvmSpec().getEvmStateHistoryWindow());
+        assertEquals(128, new TestnetConfig().getEvmSpec().getEvmStateHistoryWindow());
+    }
+
+    @Test
     public void mainnet_and_testnet_default_to_disabled() {
         assertFalse(new MainnetConfig().getEvmSpec().isEvmEnabled());
         assertFalse(new TestnetConfig().getEvmSpec().isEvmEnabled());
