@@ -23,6 +23,7 @@
  */
 package io.xdag.evm.state;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
@@ -31,6 +32,8 @@ import static org.junit.Assert.assertTrue;
 
 import io.xdag.evm.EvmConfig;
 import io.xdag.evm.XdagEvmExecutor;
+import java.util.ArrayList;
+import java.util.List;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 import org.apache.tuweni.units.bigints.UInt256;
@@ -209,5 +212,74 @@ public class RocksDbWorldStateTest {
                 0L, reopened.getAccount(sender).getNonce());
         assertNull("a simulated deploy must not persist any contract account",
                 reopened.getAccount(Address.contractAddress(sender, 0L)));
+    }
+
+    @Test
+    public void commitAndDigestCapturesPriorValues() {
+        InMemoryKVSource store = new InMemoryKVSource();
+        Address addr = Address.fromHexString("0x00000000000000000000000000000000000000aa");
+
+        // Height 1: create the account (prior = absent). Capture its journal.
+        RocksDbWorldUpdater h1 = new RocksDbWorldUpdater(store);
+        h1.createAccount(addr, 0L, Wei.of(100));
+        List<EvmStateJournal.Entry> j1 = new ArrayList<>();
+        h1.commitAndDigest(j1);
+        // The account key must be journaled with a null (absent) prior value.
+        assertEquals(1, j1.size());
+        assertNull(j1.get(0).priorValue());
+
+        // Height 2: change the balance. The prior value must be the height-1 account record.
+        byte[] priorRecord = store.get(EvmStateSchema.accountKey(addr));
+        RocksDbWorldUpdater h2 = new RocksDbWorldUpdater(store);
+        h2.getAccount(addr).setBalance(Wei.of(250));
+        List<EvmStateJournal.Entry> j2 = new ArrayList<>();
+        h2.commitAndDigest(j2);
+        assertEquals(1, j2.size());
+        assertArrayEquals(EvmStateSchema.accountKey(addr), j2.get(0).key());
+        assertArrayEquals(priorRecord, j2.get(0).priorValue());
+    }
+
+    @Test
+    public void noArgCommitAndDigestStillReturnsSameDelta() {
+        InMemoryKVSource a = new InMemoryKVSource();
+        InMemoryKVSource b = new InMemoryKVSource();
+        Address addr = Address.fromHexString("0x00000000000000000000000000000000000000bb");
+
+        RocksDbWorldUpdater ua = new RocksDbWorldUpdater(a);
+        ua.createAccount(addr, 1L, Wei.of(5));
+        RocksDbWorldUpdater ub = new RocksDbWorldUpdater(b);
+        ub.createAccount(addr, 1L, Wei.of(5));
+
+        // The journaling overload must not change the digest the consensus root depends on.
+        assertEquals(ua.commitAndDigest(), ub.commitAndDigest(new ArrayList<>()));
+    }
+
+    @Test
+    public void commitAndDigestJournalsDeletedSlotPriorValue() {
+        // Exercises the `deletes` capture loop (distinct from the puts loop above): zeroing a stored
+        // slot removes its key, and the reverse-delta must record the slot's prior value so history
+        // can restore it. Touching the account also re-puts the account key, so the journal holds more
+        // than one entry — assert by locating the storage key, not by size.
+        InMemoryKVSource s = new InMemoryKVSource();
+        Address acct = Address.fromHexString("0x00000000000000000000000000000000000000cc");
+        UInt256 slot = UInt256.valueOf(3);
+
+        RocksDbWorldUpdater h1 = new RocksDbWorldUpdater(s);
+        h1.createAccount(acct, 0L, Wei.of(1)).setStorageValue(slot, UInt256.valueOf(11));
+        h1.commitAndDigest();
+
+        byte[] storageKey = EvmStateSchema.storageKey(acct, slot);
+        byte[] priorSlot = s.get(storageKey); // the height-1 encoded slot value
+        assertNotNull(priorSlot);
+
+        RocksDbWorldUpdater h2 = new RocksDbWorldUpdater(s);
+        h2.getAccount(acct).setStorageValue(slot, UInt256.ZERO); // zero -> routed into `deletes`
+        List<EvmStateJournal.Entry> j2 = new ArrayList<>();
+        h2.commitAndDigest(j2);
+
+        EvmStateJournal.Entry deleted = j2.stream()
+                .filter(e -> java.util.Arrays.equals(e.key(), storageKey))
+                .findFirst().orElseThrow();
+        assertArrayEquals(priorSlot, deleted.priorValue());
     }
 }

@@ -183,6 +183,17 @@ public class RocksDbWorldUpdater implements WorldUpdater {
      * {@link Bytes32#ZERO}; only the root commit touches the store.
      */
     public Bytes32 commitAndDigest() {
+        return commitAndDigest(null);
+    }
+
+    /**
+     * As {@link #commitAndDigest()}, but when {@code journalOut != null} also appends, for every state
+     * key this root commit writes or deletes, an {@link EvmStateJournal.Entry} holding the key's prior
+     * stored value (null = the key was absent). Captured before {@code batchWrite} overwrites anything,
+     * so it is the exact pre-image the C4 historical reader reverses. A child updater never touches the
+     * store, so it captures nothing. The digest returned is byte-identical to the no-arg overload.
+     */
+    public Bytes32 commitAndDigest(List<EvmStateJournal.Entry> journalOut) {
         if (parent != null) {
             // In-memory child: push changes up to the parent, exactly like SimpleWorld.
             accounts.forEach((address, account) -> {
@@ -238,6 +249,15 @@ public class RocksDbWorldUpdater implements WorldUpdater {
             }
         });
         Bytes32 delta = stateDelta(puts, deletes);
+        if (journalOut != null) {
+            // puts.keySet() and deletes are disjoint by construction, so each key is journaled once.
+            for (byte[] key : puts.keySet()) {
+                journalOut.add(new EvmStateJournal.Entry(key, store.get(key)));
+            }
+            for (byte[] key : deletes) {
+                journalOut.add(new EvmStateJournal.Entry(key, store.get(key)));
+            }
+        }
         store.batchWrite(puts, deletes);
         accounts = new HashMap<>();
         return delta;
