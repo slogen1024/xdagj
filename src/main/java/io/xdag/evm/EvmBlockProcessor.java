@@ -26,6 +26,7 @@ package io.xdag.evm;
 import io.xdag.db.rocksdb.KVSource;
 import io.xdag.evm.state.EvmMetaStore;
 import io.xdag.evm.state.EvmReceipt;
+import io.xdag.evm.state.EvmStateJournal;
 import io.xdag.evm.state.EvmStateSchema;
 import io.xdag.evm.state.RocksDbWorldUpdater;
 import io.xdag.evm.tx.EvmTransaction;
@@ -79,6 +80,10 @@ public class EvmBlockProcessor {
     private final EvmMetaStore metaStore;
     /** Genesis pre-funding seeded once into EVM_STATE by {@link #seedGenesisIfAbsent()} (on-ramp). */
     private final List<GenesisAllocEntry> genesisAlloc;
+    /** Reverse-delta journal for bounded historical state (C4); null disables history capture. */
+    private final EvmStateJournal journal;
+    /** How many recent heights of reverse journals to retain (C4 window). */
+    private final int historyWindow;
 
     /** Always-active processor (activation height 0), no genesis alloc — used by tests. */
     public EvmBlockProcessor(EvmConfig config, KVSource<byte[], byte[]> stateStore,
@@ -94,6 +99,13 @@ public class EvmBlockProcessor {
     public EvmBlockProcessor(EvmConfig config, KVSource<byte[], byte[]> stateStore,
                              EvmTxStore txStore, EvmMetaStore metaStore, long activationHeight,
                              List<GenesisAllocEntry> genesisAlloc) {
+        this(config, stateStore, txStore, metaStore, activationHeight, genesisAlloc, null, 0);
+    }
+
+    public EvmBlockProcessor(EvmConfig config, KVSource<byte[], byte[]> stateStore,
+                             EvmTxStore txStore, EvmMetaStore metaStore, long activationHeight,
+                             List<GenesisAllocEntry> genesisAlloc, EvmStateJournal journal,
+                             int historyWindow) {
         this.executor = new XdagEvmExecutor(config);
         this.chainId = config.chainId();
         this.blockGasLimit = config.maxGasLimit();
@@ -103,6 +115,8 @@ public class EvmBlockProcessor {
         this.txStore = txStore;
         this.metaStore = metaStore;
         this.genesisAlloc = List.copyOf(genesisAlloc);
+        this.journal = journal;
+        this.historyWindow = historyWindow;
     }
 
     /**
@@ -274,6 +288,9 @@ public class EvmBlockProcessor {
         log.info("EVM rollback to main height {}", height);
         metaStore.removeAbove(height);
         stateStore.reset();
+        if (journal != null) {
+            journal.clear(); // Option A: replay below repopulates the window from genesis
+        }
         seedGenesisIfAbsent(); // the reset wiped the marker + funded balances; restore before replay
         Bytes32 previousRoot = genesisRoot();
         for (long h : metaStore.txListHeights()) {
@@ -396,7 +413,15 @@ public class EvmBlockProcessor {
         // over exactly the (puts, deletes) this commit writes, so two nodes diverging on any balance or
         // storage — even with identical (txHash, status, gasUsed) — now produce different roots, which
         // the replay self-check in rollbackTo can detect.
-        digest.add(root.commitAndDigest());
+        List<EvmStateJournal.Entry> journalEntries = journal == null ? null : new ArrayList<>();
+        digest.add(root.commitAndDigest(journalEntries));
+        if (journal != null) {
+            // Persist this height's reverse delta and drop journals older than the retained window.
+            // Runs on normal execution AND reorg replay, so replayed heights regenerate journals.
+            journal.putHeightJournal(height, journalEntries);
+            long lowestRetained = height - historyWindow + 1; // inclusive: keep [lowestRetained, height]
+            journal.pruneBelow(lowestRetained);
+        }
         Bytes32 chainedRoot =
                 org.hyperledger.besu.crypto.Hash.keccak256(Bytes.concatenate(digest.toArray(new Bytes[0])));
         return new ExecutionOutcome(chainedRoot, executed);

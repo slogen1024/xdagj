@@ -30,6 +30,8 @@ import static org.junit.Assert.assertTrue;
 
 import io.xdag.evm.state.EvmMetaStore;
 import io.xdag.evm.state.EvmReceipt;
+import io.xdag.evm.state.EvmStateJournal;
+import io.xdag.evm.state.HistoricalStateReader;
 import io.xdag.evm.state.InMemoryKVSource;
 import io.xdag.evm.state.RocksDbWorldUpdater;
 import io.xdag.evm.tx.EvmTransaction;
@@ -48,6 +50,7 @@ import org.hyperledger.besu.datatypes.Wei;
 import org.hyperledger.besu.evm.EvmSpecVersion;
 import org.hyperledger.besu.evm.account.Account;
 import org.hyperledger.besu.evm.account.MutableAccount;
+import org.hyperledger.besu.evm.worldstate.WorldUpdater;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -580,6 +583,55 @@ public class EvmBlockProcessorTest {
 
         gated.processMainBlock(List.of(ref(deploy)), 5L, 1002L, BLOCK_HASH_2);
         assertEquals(1, (int) metaStore.getReceipt(deploy.getHash()).orElseThrow().status());
+    }
+
+    @Test
+    public void journalsEachHeightAndReadsHistoricalBalance() {
+        // C4: the processor records a reverse-delta journal per executed height so HistoricalStateReader
+        // can reconstruct a past balance. Fund SENDER at genesis, run two value transfers at heights 1
+        // and 2, then read SENDER's balance as it was at height 1 — it must equal the post-height-1
+        // balance, and be strictly below the genesis start (value moved + gas burned).
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmTxStore txs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        EvmStateJournal journal = new EvmStateJournal(new InMemoryKVSource());
+        // Oversized on purpose: the test runs at heights 1-2, so any window >= 2 behaves identically and
+        // pruning never triggers. One local keeps the processor and reader windows from drifting apart.
+        int historyWindow = 128;
+        EvmBlockProcessor proc = new EvmBlockProcessor(EvmConfig.devnet(), state, txs, meta, 0L,
+                List.of(new GenesisAllocEntry(sender, Wei.fromEth(1))), journal, historyWindow);
+        proc.seedGenesisIfAbsent();
+
+        BigInteger balanceStart = balanceOf(state, sender);
+        executeOneTransferAtHeight(proc, txs, 0L, 1L, BLOCK_HASH_1);
+        BigInteger balanceAfter1 = balanceOf(state, sender);
+        executeOneTransferAtHeight(proc, txs, 1L, 2L, BLOCK_HASH_2);
+
+        HistoricalStateReader reader = new HistoricalStateReader(state, journal, historyWindow);
+        WorldUpdater at1 = reader.worldAt(1L, 2L);
+        assertEquals("historical read at height 1 must equal the post-height-1 balance",
+                balanceAfter1, at1.getAccount(sender).getBalance().getAsBigInteger());
+        assertTrue("each transfer must reduce the sender's balance (value + gas)",
+                balanceAfter1.compareTo(balanceStart) < 0);
+    }
+
+    /** The sender's balance in {@code state}, read through a fresh root updater. */
+    private static BigInteger balanceOf(InMemoryKVSource state, Address address) {
+        return new RocksDbWorldUpdater(state).getAccount(address).getBalance().getAsBigInteger();
+    }
+
+    /**
+     * Stores a signed value transfer (nonce {@code nonce}, value 100 wei, 21000 gas) from {@code sender}
+     * and executes it as a single-tx main block at {@code height}, reusing the file's signing path so the
+     * sender's balance drops by value + gas.
+     */
+    private void executeOneTransferAtHeight(EvmBlockProcessor proc, EvmTxStore txs, long nonce, long height,
+                                            Bytes32 blockHash) {
+        Address recipient = Address.fromHexString("0x00000000000000000000000000000000000000aa");
+        EvmTransaction transfer = EvmTransaction.unsigned(nonce, Wei.of(1), 21_000L,
+                Optional.of(recipient), Wei.of(100), Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+        txs.put(transfer);
+        proc.processMainBlock(List.of(ref(transfer)), height, 1000L + height, blockHash);
     }
 
     @Test
