@@ -21,7 +21,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-package io.xdag.rpc.server.core;
+package io.xdag.rpc.ws;
 
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
@@ -35,59 +35,49 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
+import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler;
 import io.netty.handler.logging.LogLevel;
 import io.netty.handler.logging.LoggingHandler;
-import io.xdag.Kernel;
 import io.xdag.config.spec.RPCSpec;
-import io.xdag.rpc.api.XdagApi;
 import io.xdag.rpc.server.handler.AuthHandler;
 import io.xdag.rpc.server.handler.CorsHandler;
-import io.xdag.rpc.server.handler.JsonRpcHandler;
 import io.xdag.rpc.server.handler.JsonRpcRequestHandler;
 import lombok.extern.slf4j.Slf4j;
 
 import java.net.InetAddress;
 import java.util.List;
 
+/**
+ * WebSocket JSON-RPC server (C6), on {@code rpc.ws.port}. Mirrors the HTTP {@link
+ * io.xdag.rpc.server.core.JsonRpcServer} bootstrap; the pipeline runs the HTTP codec + CORS/auth for the
+ * upgrade handshake, then {@link WebSocketServerProtocolHandler} + {@link RpcWebSocketFrameHandler} for
+ * the persistent frame stream. Started only when {@code rpc.ws.enabled}. Node-local.
+ */
 @Slf4j
-public class JsonRpcServer {
+public class RpcWebSocketServer {
+
     private final RPCSpec rpcSpec;
-    private final XdagApi xdagApi;
-    private final Kernel kernel;
+    private final SubscriptionManager manager;
+    private final List<JsonRpcRequestHandler> handlers;
     private Channel channel;
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
 
-
-    public JsonRpcServer(final RPCSpec rpcSpec, final XdagApi xdagApi, final Kernel kernel) {
+    public RpcWebSocketServer(RPCSpec rpcSpec, SubscriptionManager manager,
+                              List<JsonRpcRequestHandler> handlers) {
         this.rpcSpec = rpcSpec;
-        this.xdagApi = xdagApi;
-        this.kernel = kernel;
+        this.manager = manager;
+        this.handlers = handlers;
     }
 
     public void start() {
         try {
-            // Create request handlers (shared with the WebSocket server via RpcHandlers.build).
-            List<JsonRpcRequestHandler> handlers = RpcHandlers.build(xdagApi, kernel);
-
-            // Create SSL context (if HTTPS is enabled)
-//            final SslContext sslCtx;
-//            if (rpcSpec.isRpcEnableHttps()) {
-//                File certFile = new File(rpcSpec.getRpcHttpsCertFile());
-//                File keyFile = new File(rpcSpec.getRpcHttpsKeyFile());
-//                if (!certFile.exists() || !keyFile.exists()) {
-//                    throw new RuntimeException("SSL certificate or key file not found");
-//                }
-//                sslCtx = SslContextBuilder.forServer(certFile, keyFile).build();
-//            } else {
-//                sslCtx = null;
-//            }
-
-            // Create event loop groups
+            // WS reuses the HTTP thread-pool sizing (and CORS/auth/aggregator config below); only the
+            // bind host/port are ws-specific. There is intentionally no separate rpc.ws.*.threads config.
             bossGroup = new MultiThreadIoEventLoopGroup(rpcSpec.getRpcHttpBossThreads(),
-                NioIoHandler.newFactory());
+                    NioIoHandler.newFactory());
             workerGroup = new MultiThreadIoEventLoopGroup(rpcSpec.getRpcHttpWorkerThreads(),
-                NioIoHandler.newFactory());
+                    NioIoHandler.newFactory());
 
             ServerBootstrap b = new ServerBootstrap();
             b.group(bossGroup, workerGroup)
@@ -98,30 +88,24 @@ public class JsonRpcServer {
                         @Override
                         protected void initChannel(SocketChannel ch) {
                             ChannelPipeline p = ch.pipeline();
-                            
-                            // SSL
-//                            if (sslCtx != null) {
-//                                p.addLast(sslCtx.newHandler(ch.alloc()));
-//                            }
-
-                            // HTTP codec
+                            // HTTP codec + aggregator: needed for the WebSocket upgrade handshake.
                             p.addLast(new HttpServerCodec());
-                            // HTTP message aggregator
                             p.addLast(new HttpObjectAggregator(rpcSpec.getRpcHttpMaxContentLength()));
-                            // CORS handler
+                            // CORS + auth gate the handshake GET; they pass WebSocket frames through
+                            // unchanged (both ignore non-HttpRequest messages).
                             p.addLast(new CorsHandler(rpcSpec.getRpcHttpCorsOrigins()));
-                            // API token gate: when a token is configured it rejects requests lacking a
-                            // valid bearer token. Placed after CorsHandler so OPTIONS preflight is not gated.
                             p.addLast(new AuthHandler(rpcSpec.getRpcHttpApiToken()));
-                            // JSON-RPC handler
-                            p.addLast(new JsonRpcHandler(rpcSpec, handlers));
+                            // WebSocket upgrade, then the JSON-RPC frame handler for the persistent stream.
+                            p.addLast(new WebSocketServerProtocolHandler("/"));
+                            p.addLast(new RpcWebSocketFrameHandler(manager, handlers));
                         }
                     });
-            log.info("---------HTTP Host:{}, HTTP Port:{}",rpcSpec.getRpcHttpHost(), rpcSpec.getRpcHttpPort());
-            channel = b.bind(InetAddress.getByName(rpcSpec.getRpcHttpHost()), rpcSpec.getRpcHttpPort()).sync().channel();
+            log.info("---------WS Host:{}, WS Port:{}", rpcSpec.getRpcWsHost(), rpcSpec.getRpcWsPort());
+            channel = b.bind(InetAddress.getByName(rpcSpec.getRpcWsHost()), rpcSpec.getRpcWsPort())
+                    .sync().channel();
         } catch (Exception e) {
             stop();
-            throw new RuntimeException("Failed to start JSON-RPC server", e);
+            throw new RuntimeException("Failed to start WebSocket RPC server", e);
         }
     }
 
