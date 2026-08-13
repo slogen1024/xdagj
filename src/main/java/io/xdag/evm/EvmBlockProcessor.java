@@ -44,6 +44,7 @@ import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 import org.hyperledger.besu.datatypes.Address;
 import org.hyperledger.besu.datatypes.Hash;
+import org.hyperledger.besu.datatypes.Log;
 import org.hyperledger.besu.datatypes.LogsBloomFilter;
 import org.hyperledger.besu.datatypes.Wei;
 import org.hyperledger.besu.evm.account.Account;
@@ -85,6 +86,12 @@ public class EvmBlockProcessor {
     private final EvmStateJournal journal;
     /** How many recent heights of reverse journals to retain (C4 window). */
     private final int historyWindow;
+    /** Optional late-bound observer for WebSocket subscriptions (C6); null when no WS server runs. */
+    private volatile EvmSubscriptionSink subscriptionSink;
+
+    public void setSubscriptionSink(EvmSubscriptionSink sink) {
+        this.subscriptionSink = sink;
+    }
 
     /** Always-active processor (activation height 0), no genesis alloc — used by tests. */
     public EvmBlockProcessor(EvmConfig config, KVSource<byte[], byte[]> stateStore,
@@ -276,8 +283,41 @@ public class EvmBlockProcessor {
         metaStore.putHeightRecord(height, outcome.root(), blockHash, outcome.executed().size(),
                 timestampSeconds);
         metaStore.putTxList(height, outcome.executed());
+        // C6: deliver this height's logs to the WS subscription layer (removed=false). Read the sink
+        // into a local so a concurrent setSubscriptionSink(null) cannot NPE mid-method.
+        EvmSubscriptionSink sink = subscriptionSink;
+        if (sink != null) {
+            List<EvmSubscriptionSink.LogRecord> records = collectLogRecords(height);
+            if (!records.isEmpty()) {
+                sink.onLogs(height, blockHash, records, false);
+            }
+        }
         log.info("EVM main block {}: executed {} tx(s), root {}", height, outcome.executed().size(),
                 outcome.root());
+    }
+
+    /**
+     * All of {@code height}'s emitted logs with their (txHash, txIndex, logIndex) coordinates. The
+     * numbering (txIndex per-tx, logIndex per-height across all logs) MUST match
+     * {@code EthRequestHandler.getLogs} so a WS {@code logs} subscription and {@code eth_getLogs} agree.
+     * Unlike getLogs this collects unconditionally — the SubscriptionManager applies the per-sub filter.
+     */
+    private List<EvmSubscriptionSink.LogRecord> collectLogRecords(long height) {
+        List<EvmSubscriptionSink.LogRecord> records = new ArrayList<>();
+        List<Hash> txHashes = metaStore.getTxList(height);
+        int logIndex = 0;
+        for (int i = 0; i < txHashes.size(); i++) {
+            Hash txHash = txHashes.get(i);
+            EvmReceipt receipt = metaStore.getReceipt(txHash).orElse(null);
+            if (receipt == null) {
+                continue;
+            }
+            for (Log log : receipt.logs()) {
+                records.add(new EvmSubscriptionSink.LogRecord(log, txHash, i, logIndex));
+                logIndex++;
+            }
+        }
+        return records;
     }
 
     /**
@@ -287,6 +327,23 @@ public class EvmBlockProcessor {
      */
     public synchronized void rollbackTo(long height) {
         log.info("EVM rollback to main height {}", height);
+        // C6: re-emit each reorged-out height's logs with removed=true, sourced from EVM_META BEFORE the
+        // wipe below deletes them, so re-filtering reproduces exactly the delivered set. Read the sink
+        // into a local first so a concurrent setSubscriptionSink(null) cannot NPE mid-method.
+        EvmSubscriptionSink sink = subscriptionSink;
+        if (sink != null) {
+            for (long h : metaStore.txListHeights()) {
+                if (h <= height) {
+                    continue;
+                }
+                List<EvmSubscriptionSink.LogRecord> records = collectLogRecords(h);
+                if (!records.isEmpty()) {
+                    Bytes32 revertedHash = metaStore.getHeightRecord(h)
+                            .map(EvmMetaStore.HeightRecord::blockHash).orElse(Bytes32.ZERO);
+                    sink.onLogs(h, revertedHash, records, true);
+                }
+            }
+        }
         metaStore.removeAbove(height);
         stateStore.reset();
         if (journal != null) {

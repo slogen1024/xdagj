@@ -39,6 +39,7 @@ import io.xdag.evm.tx.EvmTransaction;
 import io.xdag.evm.tx.EvmTxStore;
 import io.xdag.rpc.eth.LogFilter;
 import java.math.BigInteger;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -367,6 +368,38 @@ public class EvmBlockProcessorTest {
         assertEquals(List.of(call.getHash()), metaStore.getTxList(2L));
         assertNotEquals("chained roots must differ", rec1.stateRoot(), rec2.stateRoot());
         assertEquals(Optional.of(2L), metaStore.highestHeight());
+    }
+
+    @Test
+    public void forward_and_reverted_execution_fire_the_subscription_sink() {
+        // C6: executeAndCheckpoint fires onLogs(removed=false) for a height that emitted logs; a
+        // rollback re-emits each reorged-out height's logs with removed=true BEFORE the EVM_META wipe,
+        // sourced from the canonical store so re-filtering reproduces exactly the delivered set.
+        List<String> calls = new ArrayList<>();
+        processor.setSubscriptionSink(new EvmSubscriptionSink() {
+            @Override
+            public void onNewMainHead(long h, Bytes32 hash, long ts) {
+            }
+
+            @Override
+            public void onLogs(long h, Bytes32 hash, List<LogRecord> logs, boolean removed) {
+                calls.add("h=" + h + " removed=" + removed + " n=" + logs.size());
+            }
+        });
+
+        // Deploy the LOG0 contract (h1, no log) then CALL it (h2, emits one log).
+        EvmTransaction deploy = storedTx(0, Optional.empty(), LOG_INIT_CODE, 200_000L);
+        processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);
+        Address contract = metaStore.getReceipt(deploy.getHash()).orElseThrow().contractAddress().orElseThrow();
+        EvmTransaction call = storedTx(1, Optional.of(contract), Bytes.EMPTY, 100_000L);
+        processor.processMainBlock(List.of(ref(call)), 2L, 1002L, BLOCK_HASH_2);
+
+        // Forward: h2 fired onLogs(removed=false) with its 1 log. (h1 has no logs -> no forward call.)
+        assertTrue("forward onLogs at h2", calls.contains("h=2 removed=false n=1"));
+
+        // Reorg to height 1: h2's log must be re-emitted with removed=true BEFORE the wipe.
+        processor.rollbackTo(1);
+        assertTrue("reverted onLogs at h2", calls.contains("h=2 removed=true n=1"));
     }
 
     @Test

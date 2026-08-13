@@ -35,6 +35,7 @@ import io.xdag.core.XdagField.FieldType;
 import io.xdag.consensus.RandomX;
 import io.xdag.crypto.core.CryptoProvider;
 import io.xdag.evm.EvmBlockProcessor;
+import io.xdag.evm.EvmSubscriptionSink;
 import io.xdag.evm.state.EvmMetaStore;
 import io.xdag.crypto.encoding.Base58;
 import io.xdag.crypto.hash.HashUtils;
@@ -125,6 +126,13 @@ public class BlockchainImpl implements Blockchain {
     private final RandomX randomx;
     private final List<Listener> listeners = Lists.newArrayList();
     private ScheduledFuture<?> checkLoopFuture;
+
+    /** Optional late-bound observer for WebSocket subscriptions (C6); null when no WS server runs. */
+    private volatile EvmSubscriptionSink subscriptionSink;
+
+    public void setSubscriptionSink(EvmSubscriptionSink sink) {
+        this.subscriptionSink = sink;
+    }
 
     // Snapshot related fields
     private final long snapshotHeight;
@@ -1326,11 +1334,18 @@ public class BlockchainImpl implements Blockchain {
 
             // EVM finality is aligned with main-block confirmation (spec §7.1): execute the refs
             // collected during the DFS, in visit order, against the persisted EVM world state.
+            long timestampSeconds = XdagTime.xdagTimestampToMs(block.getTimestamp()) / 1000;
             EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
             if (evmProcessor != null && !evmRefs.isEmpty()) {
-                long timestampSeconds = XdagTime.xdagTimestampToMs(block.getTimestamp()) / 1000;
                 evmProcessor.processMainBlock(evmRefs, mainNumber, timestampSeconds,
                         Bytes32.wrap(block.getInfo().getHash()));
+            }
+            // C6: a new main block became canonical -> drive newHeads. Fires once per confirmed main
+            // block, independent of whether it carries EVM refs. Read the sink into a local so a
+            // concurrent setSubscriptionSink(null) cannot NPE mid-method.
+            EvmSubscriptionSink sink = subscriptionSink;
+            if (sink != null) {
+                sink.onNewMainHead(mainNumber, Bytes32.wrap(block.getInfo().getHash()), timestampSeconds);
             }
             // Main block REF points to itself
             // TODO: Add fee
