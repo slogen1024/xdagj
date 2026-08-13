@@ -123,4 +123,9 @@ public class RpcWebSocketServer {
             workerGroup = null;
         }
     }
+
+    /** The actual bound TCP port (useful when binding port 0); -1 before start()/after stop(). */
+    public int boundPort() {
+        return channel == null ? -1 : ((java.net.InetSocketAddress) channel.localAddress()).getPort();
+    }
 }
