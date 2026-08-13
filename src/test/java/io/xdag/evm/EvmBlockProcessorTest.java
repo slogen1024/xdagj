@@ -24,6 +24,7 @@
 package io.xdag.evm;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -36,8 +37,10 @@ import io.xdag.evm.state.InMemoryKVSource;
 import io.xdag.evm.state.RocksDbWorldUpdater;
 import io.xdag.evm.tx.EvmTransaction;
 import io.xdag.evm.tx.EvmTxStore;
+import io.xdag.rpc.eth.LogFilter;
 import java.math.BigInteger;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
@@ -46,6 +49,7 @@ import org.hyperledger.besu.crypto.KeyPair;
 import org.hyperledger.besu.crypto.SECP256K1;
 import org.hyperledger.besu.datatypes.Address;
 import org.hyperledger.besu.datatypes.Hash;
+import org.hyperledger.besu.datatypes.LogsBloomFilter;
 import org.hyperledger.besu.datatypes.Wei;
 import org.hyperledger.besu.evm.EvmSpecVersion;
 import org.hyperledger.besu.evm.account.Account;
@@ -63,6 +67,14 @@ public class EvmBlockProcessorTest {
     /** Initcode deploying runtime 0x602a600055 (SSTORE slot0 = 42 on every call). */
     private static final Bytes INIT_CODE = Bytes.fromHexString("0x64602a6000556000526005601bf3");
     private static final Bytes RUNTIME = Bytes.fromHexString("0x602a600055");
+
+    /**
+     * Initcode that returns the 6-byte runtime {@code 60006000a000} = PUSH1 0 (len) PUSH1 0 (offset)
+     * LOG0 STOP: every CALL to the deployed contract emits one topic-less log carrying the contract's
+     * address (enough to set the bloom's address bits). Constructor trace: PUSH1 0x06 PUSH1 0x0c PUSH1
+     * 0x00 CODECOPY (copy 6 runtime bytes from code offset 12 to mem 0) PUSH1 0x06 PUSH1 0x00 RETURN.
+     */
+    private static final Bytes LOG_INIT_CODE = Bytes.fromHexString("0x6006600c60003960066000f360006000a000");
     private static final BigInteger CHAIN_ID = BigInteger.valueOf(0xCAFE);
 
     private final SECP256K1 algo = new SECP256K1();
@@ -355,6 +367,33 @@ public class EvmBlockProcessorTest {
         assertEquals(List.of(call.getHash()), metaStore.getTxList(2L));
         assertNotEquals("chained roots must differ", rec1.stateRoot(), rec2.stateRoot());
         assertEquals(Optional.of(2L), metaStore.highestHeight());
+    }
+
+    @Test
+    public void executeList_writes_a_height_bloom_covering_emitted_logs() {
+        // Deploy the LOG0 contract at height 1 (constructor emits nothing), then CALL it at height 2 so
+        // its runtime emits a log. Height 1's bloom must be all-zero (no logs); height 2's bloom must
+        // cover the emitted log's address and reject an unrelated one.
+        EvmTransaction deploy = storedTx(0, Optional.empty(), LOG_INIT_CODE, 200_000L);
+        processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);
+        Address contract = metaStore.getReceipt(deploy.getHash()).orElseThrow().contractAddress().orElseThrow();
+
+        EvmTransaction call = storedTx(1, Optional.of(contract), Bytes.EMPTY, 100_000L);
+        processor.processMainBlock(List.of(ref(call)), 2L, 1002L, BLOCK_HASH_2);
+        EvmReceipt callReceipt = metaStore.getReceipt(call.getHash()).orElseThrow();
+        assertEquals("call must succeed", 1, callReceipt.status());
+        assertFalse("the LOG0 runtime must emit a log", callReceipt.logs().isEmpty());
+
+        // Height 1 (deploy, no logs) -> present, all-zero bloom.
+        Bytes bloom1 = metaStore.getHeightBloom(1).orElseThrow();
+        assertTrue("no-log height -> zero bloom", bloom1.isZero());
+
+        // Height 2 -> bloom covers the emitting contract's address, rejects an unrelated address.
+        LogsBloomFilter hb2 = new LogsBloomFilter(metaStore.getHeightBloom(2).orElseThrow());
+        LogFilter present = LogFilter.parse(Map.of("address", contract.toHexString()));
+        LogFilter absent = LogFilter.parse(Map.of("address", "0x000000000000000000000000000000000000dead"));
+        assertTrue("bloom must cover the emitting contract's address", present.couldMatch(hb2));
+        assertFalse("bloom must reject an unrelated address", absent.couldMatch(hb2));
     }
 
     @Test

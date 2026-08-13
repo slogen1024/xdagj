@@ -44,6 +44,7 @@ import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 import org.hyperledger.besu.datatypes.Address;
 import org.hyperledger.besu.datatypes.Hash;
+import org.hyperledger.besu.datatypes.LogsBloomFilter;
 import org.hyperledger.besu.datatypes.Wei;
 import org.hyperledger.besu.evm.account.Account;
 import org.hyperledger.besu.evm.account.MutableAccount;
@@ -385,6 +386,7 @@ public class EvmBlockProcessor {
         digest.add(previousRoot);
         digest.add(Bytes.ofUnsignedLong(height)); // Phase 2: commit which height executed, not just outcomes
         List<Hash> executed = new ArrayList<>(txHashes.size());
+        LogsBloomFilter.Builder bloomBuilder = LogsBloomFilter.builder();
         long gasBudget = blockGasLimit;
         for (Hash txHash : txHashes) {
             Bytes blob = txStore.get(txHash).orElse(null);
@@ -404,6 +406,7 @@ public class EvmBlockProcessor {
             }
             EvmReceipt receipt = executeOne(root, blob, height, timestampSeconds);
             metaStore.putReceipt(txHash, receipt);
+            receipt.logs().forEach(bloomBuilder::insertLog);
             executed.add(txHash);
             digest.add(Bytes.concatenate(txHash.getBytes(),
                     Bytes.of((byte) receipt.status()),
@@ -422,6 +425,9 @@ public class EvmBlockProcessor {
             long lowestRetained = height - historyWindow + 1; // inclusive: keep [lowestRetained, height]
             journal.pruneBelow(lowestRetained);
         }
+        // C5: persist this height's logs bloom so eth_getLogs can skip it without reading receipts.
+        // Runs on normal execution AND reorg replay (like receipts), so replayed heights regenerate it.
+        metaStore.putHeightBloom(height, bloomBuilder.build().getBytes());
         Bytes32 chainedRoot =
                 org.hyperledger.besu.crypto.Hash.keccak256(Bytes.concatenate(digest.toArray(new Bytes[0])));
         return new ExecutionOutcome(chainedRoot, executed);
