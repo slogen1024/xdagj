@@ -261,4 +261,40 @@ public class RpcTransportE2ETest {
                 + "0x" + "77".repeat(32) + "\"]}");
         assertEquals(0, none.size());
     }
+
+    @Test
+    public void ws_logs_subscription_forward_removed_and_newHeads() throws Exception {
+        // Deploy the LOG0 contract (h1) so we know its address for the logs filter.
+        EvmTransaction deploy = mineTx(0, Optional.empty(), LOG0_INIT, 1L);
+        String contract = rpc("eth_getTransactionReceipt", quote(deploy.getHash().getBytes().toHexString()))
+                .get("contractAddress").asText();
+
+        BlockingQueue<String> frames = new LinkedBlockingQueue<>();
+        WebSocket sock = openWs(frames);
+        sock.sendText("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_subscribe\",\"params\":[\"logs\",{"
+                + "\"address\":" + quote(contract) + "}]}", true);
+        String subReply = frames.poll(5, TimeUnit.SECONDS);
+        assertTrue("logs subscribe id", subReply != null && subReply.contains("\"result\":\"0x"));
+
+        // Call the contract (h2) -> a removed:false log notification is pushed over the WS.
+        mineTx(1, Optional.of(Address.fromHexString(contract)), Bytes.EMPTY, 2L);
+        String fwd = frames.poll(5, TimeUnit.SECONDS);
+        assertTrue("forward log notification", fwd != null && fwd.contains("\"method\":\"eth_subscription\"")
+                && fwd.contains("\"removed\":false"));
+
+        // Reorg to h1 -> h2's log is re-emitted removed:true (before the EVM_META wipe).
+        proc.rollbackTo(1);
+        String reverted = frames.poll(5, TimeUnit.SECONDS);
+        assertTrue("reverted log notification", reverted != null && reverted.contains("\"removed\":true"));
+
+        // newHeads: subscribe, then drive a head event -> a header frame with the height arrives.
+        sock.sendText("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"eth_subscribe\",\"params\":[\"newHeads\"]}",
+                true);
+        frames.poll(5, TimeUnit.SECONDS); // the subscribe reply
+        mgr.onNewMainHead(7, Bytes32.fromHexString("0x" + "cd".repeat(32)), 12345L);
+        String head = frames.poll(5, TimeUnit.SECONDS);
+        assertTrue("newHeads notification", head != null && head.contains("\"number\":\"0x7\""));
+
+        sock.abort();
+    }
 }
