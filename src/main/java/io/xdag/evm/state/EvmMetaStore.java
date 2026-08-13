@@ -40,6 +40,7 @@ import org.hyperledger.besu.datatypes.Hash;
  *   0x02 | mainHeight(8 BE) -> concatenated txHash(32) execution order (reorg replay script)
  *   0x03 | mainHeight(8 BE) -> deferred (I4) pending block: blockHash(32) | timestamp(8 BE) | refs
  *   0x04 | txHash(32)       -> mainHeight(8 BE) | index(4 BE)  (reverse index for eth_getTransaction*)
+ *   0x05 | mainHeight(8 BE) -> 256-byte logs bloom (C5 eth_getLogs skip index; advisory, not consensus)
  * </pre>
  *
  * Height records are the reorg checkpoints: {@link #removeAbove(long)} truncates everything past a
@@ -54,9 +55,12 @@ public class EvmMetaStore {
     private static final byte PREFIX_PENDING = 0x03;
     /** Reverse index txHash -> (height, index) so eth_getTransaction* resolves in one point lookup. */
     private static final byte PREFIX_TX_LOCATION = 0x04;
+    /** Per-height 256-byte Ethereum logs bloom (C5): height -> OR of that height's logs' address+topics. */
+    private static final byte PREFIX_LOG_BLOOM = 0x05;
     private static final int HEIGHT_RECORD_LENGTH = 32 + 32 + 4 + 8;
     private static final int PENDING_HEADER_LENGTH = 32 + 8; // blockHash(32) | timestampSeconds(8)
     private static final int LOCATION_RECORD_LENGTH = 8 + 4; // height(8 BE) | index(4 BE)
+    private static final int LOG_BLOOM_LENGTH = 256; // fixed Ethereum logs-bloom width (2048 bits)
 
     private final KVSource<byte[], byte[]> store;
 
@@ -219,6 +223,12 @@ public class EvmMetaStore {
         return key;
     }
 
+    private static byte[] bloomKey(long height) {
+        byte[] key = heightKey(height);
+        key[0] = PREFIX_LOG_BLOOM;
+        return key;
+    }
+
     /** Records a main block whose EVM execution is deferred until its blobs arrive (I4). */
     public void putPending(long height, Bytes32 blockHash, long timestampSeconds, List<Bytes32> refs) {
         Bytes[] parts = new Bytes[refs.size() + 2];
@@ -263,8 +273,8 @@ public class EvmMetaStore {
     }
 
     /**
-     * Deletes every height record, tx list, per-tx receipt, reverse-index entry, and pending record
-     * strictly above {@code height} (reorg truncation). Receipts and reverse-index entries must go
+     * Deletes every height record, tx list, per-tx receipt, reverse-index entry, pending record, and
+     * logs bloom strictly above {@code height} (reorg truncation). Receipts and reverse-index entries must go
      * too, otherwise a reorged-out tx keeps advertising a stale success/contract-address through
      * {@link #getReceipt} or a stale (height, index) through {@link #findTxLocation}.
      */
@@ -288,6 +298,11 @@ public class EvmMetaStore {
                 store.delete(key);
             }
         }
+        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_LOG_BLOOM})) {
+            if (heightFromKey(key) > height) {
+                store.delete(key);
+            }
+        }
     }
 
     public void putReceipt(Hash txHash, EvmReceipt receipt) {
@@ -297,5 +312,23 @@ public class EvmMetaStore {
     public Optional<EvmReceipt> getReceipt(Hash txHash) {
         byte[] raw = store.get(receiptKey(txHash));
         return raw == null ? Optional.empty() : Optional.of(EvmReceipt.fromRlp(Bytes.wrap(raw)));
+    }
+
+    /** Stores the height's 256-byte logs bloom (C5 skip index). Advisory: never consensus data. */
+    public void putHeightBloom(long height, Bytes bloom) {
+        store.put(bloomKey(height), bloom.toArray());
+    }
+
+    /**
+     * The height's logs bloom, or empty when none was recorded (legacy height) OR the stored value is
+     * not exactly 256 bytes (corrupt optimization artifact). Empty means "fall back to the receipt scan"
+     * — an advisory index must never fail a query, unlike the fail-fast receipt/height-record readers.
+     */
+    public Optional<Bytes> getHeightBloom(long height) {
+        byte[] raw = store.get(bloomKey(height));
+        if (raw == null || raw.length != LOG_BLOOM_LENGTH) {
+            return Optional.empty();
+        }
+        return Optional.of(Bytes.wrap(raw));
     }
 }

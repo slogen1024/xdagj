@@ -23,6 +23,7 @@
  */
 package io.xdag.evm.state;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -156,5 +157,52 @@ public class EvmMetaStoreTest {
         assertEquals(0, loaded.status());
         assertTrue(loaded.contractAddress().isEmpty());
         assertTrue(loaded.logs().isEmpty());
+    }
+
+    @Test
+    public void height_bloom_round_trips_and_absent_is_empty() {
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        byte[] bloom = new byte[256];
+        bloom[3] = 0x40;
+        bloom[200] = (byte) 0x81;
+        meta.putHeightBloom(7, Bytes.wrap(bloom));
+
+        assertTrue(meta.getHeightBloom(7).isPresent());
+        assertArrayEquals(bloom, meta.getHeightBloom(7).orElseThrow().toArray());
+        assertTrue("absent height -> empty", meta.getHeightBloom(9).isEmpty());
+    }
+
+    @Test
+    public void wrong_length_bloom_is_treated_as_absent() {
+        // A corrupt/short bloom is an optimization artifact, NOT a consensus record: it must degrade to
+        // empty (fallback scan), never throw like the receipt/height-record readers do.
+        InMemoryKVSource store = new InMemoryKVSource();
+        EvmMetaStore meta = new EvmMetaStore(store);
+        meta.putHeightBloom(4, Bytes.wrap(new byte[256]));
+        // Overwrite the stored value with a wrong-length blob at the same key.
+        store.put(bloomKeyForTest(4), new byte[]{1, 2, 3});
+        assertTrue(meta.getHeightBloom(4).isEmpty());
+    }
+
+    @Test
+    public void remove_above_clears_height_blooms() {
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        meta.putHeightBloom(1, Bytes.wrap(new byte[256]));
+        meta.putHeightBloom(2, Bytes.wrap(new byte[256]));
+        meta.putHeightBloom(3, Bytes.wrap(new byte[256]));
+        meta.removeAbove(1);
+        assertTrue(meta.getHeightBloom(1).isPresent());
+        assertTrue(meta.getHeightBloom(2).isEmpty());
+        assertTrue(meta.getHeightBloom(3).isEmpty());
+    }
+
+    /** Mirrors EvmMetaStore's private bloomKey layout (0x05 | height 8-byte BE) for the corrupt-value test. */
+    private static byte[] bloomKeyForTest(long height) {
+        byte[] key = new byte[9];
+        key[0] = 0x05;
+        for (int i = 0; i < 8; i++) {
+            key[1 + i] = (byte) (height >>> (56 - 8 * i));
+        }
+        return key;
     }
 }
