@@ -47,6 +47,9 @@ import io.xdag.pool.WebSocketServer;
 import io.xdag.pool.PoolAwardManagerImpl;
 import io.xdag.rpc.api.XdagApi;
 import io.xdag.rpc.api.impl.XdagApiImpl;
+import io.xdag.rpc.server.core.RpcHandlers;
+import io.xdag.rpc.ws.RpcWebSocketServer;
+import io.xdag.rpc.ws.SubscriptionManager;
 import io.xdag.utils.XdagTime;
 import lombok.Getter;
 import lombok.Setter;
@@ -113,6 +116,10 @@ public class Kernel {
 
     // RPC related components
     protected XdagApi api;
+
+    // WebSocket subscription server + sink (C6), null unless rpc.ws.enabled for this network.
+    protected SubscriptionManager subscriptionManager;
+    protected RpcWebSocketServer rpcWebSocketServer;
 
     public Kernel(Config config, Wallet wallet) {
         this.config = config;
@@ -294,6 +301,23 @@ public class Kernel {
         api = new XdagApiImpl(this);
         api.start();
 
+        // Start the WebSocket subscription server (C6). Guarded on rpc.ws.enabled so a disabled node
+        // builds nothing and injects no sink (byte-identical to the pre-C6 path). Wired here — after
+        // both blockchain and evmBlockProcessor are constructed — so the sink is injected into already
+        // live components; the WS server shares the same XdagApi + handler list as the HTTP server.
+        if (config.getRPCSpec().isRpcWsEnabled()) {
+            subscriptionManager = new SubscriptionManager();
+            // blockchain is always the concrete BlockchainImpl (constructed above); the sink setter is
+            // not on the Blockchain interface, so cast to reach it.
+            ((BlockchainImpl) blockchain).setSubscriptionSink(subscriptionManager); // newHeads
+            if (evmBlockProcessor != null) {
+                evmBlockProcessor.setSubscriptionSink(subscriptionManager); // logs (only when EVM enabled)
+            }
+            rpcWebSocketServer = new RpcWebSocketServer(config.getRPCSpec(), subscriptionManager,
+                    RpcHandlers.build(api, this));
+            rpcWebSocketServer.start();
+        }
+
         // Start Telnet Server
         telnetServer = new TelnetServer(this);
         telnetServer.start();
@@ -314,6 +338,11 @@ public class Kernel {
         // Stop Api
         if (api != null) {
             api.stop();
+        }
+
+        // Stop the WebSocket subscription server (C6); null unless rpc.ws.enabled.
+        if (rpcWebSocketServer != null) {
+            rpcWebSocketServer.stop();
         }
 
         // Stop consensus (null-guarded so testStop works after a partial start)
