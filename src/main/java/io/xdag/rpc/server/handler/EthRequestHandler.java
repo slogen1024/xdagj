@@ -38,6 +38,7 @@ import io.xdag.evm.tx.EvmTxStore;
 import io.xdag.evm.tx.IntrinsicGas;
 import io.xdag.rpc.eth.EthHex;
 import io.xdag.rpc.eth.EthObjects;
+import io.xdag.rpc.eth.LogFilter;
 import io.xdag.rpc.error.JsonRpcException;
 import io.xdag.rpc.server.protocol.JsonRpcRequest;
 import java.math.BigInteger;
@@ -54,6 +55,7 @@ import org.apache.tuweni.units.bigints.UInt256;
 import org.hyperledger.besu.datatypes.Address;
 import org.hyperledger.besu.datatypes.Hash;
 import org.hyperledger.besu.datatypes.Log;
+import org.hyperledger.besu.datatypes.LogsBloomFilter;
 import org.hyperledger.besu.datatypes.Wei;
 import org.hyperledger.besu.evm.account.Account;
 import org.hyperledger.besu.evm.worldstate.WorldUpdater;
@@ -364,11 +366,14 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
         if (to - from + 1 > maxLogScanRange) {
             throw JsonRpcException.invalidParams("log query range exceeds " + maxLogScanRange + " blocks");
         }
-        Set<Address> addressFilter = parseAddressFilter(filter.get("address"));
-        List<Bytes32> topic0 = parseTopic0(filter.get("topics"));
+        LogFilter logFilter = LogFilter.parse(filter);
 
         List<Object> out = new ArrayList<>();
         for (long height = from; height <= Math.min(to, head) && evmMetaStore != null; height++) {
+            Optional<Bytes> bloom = evmMetaStore.getHeightBloom(height);
+            if (bloom.isPresent() && !logFilter.couldMatch(new LogsBloomFilter(bloom.get()))) {
+                continue; // bloom proves no log at this height can match — skip the receipt reads
+            }
             List<Hash> txHashes = evmMetaStore.getTxList(height);
             String blockHash = txHashes.isEmpty() ? null : blockHashAt(height);
             int logIndex = 0;
@@ -379,7 +384,7 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
                     continue;
                 }
                 for (Log log : receipt.get().logs()) {
-                    if (matches(log, addressFilter, topic0)) {
+                    if (logFilter.matches(log)) {
                         out.add(EthObjects.log(log, height, blockHash, txHash, i, logIndex));
                     }
                     logIndex++;
@@ -387,51 +392,6 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
             }
         }
         return out;
-    }
-
-    private Set<Address> parseAddressFilter(Object address) {
-        if (address == null) {
-            return Set.of();
-        }
-        Set<Address> set = new java.util.HashSet<>();
-        if (address instanceof List<?> list) {
-            for (Object a : list) {
-                set.add(EthHex.decodeAddress((String) a));
-            }
-        } else {
-            set.add(EthHex.decodeAddress((String) address));
-        }
-        return set;
-    }
-
-    /** v1: only topic[0] is filtered (exact match); a null/absent topics list matches everything. */
-    private List<Bytes32> parseTopic0(Object topics) {
-        if (!(topics instanceof List<?> list) || list.isEmpty() || list.get(0) == null) {
-            return List.of();
-        }
-        Object first = list.get(0);
-        List<Bytes32> out = new ArrayList<>();
-        if (first instanceof List<?> alts) {
-            for (Object t : alts) {
-                out.add(Bytes32.wrap(EthHex.decodeData((String) t)));
-            }
-        } else {
-            out.add(Bytes32.wrap(EthHex.decodeData((String) first)));
-        }
-        return out;
-    }
-
-    private boolean matches(Log log, Set<Address> addresses, List<Bytes32> topic0) {
-        if (!addresses.isEmpty() && !addresses.contains(log.getLogger())) {
-            return false;
-        }
-        if (!topic0.isEmpty()) {
-            if (log.getTopics().isEmpty()) {
-                return false;
-            }
-            return topic0.contains(Bytes32.wrap(log.getTopics().get(0).getBytes()));
-        }
-        return true;
     }
 
     /** The latest executed EVM height (state anchor); 0 when no EVM tx has executed (genesis only). */

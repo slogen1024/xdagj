@@ -45,6 +45,7 @@ import io.xdag.rpc.error.JsonRpcException;
 import io.xdag.rpc.server.protocol.JsonRpcRequest;
 import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -58,6 +59,7 @@ import org.hyperledger.besu.datatypes.Address;
 import org.hyperledger.besu.datatypes.Hash;
 import org.hyperledger.besu.datatypes.Log;
 import org.hyperledger.besu.datatypes.LogTopic;
+import org.hyperledger.besu.datatypes.LogsBloomFilter;
 import org.hyperledger.besu.datatypes.Wei;
 import org.hyperledger.besu.evm.account.MutableAccount;
 import org.junit.Before;
@@ -449,5 +451,79 @@ public class EthRequestHandlerTest {
         wide.put("fromBlock", "0x0");
         wide.put("toBlock", "0x2000"); // 8192 > 1024
         assertThrows(JsonRpcException.class, () -> h.handle(request("eth_getLogs", wide)));
+    }
+
+    // C5 eth_getLogs: full positional topic matching + per-height bloom skip. SIG stands in for an event
+    // signature (topic[0]); ALICE/BOB are indexed-address args left-padded to 32-byte topics (topic[1]).
+    private static final Address EMITTER =
+            Address.fromHexString("0x4444444444444444444444444444444444444444");
+    private static final Bytes32 SIG = Bytes32.fromHexString("0x" + "11".repeat(32));
+    private static final Bytes32 ALICE = Bytes32.fromHexString("0x" + "22".repeat(32));
+    private static final Bytes32 BOB = Bytes32.fromHexString("0x" + "33".repeat(32));
+    private static final Bytes32 OTHER_SIG = Bytes32.fromHexString("0x" + "99".repeat(32));
+
+    /** Seeds one height with a single-tx receipt carrying one log (emitter + given topics) AND its bloom. */
+    private void seedLogHeight(EvmMetaStore metaStore, long height, EvmTransaction txForHash,
+                               Address emitter, Bytes32... topics) {
+        Log log = new Log(emitter, Bytes.EMPTY, Arrays.stream(topics).map(LogTopic::wrap).toList());
+        Hash txHash = txForHash.getHash();
+        metaStore.putTxList(height, List.of(txHash));
+        metaStore.putReceipt(txHash, new EvmReceipt(1, 21_000L, Optional.empty(), List.of(log)));
+        metaStore.putHeightBloom(height, LogsBloomFilter.builder().insertLog(log).build().getBytes());
+    }
+
+    @Test
+    public void eth_getLogs_filters_on_an_indexed_topic1() throws Exception {
+        InMemoryKVSource stateStore = new InMemoryKVSource();
+        EvmTxStore txStore = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore metaStore = new EvmMetaStore(new InMemoryKVSource());
+        EvmTransaction txA = signedTx(0, BigInteger.valueOf(0xCAFE));
+        EvmTransaction txB = signedTx(1, BigInteger.valueOf(0xCAFE));
+        seedLogHeight(metaStore, 1L, txA, EMITTER, SIG, ALICE);
+        seedLogHeight(metaStore, 2L, txB, EMITTER, SIG, BOB);
+        EthRequestHandler h = queryHandler(stateStore, txStore, metaStore, 10L);
+
+        // topics = [SIG, ALICE] must match ONLY height 1 (topic[0]-only would have matched both).
+        Object result = h.handle(request("eth_getLogs", java.util.Map.of(
+                "fromBlock", "0x1", "toBlock", "0x2",
+                "topics", List.of(SIG.toHexString(), ALICE.toHexString()))));
+        assertEquals(1, ((List<?>) result).size());
+    }
+
+    @Test
+    public void eth_getLogs_skips_a_non_matching_bloom_height() throws Exception {
+        InMemoryKVSource stateStore = new InMemoryKVSource();
+        EvmTxStore txStore = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore metaStore = new EvmMetaStore(new InMemoryKVSource());
+        EvmTransaction txA = signedTx(0, BigInteger.valueOf(0xCAFE));
+        EvmTransaction txB = signedTx(1, BigInteger.valueOf(0xCAFE));
+        seedLogHeight(metaStore, 1L, txA, EMITTER, SIG, ALICE);
+        seedLogHeight(metaStore, 2L, txB,
+                Address.fromHexString("0x000000000000000000000000000000000000beef"), OTHER_SIG);
+        EthRequestHandler h = queryHandler(stateStore, txStore, metaStore, 10L);
+
+        // Filter for SIG over [1,2]: height 2's bloom (only beef+OTHER_SIG) cannot match -> skipped.
+        Object result = h.handle(request("eth_getLogs", java.util.Map.of(
+                "fromBlock", "0x1", "toBlock", "0x2", "topics", List.of(SIG.toHexString()))));
+        assertEquals(1, ((List<?>) result).size());
+    }
+
+    @Test
+    public void eth_getLogs_falls_back_when_a_height_has_no_bloom() throws Exception {
+        InMemoryKVSource stateStore = new InMemoryKVSource();
+        EvmTxStore txStore = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore metaStore = new EvmMetaStore(new InMemoryKVSource());
+        EvmTransaction txA = signedTx(0, BigInteger.valueOf(0xCAFE));
+        // Seed a matching receipt but OMIT its bloom so getHeightBloom is empty.
+        Hash txHash = txA.getHash();
+        Log log = new Log(EMITTER, Bytes.EMPTY, List.of(LogTopic.wrap(SIG)));
+        metaStore.putTxList(1L, List.of(txHash));
+        metaStore.putReceipt(txHash, new EvmReceipt(1, 21_000L, Optional.empty(), List.of(log)));
+        // NO putHeightBloom -> getHeightBloom empty -> fallback scan must still find the log.
+        EthRequestHandler h = queryHandler(stateStore, txStore, metaStore, 10L);
+
+        Object result = h.handle(request("eth_getLogs", java.util.Map.of(
+                "fromBlock", "0x1", "toBlock", "0x1", "topics", List.of(SIG.toHexString()))));
+        assertEquals(1, ((List<?>) result).size());
     }
 }
