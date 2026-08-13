@@ -65,4 +65,22 @@ public interface RPCSpec {
 
     String getRpcHttpsKeyFile();
 
+    /**
+     * Check if RPC WebSocket server is enabled
+     * @return Boolean indicating if RPC WebSocket endpoint is enabled
+     */
+    boolean isRpcWsEnabled();
+
+    /**
+     * Get the host address for RPC WebSocket server
+     * @return String containing the RPC WebSocket server host address
+     */
+    String getRpcWsHost();
+
+    /**
+     * Get the port number for RPC WebSocket server
+     * @return Integer containing the RPC WebSocket server port number
+     */
+    int getRpcWsPort();
+
 }

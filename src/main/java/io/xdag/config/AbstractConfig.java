@@ -146,6 +146,10 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected int rpcHttpBossThreads = 1;
     protected int rpcHttpWorkerThreads = 4; // 0 means use Netty default (2 * CPU cores)
 
+    // RPC WebSocket configuration
+    protected boolean rpcWsEnabled = false;
+    protected String rpcWsHost = "127.0.0.1";
+    protected int rpcWsPort = 10002;
 
     // Snapshot configuration
     protected boolean snapshotEnabled = false;
@@ -425,6 +429,10 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
                         + "or bind rpc.http.host to 127.0.0.1.", rpcHttpHost);
             }
         }
+        // RPC WebSocket configuration
+        rpcWsEnabled = config.hasPath("rpc.ws.enabled") && config.getBoolean("rpc.ws.enabled");
+        rpcWsHost = config.hasPath("rpc.ws.host") ? config.getString("rpc.ws.host") : rpcWsHost;
+        rpcWsPort = config.hasPath("rpc.ws.port") ? config.getInt("rpc.ws.port") : rpcWsPort;
         flag = config.hasPath("randomx.flags.fullmem") && config.getBoolean("randomx.flags.fullmem");
 
     }
@@ -560,6 +568,15 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
 
     @Override
     public String getRpcHttpsKeyFile() {return rpcHttpsKeyFile;}
+
+    @Override
+    public boolean isRpcWsEnabled() {return rpcWsEnabled;}
+
+    @Override
+    public String getRpcWsHost() {return rpcWsHost;}
+
+    @Override
+    public int getRpcWsPort() {return rpcWsPort;}
 
     @Override
     public boolean isSnapshotEnabled() {

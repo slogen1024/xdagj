@@ -26,10 +26,12 @@ package io.xdag.config;
 
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_HEAD_TEST;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Before;
 import org.junit.Test;
 
+import io.xdag.config.spec.RPCSpec;
 import io.xdag.core.XUnit;
 
 public class DevnetConfigTest {
@@ -39,6 +41,14 @@ public class DevnetConfigTest {
     @Before
     public void setUp() {
         config = new DevnetConfig();
+    }
+
+    @Test
+    public void devnet_reads_rpc_ws_section() {
+        RPCSpec rpc = config.getRPCSpec();
+        assertTrue(rpc.isRpcWsEnabled());
+        assertEquals("127.0.0.1", rpc.getRpcWsHost());
+        assertEquals(10002, rpc.getRpcWsPort());
     }
 
     @Test
