@@ -1,0 +1,15 @@
+{
+  "name": "xdag-hardhat-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hardhat E2E for the XDAG devnet EVM JSON-RPC",
+  "scripts": {
+    "compile": "hardhat compile",
+    "deploy": "hardhat run scripts/deploy.js --network xdagDevnet",
+    "e2e": "hardhat test --network xdagDevnet"
+  },
+  "devDependencies": {
+    "hardhat": "^2.22.0",
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0"
+  }
+}
