@@ -228,4 +228,37 @@ public class RpcTransportE2ETest {
         assertTrue("subscribe returns a 0x id", reply != null && reply.contains("\"result\":\"0x"));
         sock.abort(); // JDK HttpClient has no close() on 17; abort the socket so it doesn't linger
     }
+
+    @Test
+    public void http_deploy_call_getLogs_and_historical_balance() throws Exception {
+        String eoa = KEY1_SENDER.toHexString();
+        // Genesis balance over HTTP: Wei.fromEth(1) = 1e18 wei = 0xde0b6b3a7640000.
+        assertEquals("\"0xde0b6b3a7640000\"",
+                rpc("eth_getBalance", quote(eoa), quote("latest")).toString());
+
+        // Deploy the LOG0 contract (h1); read the receipt over HTTP.
+        EvmTransaction deploy = mineTx(0, Optional.empty(), LOG0_INIT, 1L);
+        JsonNode receipt = rpc("eth_getTransactionReceipt", quote(deploy.getHash().getBytes().toHexString()));
+        assertEquals("\"0x1\"", receipt.get("status").toString());
+        String contract = receipt.get("contractAddress").asText();
+
+        // Call it (h2) -> one log. getLogs by the contract address returns exactly one, removed=false.
+        mineTx(1, Optional.of(Address.fromHexString(contract)), Bytes.EMPTY, 2L);
+        JsonNode logs = rpc("eth_getLogs",
+                "{\"fromBlock\":\"0x1\",\"toBlock\":\"0x2\",\"address\":" + quote(contract) + "}");
+        assertEquals(1, logs.size());
+        assertEquals("\"" + contract + "\"", logs.get(0).get("address").toString());
+        assertEquals("false", logs.get(0).get("removed").toString());
+
+        // Historical block tag (C4): balance at height 1 exceeds latest — gas was paid between h1 and h2.
+        String atOne = rpc("eth_getBalance", quote(eoa), quote("0x1")).asText();
+        String atLatest = rpc("eth_getBalance", quote(eoa), quote("latest")).asText();
+        assertTrue("historical (h1) balance must exceed latest (gas paid at h2)",
+                new BigInteger(atOne.substring(2), 16).compareTo(new BigInteger(atLatest.substring(2), 16)) > 0);
+
+        // A topic filter the LOG0 (topic-less) log cannot satisfy returns nothing (full positional filter, C5).
+        JsonNode none = rpc("eth_getLogs", "{\"fromBlock\":\"0x1\",\"toBlock\":\"0x2\",\"topics\":[\""
+                + "0x" + "77".repeat(32) + "\"]}");
+        assertEquals(0, none.size());
+    }
 }
