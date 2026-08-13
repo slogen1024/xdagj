@@ -30,7 +30,9 @@ import static org.junit.Assert.assertTrue;
 
 import io.xdag.core.Block;
 import io.xdag.core.Blockchain;
+import io.xdag.evm.EvmBlockProcessor;
 import io.xdag.evm.EvmConfig;
+import io.xdag.evm.GenesisAllocEntry;
 import io.xdag.evm.state.EvmMetaStore;
 import io.xdag.evm.state.EvmReceipt;
 import io.xdag.evm.state.EvmStateJournal;
@@ -138,8 +140,7 @@ public class EthRequestHandlerTest {
 
     private void fundSender(InMemoryKVSource stateStore) {
         RocksDbWorldUpdater w = new RocksDbWorldUpdater(stateStore);
-        w.createAccount(Address.fromHexString("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"),
-                0L, Wei.fromEth(1));
+        w.createAccount(KEY1_SENDER, 0L, Wei.fromEth(1));
         w.commit();
     }
 
@@ -525,5 +526,57 @@ public class EthRequestHandlerTest {
         Object result = h.handle(request("eth_getLogs", java.util.Map.of(
                 "fromBlock", "0x1", "toBlock", "0x1", "topics", List.of(SIG.toHexString()))));
         assertEquals(1, ((List<?>) result).size());
+    }
+
+    /** Initcode returning runtime `60006000a000` (PUSH1 0 PUSH1 0 LOG0 STOP): every CALL emits one
+     *  topic-less log carrying the contract's address. See EvmBlockProcessorTest for the byte trace. */
+    private static final Bytes LOG0_INIT = Bytes.fromHexString("0x6006600c60003960066000f360006000a000");
+    private static final Address KEY1_SENDER =
+            Address.fromHexString("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf");
+
+    /** Signs a private-key-1 tx (nonce, to, payload), stores it, executes it at {@code height}, and
+     *  asserts it succeeded — so a silent revert localizes here, not as a confusing later log-count. */
+    private EvmTransaction execAt(EvmTxStore txStore, EvmMetaStore metaStore, EvmBlockProcessor proc,
+                                  long nonce, Optional<Address> to, Bytes payload, long height) {
+        SECP256K1 algo = new SECP256K1();
+        KeyPair key = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
+        EvmTransaction tx = EvmTransaction.unsigned(nonce, Wei.ONE, 200_000L, to, Wei.ZERO, payload,
+                BigInteger.valueOf(0xCAFE)).sign(key, algo);
+        txStore.put(tx);
+        proc.processMainBlock(List.of(Bytes32.wrap(tx.getHash().getBytes())), height, 1000L + height,
+                Bytes32.leftPad(Bytes.ofUnsignedLong(height)));
+        assertEquals("execAt: execution at height " + height + " must succeed", 1,
+                metaStore.getReceipt(tx.getHash()).orElseThrow().status());
+        return tx;
+    }
+
+    @Test
+    public void eth_getLogs_reflects_real_execution_and_survives_a_reorg() {
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmTxStore txStore = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore metaStore = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor proc = new EvmBlockProcessor(EvmConfig.devnet(), state, txStore, metaStore, 0L,
+                List.of(new GenesisAllocEntry(KEY1_SENDER, Wei.fromEth(1))));
+        proc.seedGenesisIfAbsent();
+
+        // Deploy the LOG0 contract (h1, no log) then CALL it (h2, emits a log => real bloom at h2).
+        EvmTransaction deploy = execAt(txStore, metaStore, proc, 0, Optional.empty(), LOG0_INIT, 1L);
+        Address contract = metaStore.getReceipt(deploy.getHash()).orElseThrow().contractAddress().orElseThrow();
+        execAt(txStore, metaStore, proc, 1, Optional.of(contract), Bytes.EMPTY, 2L);
+
+        EthRequestHandler h = queryHandler(state, txStore, metaStore, 2L);
+        Map<String, Object> byContract = Map.of("fromBlock", "0x1", "toBlock", "0x2",
+                "address", contract.toHexString());
+
+        // The emitted log is found (its height-2 bloom does not skip it).
+        assertEquals(1, ((List<?>) h.handle(request("eth_getLogs", byContract))).size());
+
+        // Reorg to height 1: height-2 receipt + bloom removed -> the query now finds nothing.
+        proc.rollbackTo(1);
+        assertEquals(0, ((List<?>) h.handle(request("eth_getLogs", byContract))).size());
+
+        // Re-execute a new height-2 call (nonce back to 1 after replay) -> bloom regenerated -> found again.
+        execAt(txStore, metaStore, proc, 1, Optional.of(contract), Bytes.EMPTY, 2L);
+        assertEquals(1, ((List<?>) h.handle(request("eth_getLogs", byContract))).size());
     }
 }
