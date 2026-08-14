@@ -112,7 +112,7 @@ public class RpcTransportE2ETest {
         mgr = new SubscriptionManager();
         proc.setSubscriptionSink(mgr);
 
-        EvmTxPool txPool = new EvmTxPool(new EvmTxStore(new InMemoryKVSource()), state,
+        EvmTxPool txPool = new EvmTxPool(txStore, state,
                 CHAIN_ID, 30_000_000L, Wei.ONE, 3600L, () -> 1000L);
 
         // --- mocked Blockchain / ChannelManager / Kernel (avoids booting a full node) ---
