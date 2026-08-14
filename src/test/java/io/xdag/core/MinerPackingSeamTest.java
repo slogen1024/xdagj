@@ -194,8 +194,8 @@ public class MinerPackingSeamTest {
 
         // Query the receipt through the eth handler over the same stores (C3 write->query loop).
         io.xdag.rpc.server.handler.EthRequestHandler h = new io.xdag.rpc.server.handler.EthRequestHandler(
-                evmStateSource, EvmConfig.devnet(), BigInteger.ONE, blockchain, evmTxPool, null,
-                evmTxStore, evmMetaStore, 1024L);
+                EvmConfig.devnet(), BigInteger.ONE, blockchain, evmTxPool, null,
+                evmTxStore, evmMetaStore, 1024L, null);
         io.xdag.rpc.server.protocol.JsonRpcRequest req = new io.xdag.rpc.server.protocol.JsonRpcRequest();
         req.setMethod("eth_getTransactionReceipt");
         req.setParams(new Object[]{deployTx.getHash().getBytes().toHexString()});
