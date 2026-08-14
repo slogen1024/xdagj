@@ -40,7 +40,10 @@ C4（历史状态）、C5（getLogs bloom + 全 topic）、C6（WebSocket 订阅
   `~/Library/Java/JavaVirtualMachines/`——与现有 ms-17 安装模式一致；不用 brew、不用 sudo，
   整目录删除即可回滚；
 - 构建仅以会话级 `JAVA_HOME` 指向 JDK 21，不改系统默认 Java；
-- Maven 用现有 `/usr/local` 下的 3.9.x。
+- Maven：本机 `/usr/local` 实为 3.6.3（计划阶段核实，不满足 3.9.x 要求），
+  故另装 Apache Maven 3.9.9 到 `~/tools/`（同样用户目录、可整目录删除回滚）；
+- 按仓库既定机制注册 `~/.m2/toolchains.xml`（源自 `misc/toolchains.xml`，
+  jdkHome 指向新装 Temurin 21；pom 的 maven-toolchains-plugin 强制要求该注册）。
 
 ## 3. 失败处置策略
 
