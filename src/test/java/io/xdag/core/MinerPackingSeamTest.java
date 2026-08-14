@@ -46,6 +46,8 @@ import io.xdag.db.rocksdb.RocksdbFactory;
 import io.xdag.evm.EvmBlockProcessor;
 import io.xdag.evm.EvmConfig;
 import io.xdag.evm.state.EvmMetaStore;
+import io.xdag.evm.state.EvmStateJournal;
+import io.xdag.evm.state.HistoricalStateReader;
 import io.xdag.evm.state.InMemoryKVSource;
 import io.xdag.evm.state.RocksDbWorldUpdater;
 import io.xdag.evm.tx.EvmTransaction;
@@ -195,7 +197,8 @@ public class MinerPackingSeamTest {
         // Query the receipt through the eth handler over the same stores (C3 write->query loop).
         io.xdag.rpc.server.handler.EthRequestHandler h = new io.xdag.rpc.server.handler.EthRequestHandler(
                 EvmConfig.devnet(), BigInteger.ONE, blockchain, evmTxPool, null,
-                evmTxStore, evmMetaStore, 1024L, null);
+                evmTxStore, evmMetaStore, 1024L,
+                new HistoricalStateReader(evmStateSource, new EvmStateJournal(new InMemoryKVSource()), 128));
         io.xdag.rpc.server.protocol.JsonRpcRequest req = new io.xdag.rpc.server.protocol.JsonRpcRequest();
         req.setMethod("eth_getTransactionReceipt");
         req.setParams(new Object[]{deployTx.getHash().getBytes().toHexString()});
