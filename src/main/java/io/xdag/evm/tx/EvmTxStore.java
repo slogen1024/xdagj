@@ -24,9 +24,15 @@
 package io.xdag.evm.tx;
 
 import io.xdag.db.rocksdb.KVSource;
+import java.util.List;
 import java.util.Optional;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.tuweni.bytes.Bytes;
+import org.apache.tuweni.bytes.Bytes32;
 import org.hyperledger.besu.datatypes.Hash;
+import org.hyperledger.besu.ethereum.rlp.BytesValueRLPOutput;
+import org.hyperledger.besu.ethereum.rlp.RLP;
+import org.hyperledger.besu.ethereum.rlp.RLPInput;
 
 /**
  * The EVM_TX store: signed EIP-155 RLP blobs keyed by transaction hash (spec §4.2).
@@ -36,6 +42,7 @@ import org.hyperledger.besu.datatypes.Hash;
  * Writes are idempotent — the key is the keccak256 of the value, so re-putting the same blob is a
  * no-op by construction.
  */
+@Slf4j
 public class EvmTxStore {
 
     private static final byte PREFIX_TX = 0x00;
@@ -74,5 +81,65 @@ public class EvmTxStore {
 
     public void remove(Hash txHash) {
         store.delete(txKey(txHash));
+    }
+
+    /** Batch bodies (spec §5): 0x01 | keccak256(body) -> RLP list of 32-byte tx hashes. */
+    private static final byte PREFIX_BATCH = 0x01;
+
+    /** Hard cap on txs per batch (spec §2); an over-sized crafted body reads as a miss. */
+    public static final int MAX_BATCH_TXS = 1024;
+
+    private static byte[] batchKey(Hash batchHash) {
+        return Bytes.concatenate(Bytes.of(PREFIX_BATCH), batchHash.getBytes()).toArray();
+    }
+
+    /** Canonical batch-body encoding: an RLP list of the ordered 32-byte tx hashes. */
+    public static Bytes encodeBatch(List<Bytes32> txHashes) {
+        BytesValueRLPOutput out = new BytesValueRLPOutput();
+        out.startList();
+        txHashes.forEach(out::writeBytes);
+        out.endList();
+        return out.encoded();
+    }
+
+    /** Stores a batch body content-addressed; returns its commitment hash. Idempotent. */
+    public Hash putBatch(Bytes body) {
+        Hash batchHash = Hash.hash(body);
+        store.put(batchKey(batchHash), body.toArray());
+        return batchHash;
+    }
+
+    public Optional<Bytes> getBatchRaw(Hash batchHash) {
+        byte[] raw = store.get(batchKey(batchHash));
+        return raw == null ? Optional.empty() : Optional.of(Bytes.wrap(raw));
+    }
+
+    public boolean containsBatch(Hash batchHash) {
+        return store.get(batchKey(batchHash)) != null;
+    }
+
+    /**
+     * Decodes a stored batch body into its ordered tx hashes. A malformed, empty, or over-sized
+     * body reads as a miss (with a warning) — this is the execution-side clamp on crafted
+     * batches (spec §5/§9).
+     */
+    public Optional<List<Bytes32>> getBatch(Hash batchHash) {
+        Optional<Bytes> raw = getBatchRaw(batchHash);
+        if (raw.isEmpty()) {
+            return Optional.empty();
+        }
+        try {
+            RLPInput in = RLP.input(raw.get());
+            List<Bytes32> hashes = in.readList(RLPInput::readBytes32);
+            if (hashes.isEmpty() || hashes.size() > MAX_BATCH_TXS) {
+                log.warn("Batch {} has {} entries (allowed 1..{}); treating as miss",
+                        batchHash, hashes.size(), MAX_BATCH_TXS);
+                return Optional.empty();
+            }
+            return Optional.of(hashes);
+        } catch (RuntimeException e) {
+            log.warn("Batch {} body is malformed ({}); treating as miss", batchHash, e.toString());
+            return Optional.empty();
+        }
     }
 }
