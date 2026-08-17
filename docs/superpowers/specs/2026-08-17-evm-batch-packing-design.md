@@ -22,8 +22,14 @@
 
 ## 2. 字段与承诺语义
 
-- 激活后（确认主块 `height ≥ evm.batchActivationHeight`）矿工产出的 0x0F 字段值
+- 激活后（待产主块高度 ≥ `evm.batchActivationHeight`）矿工产出的 0x0F 字段值
   = `keccak256(RLP([txHash0, txHash1, …]))`（批次承诺）。
+- **激活高度只门控矿工侧产出**；执行侧对（EVM 激活后的）所有 ref **始终 dual-lookup**。
+  这是确定性安全的：一个 32 字节值不可能既是 keccak(签名交易 RLP) 又是
+  keccak(批次体)（等价于 keccak 碰撞），解释由数据唯一决定。好处是消除激活边界的
+  活性陷阱——若解释按高度切换而矿工对确认高度预判偏差一格，承诺会被当作 tx hash
+  等待一个永不存在的 blob，永久停摆。（计划阶段修正：spec 初稿的"激活后才 dual-lookup"
+  收紧为本条。）
 - 0x0F 的编码/解析/构造三处（`Block.java` 11 参构造器 / `getEncodedBody` / `parse`）
   **一概不动**——字段仍是原样 32 字节，只有语义随高度切换。
 - 执行期展开用 **dual-lookup**：先按批次体查（§5），miss 则按 legacy 单 tx blob 解释。
@@ -63,9 +69,10 @@
 
 - EVM_TX 列族新增批次体记录：`key = keccak256(body)`，`value = body`
   （body = RLP 编码的 32 字节 tx hash 平铺列表）。
-- 与 tx blob 同库共存、**不加前缀**：两类记录都满足 key = keccak256(value) 内容寻址；
-  preimage 形状不同（9 元素签名交易列表 vs 32 字节串平铺列表）且读取永远按意图走
-  `getBatch` / `getTx`，无歧义。
+- 键布局顺存储既有约定（现有 tx 记录 key = `0x00‖txHash`）：批次体 key = **`0x01‖batchHash`**
+  （`PREFIX_BATCH = 0x01`）。内容寻址不受影响（batchHash = keccak256(body)）；
+  前缀域隔离让两类记录永不同键。（计划阶段修正：spec 初稿写"不加前缀"，
+  是因为当时未核实 EvmTxStore 已用前缀键。）
 - 新 API：`putBatch(hash, body)` / `getBatch(hash) → Optional<List<Bytes32>>`
   （get 内部校验 RLP 形状且条目数 ≤ `MAX_BATCH_TXS`，坏形状或超限一律按 miss 处理并告警
   ——这就是执行侧对恶意超大 crafted 批的落点，§9 三重钳制之一）。
