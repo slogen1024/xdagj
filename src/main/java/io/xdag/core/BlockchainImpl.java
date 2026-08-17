@@ -1483,6 +1483,9 @@ public class BlockchainImpl implements Blockchain {
         if (CollectionUtils.isNotEmpty(orphans)) {
             refs.addAll(orphans);
         }
+        // Predict this block's height as nmain+1; the confirmed height may differ after a reorg, but
+        // the executor's dual-lookup (EvmBlockProcessor.expandRefs) is content-addressed — it accepts
+        // both ref forms at any height — so a boundary mis-prediction is liveness-safe.
         long nextHeight = xdagStats.nmain + 1;
         boolean batchFork = nextHeight >= kernel.getConfig().getEvmSpec().getEvmBatchActivationHeight();
         Bytes32 evmTxRef = batchFork ? selectEvmBatch(16 - res - orphans.size())
@@ -1525,7 +1528,7 @@ public class BlockchainImpl implements Blockchain {
      */
     private Bytes32 selectEvmBatch(int freeFields) {
         try {
-            if (freeFields < 1 || kernel.getEvmTxPool() == null || kernel.getEvmTxStore() == null) {
+            if (freeFields < 1 || kernel.getEvmTxPool() == null || kernel.getEvmTxStore() == null) { // batch store required for putBatch; the legacy path needs no store
                 return null;
             }
             long gasBudget = kernel.getConfig().getEvmSpec().getEvmBlockGasLimit();

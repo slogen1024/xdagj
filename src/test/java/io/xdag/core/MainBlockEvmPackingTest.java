@@ -273,6 +273,7 @@ public class MainBlockEvmPackingTest {
 
     @Test
     public void already_executed_tx_is_not_packed() {
+        // Exercises the batch-fork path: stopped-set drains the only tx so selectEvmBatch returns null.
         EvmTransaction tx = pooledTx(evmKey, 0);
         evmMetaStore.putReceipt(tx.getHash(), new EvmReceipt(1, 21_000L, Optional.empty(), List.of()));
         assertNull("a tx with a receipt must not be re-packed", blockchain.createMainBlock().getEvmTxRef());
