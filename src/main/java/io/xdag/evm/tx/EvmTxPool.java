@@ -134,8 +134,9 @@ public class EvmTxPool {
             return AddResult.UNDERPRICED;
         }
 
-        // Account checks against the CURRENT persisted world state. A fresh root updater per call:
-        // read-only usage, nothing is committed.
+        // Account checks against the CURRENT persisted world state. Deliberately opens a fresh
+        // read-only root updater per call (same pattern as selectBatch's shared snapshot): balance
+        // must be read atomically alongside nonce, and nothing is committed.
         Account account = new RocksDbWorldUpdater(evmStateStore).getAccount(sender);
         long accountNonce = account == null ? 0L : account.getNonce();
         Wei balance = account == null ? Wei.ZERO : account.getBalance();
@@ -255,15 +256,19 @@ public class EvmTxPool {
      * (descending, insertion order breaking ties), nonces strictly ascending within a sender
      * starting at the account nonce (a head gap disqualifies the sender), a tx that exceeds the
      * remaining budget stops its sender (no nonce holes), until the budget, the cap, or the pool
-     * is exhausted. Expired entries stop their sender's run. Does not mutate the pool.
+     * is exhausted. An expired entry encountered mid-run truncates the run at that point.
+     * Does not mutate the pool.
      */
     public synchronized List<EvmTransaction> selectBatch(long gasBudget, int maxTxs) {
         long now = clockSeconds.getAsLong();
         List<EvmTransaction> selected = new ArrayList<>();
         long remaining = gasBudget;
         List<Deque<EvmTransaction>> runs = new ArrayList<>();
+        // One shared read-only root updater for all sender nonce lookups in this snapshot.
+        RocksDbWorldUpdater snapshot = new RocksDbWorldUpdater(evmStateStore);
         for (Map.Entry<Address, NavigableMap<Long, PoolEntry>> e : bySender.entrySet()) {
-            long accountNonce = currentNonce(e.getKey());
+            Account acct = snapshot.getAccount(e.getKey());
+            long accountNonce = acct == null ? 0L : acct.getNonce();
             Deque<EvmTransaction> run = new ArrayDeque<>();
             long expected = accountNonce;
             for (PoolEntry entry : e.getValue().tailMap(accountNonce, true).values()) {
@@ -299,11 +304,6 @@ public class EvmTxPool {
             remaining -= tx.getGasLimit();
         }
         return selected;
-    }
-
-    private long currentNonce(Address sender) {
-        Account account = new RocksDbWorldUpdater(evmStateStore).getAccount(sender);
-        return account == null ? 0L : account.getNonce();
     }
 
     // ---- helpers ----

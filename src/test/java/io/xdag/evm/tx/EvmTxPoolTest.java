@@ -392,6 +392,60 @@ public class EvmTxPoolTest {
     }
 
     @Test
+    public void select_batch_breaks_price_ties_by_insertion_order() {
+        // Two senders with the SAME gasPrice; X added before Y → batch order [X's tx, Y's tx].
+        KeyPair keyX = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(30)));
+        KeyPair keyY = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(31)));
+        Address addrX = Address.extract(keyX.getPublicKey());
+        Address addrY = Address.extract(keyY.getPublicKey());
+        fund(addrX, Wei.fromEth(1), 0L);
+        fund(addrY, Wei.fromEth(1), 0L);
+
+        Wei samePrice = Wei.of(5_000_000_000L);
+        EvmTransaction txX = tx(keyX, 0, samePrice);
+        EvmTransaction txY = tx(keyY, 0, samePrice);
+
+        // X inserted first, Y second — insertion order must break the tie.
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(txX.getRawRlp()));
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(txY.getRawRlp()));
+
+        List<EvmTransaction> batch = pool.selectBatch(Long.MAX_VALUE);
+        assertEquals(2, batch.size());
+        assertEquals("X (inserted first) should come before Y on a price tie",
+                addrX, batch.get(0).getSender());
+        assertEquals(addrY, batch.get(1).getSender());
+    }
+
+    @Test
+    public void select_batch_truncates_a_run_at_an_expired_entry() {
+        // Sender queues nonce=1 first (while it is fresh), then the clock advances past TTL,
+        // then nonce=0 is added (still fresh). The nonce=0 entry starts the run but nonce=1 is
+        // expired mid-run, so the run is truncated: only nonce=0 is selected.
+        Wei gasPrice = Wei.of(2_000_000_000L);
+        // Fund enough to cover both nonces.
+        BigInteger singleCost = BigInteger.ONE
+                .add(BigInteger.valueOf(21_000L).multiply(BigInteger.valueOf(2_000_000_000L)));
+        fund(sender, Wei.of(singleCost.multiply(BigInteger.TWO)), 0L);
+
+        // Add nonce=1 early (clock=1000).
+        EvmTransaction txNonce1 = tx(key, 1, gasPrice);
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(txNonce1.getRawRlp()));
+
+        // Advance clock past TTL so nonce=1 is now expired.
+        clock[0] += 3601L;
+
+        // Add nonce=0 at the new time (still fresh relative to its addedAtSeconds).
+        EvmTransaction txNonce0 = tx(key, 0, gasPrice);
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(txNonce0.getRawRlp()));
+
+        // selectBatch: nonce=0 starts the run; nonce=1 is expired → run truncates after nonce=0.
+        List<EvmTransaction> batch = pool.selectBatch(Long.MAX_VALUE);
+        assertEquals("only nonce=0 should be selected; expired nonce=1 truncates the run",
+                1, batch.size());
+        assertEquals(0L, batch.get(0).getNonce());
+    }
+
+    @Test
     public void stale_entries_are_pruned_when_the_account_nonce_advances() {
         Wei gasPrice = Wei.of(2_000_000_000L);
         BigInteger singleCost = BigInteger.ONE
