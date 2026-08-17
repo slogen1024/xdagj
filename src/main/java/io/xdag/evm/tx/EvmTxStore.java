@@ -37,7 +37,10 @@ import org.hyperledger.besu.ethereum.rlp.RLPInput;
 /**
  * The EVM_TX store: signed EIP-155 RLP blobs keyed by transaction hash (spec §4.2).
  *
- * <pre>  0x00 | txHash(32) -> raw signed RLP</pre>
+ * <pre>
+ *   0x00 | txHash(32)    -> raw signed RLP blob
+ *   0x01 | batchHash(32) -> RLP list of 32-byte tx hashes (batch D2)
+ * </pre>
  *
  * Writes are idempotent — the key is the keccak256 of the value, so re-putting the same blob is a
  * no-op by construction.
@@ -46,6 +49,10 @@ import org.hyperledger.besu.ethereum.rlp.RLPInput;
 public class EvmTxStore {
 
     private static final byte PREFIX_TX = 0x00;
+    /** Batch bodies (spec §5): 0x01 | keccak256(body) -> RLP list of 32-byte tx hashes. */
+    private static final byte PREFIX_BATCH = 0x01;
+    /** Hard cap on txs per batch (spec §2); an over-sized crafted body reads as a miss. */
+    public static final int MAX_BATCH_TXS = 1024;
 
     private final KVSource<byte[], byte[]> store;
 
@@ -83,12 +90,6 @@ public class EvmTxStore {
         store.delete(txKey(txHash));
     }
 
-    /** Batch bodies (spec §5): 0x01 | keccak256(body) -> RLP list of 32-byte tx hashes. */
-    private static final byte PREFIX_BATCH = 0x01;
-
-    /** Hard cap on txs per batch (spec §2); an over-sized crafted body reads as a miss. */
-    public static final int MAX_BATCH_TXS = 1024;
-
     private static byte[] batchKey(Hash batchHash) {
         return Bytes.concatenate(Bytes.of(PREFIX_BATCH), batchHash.getBytes()).toArray();
     }
@@ -109,11 +110,13 @@ public class EvmTxStore {
         return batchHash;
     }
 
+    /** Raw body bytes for a stored batch; empty if the hash is unknown. */
     public Optional<Bytes> getBatchRaw(Hash batchHash) {
         byte[] raw = store.get(batchKey(batchHash));
         return raw == null ? Optional.empty() : Optional.of(Bytes.wrap(raw));
     }
 
+    /** True if a batch body is stored under this commitment hash. */
     public boolean containsBatch(Hash batchHash) {
         return store.get(batchKey(batchHash)) != null;
     }
@@ -138,7 +141,7 @@ public class EvmTxStore {
             }
             return Optional.of(hashes);
         } catch (RuntimeException e) {
-            log.warn("Batch {} body is malformed ({}); treating as miss", batchHash, e.toString());
+            log.warn("Batch {} body is malformed ({}); treating as miss", batchHash, e.getMessage());
             return Optional.empty();
         }
     }

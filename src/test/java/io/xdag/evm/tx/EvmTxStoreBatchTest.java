@@ -23,7 +23,9 @@
  */
 package io.xdag.evm.tx;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import io.xdag.evm.state.InMemoryKVSource;
 import java.util.List;
@@ -68,14 +70,29 @@ public class EvmTxStoreBatchTest {
     }
 
     @Test
-    public void malformed_or_oversized_body_reads_as_miss() {
+    public void malformed_body_reads_as_miss() {
         Bytes bad = Bytes.fromHexString("0xdeadbeef"); // not an RLP list
         Hash badHash = store.putBatch(bad);
         assertTrue(store.getBatch(badHash).isEmpty());
+    }
+
+    @Test
+    public void oversized_body_reads_as_miss() {
+        // 1025 entries (one over cap) must be a miss
         List<Bytes32> tooMany = IntStream.rangeClosed(1, EvmTxStore.MAX_BATCH_TXS + 1)
                 .mapToObj(EvmTxStoreBatchTest::h).toList();
         Hash bigHash = store.putBatch(EvmTxStore.encodeBatch(tooMany));
         assertTrue(store.getBatch(bigHash).isEmpty());
+
+        // exactly 1024 entries must succeed
+        List<Bytes32> atCap = IntStream.rangeClosed(1, EvmTxStore.MAX_BATCH_TXS)
+                .mapToObj(EvmTxStoreBatchTest::h).toList();
+        Hash capHash = store.putBatch(EvmTxStore.encodeBatch(atCap));
+        assertTrue(store.getBatch(capHash).isPresent());
+    }
+
+    @Test
+    public void empty_body_reads_as_miss() {
         Hash emptyHash = store.putBatch(EvmTxStore.encodeBatch(List.of()));
         assertTrue(store.getBatch(emptyHash).isEmpty());
     }
