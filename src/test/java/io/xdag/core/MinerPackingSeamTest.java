@@ -194,6 +194,70 @@ public class MinerPackingSeamTest {
     }
 
     @Test
+    public void a_batched_main_block_confirms_multiple_txs_end_to_end() {
+        // Second sender: private key = 2. Its Ethereum address is derived from the public key.
+        KeyPair evmKey2 = algo.createKeyPair(algo.createPrivateKey(BigInteger.TWO));
+        Address evmSender2 = Address.extract(evmKey2.getPublicKey());
+
+        // Fund both senders: sender1 needs enough for 3 txs (200_000 gas * Wei.ONE * 3), sender2 for 1.
+        // Wei.fromEth(1) covers any reasonable gas cost in these tests.
+        RocksDbWorldUpdater w = new RocksDbWorldUpdater(evmStateSource);
+        w.createAccount(evmSender2, 0L, Wei.fromEth(1));
+        w.commit();
+
+        // Three consecutive txs from sender1 (nonces 0, 1, 2) — value transfers to a dummy address.
+        Address dummy = Address.fromHexString("0x1111111111111111111111111111111111111111");
+        for (long nonce = 0; nonce <= 2; nonce++) {
+            EvmTransaction tx = EvmTransaction.unsigned(nonce, Wei.ONE, 200_000L,
+                    Optional.of(dummy), Wei.ZERO, Bytes.EMPTY, BigInteger.valueOf(0xCAFE))
+                    .sign(evmKey, algo);
+            evmTxStore.put(tx);
+            assertEquals("sender1 nonce " + nonce + " must be ADDED",
+                    EvmTxPool.AddResult.ADDED, evmTxPool.add(tx.getRawRlp()));
+        }
+        // One tx from sender2 (nonce 0).
+        EvmTransaction tx2 = EvmTransaction.unsigned(0L, Wei.ONE, 200_000L,
+                Optional.of(dummy), Wei.ZERO, Bytes.EMPTY, BigInteger.valueOf(0xCAFE))
+                .sign(evmKey2, algo);
+        evmTxStore.put(tx2);
+        assertEquals("sender2 nonce 0 must be ADDED",
+                EvmTxPool.AddResult.ADDED, evmTxPool.add(tx2.getRawRlp()));
+
+        // The miner builds a main block — with batchActivationHeight=0, it must produce a batch commitment.
+        Block mainBlock = blockchain.createMainBlock();
+        assertNotNull("main block must carry an evmTxRef", mainBlock.getEvmTxRef());
+        var batchOpt = evmTxStore.getBatch(org.hyperledger.besu.datatypes.Hash.wrap(mainBlock.getEvmTxRef()));
+        assertTrue("ref must resolve as a batch", batchOpt.isPresent());
+        assertEquals("batch must contain exactly 4 txs", 4, batchOpt.get().size());
+
+        // Execute the batch through the real processor (mirrors what setMain calls).
+        evmBlockProcessor.processMainBlock(List.of(mainBlock.getEvmTxRef()), 1L, 1001L,
+                Bytes32.wrap(mainBlock.getHashLow()));
+
+        // All 4 receipts must exist with status 1 (value transfers succeed).
+        List<Bytes32> batchMembers = batchOpt.get();
+        for (Bytes32 memberHash : batchMembers) {
+            org.hyperledger.besu.datatypes.Hash h = org.hyperledger.besu.datatypes.Hash.wrap(memberHash);
+            var receipt = evmMetaStore.getReceipt(h);
+            assertTrue("receipt must be present for " + h, receipt.isPresent());
+            assertEquals("receipt must be success for " + h, 1, receipt.orElseThrow().status());
+        }
+
+        // getTxList(height=1) must return exactly the 4 hashes in batch order.
+        List<org.hyperledger.besu.datatypes.Hash> txList = evmMetaStore.getTxList(1L);
+        assertEquals("tx list must have 4 entries", 4, txList.size());
+        for (int i = 0; i < 4; i++) {
+            assertEquals("tx list entry " + i + " must match batch member " + i,
+                    batchMembers.get(i), Bytes32.wrap(txList.get(i).getBytes()));
+        }
+
+        // Sender1's nonce must have advanced to 3 (all three txs executed).
+        RocksDbWorldUpdater snapshot = new RocksDbWorldUpdater(evmStateSource);
+        assertEquals("sender1 account nonce must be 3 after 3 executed txs",
+                3L, snapshot.getAccount(evmSender).getNonce());
+    }
+
+    @Test
     public void receipt_is_queryable_after_execution() throws Exception {
         EvmTransaction deployTx = EvmTransaction.unsigned(0L, Wei.ONE, 200_000L, java.util.Optional.empty(),
                 Wei.ZERO, INIT_CODE, BigInteger.valueOf(0xCAFE)).sign(evmKey, algo);

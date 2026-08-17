@@ -54,6 +54,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.WebSocket;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
@@ -66,6 +67,7 @@ import org.apache.tuweni.bytes.Bytes32;
 import org.hyperledger.besu.crypto.KeyPair;
 import org.hyperledger.besu.crypto.SECP256K1;
 import org.hyperledger.besu.datatypes.Address;
+import org.hyperledger.besu.datatypes.Hash;
 import org.hyperledger.besu.datatypes.Wei;
 import org.junit.After;
 import org.junit.Before;
@@ -260,6 +262,46 @@ public class RpcTransportE2ETest {
         JsonNode none = rpc("eth_getLogs", "{\"fromBlock\":\"0x1\",\"toBlock\":\"0x2\",\"topics\":[\""
                 + "0x" + "77".repeat(32) + "\"]}");
         assertEquals(0, none.size());
+    }
+
+    @Test
+    public void http_multiple_txs_confirm_in_one_main_block() throws Exception {
+        // Submit two txs from the same funded sender (KEY1_SENDER, nonces 0 and 1) via eth_sendRawTransaction.
+        // @Before starts with fresh state so account nonce is 0.
+        SECP256K1 algo = new SECP256K1();
+        KeyPair key = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
+        Address dummy = Address.fromHexString("0x1111111111111111111111111111111111111111");
+        EvmTransaction tx0 = EvmTransaction.unsigned(0L, Wei.ONE, 21_000L,
+                Optional.of(dummy), Wei.ZERO, Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+        EvmTransaction tx1 = EvmTransaction.unsigned(1L, Wei.ONE, 21_000L,
+                Optional.of(dummy), Wei.ZERO, Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+
+        // Submit both over real HTTP — the pool must accept the second (nonce window, cumulative balance).
+        rpc("eth_sendRawTransaction", quote(tx0.getRawRlp().toHexString()));
+        rpc("eth_sendRawTransaction", quote(tx1.getRawRlp().toHexString()));
+
+        // Build the batch the miner would: encode the ordered hash list, store it content-addressed.
+        List<Bytes32> hashes = new ArrayList<>();
+        hashes.add(Bytes32.wrap(tx0.getHash().getBytes()));
+        hashes.add(Bytes32.wrap(tx1.getHash().getBytes()));
+        Bytes batchBody = EvmTxStore.encodeBatch(hashes);
+        Hash batchHash = txStore.putBatch(batchBody);
+        Bytes32 batchRef = Bytes32.wrap(batchHash.getBytes());
+
+        // Call processMainBlock ONCE with the batch commitment — both txs execute in one block.
+        long height = 3L;
+        proc.processMainBlock(List.of(batchRef), height, 1000L + height,
+                Bytes32.leftPad(Bytes.ofUnsignedLong(height)));
+
+        // Both receipts must have status 0x1.
+        JsonNode r0 = rpc("eth_getTransactionReceipt", quote(tx0.getHash().getBytes().toHexString()));
+        JsonNode r1 = rpc("eth_getTransactionReceipt", quote(tx1.getHash().getBytes().toHexString()));
+        assertEquals("tx0 receipt status", "\"0x1\"", r0.get("status").toString());
+        assertEquals("tx1 receipt status", "\"0x1\"", r1.get("status").toString());
+
+        // eth_getBlockByNumber for this height must list 2 transactions.
+        JsonNode block = rpc("eth_getBlockByNumber", quote("0x" + Long.toHexString(height)), "true");
+        assertEquals("block must contain 2 transactions", 2, block.get("transactions").size());
     }
 
     @Test
