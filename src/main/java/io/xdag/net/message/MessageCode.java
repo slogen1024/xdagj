@@ -92,7 +92,10 @@ public enum MessageCode {
     EVM_TX_REQUEST(0x1C),
     EVM_TX_REPLY(0x1D),
     // EVM state-root gossip: a node's (height, chained root) for cross-node divergence detection.
-    EVM_STATE_ROOT(0x1E);
+    EVM_STATE_ROOT(0x1E),
+    // EVM batch bodies (batch D2): fetch the ordered tx-hash list behind a 0x0F batch commitment.
+    EVM_BATCH_REQUEST(0x1F),
+    EVM_BATCH_REPLY(0x20);
 
 
     private static final MessageCode[] map = new MessageCode[256];

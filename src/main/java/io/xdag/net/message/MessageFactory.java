@@ -26,6 +26,8 @@ package io.xdag.net.message;
 
 import io.xdag.net.message.consensus.*;
 import io.xdag.net.message.p2p.DisconnectMessage;
+import io.xdag.net.message.p2p.EvmBatchReplyMessage;
+import io.xdag.net.message.p2p.EvmBatchRequestMessage;
 import io.xdag.net.message.p2p.EvmStateRootMessage;
 import io.xdag.net.message.p2p.EvmTxBroadcastMessage;
 import io.xdag.net.message.p2p.EvmTxReplyMessage;
@@ -80,6 +82,8 @@ public class MessageFactory {
                 case EVM_TX_REQUEST -> new EvmTxRequestMessage(body);
                 case EVM_TX_REPLY -> new EvmTxReplyMessage(body);
                 case EVM_STATE_ROOT -> new EvmStateRootMessage(body);
+                case EVM_BATCH_REQUEST -> new EvmBatchRequestMessage(body);
+                case EVM_BATCH_REPLY -> new EvmBatchReplyMessage(body);
             };
         } catch (Throwable e) {
             throw new MessageException("Failed to decode message", e);
