@@ -189,6 +189,54 @@ public class MainBlockEvmPackingTest {
     }
 
     /**
+     * Before the batch fork the miner falls back to the legacy selectEvmTxRef path: the 0x0F field
+     * carries the bare tx hash, NOT a batch commitment. We verify this with a DevnetConfig that
+     * reports batchActivationHeight = Long.MAX_VALUE (the AbstractConfig default), overriding the
+     * devnet conf-file value of 0.
+     */
+    @Test
+    public void pre_fork_main_block_still_packs_a_bare_tx_hash() throws Exception {
+        // Anonymous DevnetConfig subclass keeps everything identical to the class-level `config`
+        // except getEvmBatchActivationHeight() returns Long.MAX_VALUE, so nextHeight (1) < MAX_VALUE
+        // and createMainBlock() takes the legacy selectEvmTxRef branch.
+        Config preForkConfig = new DevnetConfig() {
+            @Override
+            public long getEvmBatchActivationHeight() {
+                return Long.MAX_VALUE;
+            }
+        };
+        preForkConfig.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
+        preForkConfig.getNodeSpec().setStoreBackupDir(root.newFolder().getAbsolutePath());
+
+        // Reuse the same wallet key and EVM state already set up in @Before.
+        Kernel preForkKernel = new Kernel(preForkConfig, wallet.getDefKey());
+        preForkKernel.setBlockStore(kernel.getBlockStore());
+        preForkKernel.setOrphanBlockStore(kernel.getOrphanBlockStore());
+        preForkKernel.setAddressStore(kernel.getAddressStore());
+        preForkKernel.setTxHistoryStore(kernel.getTxHistoryStore());
+        preForkKernel.setWallet(wallet);
+        preForkKernel.setEvmStateStore(evmStateSource);
+        preForkKernel.setEvmMetaStore(evmMetaStore);
+        preForkKernel.setEvmTxPool(evmTxPool);
+        preForkKernel.setEvmTxStore(evmTxStore);
+
+        EvmTransaction tx = pooledTx(evmKey, 0);
+        BlockchainImpl preForkChain = new BlockchainImpl(preForkKernel);
+        Block main = preForkChain.createMainBlock();
+
+        Bytes32 ref = main.getEvmTxRef();
+        assertNotNull("legacy ref must be non-null", ref);
+
+        // Legacy path: ref IS the bare tx hash, not a batch commitment.
+        assertEquals("legacy ref must equal bare tx hash",
+                Bytes32.wrap(tx.getHash().getBytes()), ref);
+
+        // No batch record should exist for this ref in the store.
+        assertTrue("no batch record must exist for a legacy ref",
+                evmTxStore.getBatch(Hash.wrap(ref)).isEmpty());
+    }
+
+    /**
      * Multiple pool txs (two senders) are packed into one batch commitment. Both tx hashes appear
      * in the decoded member list.
      */
@@ -207,8 +255,11 @@ public class MainBlockEvmPackingTest {
 
         Bytes32 h1 = Bytes32.wrap(tx1.getHash().getBytes());
         Bytes32 h2 = Bytes32.wrap(tx2.getHash().getBytes());
-        assertTrue("batch must contain tx1", batch.get().contains(h1));
-        assertTrue("batch must contain tx2", batch.get().contains(h2));
+        // Both txs share gasPrice=Wei.ONE; bySender is a LinkedHashMap (insertion-ordered),
+        // so selectBatch picks tx1's sender run first (strict > comparison keeps first best),
+        // then tx2's. Expected order: [tx1, tx2].
+        assertEquals("batch must contain txs in exact priority order",
+                List.of(h1, h2), batch.get());
     }
 
     // ---------------------------------------------------------------------------
