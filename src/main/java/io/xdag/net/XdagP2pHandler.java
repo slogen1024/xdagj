@@ -69,6 +69,8 @@ import org.hyperledger.besu.datatypes.Hash;
 import io.xdag.net.message.p2p.DisconnectMessage;
 import io.xdag.net.message.p2p.EvmStateRootMessage;
 import io.xdag.net.message.p2p.EvmTxBroadcastMessage;
+import io.xdag.net.message.p2p.EvmBatchReplyMessage;
+import io.xdag.net.message.p2p.EvmBatchRequestMessage;
 import io.xdag.net.message.p2p.EvmTxReplyMessage;
 import io.xdag.net.message.p2p.EvmTxRequestMessage;
 import io.xdag.net.message.p2p.HelloMessage;
@@ -218,7 +220,8 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
             case BLOCKS_REQUEST, BLOCKS_REPLY, SUMS_REQUEST, SUMS_REPLY, BLOCKEXT_REQUEST, BLOCKEXT_REPLY, BLOCK_REQUEST, NEW_BLOCK, SYNC_BLOCK, SYNCBLOCK_REQUEST ->
                     onXdag(msg);
             /* evm — routed to onXdag where the EVM handlers live; without this they never dispatch */
-            case EVM_TX_BROADCAST, EVM_TX_REQUEST, EVM_TX_REPLY, EVM_STATE_ROOT -> onXdag(msg);
+            case EVM_TX_BROADCAST, EVM_TX_REQUEST, EVM_TX_REPLY, EVM_STATE_ROOT,
+                    EVM_BATCH_REQUEST, EVM_BATCH_REPLY -> onXdag(msg);
             default -> ctx.fireChannelRead(msg);
         }
     }
@@ -343,6 +346,8 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
             case EVM_TX_REQUEST -> processEvmTxRequest((EvmTxRequestMessage) msg);
             case EVM_TX_REPLY -> processEvmTxReply((EvmTxReplyMessage) msg);
             case EVM_STATE_ROOT -> processEvmStateRoot((EvmStateRootMessage) msg);
+            case EVM_BATCH_REQUEST -> processEvmBatchRequest((EvmBatchRequestMessage) msg);
+            case EVM_BATCH_REPLY -> processEvmBatchReply((EvmBatchReplyMessage) msg);
             default -> throw new UnreachableException();
         }
     }
@@ -400,15 +405,21 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
         syncMgr.validateAndAddNewBlock(bw);
     }
 
-    /** Spec §6.2: pull a referenced-but-unknown EVM tx blob from the peer that announced the block. */
+    /**
+     * Spec §6.2: pull a referenced-but-unknown blob from the peer that announced the block. The ref
+     * may be either a tx hash (legacy single-tx) or a batch commitment; content addressing makes
+     * whichever reply arrives verifiable. Both request kinds are sent so the peer can answer with
+     * whichever body it has.
+     */
     private void requestMissingEvmBlob(Block block) {
         EvmTxStore evmTxStore = kernel.getEvmTxStore();
         if (block.getEvmTxRef() == null || evmTxStore == null) {
             return;
         }
         Hash txHash = Hash.wrap(block.getEvmTxRef());
-        if (!evmTxStore.contains(txHash)) {
+        if (!evmTxStore.contains(txHash) && !evmTxStore.containsBatch(txHash)) {
             msgQueue.sendMessage(new EvmTxRequestMessage(block.getEvmTxRef()));
+            msgQueue.sendMessage(new EvmBatchRequestMessage(block.getEvmTxRef()));
         }
     }
 
@@ -428,6 +439,9 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
         try {
             for (Bytes32 ref : evmProcessor.pendingMissingBlobHashes()) {
                 msgQueue.sendMessage(new EvmTxRequestMessage(ref));
+            }
+            for (Bytes32 ref : evmProcessor.pendingMissingBatchHashes()) {
+                msgQueue.sendMessage(new EvmBatchRequestMessage(ref));
             }
         } catch (RuntimeException e) {
             log.debug("requestPendingEvmBlobs failed for node {}: {}", channel.getRemoteAddress(), e.toString());
@@ -497,6 +511,40 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
 
     private void processEvmTxReply(EvmTxReplyMessage msg) {
         ingestEvmTxBlob(msg.getRawRlp());
+    }
+
+    private void processEvmBatchRequest(EvmBatchRequestMessage msg) {
+        EvmTxStore evmTxStore = kernel.getEvmTxStore();
+        if (evmTxStore == null) {
+            return;
+        }
+        evmTxStore.getBatchRaw(Hash.wrap(msg.getBatchHash()))
+                .ifPresent(body -> msgQueue.sendMessage(new EvmBatchReplyMessage(body)));
+    }
+
+    /**
+     * Stores a batch body only when (a) it is within the P2P size cap and (b) its keccak matches a
+     * commitment some deferred height is actually awaiting (the sole ingest gate — unsolicited
+     * bodies never touch the disk), then resumes deferred execution. Member blobs the body reveals
+     * as missing are fetched by the next retry tick via pendingMissingBlobHashes().
+     */
+    private void processEvmBatchReply(EvmBatchReplyMessage msg) {
+        EvmTxStore evmTxStore = kernel.getEvmTxStore();
+        EvmBlockProcessor evmProcessor = kernel.getEvmBlockProcessor();
+        if (evmTxStore == null || evmProcessor == null
+                || msg.getBatchBody().size() > config.getEvmSpec().getEvmMaxP2pTxBytes()) {
+            return;
+        }
+        Hash batchHash;
+        try {
+            batchHash = Hash.hash(msg.getBatchBody());
+        } catch (RuntimeException e) {
+            return;
+        }
+        if (evmProcessor.isAwaitingBatch(batchHash)) {
+            evmTxStore.putBatch(msg.getBatchBody());
+            evmProcessor.onBlobsAvailable();
+        }
     }
 
     /**
