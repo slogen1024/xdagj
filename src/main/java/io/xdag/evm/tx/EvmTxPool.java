@@ -28,10 +28,13 @@ import io.xdag.evm.state.RocksDbWorldUpdater;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Optional;
+import java.util.TreeMap;
 import java.util.function.LongSupplier;
 import org.apache.tuweni.bytes.Bytes;
 import org.hyperledger.besu.datatypes.Address;
@@ -44,9 +47,13 @@ import org.hyperledger.besu.evm.account.Account;
  * current world state, persists accepted blobs into the EVM_TX store, and hands miners a
  * gas-price-ordered selection.
  *
- * <p>v1 policy: strictly one pending tx per sender (nonce must equal the account nonce), replaced
- * only by a strictly higher gas price. Thread-safe via a single lock — pool throughput is nowhere
- * near contention territory in v1.
+ * <p>v2 policy: per-sender nonce chains. A sender may queue up to MAX_PER_SENDER consecutive
+ * pending transactions covering the nonce window [accountNonce, accountNonce + MAX_PER_SENDER - 1].
+ * Nonces outside that window are rejected with NONCE_MISMATCH. Stale entries (nonce &lt;
+ * accountNonce) are pruned at admission time. Admission requires that the sender's cumulative cost
+ * (Σ value + gasLimit×gasPrice over all queued txs including the new one) does not exceed the
+ * account balance. Same-slot replacement requires a strictly higher gas price (replace-by-fee).
+ * Thread-safe via a single lock — pool throughput is nowhere near contention territory in v2.
  */
 public class EvmTxPool {
 
@@ -58,6 +65,12 @@ public class EvmTxPool {
 
     /** Hard cap on distinct pending txs; a P2P-exposed pool must bound its memory (spec §6 DoS). */
     public static final int MAX_POOL_SIZE = 4096;
+
+    /**
+     * Maximum queued txs per sender (nonce window width). A sender may hold nonces
+     * [accountNonce, accountNonce + MAX_PER_SENDER - 1] simultaneously.
+     */
+    public static final int MAX_PER_SENDER = 16;
 
     private record PoolEntry(EvmTransaction tx, Address sender, long addedAtSeconds) {
     }
@@ -72,8 +85,8 @@ public class EvmTxPool {
 
     /** txHash -> entry; insertion order preserved for deterministic same-price tiebreaks. */
     private final Map<Hash, PoolEntry> byHash = new LinkedHashMap<>();
-    /** sender -> entry (v1: one pending tx per sender). */
-    private final Map<Address, PoolEntry> bySender = new LinkedHashMap<>();
+    /** sender -> nonce-sorted queue of pending entries. */
+    private final Map<Address, NavigableMap<Long, PoolEntry>> bySender = new LinkedHashMap<>();
 
     public EvmTxPool(EvmTxStore txStore, KVSource<byte[], byte[]> evmStateStore, BigInteger chainId,
                      long blockGasLimit, Wei minGasPrice, long ttlSeconds, LongSupplier clockSeconds) {
@@ -124,15 +137,33 @@ public class EvmTxPool {
         Account account = new RocksDbWorldUpdater(evmStateStore).getAccount(sender);
         long accountNonce = account == null ? 0L : account.getNonce();
         Wei balance = account == null ? Wei.ZERO : account.getBalance();
-        if (tx.getNonce() != accountNonce) {
+
+        // Obtain (or create) the per-sender nonce queue and prune entries that are now below the
+        // current account nonce (confirmed on-chain since they were queued).
+        NavigableMap<Long, PoolEntry> queue = bySender.computeIfAbsent(sender, s -> new TreeMap<>());
+        pruneStale(sender, queue, accountNonce);
+
+        // Admission window: [accountNonce, accountNonce + MAX_PER_SENDER - 1].
+        if (tx.getNonce() < accountNonce || tx.getNonce() >= accountNonce + MAX_PER_SENDER) {
+            if (queue.isEmpty()) {
+                bySender.remove(sender);
+            }
             return AddResult.NONCE_MISMATCH;
         }
-        // Gas settles in EVM wei (缺口2 / Path α): the sender must cover the transferred value plus the
-        // maximum gas fee (gasLimit * gasPrice). The unused gas is refunded when the tx executes; the
-        // net charge (gasUsed * gasPrice) is burned. EvmBlockProcessor re-checks this at execution.
-        BigInteger maxCost = tx.getValue().getAsBigInteger()
-                .add(tx.getGasPrice().getAsBigInteger().multiply(BigInteger.valueOf(tx.getGasLimit())));
-        if (balance.getAsBigInteger().compareTo(maxCost) < 0) {
+
+        // Cumulative cost admission: the sender must be able to cover ALL queued txs (including the
+        // new one, excluding any entry being replaced at the same nonce slot).
+        // Gas settles in EVM wei (缺口2 / Path α): value + gasLimit * gasPrice.
+        BigInteger cumulative = cost(tx);
+        for (PoolEntry e : queue.values()) {
+            if (e.tx().getNonce() != tx.getNonce()) {
+                cumulative = cumulative.add(cost(e.tx()));
+            }
+        }
+        if (balance.getAsBigInteger().compareTo(cumulative) < 0) {
+            if (queue.isEmpty()) {
+                bySender.remove(sender);
+            }
             return AddResult.INSUFFICIENT_BALANCE;
         }
 
@@ -140,27 +171,24 @@ public class EvmTxPool {
         if (byHash.containsKey(hash)) {
             return AddResult.DUPLICATE;
         }
-        PoolEntry existing = bySender.get(sender);
+
+        PoolEntry existing = queue.get(tx.getNonce());
         boolean replaced = false;
         if (existing != null) {
-            if (existing.tx().getNonce() == tx.getNonce()) {
-                // Genuine same-slot competition: replace-by-fee only for a strictly higher gas price.
-                if (tx.getGasPrice().compareTo(existing.tx().getGasPrice()) <= 0) {
-                    return AddResult.UNDERPRICED;
-                }
+            // Same-slot competition: replace-by-fee only for a strictly higher gas price.
+            if (tx.getGasPrice().compareTo(existing.tx().getGasPrice()) <= 0) {
+                return AddResult.UNDERPRICED;
             }
-            // Otherwise the cached entry is for a different nonce. Under strict nonce equality only
-            // one nonce is valid per sender at a time, so this new (validated) tx's nonce is the live
-            // one and the cached entry is stale — evict it regardless of price.
             byHash.remove(existing.tx().getHash());
             replaced = true;
         } else if (byHash.size() >= MAX_POOL_SIZE) {
-            // A new sender slot would grow the pool past its cap.
+            // A new entry would grow the pool past its cap.
             return AddResult.POOL_FULL;
         }
+
         PoolEntry entry = new PoolEntry(tx, sender, clockSeconds.getAsLong());
         byHash.put(hash, entry);
-        bySender.put(sender, entry);
+        queue.put(tx.getNonce(), entry);
         txStore.put(tx);
         return replaced ? AddResult.REPLACED : AddResult.ADDED;
     }
@@ -197,14 +225,39 @@ public class EvmTxPool {
     private void removeInternal(Hash txHash) {
         PoolEntry entry = byHash.remove(txHash);
         if (entry != null) {
-            PoolEntry senderEntry = bySender.get(entry.sender());
-            if (senderEntry != null && senderEntry.tx().getHash().equals(txHash)) {
-                bySender.remove(entry.sender());
+            NavigableMap<Long, PoolEntry> queue = bySender.get(entry.sender());
+            if (queue != null) {
+                queue.remove(entry.tx().getNonce());
+                if (queue.isEmpty()) {
+                    bySender.remove(entry.sender());
+                }
             }
         }
     }
 
     public synchronized int size() {
         return byHash.size();
+    }
+
+    // ---- helpers ----
+
+    /** Maximum gas cost of a single transaction: value + gasLimit * gasPrice. */
+    private static BigInteger cost(EvmTransaction tx) {
+        return tx.getValue().getAsBigInteger()
+                .add(tx.getGasPrice().getAsBigInteger().multiply(BigInteger.valueOf(tx.getGasLimit())));
+    }
+
+    /**
+     * Remove all entries in {@code queue} whose nonce is strictly less than {@code accountNonce}.
+     * The corresponding byHash entries are also removed. The sender key in bySender is NOT removed
+     * here even if the queue becomes empty; callers handle that after inspecting the window.
+     */
+    private void pruneStale(Address sender, NavigableMap<Long, PoolEntry> queue, long accountNonce) {
+        Iterator<Map.Entry<Long, PoolEntry>> it =
+                queue.headMap(accountNonce, false).entrySet().iterator();
+        while (it.hasNext()) {
+            byHash.remove(it.next().getValue().tx().getHash());
+            it.remove();
+        }
     }
 }

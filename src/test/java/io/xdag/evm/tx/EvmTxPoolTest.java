@@ -109,7 +109,9 @@ public class EvmTxPoolTest {
 
     @Test
     public void nonce_mismatch_rejected() {
-        assertEquals(EvmTxPool.AddResult.NONCE_MISMATCH, pool.add(tx(key, 5, Wei.of(2_000_000_000L)).getRawRlp()));
+        // Window is [accountNonce, accountNonce + MAX_PER_SENDER - 1] = [0, 15]; nonce 16 is outside.
+        assertEquals(EvmTxPool.AddResult.NONCE_MISMATCH,
+                pool.add(tx(key, EvmTxPool.MAX_PER_SENDER, Wei.of(2_000_000_000L)).getRawRlp()));
     }
 
     @Test
@@ -192,14 +194,16 @@ public class EvmTxPoolTest {
 
     @Test
     public void new_nonce_replaces_stale_sender_entry_regardless_of_price() {
-        // After a tx confirms, the account nonce advances; the sender's next-nonce tx must not be
-        // locked out by the now-stale lower-price entry still cached under the same sender.
+        // After a tx confirms, the account nonce advances; the stale nonce=0 entry is pruned and the
+        // new nonce=1 tx occupies a fresh slot — result is ADDED, not REPLACED (nonce-chain pool).
         EvmTransaction first = tx(key, 0, Wei.of(5_000_000_000L));
         assertEquals(EvmTxPool.AddResult.ADDED, pool.add(first.getRawRlp()));
 
         fund(sender, Wei.fromEth(1), 1L); // simulate `first` having been executed: account nonce -> 1
         EvmTransaction next = tx(key, 1, Wei.of(1_000_000_000L)); // lower price, but a NEW nonce
-        assertEquals(EvmTxPool.AddResult.REPLACED, pool.add(next.getRawRlp()));
+        // Old assertion was REPLACED (v1 stale-evict semantics); now stale entries are pruned at
+        // admission time and the new nonce fills an empty slot, so the result is ADDED.
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(next.getRawRlp()));
         assertEquals(1, pool.size());
         assertEquals(next.getHash(), pool.selectTransactions(10).getFirst().getHash());
     }
@@ -229,5 +233,97 @@ public class EvmTxPoolTest {
         assertEquals(0, pool.size());
         // The persisted blob stays: consensus may still need it for blocks already referencing it.
         assertTrue(txStore.contains(t.getHash()));
+    }
+
+    // ---- nonce-chain (Task D2) tests ----
+
+    @Test
+    public void nonce_window_accepts_future_nonces_within_16_and_rejects_beyond() {
+        // account nonce = 0; window is [0, MAX_PER_SENDER-1] = [0, 15]
+        Wei gasPrice = Wei.of(2_000_000_000L);
+        // Fund enough for 16 txs: each costs value(1) + gasLimit(21000) * gasPrice(2e9) = 42_000_000_000_001 wei
+        BigInteger singleCost = BigInteger.ONE
+                .add(BigInteger.valueOf(21_000L).multiply(BigInteger.valueOf(2_000_000_000L)));
+        fund(sender, Wei.of(singleCost.multiply(BigInteger.valueOf(EvmTxPool.MAX_PER_SENDER))), 0L);
+
+        for (int n = 0; n < EvmTxPool.MAX_PER_SENDER; n++) {
+            assertEquals("nonce " + n + " should be ADDED",
+                    EvmTxPool.AddResult.ADDED, pool.add(tx(key, n, gasPrice).getRawRlp()));
+        }
+        // nonce == MAX_PER_SENDER (16) is outside the window
+        assertEquals(EvmTxPool.AddResult.NONCE_MISMATCH,
+                pool.add(tx(key, EvmTxPool.MAX_PER_SENDER, gasPrice).getRawRlp()));
+        // a nonce below account nonce (negative nonce is unsigned, but nonce=-1 on EVM is Long.MAX_VALUE
+        // so use a new sender at nonce=1 while account nonce is 0)
+        KeyPair k2 = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(77)));
+        Address addr2 = Address.extract(k2.getPublicKey());
+        fund(addr2, Wei.fromEth(1), 2L); // account nonce = 2
+        assertEquals(EvmTxPool.AddResult.NONCE_MISMATCH,
+                pool.add(tx(k2, 1, gasPrice).getRawRlp())); // nonce 1 < accountNonce 2
+        assertEquals(EvmTxPool.MAX_PER_SENDER, pool.size());
+    }
+
+    @Test
+    public void replace_by_fee_is_per_sender_nonce_slot() {
+        Wei gasPrice = Wei.of(2_000_000_000L);
+        // Fund enough to cover both nonce=0 (2e9) and nonce=1 after replacement (3e9).
+        // Worst-case cumulative = (1 + 21000*2e9) + (1 + 21000*3e9) = 42_000_000_001 + 63_000_000_001.
+        BigInteger costAt2g = BigInteger.ONE
+                .add(BigInteger.valueOf(21_000L).multiply(BigInteger.valueOf(2_000_000_000L)));
+        BigInteger costAt3g = BigInteger.ONE
+                .add(BigInteger.valueOf(21_000L).multiply(BigInteger.valueOf(3_000_000_000L)));
+        fund(sender, Wei.of(costAt2g.add(costAt3g)), 0L);
+
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(key, 0, gasPrice).getRawRlp()));
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(key, 1, gasPrice).getRawRlp()));
+
+        // Same (sender, nonce=1) with a lower price (distinct tx bytes, not a duplicate): UNDERPRICED.
+        // Note: equal-price produces identical tx bytes → DUPLICATE fires first; the UNDERPRICED
+        // gate is exercised by a strictly lower price that still produces a different hash.
+        assertEquals(EvmTxPool.AddResult.UNDERPRICED,
+                pool.add(tx(key, 1, Wei.of(1_500_000_000L)).getRawRlp()));
+        // Same (sender, nonce=1): strictly higher price → REPLACED; pool stays at 2
+        EvmTransaction higherNonce1 = tx(key, 1, Wei.of(3_000_000_000L));
+        assertEquals(EvmTxPool.AddResult.REPLACED, pool.add(higherNonce1.getRawRlp()));
+        assertEquals(2, pool.size());
+    }
+
+    @Test
+    public void cumulative_balance_rejects_a_queue_the_sender_cannot_afford() {
+        // Each tx costs value(1) + 21000 * 2e9 = 42_000_000_000_001 wei.
+        BigInteger singleCost = BigInteger.ONE
+                .add(BigInteger.valueOf(21_000L).multiply(BigInteger.valueOf(2_000_000_000L)));
+        // Fund exactly 2x cost so the 3rd tx pushes cumulative over balance.
+        fund(sender, Wei.of(singleCost.multiply(BigInteger.TWO)), 0L);
+
+        Wei gasPrice = Wei.of(2_000_000_000L);
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(key, 0, gasPrice).getRawRlp()));
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(key, 1, gasPrice).getRawRlp()));
+        assertEquals(EvmTxPool.AddResult.INSUFFICIENT_BALANCE, pool.add(tx(key, 2, gasPrice).getRawRlp()));
+        assertEquals(2, pool.size());
+    }
+
+    @Test
+    public void stale_entries_are_pruned_when_the_account_nonce_advances() {
+        Wei gasPrice = Wei.of(2_000_000_000L);
+        BigInteger singleCost = BigInteger.ONE
+                .add(BigInteger.valueOf(21_000L).multiply(BigInteger.valueOf(2_000_000_000L)));
+        fund(sender, Wei.of(singleCost.multiply(BigInteger.TWO)), 0L);
+
+        EvmTransaction t0 = tx(key, 0, gasPrice);
+        EvmTransaction t1 = tx(key, 1, gasPrice);
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(t0.getRawRlp()));
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(t1.getRawRlp()));
+        assertEquals(2, pool.size());
+
+        // Advance account nonce to 1 (as if t0 executed on-chain).
+        fund(sender, Wei.fromEth(1), 1L);
+
+        // Adding any tx for this sender triggers pruning of nonce < accountNonce.
+        EvmTransaction t2 = tx(key, 1, Wei.of(3_000_000_000L)); // replaces t1 at same nonce
+        pool.add(t2.getRawRlp()); // REPLACED or ADDED — we just care about the side effect
+
+        // t0 (nonce=0) was stale and must have been removed from byHash.
+        assertTrue("stale nonce=0 entry must be pruned from the pool", pool.get(t0.getHash()).isEmpty());
     }
 }
