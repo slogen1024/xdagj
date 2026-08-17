@@ -69,6 +69,13 @@ public class EvmConfigSectionTest {
     }
 
     @Test
+    public void devnet_activates_batch_packing_at_genesis_and_shared_nets_do_not() {
+        assertEquals(0L, new DevnetConfig().getEvmSpec().getEvmBatchActivationHeight());
+        assertEquals(Long.MAX_VALUE, new TestnetConfig().getEvmSpec().getEvmBatchActivationHeight());
+        assertEquals(Long.MAX_VALUE, new MainnetConfig().getEvmSpec().getEvmBatchActivationHeight());
+    }
+
+    @Test
     public void devnet_funds_the_standard_test_address_in_genesis_alloc() {
         // The funding on-ramp: devnet pre-funds the standard test address (private key 1); the other
         // networks fund nothing at genesis.

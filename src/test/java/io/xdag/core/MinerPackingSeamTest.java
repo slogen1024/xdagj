@@ -142,6 +142,7 @@ public class MinerPackingSeamTest {
         kernel.setEvmStateStore(evmStateSource);
         kernel.setEvmMetaStore(evmMetaStore);
         kernel.setEvmTxPool(evmTxPool);
+        kernel.setEvmTxStore(evmTxStore);
         kernel.setEvmBlockProcessor(evmBlockProcessor);
 
         RocksDbWorldUpdater w = new RocksDbWorldUpdater(evmStateSource);
@@ -165,11 +166,19 @@ public class MinerPackingSeamTest {
         evmTxStore.put(deployTx);
         assertEquals(EvmTxPool.AddResult.ADDED, evmTxPool.add(deployTx.getRawRlp()));
 
-        // The miner builds a main block; it must carry the packed ref.
+        // The miner builds a main block; with the batch fork active it must carry a batch commitment
+        // (not the bare tx hash — the 0x0F field now points to an EvmTxStore batch record).
         Block mainBlock = blockchain.createMainBlock();
-        assertEquals(Bytes32.wrap(deployTx.getHash().getBytes()), mainBlock.getEvmTxRef());
+        assertNotNull("main block must carry a ref", mainBlock.getEvmTxRef());
+        // The ref must be a batch commitment whose single member is the deploy tx.
+        var batchOpt = evmTxStore.getBatch(org.hyperledger.besu.datatypes.Hash.wrap(mainBlock.getEvmTxRef()));
+        assertTrue("ref must resolve as a batch", batchOpt.isPresent());
+        assertEquals("batch must contain exactly one tx", 1, batchOpt.get().size());
+        assertEquals("batch member must be the deploy tx hash",
+                Bytes32.wrap(deployTx.getHash().getBytes()), batchOpt.get().get(0));
 
         // Execute the block's ref through the real setMain path (EvmBlockProcessor.processMainBlock).
+        // The processor dual-looks-up the batch commitment and expands it to the tx list.
         // getHashLow() forces hash calculation (an unmined block's info hash is otherwise unset).
         evmBlockProcessor.processMainBlock(List.of(mainBlock.getEvmTxRef()), 1L, 1001L,
                 Bytes32.wrap(mainBlock.getHashLow()));

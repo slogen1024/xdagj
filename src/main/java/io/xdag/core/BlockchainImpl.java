@@ -37,6 +37,8 @@ import io.xdag.crypto.core.CryptoProvider;
 import io.xdag.evm.EvmBlockProcessor;
 import io.xdag.evm.EvmSubscriptionSink;
 import io.xdag.evm.state.EvmMetaStore;
+import io.xdag.evm.tx.EvmTransaction;
+import io.xdag.evm.tx.EvmTxStore;
 import io.xdag.crypto.encoding.Base58;
 import io.xdag.crypto.hash.HashUtils;
 import io.xdag.crypto.keys.ECKeyPair;
@@ -1481,7 +1483,10 @@ public class BlockchainImpl implements Blockchain {
         if (CollectionUtils.isNotEmpty(orphans)) {
             refs.addAll(orphans);
         }
-        Bytes32 evmTxRef = selectEvmTxRef(16 - res - orphans.size());
+        long nextHeight = xdagStats.nmain + 1;
+        boolean batchFork = nextHeight >= kernel.getConfig().getEvmSpec().getEvmBatchActivationHeight();
+        Bytes32 evmTxRef = batchFork ? selectEvmBatch(16 - res - orphans.size())
+                : selectEvmTxRef(16 - res - orphans.size());
         return new Block(kernel.getConfig(), sendTime[0], null, refs, true, null,
                 kernel.getConfig().getNodeSpec().getNodeTag(), -1, XAmount.ZERO, null, evmTxRef);
     }
@@ -1507,6 +1512,44 @@ public class BlockchainImpl implements Blockchain {
             return null;
         } catch (RuntimeException e) {
             log.warn("EVM tx selection failed while building a main block; packing none", e);
+            return null;
+        }
+    }
+
+    /**
+     * Builds a gas-budgeted batch from the pool, persists its body content-addressed, and returns
+     * the commitment for the 0x0F field (batch D2) — or null when the EVM is disabled, no field
+     * slot is free, or the pool yields nothing. A tx that already has a receipt (executed on the
+     * canonical chain) drops itself and its sender's later txs (no nonce holes). Never throws into
+     * mining.
+     */
+    private Bytes32 selectEvmBatch(int freeFields) {
+        try {
+            if (freeFields < 1 || kernel.getEvmTxPool() == null || kernel.getEvmTxStore() == null) {
+                return null;
+            }
+            long gasBudget = kernel.getConfig().getEvmSpec().getEvmBlockGasLimit();
+            EvmMetaStore metaStore = kernel.getEvmMetaStore();
+            List<EvmTransaction> picked = kernel.getEvmTxPool().selectBatch(gasBudget);
+            List<Bytes32> hashes = new ArrayList<>(picked.size());
+            Set<org.hyperledger.besu.datatypes.Address> stopped = new HashSet<>();
+            for (EvmTransaction tx : picked) {
+                if (stopped.contains(tx.getSender())) {
+                    continue; // an earlier tx of this sender was dropped — no nonce holes
+                }
+                if (metaStore != null && metaStore.getReceipt(tx.getHash()).isPresent()) {
+                    stopped.add(tx.getSender());
+                    continue;
+                }
+                hashes.add(Bytes32.wrap(tx.getHash().getBytes()));
+            }
+            if (hashes.isEmpty()) {
+                return null;
+            }
+            Bytes body = EvmTxStore.encodeBatch(hashes);
+            return Bytes32.wrap(kernel.getEvmTxStore().putBatch(body).getBytes());
+        } catch (RuntimeException e) {
+            log.warn("EVM batch selection failed while building a main block; packing none", e);
             return null;
         }
     }

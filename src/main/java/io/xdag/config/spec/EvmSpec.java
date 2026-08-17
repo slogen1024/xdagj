@@ -38,6 +38,12 @@ public interface EvmSpec {
     /** Main-block height at which EVM_TX_REF fields become valid (hard-fork gate). */
     long getEvmActivationHeight();
 
+    /**
+     * Main-block height at which the miner switches the 0x0F ref from a single tx hash to a
+     * batch commitment (batch D2 fork). Defaults to {@code Long.MAX_VALUE} (not activated).
+     */
+    long getEvmBatchActivationHeight();
+
     /** EIP-155 chain id for this network (devnet provisional: 51966 = 0xCAFE). */
     long getEvmChainId();
 
