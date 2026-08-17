@@ -510,7 +510,9 @@ MetaMask 轮询:
   执行侧对 ref 始终 dual-lookup 展开（激活高度只门控矿工侧，边界无活性陷阱）；
   P2P 新增 EVM_BATCH_REQUEST/REPLY(0x1F/0x20) 按需拉体，歧义 ref 双请求；
   重放脚本/收据/反向索引/bloom/回滚格式零变化。`evm.batchActivationHeight` devnet=0 已激活；
-  testnet/mainnet 待分叉排期。吞吐上限从 1 tx/主块提升至 Σ gasLimit ≤ 30M（≈1428 笔转账）。
+  testnet/mainnet 待分叉排期。吞吐上限从 1 tx/主块提升至整批装满；devnet 依用户裁定**不设 gas
+  预算钳制**（`evm.blockGasLimit = 1e12`，预算机制保留为共享网安全阀——EVM 在 setMain 同步执行，
+  正式网启用前必须定真实共识值），实际边界 = `MAX_BATCH_TXS`(1024 笔/主块) 与 64s 出块节奏。
 
 **缺陷 3：无原生 XDAG ↔ EVM 自动 bridge（资金入口仅创世分配）**
 

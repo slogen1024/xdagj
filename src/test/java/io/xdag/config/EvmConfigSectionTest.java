@@ -46,7 +46,8 @@ public class EvmConfigSectionTest {
         assertTrue(spec.isEvmEnabled());
         assertEquals(0L, spec.getEvmActivationHeight());
         assertEquals(51966L, spec.getEvmChainId()); // 0xCAFE provisional
-        assertEquals(30_000_000L, spec.getEvmBlockGasLimit());
+        // Devnet gas budget is deliberately non-binding (1e12): batches fill to MAX_BATCH_TXS instead.
+        assertEquals(1_000_000_000_000L, spec.getEvmBlockGasLimit());
         assertEquals(3600L, spec.getEvmTxPoolTtlSeconds());
         assertEquals(131_072, spec.getEvmMaxP2pTxBytes());
         assertEquals("ADR-007: placeholder gas prices are legal on devnet", BigInteger.ONE, spec.getEvmMinGasPrice());

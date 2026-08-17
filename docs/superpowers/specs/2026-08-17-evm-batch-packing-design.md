@@ -12,7 +12,8 @@
 
 ## 1. 目标与成功标准
 
-每主块可打包多笔 EVM 交易直到 `blockGasLimit`（30M gas ≈ 1428 笔纯转账/主块），
+每主块可打包多笔 EVM 交易直到 `blockGasLimit`（交付后修订：devnet 依用户裁定把该配置提到
+1e12 使预算不构成约束——实际边界为 `MAX_BATCH_TXS`=1024 笔/主块；预算机制保留为共享网安全阀），
 单 sender 连发（nonce 链）与多 sender 并发都能在一个主块内确认。
 
 成功标准：
