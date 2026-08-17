@@ -51,8 +51,14 @@ public class EvmTxStore {
     private static final byte PREFIX_TX = 0x00;
     /** Batch bodies (spec §5): 0x01 | keccak256(body) -> RLP list of 32-byte tx hashes. */
     private static final byte PREFIX_BATCH = 0x01;
-    /** Hard cap on txs per batch (spec §2); an over-sized crafted body reads as a miss. */
-    public static final int MAX_BATCH_TXS = 1024;
+    /**
+     * Hard cap on txs per batch (spec §2): the largest batch whose RLP body still fits one
+     * EVM_BATCH_REPLY under the default {@code evm.maxP2pTxBytes} = 131072 — each hash encodes
+     * to 33 bytes plus a 4-byte list header, and 33 * 3971 + 4 = 131047. Consensus-relevant:
+     * nodes with different caps disagree on which batches execute, so raising it requires a
+     * coordinated upgrade. An over-sized crafted body reads as a miss.
+     */
+    public static final int MAX_BATCH_TXS = 3971;
 
     private final KVSource<byte[], byte[]> store;
 

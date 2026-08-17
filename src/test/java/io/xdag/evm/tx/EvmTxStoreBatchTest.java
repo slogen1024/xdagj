@@ -78,17 +78,31 @@ public class EvmTxStoreBatchTest {
 
     @Test
     public void oversized_body_reads_as_miss() {
-        // 1025 entries (one over cap) must be a miss
+        // one entry over cap must be a miss
         List<Bytes32> tooMany = IntStream.rangeClosed(1, EvmTxStore.MAX_BATCH_TXS + 1)
                 .mapToObj(EvmTxStoreBatchTest::h).toList();
         Hash bigHash = store.putBatch(EvmTxStore.encodeBatch(tooMany));
         assertTrue(store.getBatch(bigHash).isEmpty());
 
-        // exactly 1024 entries must succeed
+        // exactly MAX_BATCH_TXS entries must succeed
         List<Bytes32> atCap = IntStream.rangeClosed(1, EvmTxStore.MAX_BATCH_TXS)
                 .mapToObj(EvmTxStoreBatchTest::h).toList();
         Hash capHash = store.putBatch(EvmTxStore.encodeBatch(atCap));
         assertTrue(store.getBatch(capHash).isPresent());
+    }
+
+    @Test
+    public void max_batch_txs_is_the_p2p_transport_ceiling() {
+        // MAX_BATCH_TXS is pinned to the largest batch whose RLP body still fits one
+        // EVM_BATCH_REPLY under evm.maxP2pTxBytes (default 131072): 33 bytes per hash
+        // plus a 4-byte list header. One more hash must overflow the cap.
+        int p2pCap = 131_072;
+        Bytes atCap = EvmTxStore.encodeBatch(IntStream.rangeClosed(1, EvmTxStore.MAX_BATCH_TXS)
+                .mapToObj(EvmTxStoreBatchTest::h).toList());
+        assertTrue(atCap.size() <= p2pCap);
+        Bytes overCap = EvmTxStore.encodeBatch(IntStream.rangeClosed(1, EvmTxStore.MAX_BATCH_TXS + 1)
+                .mapToObj(EvmTxStoreBatchTest::h).toList());
+        assertTrue(overCap.size() > p2pCap);
     }
 
     @Test

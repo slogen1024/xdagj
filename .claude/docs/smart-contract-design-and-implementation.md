@@ -512,7 +512,8 @@ MetaMask 轮询:
   重放脚本/收据/反向索引/bloom/回滚格式零变化。`evm.batchActivationHeight` devnet=0 已激活；
   testnet/mainnet 待分叉排期。吞吐上限从 1 tx/主块提升至整批装满；devnet 依用户裁定**不设 gas
   预算钳制**（`evm.blockGasLimit = 1e12`，预算机制保留为共享网安全阀——EVM 在 setMain 同步执行，
-  正式网启用前必须定真实共识值），实际边界 = `MAX_BATCH_TXS`(1024 笔/主块) 与 64s 出块节奏。
+  正式网启用前必须定真实共识值），实际边界 = `MAX_BATCH_TXS`(3971 笔/主块，即 128KB
+  `evm.maxP2pTxBytes` 消息能装下的最大哈希数：33B/哈希 + 4B 列表头) 与 64s 出块节奏（≈62 tx/s）。
 
 **缺陷 3：无原生 XDAG ↔ EVM 自动 bridge（资金入口仅创世分配）**
 
