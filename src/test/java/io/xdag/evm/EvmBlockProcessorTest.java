@@ -731,4 +731,123 @@ public class EvmBlockProcessorTest {
         assertEquals("replay reproduces the identical chained root", rootAt2,
                 metaStore.getHeightRecord(2L).orElseThrow().stateRoot());
     }
+
+    // -------------------------------------------------------------------------
+    // D2: dual-lookup batch expansion tests
+    // -------------------------------------------------------------------------
+
+    @Test
+    public void a_batch_ref_expands_to_its_ordered_txs_in_one_block() {
+        // Two funded signed txs (nonce 0 and 1) stored in txStore; a batch body is stored and
+        // processMainBlock is called with the single commitment ref. Both receipts must be present
+        // and getTxList(height) must equal the flat ordered list [h0, h1].
+        EvmTransaction tx0 = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        EvmTransaction tx1 = storedTx(1,
+                Optional.of(Address.fromHexString("0x9999999999999999999999999999999999999999")),
+                Bytes.EMPTY, 21_000L);
+
+        Bytes batchBody = EvmTxStore.encodeBatch(List.of(ref(tx0), ref(tx1)));
+        Hash batchHash = txStore.putBatch(batchBody);
+        Bytes32 commitRef = Bytes32.wrap(batchHash.getBytes());
+
+        processor.processMainBlock(List.of(commitRef), 1L, 1001L, BLOCK_HASH_1);
+
+        // Both receipts present
+        assertTrue("tx0 receipt present", metaStore.getReceipt(tx0.getHash()).isPresent());
+        assertTrue("tx1 receipt present", metaStore.getReceipt(tx1.getHash()).isPresent());
+        // getTxList must match the batch's flat ordering
+        assertEquals("getTxList equals flat expansion",
+                List.of(tx0.getHash(), tx1.getHash()), metaStore.getTxList(1L));
+    }
+
+    @Test
+    public void a_legacy_single_tx_ref_still_executes_via_dual_lookup() {
+        // Regression pin: plain single-tx ref (no batch) must still execute normally after the
+        // dual-lookup change.
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+
+        processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);
+
+        assertEquals("single-tx legacy ref must yield a success receipt", 1,
+                metaStore.getReceipt(deploy.getHash()).orElseThrow().status());
+        assertEquals(List.of(deploy.getHash()), metaStore.getTxList(1L));
+    }
+
+    @Test
+    public void a_missing_batch_body_defers_and_reports_both_kinds_of_missing_hashes() {
+        // Commitment computed (keccak of the body) but body NOT stored → processMainBlock must
+        // defer. The commitment hash must appear in BOTH pendingMissingBatchHashes and
+        // pendingMissingBlobHashes (ambiguous ref). isAwaitingBatch(hash) must return true.
+        // After putBatch + onBlobsAvailable the tx receipt appears and both lists become empty.
+        EvmTransaction tx = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        Bytes batchBody = EvmTxStore.encodeBatch(List.of(ref(tx)));
+        Hash batchHash = Hash.hash(batchBody); // compute hash WITHOUT storing the body
+        Bytes32 commitRef = Bytes32.wrap(batchHash.getBytes());
+
+        processor.processMainBlock(List.of(commitRef), 1L, 1001L, BLOCK_HASH_1);
+
+        assertTrue("no receipt while batch body is missing",
+                metaStore.getReceipt(tx.getHash()).isEmpty());
+        assertEquals("height is queued", List.of(1L), metaStore.pendingHeights());
+
+        List<Bytes32> missingBlobs = processor.pendingMissingBlobHashes();
+        List<Bytes32> missingBatches = processor.pendingMissingBatchHashes();
+        assertTrue("commit ref in pendingMissingBlobHashes (may be a legacy tx)",
+                missingBlobs.contains(commitRef));
+        assertTrue("commit ref in pendingMissingBatchHashes (may be a batch)",
+                missingBatches.contains(commitRef));
+        assertTrue("isAwaitingBatch(hash) true", processor.isAwaitingBatch(batchHash));
+
+        // Body and tx blob arrive; drain resolves the stall.
+        txStore.putBatch(batchBody);
+        processor.onBlobsAvailable();
+
+        assertTrue("receipt present after drain",
+                metaStore.getReceipt(tx.getHash()).isPresent());
+        assertTrue("pendingMissingBlobHashes empty after drain",
+                processor.pendingMissingBlobHashes().isEmpty());
+        assertTrue("pendingMissingBatchHashes empty after drain",
+                processor.pendingMissingBatchHashes().isEmpty());
+    }
+
+    @Test
+    public void a_batch_with_a_missing_member_blob_defers_until_the_blob_arrives() {
+        // Batch body stored, but member tx1's blob is removed from txStore → processMainBlock
+        // must stall. tx1 must be in pendingMissingBlobHashes but NOT in
+        // pendingMissingBatchHashes. isAwaitingBlob(tx1) must be true. After putRaw +
+        // onBlobsAvailable both receipts appear.
+        EvmTransaction tx0 = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        EvmTransaction tx1 = storedTx(1,
+                Optional.of(Address.fromHexString("0x9999999999999999999999999999999999999999")),
+                Bytes.EMPTY, 21_000L);
+
+        Bytes batchBody = EvmTxStore.encodeBatch(List.of(ref(tx0), ref(tx1)));
+        Hash batchHash = txStore.putBatch(batchBody);
+        Bytes32 commitRef = Bytes32.wrap(batchHash.getBytes());
+
+        // Remove tx1's blob AFTER storing the batch (body present, member missing).
+        txStore.remove(tx1.getHash());
+
+        processor.processMainBlock(List.of(commitRef), 1L, 1001L, BLOCK_HASH_1);
+
+        assertTrue("no checkpoint while member blob is missing",
+                metaStore.getHeightRecord(1L).isEmpty());
+        assertEquals(List.of(1L), metaStore.pendingHeights());
+
+        List<Bytes32> missingBlobs = processor.pendingMissingBlobHashes();
+        List<Bytes32> missingBatches = processor.pendingMissingBatchHashes();
+        assertTrue("tx1 in pendingMissingBlobHashes", missingBlobs.contains(ref(tx1)));
+        assertFalse("tx1 NOT in pendingMissingBatchHashes", missingBatches.contains(ref(tx1)));
+        assertTrue("isAwaitingBlob(tx1) true", processor.isAwaitingBlob(tx1.getHash()));
+
+        // Restore the missing member blob and drain.
+        txStore.putRaw(tx1.getHash(), tx1.getRawRlp());
+        processor.onBlobsAvailable();
+
+        assertTrue("both receipts present after drain",
+                metaStore.getReceipt(tx0.getHash()).isPresent());
+        assertTrue("both receipts present after drain",
+                metaStore.getReceipt(tx1.getHash()).isPresent());
+        assertTrue("no longer pending", metaStore.pendingHeights().isEmpty());
+    }
 }

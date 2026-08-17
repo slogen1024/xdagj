@@ -39,6 +39,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
@@ -169,7 +170,7 @@ public class EvmBlockProcessor {
                     txRefs.size(), height, activationHeight);
             return;
         }
-        if (!metaStore.pendingHeights().isEmpty() || !allBlobsPresent(txRefs)) {
+        if (!metaStore.pendingHeights().isEmpty() || !expandRefs(txRefs).complete()) {
             metaStore.putPending(height, blockHash, timestampSeconds, txRefs);
             log.warn("Deferring EVM execution of main block at height {} ({} ref(s)) until blobs arrive",
                     height, txRefs.size());
@@ -189,7 +190,7 @@ public class EvmBlockProcessor {
             if (pending == null) {
                 continue;
             }
-            if (!allBlobsPresent(pending.refs())) {
+            if (!expandRefs(pending.refs()).complete()) {
                 return; // the lowest incomplete height blocks everything above it
             }
             executeAndCheckpoint(pending.refs(), height, pending.timestampSeconds(), pending.blockHash());
@@ -197,61 +198,92 @@ public class EvmBlockProcessor {
         }
     }
 
+    /** Dual-lookup expansion of raw 0x0F refs (spec §7). */
+    private record Expansion(List<Bytes32> flat, List<Bytes32> unknownRefs,
+                             List<Bytes32> missingTxBlobs) {
+        boolean complete() {
+            return unknownRefs.isEmpty() && missingTxBlobs.isEmpty();
+        }
+    }
+
     /**
-     * The distinct tx hashes that deferred (pending) heights reference but whose blobs are not yet
-     * stored, lowest height first, in ref order. The P2P layer periodically re-requests these from
-     * peers so a stalled EVM height converges (I4): the retry self-heals a dropped request or a blob
-     * reply that arrived before the block was deferred. Empty when nothing is pending or all blobs
-     * are present.
+     * Interprets each ref by content (spec §2): a stored batch body expands to its ordered tx
+     * hashes; otherwise a stored tx blob is a legacy single-tx ref. A ref matching neither store
+     * is "unknown" — it may be either kind, so the P2P retry asks for both. Deterministic across
+     * nodes because a 32-byte value cannot be both keccak(tx RLP) and keccak(batch body).
+     */
+    private Expansion expandRefs(List<Bytes32> txRefs) {
+        List<Bytes32> flat = new ArrayList<>();
+        List<Bytes32> unknown = new ArrayList<>();
+        List<Bytes32> missingBlobs = new ArrayList<>();
+        for (Bytes32 ref : txRefs) {
+            Hash asHash = Hash.wrap(ref);
+            Optional<List<Bytes32>> batch = txStore.getBatch(asHash);
+            if (batch.isPresent()) {
+                for (Bytes32 member : batch.get()) {
+                    flat.add(member);
+                    if (!txStore.contains(Hash.wrap(member))) {
+                        missingBlobs.add(member);
+                    }
+                }
+            } else if (txStore.contains(asHash)) {
+                flat.add(ref);
+            } else {
+                unknown.add(ref);
+            }
+        }
+        return new Expansion(flat, unknown, missingBlobs);
+    }
+
+    /**
+     * The distinct tx hashes (and ambiguous refs) that deferred heights still lack, for EVM_TX_REQUEST
+     * retry. Includes expanded member hashes whose blobs are absent, plus unknown refs that may be
+     * either a legacy single tx or a batch commitment. Lowest height first, in ref order.
+     * Empty when nothing is pending or all blobs are present.
      */
     public synchronized List<Bytes32> pendingMissingBlobHashes() {
         List<Bytes32> missing = new ArrayList<>();
         Set<Bytes32> seen = new HashSet<>();
-        for (long height : metaStore.pendingHeights()) {
-            EvmMetaStore.PendingBlock pending = metaStore.getPending(height).orElse(null);
-            if (pending == null) {
-                continue;
-            }
-            for (Bytes32 ref : pending.refs()) {
-                if (!txStore.contains(Hash.wrap(ref)) && seen.add(ref)) {
-                    missing.add(ref);
-                }
-            }
-        }
+        forEachPendingExpansion(exp -> {
+            exp.missingTxBlobs().forEach(h -> { if (seen.add(h)) missing.add(h); });
+            exp.unknownRefs().forEach(h -> { if (seen.add(h)) missing.add(h); }); // may be a legacy single tx
+        });
         return missing;
     }
 
-    /** True if some deferred height references {@code txHash} and its blob is not yet stored. */
-    public synchronized boolean isAwaitingBlob(Hash txHash) {
-        if (txStore.contains(txHash)) {
-            return false;
-        }
-        Bytes32 target = Bytes32.wrap(txHash.getBytes());
-        for (long height : metaStore.pendingHeights()) {
-            EvmMetaStore.PendingBlock pending = metaStore.getPending(height).orElse(null);
-            if (pending != null && pending.refs().contains(target)) {
-                return true;
-            }
-        }
-        return false;
+    /** Ambiguous refs that may be batch commitments, for EVM_BATCH_REQUEST retry. */
+    public synchronized List<Bytes32> pendingMissingBatchHashes() {
+        List<Bytes32> missing = new ArrayList<>();
+        Set<Bytes32> seen = new HashSet<>();
+        forEachPendingExpansion(exp ->
+                exp.unknownRefs().forEach(h -> { if (seen.add(h)) missing.add(h); }));
+        return missing;
     }
 
-    private boolean allBlobsPresent(List<Bytes32> txRefs) {
-        for (Bytes32 refBytes : txRefs) {
-            if (!txStore.contains(Hash.wrap(refBytes))) {
-                return false;
-            }
+    private void forEachPendingExpansion(Consumer<Expansion> fn) {
+        for (long height : metaStore.pendingHeights()) {
+            metaStore.getPending(height).ifPresent(p -> fn.accept(expandRefs(p.refs())));
         }
-        return true;
+    }
+
+    /** True if some deferred height's expansion still lacks this tx blob (or has it as an unknown ref). */
+    public synchronized boolean isAwaitingBlob(Hash txHash) {
+        return pendingMissingBlobHashes().contains(Bytes32.wrap(txHash.getBytes()));
+    }
+
+    /** True if some deferred height has this hash as an ambiguous (possibly-batch) ref. */
+    public synchronized boolean isAwaitingBatch(Hash batchHash) {
+        return pendingMissingBatchHashes().contains(Bytes32.wrap(batchHash.getBytes()));
     }
 
     /** Executes a confirmed (or drained) main block's refs and writes its EVM_META checkpoint. */
     private void executeAndCheckpoint(List<Bytes32> txRefs, long height, long timestampSeconds,
                                       Bytes32 blockHash) {
         seedGenesisIfAbsent(); // fund the genesis accounts before the first tx reads their balance
-        List<Hash> candidates = new ArrayList<>(txRefs.size());
+        List<Bytes32> flat = expandRefs(txRefs).flat();
+        List<Hash> candidates = new ArrayList<>(flat.size());
         Set<Hash> seen = new HashSet<>();
-        for (Bytes32 refBytes : txRefs) {
+        for (Bytes32 refBytes : flat) {
             Hash txHash = Hash.wrap(refBytes);
             if (!seen.add(txHash)) {
                 // Duplicate ref within this same block — execute once (spec §7.5).
