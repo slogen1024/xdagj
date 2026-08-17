@@ -531,18 +531,20 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
     private void processEvmBatchReply(EvmBatchReplyMessage msg) {
         EvmTxStore evmTxStore = kernel.getEvmTxStore();
         EvmBlockProcessor evmProcessor = kernel.getEvmBlockProcessor();
+        Bytes body = msg.getBatchBody();
         if (evmTxStore == null || evmProcessor == null
-                || msg.getBatchBody().size() > config.getEvmSpec().getEvmMaxP2pTxBytes()) {
+                || body.size() > config.getEvmSpec().getEvmMaxP2pTxBytes()) {
             return;
         }
         Hash batchHash;
+        // defensive: Hash.hash is not declared to throw, but guard any future change
         try {
-            batchHash = Hash.hash(msg.getBatchBody());
+            batchHash = Hash.hash(body);
         } catch (RuntimeException e) {
             return;
         }
         if (evmProcessor.isAwaitingBatch(batchHash)) {
-            evmTxStore.putBatch(msg.getBatchBody());
+            evmTxStore.putBatch(body);
             evmProcessor.onBlobsAvailable();
         }
     }
@@ -566,6 +568,7 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
         // resume execution in height order (I4 convergence).
         if (evmProcessor != null) {
             Hash txHash;
+            // defensive: Hash.hash is not declared to throw, but guard any future change
             try {
                 txHash = Hash.hash(rawRlp);
             } catch (RuntimeException e) {

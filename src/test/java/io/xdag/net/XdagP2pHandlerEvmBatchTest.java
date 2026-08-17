@@ -25,6 +25,7 @@ package io.xdag.net;
 
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -283,5 +284,24 @@ public class XdagP2pHandlerEvmBatchTest {
         assertTrue("Expected EvmTxRequestMessage for ambiguous ref X", txReqForX);
         assertTrue("Expected EvmTxRequestMessage for blob-only ref Y", txReqForY);
         assertTrue("Expected EvmBatchRequestMessage for ambiguous ref X", batchReqForX);
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 4: batch_request_for_unknown_hash_sends_no_reply
+    // -------------------------------------------------------------------------
+
+    /**
+     * When a remote peer sends EVM_BATCH_REQUEST for a hash that is NOT present in our store, the
+     * handler must not send any reply at all.
+     */
+    @Test
+    public void batch_request_for_unknown_hash_sends_no_reply() throws Exception {
+        // Use a hash that was never stored in evmTxStore
+        Bytes32 unknownHash = Bytes32.fromHexString("0x" + "ee".repeat(32));
+
+        EvmBatchRequestMessage req = new EvmBatchRequestMessage(unknownHash);
+        invokePrivate("processEvmBatchRequest", EvmBatchRequestMessage.class, req);
+
+        verify(mockMsgQueue, never()).sendMessage(any());
     }
 }
