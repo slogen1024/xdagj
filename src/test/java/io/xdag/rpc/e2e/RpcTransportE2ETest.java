@@ -114,6 +114,7 @@ public class RpcTransportE2ETest {
         mgr = new SubscriptionManager();
         proc.setSubscriptionSink(mgr);
 
+        // Same store the processor / eth_getTransactionReceipt read: pool.add persists the blob here.
         EvmTxPool txPool = new EvmTxPool(txStore, state,
                 CHAIN_ID, 30_000_000L, Wei.ONE, 3600L, () -> 1000L);
 
