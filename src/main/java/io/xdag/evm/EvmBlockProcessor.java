@@ -170,13 +170,14 @@ public class EvmBlockProcessor {
                     txRefs.size(), height, activationHeight);
             return;
         }
-        if (!metaStore.pendingHeights().isEmpty() || !expandRefs(txRefs).complete()) {
+        Expansion exp = expandRefs(txRefs);
+        if (!metaStore.pendingHeights().isEmpty() || !exp.complete()) {
             metaStore.putPending(height, blockHash, timestampSeconds, txRefs);
             log.warn("Deferring EVM execution of main block at height {} ({} ref(s)) until blobs arrive",
                     height, txRefs.size());
             return;
         }
-        executeAndCheckpoint(txRefs, height, timestampSeconds, blockHash);
+        executeAndCheckpoint(exp.flat(), height, timestampSeconds, blockHash);
     }
 
     /**
@@ -190,10 +191,11 @@ public class EvmBlockProcessor {
             if (pending == null) {
                 continue;
             }
-            if (!expandRefs(pending.refs()).complete()) {
+            Expansion exp = expandRefs(pending.refs());
+            if (!exp.complete()) {
                 return; // the lowest incomplete height blocks everything above it
             }
-            executeAndCheckpoint(pending.refs(), height, pending.timestampSeconds(), pending.blockHash());
+            executeAndCheckpoint(exp.flat(), height, pending.timestampSeconds(), pending.blockHash());
             metaStore.removePending(height);
         }
     }
@@ -215,7 +217,7 @@ public class EvmBlockProcessor {
     private Expansion expandRefs(List<Bytes32> txRefs) {
         List<Bytes32> flat = new ArrayList<>();
         List<Bytes32> unknown = new ArrayList<>();
-        List<Bytes32> missingBlobs = new ArrayList<>();
+        List<Bytes32> missingTxBlobs = new ArrayList<>();
         for (Bytes32 ref : txRefs) {
             Hash asHash = Hash.wrap(ref);
             Optional<List<Bytes32>> batch = txStore.getBatch(asHash);
@@ -223,7 +225,7 @@ public class EvmBlockProcessor {
                 for (Bytes32 member : batch.get()) {
                     flat.add(member);
                     if (!txStore.contains(Hash.wrap(member))) {
-                        missingBlobs.add(member);
+                        missingTxBlobs.add(member);
                     }
                 }
             } else if (txStore.contains(asHash)) {
@@ -232,7 +234,7 @@ public class EvmBlockProcessor {
                 unknown.add(ref);
             }
         }
-        return new Expansion(flat, unknown, missingBlobs);
+        return new Expansion(flat, unknown, missingTxBlobs);
     }
 
     /**
@@ -268,22 +270,47 @@ public class EvmBlockProcessor {
 
     /** True if some deferred height's expansion still lacks this tx blob (or has it as an unknown ref). */
     public synchronized boolean isAwaitingBlob(Hash txHash) {
-        return pendingMissingBlobHashes().contains(Bytes32.wrap(txHash.getBytes()));
+        Bytes32 target = Bytes32.wrap(txHash.getBytes());
+        for (long height : metaStore.pendingHeights()) {
+            EvmMetaStore.PendingBlock pending = metaStore.getPending(height).orElse(null);
+            if (pending == null) {
+                continue;
+            }
+            Expansion exp = expandRefs(pending.refs());
+            if (exp.missingTxBlobs().contains(target) || exp.unknownRefs().contains(target)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** True if some deferred height has this hash as an ambiguous (possibly-batch) ref. */
     public synchronized boolean isAwaitingBatch(Hash batchHash) {
-        return pendingMissingBatchHashes().contains(Bytes32.wrap(batchHash.getBytes()));
+        Bytes32 target = Bytes32.wrap(batchHash.getBytes());
+        for (long height : metaStore.pendingHeights()) {
+            EvmMetaStore.PendingBlock pending = metaStore.getPending(height).orElse(null);
+            if (pending == null) {
+                continue;
+            }
+            if (expandRefs(pending.refs()).unknownRefs().contains(target)) {
+                return true;
+            }
+        }
+        return false;
     }
 
-    /** Executes a confirmed (or drained) main block's refs and writes its EVM_META checkpoint. */
-    private void executeAndCheckpoint(List<Bytes32> txRefs, long height, long timestampSeconds,
+    /**
+     * Executes a confirmed (or drained) main block's expanded refs and writes its EVM_META checkpoint.
+     * {@code flatRefs} must already be the fully-expanded flat list (batch members inlined, no unknown
+     * refs) — callers are responsible for running {@link #expandRefs} and gating on
+     * {@link Expansion#complete()} before invoking this method.
+     */
+    private void executeAndCheckpoint(List<Bytes32> flatRefs, long height, long timestampSeconds,
                                       Bytes32 blockHash) {
         seedGenesisIfAbsent(); // fund the genesis accounts before the first tx reads their balance
-        List<Bytes32> flat = expandRefs(txRefs).flat();
-        List<Hash> candidates = new ArrayList<>(flat.size());
+        List<Hash> candidates = new ArrayList<>(flatRefs.size());
         Set<Hash> seen = new HashSet<>();
-        for (Bytes32 refBytes : flat) {
+        for (Bytes32 refBytes : flatRefs) {
             Hash txHash = Hash.wrap(refBytes);
             if (!seen.add(txHash)) {
                 // Duplicate ref within this same block — execute once (spec §7.5).

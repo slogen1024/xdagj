@@ -792,10 +792,10 @@ public class EvmBlockProcessorTest {
 
         List<Bytes32> missingBlobs = processor.pendingMissingBlobHashes();
         List<Bytes32> missingBatches = processor.pendingMissingBatchHashes();
-        assertTrue("commit ref in pendingMissingBlobHashes (may be a legacy tx)",
-                missingBlobs.contains(commitRef));
-        assertTrue("commit ref in pendingMissingBatchHashes (may be a batch)",
-                missingBatches.contains(commitRef));
+        assertEquals("commit ref is the only entry in pendingMissingBlobHashes",
+                List.of(commitRef), missingBlobs);
+        assertEquals("commit ref is the only entry in pendingMissingBatchHashes",
+                List.of(commitRef), missingBatches);
         assertTrue("isAwaitingBatch(hash) true", processor.isAwaitingBatch(batchHash));
 
         // Body and tx blob arrive; drain resolves the stall.
