@@ -141,9 +141,10 @@ public class EvmTxPool {
         // Obtain (or create) the per-sender nonce queue and prune entries that are now below the
         // current account nonce (confirmed on-chain since they were queued).
         NavigableMap<Long, PoolEntry> queue = bySender.computeIfAbsent(sender, s -> new TreeMap<>());
-        pruneStale(sender, queue, accountNonce);
+        pruneStale(queue, accountNonce);
 
         // Admission window: [accountNonce, accountNonce + MAX_PER_SENDER - 1].
+        // accountNonce + 16 cannot overflow for any reachable on-chain nonce.
         if (tx.getNonce() < accountNonce || tx.getNonce() >= accountNonce + MAX_PER_SENDER) {
             if (queue.isEmpty()) {
                 bySender.remove(sender);
@@ -183,6 +184,9 @@ public class EvmTxPool {
             replaced = true;
         } else if (byHash.size() >= MAX_POOL_SIZE) {
             // A new entry would grow the pool past its cap.
+            if (queue.isEmpty()) {
+                bySender.remove(sender);
+            }
             return AddResult.POOL_FULL;
         }
 
@@ -250,9 +254,10 @@ public class EvmTxPool {
     /**
      * Remove all entries in {@code queue} whose nonce is strictly less than {@code accountNonce}.
      * The corresponding byHash entries are also removed. The sender key in bySender is NOT removed
-     * here even if the queue becomes empty; callers handle that after inspecting the window.
+     * here even if the queue becomes empty; every caller (NONCE_MISMATCH, INSUFFICIENT_BALANCE, and
+     * POOL_FULL branches) cleans up the empty sender key before returning.
      */
-    private void pruneStale(Address sender, NavigableMap<Long, PoolEntry> queue, long accountNonce) {
+    private void pruneStale(NavigableMap<Long, PoolEntry> queue, long accountNonce) {
         Iterator<Map.Entry<Long, PoolEntry>> it =
                 queue.headMap(accountNonce, false).entrySet().iterator();
         while (it.hasNext()) {

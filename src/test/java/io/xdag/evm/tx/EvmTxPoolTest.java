@@ -321,7 +321,7 @@ public class EvmTxPoolTest {
 
         // Adding any tx for this sender triggers pruning of nonce < accountNonce.
         EvmTransaction t2 = tx(key, 1, Wei.of(3_000_000_000L)); // replaces t1 at same nonce
-        pool.add(t2.getRawRlp()); // REPLACED or ADDED — we just care about the side effect
+        assertEquals(EvmTxPool.AddResult.REPLACED, pool.add(t2.getRawRlp()));
 
         // t0 (nonce=0) was stale and must have been removed from byHash.
         assertTrue("stale nonce=0 entry must be pruned from the pool", pool.get(t0.getHash()).isEmpty());
