@@ -303,6 +303,94 @@ public class EvmTxPoolTest {
         assertEquals(2, pool.size());
     }
 
+    // ---- selectBatch (Task D3) tests ----
+
+    @Test
+    public void select_batch_orders_senders_by_price_and_nonces_ascending_within_sender() {
+        // senderA: gasPrice 20 gwei, nonces 0 and 1
+        // senderB: gasPrice 30 gwei, nonce 0
+        // Expected order: [B nonce=0, A nonce=0, A nonce=1]
+        KeyPair keyA = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(10)));
+        KeyPair keyB = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(11)));
+        Address addrA = Address.extract(keyA.getPublicKey());
+        Address addrB = Address.extract(keyB.getPublicKey());
+        fund(addrA, Wei.fromEth(1), 0L);
+        fund(addrB, Wei.fromEth(1), 0L);
+
+        Wei priceA = Wei.of(20_000_000_000L);
+        Wei priceB = Wei.of(30_000_000_000L);
+        EvmTransaction txA0 = tx(keyA, 0, priceA);
+        EvmTransaction txA1 = tx(keyA, 1, priceA);
+        EvmTransaction txB0 = tx(keyB, 0, priceB);
+
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(txA0.getRawRlp()));
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(txA1.getRawRlp()));
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(txB0.getRawRlp()));
+
+        List<EvmTransaction> batch = pool.selectBatch(Long.MAX_VALUE);
+        assertEquals(3, batch.size());
+        assertEquals(addrB, batch.get(0).getSender());
+        assertEquals(0L, batch.get(0).getNonce());
+        assertEquals(addrA, batch.get(1).getSender());
+        assertEquals(0L, batch.get(1).getNonce());
+        assertEquals(addrA, batch.get(2).getSender());
+        assertEquals(1L, batch.get(2).getNonce());
+    }
+
+    @Test
+    public void select_batch_stops_a_sender_at_the_budget_without_leaving_nonce_holes() {
+        // senderA has two txs each gasLimit=21000; budget=21000 → only nonce=0 selected
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(key, 0, Wei.of(2_000_000_000L)).getRawRlp()));
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(key, 1, Wei.of(2_000_000_000L)).getRawRlp()));
+
+        List<EvmTransaction> batch = pool.selectBatch(21_000L);
+        assertEquals(1, batch.size());
+        assertEquals(0L, batch.get(0).getNonce());
+    }
+
+    @Test
+    public void select_batch_skips_a_sender_with_a_gap_at_the_head() {
+        // senderA queues only nonce=1 (account nonce=0) → head gap, disqualified
+        // senderB queues nonce=0 → selected
+        KeyPair keyA = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(20)));
+        KeyPair keyB = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(21)));
+        Address addrA = Address.extract(keyA.getPublicKey());
+        Address addrB = Address.extract(keyB.getPublicKey());
+        fund(addrA, Wei.fromEth(1), 0L);
+        fund(addrB, Wei.fromEth(1), 0L);
+
+        // Submit nonce=0 for A first so we can then replace/add nonce=1; but account nonce is 0,
+        // so we need to skip nonce=0 entirely. We can achieve a gap by: add nonce=0 and nonce=1,
+        // then remove nonce=0 from the pool (simulating it being consumed or manually removed).
+        // Simpler: advance account nonce to 1 AFTER adding nonce=1 only — but nonce=1 requires
+        // window [0,15] so nonce=1 IS accepted when account nonce=0. Then we advance A's nonce to 0
+        // still (no on-chain change). The gap is: accountNonce=0, first queued nonce=1.
+        // So just add nonce=1 (within window) and DON'T add nonce=0 for sender A.
+        EvmTransaction txA1 = tx(keyA, 1, Wei.of(2_000_000_000L));
+        EvmTransaction txB0 = tx(keyB, 0, Wei.of(2_000_000_000L));
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(txA1.getRawRlp()));
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(txB0.getRawRlp()));
+
+        List<EvmTransaction> batch = pool.selectBatch(Long.MAX_VALUE);
+        assertEquals(1, batch.size());
+        assertEquals(addrB, batch.get(0).getSender());
+        assertEquals(0L, batch.get(0).getNonce());
+    }
+
+    @Test
+    public void select_batch_respects_the_max_batch_size_cap() {
+        // 65 distinct senders one tx each → selectBatch(Long.MAX_VALUE, 64) returns 64
+        for (int i = 0; i < 65; i++) {
+            KeyPair k = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(1000 + i)));
+            Address addr = Address.extract(k.getPublicKey());
+            fund(addr, Wei.fromEth(1), 0L);
+            assertEquals(EvmTxPool.AddResult.ADDED,
+                    pool.add(tx(k, 0, Wei.of(2_000_000_000L)).getRawRlp()));
+        }
+        List<EvmTransaction> batch = pool.selectBatch(Long.MAX_VALUE, 64);
+        assertEquals(64, batch.size());
+    }
+
     @Test
     public void stale_entries_are_pruned_when_the_account_nonce_advances() {
         Wei gasPrice = Wei.of(2_000_000_000L);

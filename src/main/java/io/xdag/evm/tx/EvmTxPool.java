@@ -26,8 +26,10 @@ package io.xdag.evm.tx;
 import io.xdag.db.rocksdb.KVSource;
 import io.xdag.evm.state.RocksDbWorldUpdater;
 import java.math.BigInteger;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -241,6 +243,67 @@ public class EvmTxPool {
 
     public synchronized int size() {
         return byHash.size();
+    }
+
+    /** {@code selectBatch(gasBudget, EvmTxStore.MAX_BATCH_TXS)}. */
+    public synchronized List<EvmTransaction> selectBatch(long gasBudget) {
+        return selectBatch(gasBudget, EvmTxStore.MAX_BATCH_TXS);
+    }
+
+    /**
+     * Greedy batch fill (spec §3): senders ordered by the gas price of their next unselected tx
+     * (descending, insertion order breaking ties), nonces strictly ascending within a sender
+     * starting at the account nonce (a head gap disqualifies the sender), a tx that exceeds the
+     * remaining budget stops its sender (no nonce holes), until the budget, the cap, or the pool
+     * is exhausted. Expired entries stop their sender's run. Does not mutate the pool.
+     */
+    public synchronized List<EvmTransaction> selectBatch(long gasBudget, int maxTxs) {
+        long now = clockSeconds.getAsLong();
+        List<EvmTransaction> selected = new ArrayList<>();
+        long remaining = gasBudget;
+        List<Deque<EvmTransaction>> runs = new ArrayList<>();
+        for (Map.Entry<Address, NavigableMap<Long, PoolEntry>> e : bySender.entrySet()) {
+            long accountNonce = currentNonce(e.getKey());
+            Deque<EvmTransaction> run = new ArrayDeque<>();
+            long expected = accountNonce;
+            for (PoolEntry entry : e.getValue().tailMap(accountNonce, true).values()) {
+                if (now - entry.addedAtSeconds() > ttlSeconds || entry.tx().getNonce() != expected) {
+                    break;
+                }
+                run.add(entry.tx());
+                expected++;
+            }
+            if (!run.isEmpty()) {
+                runs.add(run);
+            }
+        }
+        while (selected.size() < maxTxs) {
+            Deque<EvmTransaction> best = null;
+            for (Deque<EvmTransaction> run : runs) {
+                if (run.isEmpty()) {
+                    continue;
+                }
+                if (best == null || run.peek().getGasPrice().compareTo(best.peek().getGasPrice()) > 0) {
+                    best = run;
+                }
+            }
+            if (best == null) {
+                break;
+            }
+            EvmTransaction tx = best.peek();
+            if (tx.getGasLimit() > remaining) {
+                best.clear();
+                continue;
+            }
+            selected.add(best.poll());
+            remaining -= tx.getGasLimit();
+        }
+        return selected;
+    }
+
+    private long currentNonce(Address sender) {
+        Account account = new RocksDbWorldUpdater(evmStateStore).getAccount(sender);
+        return account == null ? 0L : account.getNonce();
     }
 
     // ---- helpers ----
