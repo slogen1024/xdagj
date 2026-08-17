@@ -299,8 +299,8 @@ public class EvmBlockProcessor {
             if (txStore.contains(txHash)) {
                 candidates.add(txHash);
             } else {
-                // Guarded against by the caller's allBlobsPresent gate; only reachable if the blob
-                // was evicted between the gate and here.
+                // Guarded against by the expandRefs(...).complete() gate in the caller; only reachable
+                // if the blob was evicted between the completeness check and here.
                 log.error("EVM tx blob vanished for ref {} at height {}; skipping", txHash, height);
             }
         }
