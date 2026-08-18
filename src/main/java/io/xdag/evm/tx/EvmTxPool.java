@@ -123,7 +123,7 @@ public class EvmTxPool {
             return AddResult.GAS_LIMIT_TOO_HIGH;
         }
         try {
-            if (IntrinsicGas.compute(tx.getPayload(), tx.isContractCreation()) > tx.getGasLimit()) {
+            if (IntrinsicGas.compute(tx.getPayload(), tx.isContractCreation(), tx.getAccessList()) > tx.getGasLimit()) {
                 return AddResult.INTRINSIC_GAS_TOO_LOW;
             }
         } catch (IllegalArgumentException e) {

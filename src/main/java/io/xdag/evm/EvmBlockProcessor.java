@@ -586,7 +586,7 @@ public class EvmBlockProcessor {
         }
         long intrinsicGas;
         try {
-            intrinsicGas = IntrinsicGas.compute(tx.getPayload(), tx.isContractCreation());
+            intrinsicGas = IntrinsicGas.compute(tx.getPayload(), tx.isContractCreation(), tx.getAccessList());
         } catch (IllegalArgumentException e) {
             return validationFailure("oversized initcode", e.getMessage());
         }

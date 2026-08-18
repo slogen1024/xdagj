@@ -26,7 +26,10 @@ package io.xdag.evm.tx;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
 
+import java.util.List;
 import org.apache.tuweni.bytes.Bytes;
+import org.apache.tuweni.bytes.Bytes32;
+import org.hyperledger.besu.datatypes.Address;
 import org.junit.Test;
 
 /** Shanghai intrinsic gas: 21000 + 4/zero byte + 16/non-zero byte (+ create: 32000 + 2/initcode word). */
@@ -54,5 +57,26 @@ public class IntrinsicGasTest {
     public void oversized_initcode_rejected() {
         Bytes tooBig = Bytes.repeat((byte) 1, IntrinsicGas.MAX_INITCODE_SIZE + 1);
         assertThrows(IllegalArgumentException.class, () -> IntrinsicGas.compute(tooBig, true));
+    }
+
+    @Test
+    public void access_list_adds_eip2930_costs() {
+        List<AccessListEntry> list = List.of(
+                new AccessListEntry(
+                        Address.fromHexString("0x3535353535353535353535353535353535353535"),
+                        List.of(Bytes32.leftPad(Bytes.of(1)), Bytes32.leftPad(Bytes.of(2)))),
+                new AccessListEntry(
+                        Address.fromHexString("0x3636363636363636363636363636363636363636"),
+                        List.of()));
+        long base = IntrinsicGas.compute(Bytes.EMPTY, false);
+        // 2 addresses * 2400 + 2 storage keys * 1900
+        assertEquals(base + 2 * 2400L + 2 * 1900L, IntrinsicGas.compute(Bytes.EMPTY, false, list));
+    }
+
+    @Test
+    public void empty_access_list_matches_two_arg_form() {
+        Bytes payload = Bytes.fromHexString("0x00ff00ff");
+        assertEquals(IntrinsicGas.compute(payload, true),
+                IntrinsicGas.compute(payload, true, List.of()));
     }
 }

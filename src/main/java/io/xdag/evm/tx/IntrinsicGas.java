@@ -23,21 +23,28 @@
  */
 package io.xdag.evm.tx;
 
+import java.util.List;
 import org.apache.tuweni.bytes.Bytes;
 
 /**
- * Shanghai-fork intrinsic gas for legacy transactions: the gas charged before a single opcode runs.
+ * Shanghai-fork intrinsic gas: the gas charged before a single opcode runs.
  *
  * <ul>
  *   <li>21000 base (G_transaction)</li>
  *   <li>calldata: 4 per zero byte, 16 per non-zero byte (EIP-2028)</li>
  *   <li>creation: +32000 (G_txcreate) and +2 per 32-byte initcode word, initcode capped at
  *       49152 bytes (EIP-3860)</li>
+ *   <li>access list: 2400 per address, 1900 per storage key (EIP-2930) — charged, not warmed</li>
  * </ul>
  */
 public final class IntrinsicGas {
 
     public static final int MAX_INITCODE_SIZE = 49_152;
+
+    /** EIP-2930: intrinsic cost per access-list address. */
+    public static final long ACCESS_LIST_ADDRESS_COST = 2_400L;
+    /** EIP-2930: intrinsic cost per access-list storage key. */
+    public static final long ACCESS_LIST_STORAGE_KEY_COST = 1_900L;
 
     private static final long TX_BASE_COST = 21_000L;
     private static final long ZERO_BYTE_COST = 4L;
@@ -48,10 +55,15 @@ public final class IntrinsicGas {
     private IntrinsicGas() {
     }
 
+    public static long compute(Bytes payload, boolean isContractCreation) {
+        return compute(payload, isContractCreation, List.of());
+    }
+
     /**
      * @throws IllegalArgumentException if creation initcode exceeds the EIP-3860 cap
      */
-    public static long compute(Bytes payload, boolean isContractCreation) {
+    public static long compute(Bytes payload, boolean isContractCreation,
+                               List<AccessListEntry> accessList) {
         if (isContractCreation && payload.size() > MAX_INITCODE_SIZE) {
             throw new IllegalArgumentException(
                     "initcode size " + payload.size() + " exceeds EIP-3860 cap " + MAX_INITCODE_SIZE);
@@ -63,6 +75,9 @@ public final class IntrinsicGas {
         if (isContractCreation) {
             gas += CREATE_BASE_COST;
             gas += INITCODE_WORD_COST * ((payload.size() + 31) / 32);
+        }
+        for (AccessListEntry entry : accessList) {
+            gas += ACCESS_LIST_ADDRESS_COST + ACCESS_LIST_STORAGE_KEY_COST * entry.storageKeys().size();
         }
         return gas;
     }
