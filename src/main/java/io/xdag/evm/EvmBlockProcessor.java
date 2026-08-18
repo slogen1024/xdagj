@@ -514,7 +514,7 @@ public class EvmBlockProcessor {
                 log.error("EVM tx blob vanished for {} at height {}", txHash, height);
                 continue;
             }
-            long txGasLimit = peekGasLimit(blob); // -1 when undecodable (executeOne records the failure)
+            long txGasLimit = peekGasLimit(blob, height); // -1 when undecodable (executeOne records the failure)
             if (txGasLimit > gasBudget) {
                 log.warn("EVM tx {} gas limit {} exceeds remaining block budget {} at height {}; skipping",
                         txHash, txGasLimit, gasBudget, height);
@@ -552,10 +552,19 @@ public class EvmBlockProcessor {
         return new ExecutionOutcome(chainedRoot, executed);
     }
 
-    /** Decodes just the gas limit for budget accounting; -1 if the blob cannot be decoded. */
-    private static long peekGasLimit(Bytes blob) {
+    /**
+     * Decodes just the gas limit for budget accounting; -1 if the blob cannot be decoded.
+     * A type-2 blob below the activation height also reads -1 — a non-upgraded node cannot
+     * decode it at all, and budget accounting must match byte-for-byte pre-activation (spec §4),
+     * not just the receipt (which the executeOne gate already equalizes).
+     */
+    private long peekGasLimit(Bytes blob, long height) {
         try {
-            return EvmTransaction.decode(blob).getGasLimit();
+            EvmTransaction tx = EvmTransaction.decode(blob);
+            if (tx.getType() == EvmTransaction.TYPE_EIP1559 && height < type2ActivationHeight) {
+                return -1L;
+            }
+            return tx.getGasLimit();
         } catch (RuntimeException e) {
             return -1L;
         }

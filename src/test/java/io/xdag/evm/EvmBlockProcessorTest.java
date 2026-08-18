@@ -943,4 +943,43 @@ public class EvmBlockProcessorTest {
         assertEquals("pre-activation type-2 receipt must be byte-identical to the undecodable-blob "
                 + "receipt (record equality = field equality)", undecodableReceipt, gatedReceipt);
     }
+
+    @Test
+    public void pre_activation_type2_does_not_consume_block_gas_budget() {
+        // Spec §4 completion: a non-upgraded node cannot decode a type-2 blob at all, so its budget
+        // peek reads -1 and deducts nothing. An upgraded node must match: if its peek decoded the
+        // pre-activation type-2 and deducted its 21000 gas limit, the 30000 block budget would drop
+        // to 9000 and the legacy ref behind it would be SKIPPED (no receipt, no digest entry) while
+        // a non-upgraded node executes it — splitting the chained root during the upgrade window.
+        EvmConfig gated = new EvmConfig(EvmSpecVersion.SHANGHAI, EvmConfig.DEVNET_CHAIN_ID,
+                30_000L, EvmConfig.DEFAULT_MIN_GAS_PRICE, Long.MAX_VALUE);
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmTxStore txs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor proc = new EvmBlockProcessor(gated, state, txs, meta);
+        RocksDbWorldUpdater w = new RocksDbWorldUpdater(state);
+        w.createAccount(sender, 0L, Wei.fromEth(1));
+        w.commit();
+
+        // The gated type-2 fails validation BEFORE the nonce check (no nonce burn), so the legacy
+        // transfer behind it still executes at account nonce 0.
+        EvmTransaction type2 = EvmTransaction.unsignedType2(0L, Wei.of(1), Wei.of(3), 21_000L,
+                Optional.of(Address.fromHexString("0x00000000000000000000000000000000000000aa")),
+                Wei.of(100), Bytes.EMPTY, List.of(), CHAIN_ID).sign(key, algo);
+        EvmTransaction legacy = EvmTransaction.unsigned(0L, Wei.of(1), 21_000L,
+                Optional.of(Address.fromHexString("0x00000000000000000000000000000000000000bb")),
+                Wei.of(100), Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+        txs.put(type2);
+        txs.put(legacy);
+
+        proc.processMainBlock(List.of(ref(type2), ref(legacy)), 1L, 1001L, BLOCK_HASH_1);
+
+        EvmReceipt legacyReceipt = meta.getReceipt(legacy.getHash()).orElseThrow();
+        assertEquals("the legacy tx behind the gated type-2 must execute — the type-2 must not "
+                + "consume any of the 30000 block gas budget", 1, legacyReceipt.status());
+        EvmReceipt type2Receipt = meta.getReceipt(type2.getHash()).orElseThrow();
+        assertEquals("pre-activation type-2 keeps the status-0 undecodable-path receipt", 0,
+                type2Receipt.status());
+        assertEquals("pre-activation type-2 burns zero gas", 0L, type2Receipt.gasUsed());
+    }
 }
