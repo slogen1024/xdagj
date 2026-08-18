@@ -64,7 +64,8 @@ public class IntrinsicGasTest {
         List<AccessListEntry> list = List.of(
                 new AccessListEntry(
                         Address.fromHexString("0x3535353535353535353535353535353535353535"),
-                        List.of(Bytes32.leftPad(Bytes.of(1)), Bytes32.leftPad(Bytes.of(2)), Bytes32.leftPad(Bytes.of(3)))),
+                        List.of(Bytes32.leftPad(Bytes.of(1)), Bytes32.leftPad(Bytes.of(2)),
+                                Bytes32.leftPad(Bytes.of(3)))),
                 new AccessListEntry(
                         Address.fromHexString("0x3636363636363636363636363636363636363636"),
                         List.of()));

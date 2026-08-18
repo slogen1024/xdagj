@@ -312,6 +312,64 @@ public class MainBlockEvmPackingTest {
                 List.of(Bytes32.wrap(legacy.getHash().getBytes())), batch.get());
     }
 
+    /**
+     * Legacy single-ref path with a type-2 candidate in the pool: when BOTH the batch fork and
+     * type-2 activation are in the future, the miner takes the selectEvmTxRef branch and must skip
+     * the type-2 candidate, packing the LEGACY tx's bare 32-byte hash as the 0x0F ref (no batch
+     * record). Covers the type-2 skip inside selectEvmTxRef, which the batch tests never reach.
+     */
+    @Test
+    public void pre_fork_and_pre_type2_miner_packs_only_the_bare_legacy_hash() throws Exception {
+        // Anonymous DevnetConfig subclass keeps everything identical to the class-level `config`
+        // except BOTH activation heights return Long.MAX_VALUE: nextHeight (1) is below the batch
+        // fork (legacy selectEvmTxRef branch) AND below the type-2 activation (type-2 skipped).
+        Config preForkConfig = new DevnetConfig() {
+            @Override
+            public long getEvmBatchActivationHeight() {
+                return Long.MAX_VALUE;
+            }
+
+            @Override
+            public long getEvmType2ActivationHeight() {
+                return Long.MAX_VALUE;
+            }
+        };
+        preForkConfig.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
+        preForkConfig.getNodeSpec().setStoreBackupDir(root.newFolder().getAbsolutePath());
+
+        // Reuse the same wallet key and EVM state already set up in @Before.
+        Kernel preForkKernel = new Kernel(preForkConfig, wallet.getDefKey());
+        preForkKernel.setBlockStore(kernel.getBlockStore());
+        preForkKernel.setOrphanBlockStore(kernel.getOrphanBlockStore());
+        preForkKernel.setAddressStore(kernel.getAddressStore());
+        preForkKernel.setTxHistoryStore(kernel.getTxHistoryStore());
+        preForkKernel.setWallet(wallet);
+        preForkKernel.setEvmStateStore(evmStateSource);
+        preForkKernel.setEvmMetaStore(evmMetaStore);
+        preForkKernel.setEvmTxPool(evmTxPool);
+        preForkKernel.setEvmTxStore(evmTxStore);
+
+        EvmTransaction legacy = pooledTx(evmKey, 0);
+        EvmTransaction type2 = EvmTransaction.unsignedType2(0L, Wei.ONE, Wei.of(3), 100_000L,
+                Optional.empty(), Wei.ZERO, Bytes.fromHexString("0x6001600155"), List.of(),
+                BigInteger.valueOf(0xCAFE)).sign(evmKey2, algo);
+        assertEquals(EvmTxPool.AddResult.ADDED, evmTxPool.add(type2.getRawRlp()));
+
+        BlockchainImpl preForkChain = new BlockchainImpl(preForkKernel);
+        Block main = preForkChain.createMainBlock();
+
+        Bytes32 ref = main.getEvmTxRef();
+        assertNotNull("legacy ref must be non-null", ref);
+
+        // Legacy path: ref IS the bare LEGACY tx hash — the type-2 candidate is skipped.
+        assertEquals("legacy ref must equal bare tx hash",
+                Bytes32.wrap(legacy.getHash().getBytes()), ref);
+
+        // No batch record should exist for this ref in the store.
+        assertTrue("no batch record must exist for a legacy ref",
+                evmTxStore.getBatch(Hash.wrap(ref)).isEmpty());
+    }
+
     // ---------------------------------------------------------------------------
     // Shared invariants — both batch and legacy paths agree on these
     // ---------------------------------------------------------------------------

@@ -29,6 +29,6 @@ npx hardhat test --network xdagDevnet
   choice (forces legacy txs); removing it switches to the type-2 fee flow, and both modes work.
 - **Chain id** is `51966` (0xCAFE).
 - **Funded account:** private key `0x00…01` → `0x7e5f4552091a69125d5dfcb7b8c2659029395bdf`, pre-funded on devnet.
-- **Mining:** a tx confirms once the node's miner packs it into a carrier block (one tx per block on v1),
+- **Mining:** a tx confirms once the node's miner packs it into a carrier block (batched with other pending txs into one main block),
   so confirmations may take a few blocks.
 - For `eth_subscribe`, point an ethers `WebSocketProvider` at `ws://127.0.0.1:10002`.

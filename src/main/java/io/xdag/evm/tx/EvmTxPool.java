@@ -180,7 +180,8 @@ public class EvmTxPool {
         boolean replaced = false;
         if (existing != null) {
             // Same-slot competition: replace-by-fee only for a strictly higher effective gas price.
-            // Compares EFFECTIVE prices only (cap may drop): sound while baseFee == 0; revisit if a base-fee market activates.
+            // Compares EFFECTIVE prices only (cap may drop): sound while baseFee == 0;
+            // revisit if a base-fee market activates.
             if (tx.getEffectiveGasPrice().compareTo(existing.tx().getEffectiveGasPrice()) <= 0) {
                 return AddResult.UNDERPRICED;
             }

@@ -48,7 +48,8 @@ MetaMask/viem/Hardhat 以默认设置（type-2）对 XDAG devnet 发交易即可
     EIP-2 low-s 同样强制；`maxPriorityFee > maxFee` 拒绝（以太坊同款校验）；
   - `== 0x01` → 拒绝 "type-1 (EIP-2930) transactions not supported"；
   - `0x03..0x7f` → 拒绝 "unsupported transaction type"（EIP-2718 类型码空间）；
-  - `0x80..0xbf` → 本就是非法 RLP 首字节，自然抛 RLPException。
+  - `0x80..0xbf` → 落入 "unsupported transaction type" 的 IllegalArgumentException 分支
+    （与 RLPException 行为等价：所有消费方按 RuntimeException 统一处理，收据仍与未升级节点一致）。
 - type-2 signingHash = `keccak256(0x02 ‖ rlp(前 9 项))`；签名用 yParity 直接构造
   （无 EIP-155 v 算术）。
 - `rawRlp` = 完整信封字节（含 0x02 前缀）；**txHash = keccak256(信封) 与以太坊逐位一致**
