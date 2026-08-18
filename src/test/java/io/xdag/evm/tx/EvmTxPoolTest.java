@@ -503,6 +503,19 @@ public class EvmTxPoolTest {
     }
 
     @Test
+    public void cross_type_rbf_legacy_replaces_type2_incumbent() {
+        // Type-2 incumbent with effective 5 gwei (priority 5, maxFee 100) occupies (sender, nonce=0).
+        assertEquals(EvmTxPool.AddResult.ADDED,
+                pool.add(type2Tx(key, 0, Wei.of(5_000_000_000L), Wei.of(100_000_000_000L)).getRawRlp()));
+        // Legacy challenger at 6 gwei: strictly higher than the incumbent's EFFECTIVE 5 gwei →
+        // REPLACED, even though 6 gwei is far below the incumbent's 100 gwei fee cap.
+        EvmTransaction winner = tx(key, 0, Wei.of(6_000_000_000L));
+        assertEquals(EvmTxPool.AddResult.REPLACED, pool.add(winner.getRawRlp()));
+        assertEquals(1, pool.size());
+        assertEquals(winner.getHash(), pool.selectTransactions(10).getFirst().getHash());
+    }
+
+    @Test
     public void admission_checks_fee_cap_not_effective_price() {
         // Balance covers value + EFFECTIVE(1 gwei) * gasLimit exactly, but admission charges the
         // worst case value + FEE CAP (maxFee 1000 gwei) * gasLimit (Ethereum admission rule).
@@ -515,7 +528,8 @@ public class EvmTxPoolTest {
 
     @Test
     public void select_batch_orders_mixed_types_by_effective_price() {
-        // senderA: type-2 with effective 10 gwei (priority 10, maxFee 50); senderB: legacy 5 gwei.
+        // Effective and feeCap DISAGREE about the winner: senderA is type-2 with effective 2 gwei
+        // (priority 2, maxFee 50) — feeCap ordering would rank it first; senderB is legacy 5 gwei.
         KeyPair keyA = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(40)));
         KeyPair keyB = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(41)));
         Address addrA = Address.extract(keyA.getPublicKey());
@@ -524,15 +538,16 @@ public class EvmTxPoolTest {
         fund(addrB, Wei.fromEth(1), 0L);
 
         assertEquals(EvmTxPool.AddResult.ADDED,
-                pool.add(type2Tx(keyA, 0, Wei.of(10_000_000_000L), Wei.of(50_000_000_000L)).getRawRlp()));
+                pool.add(type2Tx(keyA, 0, Wei.of(2_000_000_000L), Wei.of(50_000_000_000L)).getRawRlp()));
         assertEquals(EvmTxPool.AddResult.ADDED,
                 pool.add(tx(keyB, 0, Wei.of(5_000_000_000L)).getRawRlp()));
 
         List<EvmTransaction> batch = pool.selectBatch(Long.MAX_VALUE);
         assertEquals(2, batch.size());
-        assertEquals("type-2 with the higher EFFECTIVE price must come first",
-                addrA, batch.get(0).getSender());
-        assertEquals(addrB, batch.get(1).getSender());
+        assertEquals("legacy with the higher EFFECTIVE price (5 > 2 gwei) must come first, "
+                        + "even though the type-2 fee cap (50 gwei) is far larger",
+                addrB, batch.get(0).getSender());
+        assertEquals(addrA, batch.get(1).getSender());
     }
 
     @Test

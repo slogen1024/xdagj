@@ -47,14 +47,14 @@ import org.hyperledger.besu.evm.account.Account;
 /**
  * The EVM mempool (spec §4.4): accepts raw EIP-155 blobs from RPC/P2P, validates them against the
  * current world state, persists accepted blobs into the EVM_TX store, and hands miners a
- * gas-price-ordered selection.
+ * effective-gas-price-ordered selection.
  *
  * <p>v2 policy: per-sender nonce chains. A sender may queue up to MAX_PER_SENDER consecutive
  * pending transactions covering the nonce window [accountNonce, accountNonce + MAX_PER_SENDER - 1].
  * Nonces outside that window are rejected with NONCE_MISMATCH. Stale entries (nonce &lt;
  * accountNonce) are pruned at admission time. Admission requires that the sender's cumulative cost
- * (Σ value + gasLimit×gasPrice over all queued txs including the new one) does not exceed the
- * account balance. Same-slot replacement requires a strictly higher gas price (replace-by-fee).
+ * (Σ value + gasLimit×feeCap over all queued txs including the new one) does not exceed the
+ * account balance. Same-slot replacement requires a strictly higher effective gas price (replace-by-fee).
  * Thread-safe via a single lock — pool throughput is nowhere near contention territory in v2.
  */
 public class EvmTxPool {
@@ -180,6 +180,7 @@ public class EvmTxPool {
         boolean replaced = false;
         if (existing != null) {
             // Same-slot competition: replace-by-fee only for a strictly higher effective gas price.
+            // Compares EFFECTIVE prices only (cap may drop): sound while baseFee == 0; revisit if a base-fee market activates.
             if (tx.getEffectiveGasPrice().compareTo(existing.tx().getEffectiveGasPrice()) <= 0) {
                 return AddResult.UNDERPRICED;
             }
