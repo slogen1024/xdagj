@@ -22,8 +22,11 @@ npx hardhat test --network xdagDevnet
 ```
 
 ## Notes
-- **Legacy gas only.** The devnet has no EIP-1559; `hardhat.config.js` sets `gasPrice` so Hardhat/ethers
-  never call `eth_feeHistory` / `eth_maxPriorityFeePerGas` (unimplemented). Do not remove that line.
+- **EIP-1559 supported.** The devnet accepts both legacy (type-0) and type-2 transactions: the base fee
+  is always 0 and the effective price is `min(maxPriorityFeePerGas, maxFeePerGas)`. `eth_feeHistory` and
+  `eth_maxPriorityFeePerGas` are served, so Hardhat/ethers default fee estimation works out of the box.
+  The `gasPrice: 1` line in `hardhat.config.js` is now optional — kept as the simplest deterministic
+  choice (forces legacy txs); removing it switches to the type-2 fee flow, and both modes work.
 - **Chain id** is `51966` (0xCAFE).
 - **Funded account:** private key `0x00…01` → `0x7e5f4552091a69125d5dfcb7b8c2659029395bdf`, pre-funded on devnet.
 - **Mining:** a tx confirms once the node's miner packs it into a carrier block (one tx per block on v1),

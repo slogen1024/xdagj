@@ -306,6 +306,60 @@ public class RpcTransportE2ETest {
     }
 
     @Test
+    public void http_type2_and_legacy_confirm_in_one_main_block() throws Exception {
+        // Mixed batch (defect 1 capstone): nonce 0 = legacy transfer, nonce 1 = type-2 (EIP-1559)
+        // transfer, both from the funded KEY1_SENDER, confirmed together in ONE main block.
+        SECP256K1 algo = new SECP256K1();
+        KeyPair key = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
+        Address dummy = Address.fromHexString("0x2222222222222222222222222222222222222222");
+        EvmTransaction legacy = EvmTransaction.unsigned(0L, Wei.ONE, 21_000L,
+                Optional.of(dummy), Wei.of(5L), Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+        EvmTransaction type2 = EvmTransaction.unsignedType2(1L, Wei.ONE, Wei.of(2L), 21_000L,
+                Optional.of(dummy), Wei.of(5L), Bytes.EMPTY, List.of(), CHAIN_ID).sign(key, algo);
+
+        // Submit both over real HTTP — each eth_sendRawTransaction returns its tx hash.
+        String legacyHash = legacy.getHash().getBytes().toHexString();
+        String type2Hash = type2.getHash().getBytes().toHexString();
+        assertEquals(quote(legacyHash),
+                rpc("eth_sendRawTransaction", quote(legacy.getRawRlp().toHexString())).toString());
+        assertEquals(quote(type2Hash),
+                rpc("eth_sendRawTransaction", quote(type2.getRawRlp().toHexString())).toString());
+
+        // One main block carries BOTH txs via the batch commitment (same mechanism as the miner).
+        List<Bytes32> hashes = new ArrayList<>();
+        hashes.add(Bytes32.wrap(legacy.getHash().getBytes()));
+        hashes.add(Bytes32.wrap(type2.getHash().getBytes()));
+        Hash batchHash = txStore.putBatch(EvmTxStore.encodeBatch(hashes));
+        long height = 4L;
+        proc.processMainBlock(List.of(Bytes32.wrap(batchHash.getBytes())), height, 1000L + height,
+                Bytes32.leftPad(Bytes.ofUnsignedLong(height)));
+
+        // Receipts over HTTP: type-aware "type" field, both succeeded; the type-2 effective price
+        // is Ethereum-exact min(maxPriorityFee=1, maxFee=2) at baseFee 0.
+        JsonNode legacyReceipt = rpc("eth_getTransactionReceipt", quote(legacyHash));
+        assertEquals("legacy receipt type", "\"0x0\"", legacyReceipt.get("type").toString());
+        assertEquals("legacy receipt status", "\"0x1\"", legacyReceipt.get("status").toString());
+        JsonNode type2Receipt = rpc("eth_getTransactionReceipt", quote(type2Hash));
+        assertEquals("type-2 receipt type", "\"0x2\"", type2Receipt.get("type").toString());
+        assertEquals("type-2 receipt status", "\"0x1\"", type2Receipt.get("status").toString());
+        assertEquals("type-2 effectiveGasPrice = min(1,2)", "\"0x1\"",
+                type2Receipt.get("effectiveGasPrice").toString());
+
+        // Tx JSON over HTTP: 1559 fee fields plus the typed-envelope yParity key.
+        JsonNode type2Tx = rpc("eth_getTransactionByHash", quote(type2Hash));
+        assertEquals("type-2 tx maxFeePerGas", "\"0x2\"", type2Tx.get("maxFeePerGas").toString());
+        assertTrue("type-2 tx JSON must carry yParity", type2Tx.has("yParity"));
+
+        // eth_feeHistory transport-level shape check: base fees are honestly all zero.
+        JsonNode fees = rpc("eth_feeHistory", quote("0x2"), quote("latest"), "[]");
+        JsonNode baseFees = fees.get("baseFeePerGas");
+        assertTrue("baseFeePerGas must be non-empty", baseFees != null && baseFees.size() > 0);
+        for (JsonNode fee : baseFees) {
+            assertEquals("\"0x0\"", fee.toString());
+        }
+    }
+
+    @Test
     public void ws_logs_subscription_forward_removed_and_newHeads() throws Exception {
         // Deploy the LOG0 contract (h1) so we know its address for the logs filter.
         EvmTransaction deploy = mineTx(0, Optional.empty(), LOG0_INIT, 1L);

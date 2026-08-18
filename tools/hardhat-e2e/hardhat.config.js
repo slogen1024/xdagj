@@ -1,7 +1,9 @@
 require("@nomicfoundation/hardhat-toolbox");
 
-// XDAG devnet is legacy-gas only (no EIP-1559): set gasPrice explicitly so Hardhat/ethers do NOT
-// call eth_feeHistory / eth_maxPriorityFeePerGas (which the node does not implement).
+// XDAG devnet supports both legacy and EIP-1559 (type-2) txs: baseFee is always 0, the effective
+// price is min(maxPriorityFeePerGas, maxFeePerGas), and eth_feeHistory / eth_maxPriorityFeePerGas
+// are served. The gasPrice below is now optional — kept as the simplest deterministic choice
+// (forces legacy txs); removing it switches Hardhat/ethers to the type-2 fee flow, which also works.
 module.exports = {
   solidity: "0.8.20",
   networks: {

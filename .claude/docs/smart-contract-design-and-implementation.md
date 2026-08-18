@@ -499,6 +499,15 @@ MetaMask 轮询:
 - 现状：`EvmTransaction.java:42` 明确 type-0 是 v1 唯一交易类型；解析只认 9 元素 legacy RLP，`v < 35` 的未保护交易直接拒（`:112-113`）；无 EIP-2718 typed envelope；费用模型纯 gasPrice + `evm.minGasPrice`，`BASEFEE` 操作码读 0。
 - 影响：默认发 type-2 的工具链（MetaMask、viem、Hardhat）需显式退回 legacy 才能用；无费用市场，拥堵时只能靠 minGasPrice 一刀切。
 - 解决方向：分两步，均走 `activationHeight` 式硬分叉门。**第一步**支持 EIP-2718 envelope + type-2 解析，在没有 base fee 市场前把 `maxFeePerGas` 视作 effective gasPrice、`eth_getBlockByNumber` 返回 `baseFeePerGas: 0x0`，钱包即插即用；**第二步**（可选）实现每主块 base fee 调整（EIP-1559 公式，target = blockGasLimit/2），才有真费用市场。解码入口集中在 `EvmTransaction.decode`，第一步改动面小。
+- **已实现（2026-08-18，dev-evm）**：第一步落地——0x02 信封分派集中在 `EvmTransaction.decode`
+  （type-1 明确拒绝；ethers v6 离线签名固定向量钉住跨客户端 hash/sender）；以太坊精确费用语义
+  （baseFee≡0 下 effective = min(maxPriorityFee, maxFee)，准入/执行余额校验按 feeCap，扣退费按
+  effective，type-0 逐字节不变）；EIP-2930 accessList 收 intrinsic gas 不预热；
+  `evm.type2ActivationHeight`（devnet=0，testnet/mainnet 缺省不排期）三重门控——执行侧（激活前
+  status-0 收据与未升级节点逐字节一致，预算记账同样镜像）、矿工侧（激活前不打包，防哈希永久烧毁）、
+  RPC 侧（sendRaw 拒收）；RPC 面 type/maxFee/accessList/yParity 字段 + `eth_feeHistory`（全部 geth
+  block tag）+ `eth_maxPriorityFeePerGas`；存储/P2P/批次/重放零变化。第二步（base fee 市场）仍为
+  可选未实现。
 
 **缺陷 2：每主块最多打包 1 笔 EVM tx（吞吐上限 ≈ 1 tx / 64s）**
 

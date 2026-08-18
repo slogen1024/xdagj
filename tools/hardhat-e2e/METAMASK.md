@@ -32,8 +32,9 @@ MetaMask itself uses HTTP. Tools/dapps that use `eth_subscribe` connect to `ws:/
 (e.g. an ethers `WebSocketProvider`). `newHeads` and `logs` are supported.
 
 ## Troubleshooting
-- **Legacy gas:** devnet is legacy-only. `eth_estimateGas` works; a dapp that forces EIP-1559 fee fields
-  may fail — devnet has no `eth_feeHistory`/`eth_maxPriorityFeePerGas`.
+- **Fees:** both legacy and EIP-1559 (type-2) transactions are supported. The base fee is always 0 and
+  the effective price is `min(maxPriorityFeePerGas, maxFeePerGas)`; `eth_feeHistory` and
+  `eth_maxPriorityFeePerGas` are served, so MetaMask's default (type-2) fee flow works as-is.
 - **Chain ID mismatch:** the network chain id MUST be `51966`, else MetaMask refuses to sign.
 - **CORS:** if MetaMask/RPC calls are blocked, ensure the node's `rpc.http.corsOrigins` allows the origin.
 - **Nothing confirms:** the node must be mining (a carrier block must include the tx and become main).
