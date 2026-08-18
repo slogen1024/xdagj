@@ -130,7 +130,7 @@ public class EvmTxPool {
             // EIP-3860 oversized initcode
             return AddResult.INTRINSIC_GAS_TOO_LOW;
         }
-        if (tx.getGasPrice().compareTo(minGasPrice) < 0) {
+        if (tx.getEffectiveGasPrice().compareTo(minGasPrice) < 0) {
             return AddResult.UNDERPRICED;
         }
 
@@ -157,7 +157,7 @@ public class EvmTxPool {
 
         // Cumulative cost admission: the sender must be able to cover ALL queued txs (including the
         // new one, excluding any entry being replaced at the same nonce slot).
-        // Gas settles in EVM wei (缺口2 / Path α): value + gasLimit * gasPrice.
+        // Gas settles in EVM wei (缺口2 / Path α): value + gasLimit * feeCap.
         BigInteger cumulative = cost(tx);
         for (PoolEntry e : queue.values()) {
             if (e.tx().getNonce() != tx.getNonce()) {
@@ -179,8 +179,8 @@ public class EvmTxPool {
         PoolEntry existing = queue.get(tx.getNonce());
         boolean replaced = false;
         if (existing != null) {
-            // Same-slot competition: replace-by-fee only for a strictly higher gas price.
-            if (tx.getGasPrice().compareTo(existing.tx().getGasPrice()) <= 0) {
+            // Same-slot competition: replace-by-fee only for a strictly higher effective gas price.
+            if (tx.getEffectiveGasPrice().compareTo(existing.tx().getEffectiveGasPrice()) <= 0) {
                 return AddResult.UNDERPRICED;
             }
             byHash.remove(existing.tx().getHash());
@@ -200,12 +200,12 @@ public class EvmTxPool {
         return replaced ? AddResult.REPLACED : AddResult.ADDED;
     }
 
-    /** Live (non-expired) txs, highest gas price first; insertion order breaks ties. */
+    /** Live (non-expired) txs, highest effective gas price first; insertion order breaks ties. */
     public synchronized List<EvmTransaction> selectTransactions(int maxCount) {
         long now = clockSeconds.getAsLong();
         return byHash.values().stream()
                 .filter(e -> now - e.addedAtSeconds() <= ttlSeconds)
-                .sorted(Comparator.comparing((PoolEntry e) -> e.tx().getGasPrice()).reversed())
+                .sorted(Comparator.comparing((PoolEntry e) -> e.tx().getEffectiveGasPrice()).reversed())
                 .limit(maxCount)
                 .map(PoolEntry::tx)
                 .collect(ArrayList::new, ArrayList::add, ArrayList::addAll);
@@ -252,7 +252,7 @@ public class EvmTxPool {
     }
 
     /**
-     * Greedy batch fill (spec §3): senders ordered by the gas price of their next unselected tx
+     * Greedy batch fill (spec §3): senders ordered by the effective gas price of their next unselected tx
      * (descending, insertion order breaking ties), nonces strictly ascending within a sender
      * starting at the account nonce (a head gap disqualifies the sender), a tx that exceeds the
      * remaining budget stops its sender (no nonce holes), until the budget, the cap, or the pool
@@ -288,7 +288,8 @@ public class EvmTxPool {
                 if (run.isEmpty()) {
                     continue;
                 }
-                if (best == null || run.peek().getGasPrice().compareTo(best.peek().getGasPrice()) > 0) {
+                if (best == null
+                        || run.peek().getEffectiveGasPrice().compareTo(best.peek().getEffectiveGasPrice()) > 0) {
                     best = run;
                 }
             }
@@ -308,10 +309,10 @@ public class EvmTxPool {
 
     // ---- helpers ----
 
-    /** Maximum gas cost of a single transaction: value + gasLimit * gasPrice. */
+    /** Worst-case cost of a single transaction: value + gasLimit * feeCap (Ethereum admission rule). */
     private static BigInteger cost(EvmTransaction tx) {
         return tx.getValue().getAsBigInteger()
-                .add(tx.getGasPrice().getAsBigInteger().multiply(BigInteger.valueOf(tx.getGasLimit())));
+                .add(tx.getFeeCapPerGas().getAsBigInteger().multiply(BigInteger.valueOf(tx.getGasLimit())));
     }
 
     /**

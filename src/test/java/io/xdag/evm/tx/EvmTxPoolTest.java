@@ -85,6 +85,12 @@ public class EvmTxPoolTest {
                 Wei.of(1), Bytes.EMPTY, CHAIN_ID).sign(signer, algo);
     }
 
+    private EvmTransaction type2Tx(KeyPair signer, long nonce, Wei maxPriorityFeePerGas, Wei maxFeePerGas) {
+        return EvmTransaction.unsignedType2(nonce, maxPriorityFeePerGas, maxFeePerGas, 21_000L,
+                Optional.of(Address.fromHexString("0x2222222222222222222222222222222222222222")),
+                Wei.of(1), Bytes.EMPTY, List.of(), CHAIN_ID).sign(signer, algo);
+    }
+
     @Test
     public void valid_tx_is_added_and_blob_persisted() {
         EvmTransaction t = tx(key, 0, Wei.of(2_000_000_000L));
@@ -467,5 +473,75 @@ public class EvmTxPoolTest {
 
         // t0 (nonce=0) was stale and must have been removed from byHash.
         assertTrue("stale nonce=0 entry must be pruned from the pool", pool.get(t0.getHash()).isEmpty());
+    }
+
+    // ---- type-2 / EIP-1559 (defect-1 Task 3) tests ----
+
+    @Test
+    public void type2_is_admitted_and_priced_by_effective_gas_price() {
+        // setUp funds sender with 1 ETH — far above value(1) + maxFee(10 gwei) * gasLimit(21000).
+        // Effective price = min(priority 2 gwei, maxFee 10 gwei) = 2 gwei ≥ minGasPrice (1 gwei).
+        EvmTransaction t = type2Tx(key, 0, Wei.of(2_000_000_000L), Wei.of(10_000_000_000L));
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(t.getRawRlp()));
+        assertEquals(1, pool.size());
+        assertEquals(t.getHash(), pool.selectTransactions(10).getFirst().getHash());
+    }
+
+    @Test
+    public void cross_type_rbf_compares_effective_price() {
+        // Legacy at 5 gwei occupies (sender, nonce=0).
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(key, 0, Wei.of(5_000_000_000L)).getRawRlp()));
+        // Type-2 with effective 5 gwei (priority 5, maxFee 20): not STRICTLY higher → UNDERPRICED,
+        // even though its fee cap (20 gwei) is far above the incumbent's price.
+        assertEquals(EvmTxPool.AddResult.UNDERPRICED,
+                pool.add(type2Tx(key, 0, Wei.of(5_000_000_000L), Wei.of(20_000_000_000L)).getRawRlp()));
+        // Type-2 with effective 6 gwei (priority 6, maxFee 20): strictly higher → REPLACED.
+        EvmTransaction winner = type2Tx(key, 0, Wei.of(6_000_000_000L), Wei.of(20_000_000_000L));
+        assertEquals(EvmTxPool.AddResult.REPLACED, pool.add(winner.getRawRlp()));
+        assertEquals(1, pool.size());
+        assertEquals(winner.getHash(), pool.selectTransactions(10).getFirst().getHash());
+    }
+
+    @Test
+    public void admission_checks_fee_cap_not_effective_price() {
+        // Balance covers value + EFFECTIVE(1 gwei) * gasLimit exactly, but admission charges the
+        // worst case value + FEE CAP (maxFee 1000 gwei) * gasLimit (Ethereum admission rule).
+        BigInteger effectiveCost = BigInteger.ONE
+                .add(BigInteger.valueOf(21_000L).multiply(BigInteger.valueOf(1_000_000_000L)));
+        fund(sender, Wei.of(effectiveCost), 0L);
+        EvmTransaction t = type2Tx(key, 0, Wei.of(1_000_000_000L), Wei.of(1_000_000_000_000L));
+        assertEquals(EvmTxPool.AddResult.INSUFFICIENT_BALANCE, pool.add(t.getRawRlp()));
+    }
+
+    @Test
+    public void select_batch_orders_mixed_types_by_effective_price() {
+        // senderA: type-2 with effective 10 gwei (priority 10, maxFee 50); senderB: legacy 5 gwei.
+        KeyPair keyA = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(40)));
+        KeyPair keyB = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(41)));
+        Address addrA = Address.extract(keyA.getPublicKey());
+        Address addrB = Address.extract(keyB.getPublicKey());
+        fund(addrA, Wei.fromEth(1), 0L);
+        fund(addrB, Wei.fromEth(1), 0L);
+
+        assertEquals(EvmTxPool.AddResult.ADDED,
+                pool.add(type2Tx(keyA, 0, Wei.of(10_000_000_000L), Wei.of(50_000_000_000L)).getRawRlp()));
+        assertEquals(EvmTxPool.AddResult.ADDED,
+                pool.add(tx(keyB, 0, Wei.of(5_000_000_000L)).getRawRlp()));
+
+        List<EvmTransaction> batch = pool.selectBatch(Long.MAX_VALUE);
+        assertEquals(2, batch.size());
+        assertEquals("type-2 with the higher EFFECTIVE price must come first",
+                addrA, batch.get(0).getSender());
+        assertEquals(addrB, batch.get(1).getSender());
+    }
+
+    @Test
+    public void type2_below_min_gas_price_is_underpriced() {
+        // A pool floored at 100 wei judges the EFFECTIVE price (min(1, 1000) = 1 wei < 100), not the
+        // fee cap (maxFee 1000 wei ≥ 100) → UNDERPRICED.
+        EvmTxPool strictPool = new EvmTxPool(txStore, stateSource, CHAIN_ID, BLOCK_GAS_LIMIT,
+                Wei.of(100), 3600L, () -> clock[0]);
+        assertEquals(EvmTxPool.AddResult.UNDERPRICED,
+                strictPool.add(type2Tx(key, 0, Wei.of(1), Wei.of(1000)).getRawRlp()));
     }
 }
