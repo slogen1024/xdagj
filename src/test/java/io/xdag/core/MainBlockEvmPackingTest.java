@@ -262,6 +262,56 @@ public class MainBlockEvmPackingTest {
                 List.of(h1, h2), batch.get());
     }
 
+    /**
+     * Defect-1 upgrade window: while type-2 is not yet active, the miner must not pack a gossiped
+     * type-2 tx. Executing it to a status-0 receipt would permanently burn its hash (the
+     * receipt-presence dedup skips it forever, even post-activation — re-signing the same fields
+     * yields the same hash) and stall the sender's nonce chain. The batch must carry ONLY the
+     * legacy tx.
+     */
+    @Test
+    public void pre_fork_miner_does_not_pack_type2() throws Exception {
+        // Anonymous DevnetConfig subclass keeps everything identical to the class-level `config`
+        // except getEvmType2ActivationHeight() returns Long.MAX_VALUE, so nextHeight (1) is below
+        // the type-2 activation while the batch fork stays active (devnet batch height = 0).
+        Config preType2Config = new DevnetConfig() {
+            @Override
+            public long getEvmType2ActivationHeight() {
+                return Long.MAX_VALUE;
+            }
+        };
+        preType2Config.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
+        preType2Config.getNodeSpec().setStoreBackupDir(root.newFolder().getAbsolutePath());
+
+        // Reuse the same wallet key and EVM state already set up in @Before.
+        Kernel preType2Kernel = new Kernel(preType2Config, wallet.getDefKey());
+        preType2Kernel.setBlockStore(kernel.getBlockStore());
+        preType2Kernel.setOrphanBlockStore(kernel.getOrphanBlockStore());
+        preType2Kernel.setAddressStore(kernel.getAddressStore());
+        preType2Kernel.setTxHistoryStore(kernel.getTxHistoryStore());
+        preType2Kernel.setWallet(wallet);
+        preType2Kernel.setEvmStateStore(evmStateSource);
+        preType2Kernel.setEvmMetaStore(evmMetaStore);
+        preType2Kernel.setEvmTxPool(evmTxPool);
+        preType2Kernel.setEvmTxStore(evmTxStore);
+
+        EvmTransaction legacy = pooledTx(evmKey, 0);
+        EvmTransaction type2 = EvmTransaction.unsignedType2(0L, Wei.ONE, Wei.of(3), 100_000L,
+                Optional.empty(), Wei.ZERO, Bytes.fromHexString("0x6001600155"), List.of(),
+                BigInteger.valueOf(0xCAFE)).sign(evmKey2, algo);
+        assertEquals(EvmTxPool.AddResult.ADDED, evmTxPool.add(type2.getRawRlp()));
+
+        BlockchainImpl preType2Chain = new BlockchainImpl(preType2Kernel);
+        Block main = preType2Chain.createMainBlock();
+
+        Bytes32 ref = main.getEvmTxRef();
+        assertNotNull("batch ref must be non-null — the legacy tx is still packable", ref);
+        Optional<List<Bytes32>> batch = evmTxStore.getBatch(Hash.wrap(ref));
+        assertTrue("ref must be a stored batch", batch.isPresent());
+        assertEquals("pre-activation type-2 must be filtered out of the batch",
+                List.of(Bytes32.wrap(legacy.getHash().getBytes())), batch.get());
+    }
+
     // ---------------------------------------------------------------------------
     // Shared invariants — both batch and legacy paths agree on these
     // ---------------------------------------------------------------------------

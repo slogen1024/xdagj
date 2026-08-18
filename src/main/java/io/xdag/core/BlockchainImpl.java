@@ -1488,8 +1488,9 @@ public class BlockchainImpl implements Blockchain {
         // both ref forms at any height — so a boundary mis-prediction is liveness-safe.
         long nextHeight = xdagStats.nmain + 1;
         boolean batchFork = nextHeight >= kernel.getConfig().getEvmSpec().getEvmBatchActivationHeight();
-        Bytes32 evmTxRef = batchFork ? selectEvmBatch(16 - res - orphans.size())
-                : selectEvmTxRef(16 - res - orphans.size());
+        boolean type2Active = nextHeight >= kernel.getConfig().getEvmSpec().getEvmType2ActivationHeight();
+        Bytes32 evmTxRef = batchFork ? selectEvmBatch(16 - res - orphans.size(), type2Active)
+                : selectEvmTxRef(16 - res - orphans.size(), type2Active);
         return new Block(kernel.getConfig(), sendTime[0], null, refs, true, null,
                 kernel.getConfig().getNodeSpec().getNodeTag(), -1, XAmount.ZERO, null, evmTxRef);
     }
@@ -1498,9 +1499,10 @@ public class BlockchainImpl implements Blockchain {
      * Picks one EVM transaction hash to attach to a mined main block (C2), or null when the EVM is
      * disabled, no field slot is free, or no eligible tx exists. Skips txs that already have a
      * receipt (already executed on the canonical chain — re-packing wastes a field slot; B2b would
-     * dedup-skip it anyway). Never throws into mining: any failure logs and yields null.
+     * dedup-skip it anyway) and, when {@code type2Active} is false, type-2 candidates (not yet
+     * executable). Never throws into mining: any failure logs and yields null.
      */
-    private Bytes32 selectEvmTxRef(int freeFields) {
+    private Bytes32 selectEvmTxRef(int freeFields, boolean type2Active) {
         try {
             if (freeFields < 1 || kernel.getEvmTxPool() == null) {
                 return null;
@@ -1509,6 +1511,12 @@ public class BlockchainImpl implements Blockchain {
             for (io.xdag.evm.tx.EvmTransaction tx : kernel.getEvmTxPool().selectTransactions(8)) {
                 if (metaStore != null && metaStore.getReceipt(tx.getHash()).isPresent()) {
                     continue; // already executed on the canonical chain
+                }
+                if (!type2Active && tx.getType() == EvmTransaction.TYPE_EIP1559) {
+                    // Pre-activation type-2 must not be packed: executing it to status-0 would
+                    // permanently burn its hash (receipt dedup) and stall the sender's nonce chain.
+                    // Exec-side gate remains the backstop for crafted carriers.
+                    continue;
                 }
                 return Bytes32.wrap(tx.getHash().getBytes());
             }
@@ -1523,10 +1531,10 @@ public class BlockchainImpl implements Blockchain {
      * Builds a gas-budgeted batch from the pool, persists its body content-addressed, and returns
      * the commitment for the 0x0F field (batch D2) — or null when the EVM is disabled, no field
      * slot is free, or the pool yields nothing. A tx that already has a receipt (executed on the
-     * canonical chain) drops itself and its sender's later txs (no nonce holes). Never throws into
-     * mining.
+     * canonical chain) — or a type-2 tx while {@code type2Active} is false — drops itself and its
+     * sender's later txs (no nonce holes). Never throws into mining.
      */
-    private Bytes32 selectEvmBatch(int freeFields) {
+    private Bytes32 selectEvmBatch(int freeFields, boolean type2Active) {
         try {
             if (freeFields < 1 || kernel.getEvmTxPool() == null || kernel.getEvmTxStore() == null) { // batch store required for putBatch; the legacy path needs no store
                 return null;
@@ -1541,6 +1549,13 @@ public class BlockchainImpl implements Blockchain {
                     continue; // an earlier tx of this sender was dropped — no nonce holes
                 }
                 if (metaStore != null && metaStore.getReceipt(tx.getHash()).isPresent()) {
+                    stopped.add(tx.getSender());
+                    continue;
+                }
+                if (!type2Active && tx.getType() == EvmTransaction.TYPE_EIP1559) {
+                    // Pre-activation type-2 must not be packed: executing it to status-0 would
+                    // permanently burn its hash (receipt dedup) and stall the sender's nonce chain.
+                    // Exec-side gate remains the backstop for crafted carriers.
                     stopped.add(tx.getSender());
                     continue;
                 }
