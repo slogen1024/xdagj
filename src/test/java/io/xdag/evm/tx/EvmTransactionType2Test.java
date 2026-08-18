@@ -136,6 +136,40 @@ public class EvmTransactionType2Test {
         assertTrue(e3.getMessage().contains("unsupported"));
     }
 
+    /** secp256k1 group order n. */
+    private static final BigInteger SECP256K1_N = new BigInteger(
+            "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141", 16);
+
+    @Test
+    public void rejects_high_s_signature_on_type2() {
+        // s = n - 2 is in the high half of the curve order — EIP-2 canonical-s applies to typed txs too.
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> EvmTransaction.decode(
+                        craft(1L, 2L, 0, BigInteger.ONE, SECP256K1_N.subtract(BigInteger.TWO))));
+        assertTrue(e.getMessage().contains("high-s"));
+    }
+
+    @Test
+    public void signs_and_round_trips_type2_contract_creation() {
+        SECP256K1 algo = new SECP256K1();
+        KeyPair key = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
+        EvmTransaction unsigned = EvmTransaction.unsignedType2(
+                7L, Wei.of(1L), Wei.of(5L), 50_000L, Optional.empty(), Wei.of(123L),
+                Bytes.fromHexString("0xabcd"),
+                List.of(new AccessListEntry(TO, List.of(Bytes32.leftPad(Bytes.of(9))))),
+                DEVNET_CHAIN_ID);
+        EvmTransaction signed = unsigned.sign(key, algo);
+        assertEquals((byte) 0x02, signed.getRawRlp().get(0));
+        EvmTransaction decoded = EvmTransaction.decode(signed.getRawRlp());
+        assertEquals(2, decoded.getType());
+        assertEquals(7L, decoded.getNonce());
+        assertEquals(FUNDED, decoded.getSender());
+        assertTrue(decoded.isContractCreation());
+        assertTrue(decoded.getTo().isEmpty());
+        assertTrue(signed.getHash().equals(decoded.getHash()));
+        assertEquals(1, decoded.getAccessList().size());
+    }
+
     @Test
     public void rejects_bad_y_parity_and_priority_above_max_fee() {
         // yParity = 5: hand-encode the envelope with our own RLP writer.

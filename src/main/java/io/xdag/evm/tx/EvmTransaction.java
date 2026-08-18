@@ -206,7 +206,8 @@ public final class EvmTransaction {
             throw new IllegalArgumentException("non-canonical (high-s) signature rejected");
         }
         if (maxPriorityFeePerGas.compareTo(maxFeePerGas) > 0) {
-            throw new IllegalArgumentException("maxPriorityFeePerGas exceeds maxFeePerGas");
+            throw new IllegalArgumentException("maxPriorityFeePerGas " + maxPriorityFeePerGas
+                    + " exceeds maxFeePerGas " + maxFeePerGas);
         }
         SECPSignature signature = SECP.createSignature(r, s, (byte) yParity);
         return new EvmTransaction(TYPE_EIP1559, nonce, null, maxPriorityFeePerGas, maxFeePerGas,
@@ -302,7 +303,7 @@ public final class EvmTransaction {
         out.endList();
     }
 
-    /** EIP-155 ecrecover of the sender address; cached after the first call. */
+    /** ecrecover of the sender address from the type-appropriate signing hash; cached after the first call. */
     public Address getSender() {
         Address sender = cachedSender;
         if (sender == null) {
@@ -357,10 +358,12 @@ public final class EvmTransaction {
         return type == TYPE_LEGACY ? gasPrice : maxFeePerGas;
     }
 
+    /** Type-2 only; null for legacy — use getFeeCapPerGas()/getEffectiveGasPrice() for type-agnostic pricing. */
     public Wei getMaxPriorityFeePerGas() {
         return maxPriorityFeePerGas;
     }
 
+    /** Type-2 only; null for legacy — use getFeeCapPerGas()/getEffectiveGasPrice() for type-agnostic pricing. */
     public Wei getMaxFeePerGas() {
         return maxFeePerGas;
     }
