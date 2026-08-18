@@ -83,17 +83,27 @@ public final class EvmConfig {
         this.type2ActivationHeight = type2ActivationHeight;
     }
 
-    /** Mainnet configuration: Shanghai fork + provisional mainnet chain id. */
+    /**
+     * Mainnet configuration: Shanghai fork + provisional mainnet chain id. Type-2 is always active
+     * here (test/tooling default); production networks pass evm.type2ActivationHeight explicitly.
+     */
     public static EvmConfig mainnet() {
         return new EvmConfig(EvmSpecVersion.SHANGHAI, MAINNET_CHAIN_ID);
     }
 
-    /** Testnet configuration: Shanghai fork + provisional testnet chain id. */
+    /**
+     * Testnet configuration: Shanghai fork + provisional testnet chain id. Type-2 is always active
+     * here (test/tooling default); production networks pass evm.type2ActivationHeight explicitly.
+     */
     public static EvmConfig testnet() {
         return new EvmConfig(EvmSpecVersion.SHANGHAI, TESTNET_CHAIN_ID);
     }
 
-    /** Default development configuration: Shanghai fork + provisional devnet chain id. */
+    /**
+     * Default development configuration: Shanghai fork + provisional devnet chain id. Type-2 is
+     * always active here (test/tooling default); production networks pass evm.type2ActivationHeight
+     * explicitly.
+     */
     public static EvmConfig devnet() {
         return new EvmConfig(EvmSpecVersion.SHANGHAI, DEVNET_CHAIN_ID);
     }

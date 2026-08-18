@@ -871,6 +871,7 @@ public class EvmBlockProcessorTest {
 
         EvmReceipt receipt = metaStore.getReceipt(transfer.getHash()).orElseThrow();
         assertEquals("type-2 transfer must succeed post-activation", 1, receipt.status());
+        assertEquals("a plain transfer burns exactly the 21000 intrinsic gas", 21_000L, receipt.gasUsed());
         BigInteger expectedDrop = BigInteger.valueOf(12_345L)
                 .add(BigInteger.valueOf(receipt.gasUsed())); // + gasUsed * effectiveGasPrice(1)
         assertEquals("sender pays exactly value + gasUsed * effectiveGasPrice(1)",
@@ -981,5 +982,43 @@ public class EvmBlockProcessorTest {
         assertEquals("pre-activation type-2 keeps the status-0 undecodable-path receipt", 0,
                 type2Receipt.status());
         assertEquals("pre-activation type-2 burns zero gas", 0L, type2Receipt.gasUsed());
+    }
+
+    @Test
+    public void type2_gate_flips_exactly_at_the_activation_height() {
+        // Pins the boundary predicate `height < type2ActivationHeight` with gate = 3: height 2 is
+        // the LAST gated height, height 3 the FIRST live one. A `<=` mutation would gate height 3
+        // and fail the second assertion; an always-open mutation would execute height 2 and fail
+        // the first.
+        EvmConfig gated = new EvmConfig(EvmSpecVersion.SHANGHAI, EvmConfig.DEVNET_CHAIN_ID,
+                EvmConfig.DEFAULT_MAX_GAS_LIMIT, EvmConfig.DEFAULT_MIN_GAS_PRICE, 3L);
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmTxStore txs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor proc = new EvmBlockProcessor(gated, state, txs, meta);
+        RocksDbWorldUpdater w = new RocksDbWorldUpdater(state);
+        w.createAccount(sender, 0L, Wei.fromEth(1));
+        w.commit();
+        Address recipient = Address.fromHexString("0x00000000000000000000000000000000000000aa");
+
+        EvmTransaction gatedTx = EvmTransaction.unsignedType2(0L, Wei.of(1), Wei.of(3), 21_000L,
+                Optional.of(recipient), Wei.of(100), Bytes.EMPTY, List.of(), CHAIN_ID).sign(key, algo);
+        txs.put(gatedTx);
+        proc.processMainBlock(List.of(ref(gatedTx)), 2L, 1001L, BLOCK_HASH_1);
+        EvmReceipt gatedReceipt = meta.getReceipt(gatedTx.getHash()).orElseThrow();
+        assertEquals("height 2 (last pre-activation height) must gate the type-2 to status 0",
+                0, gatedReceipt.status());
+        assertEquals("gated type-2 burns zero gas", 0L, gatedReceipt.gasUsed());
+
+        // The gated tx never advanced the account nonce, so the height-3 tx is nonce 0 as well.
+        // A DIFFERENT value makes the hash differ — re-signing identical fields would reproduce
+        // the height-2 hash, and the receipt dedup would skip it instead of executing it.
+        EvmTransaction liveTx = EvmTransaction.unsignedType2(0L, Wei.of(1), Wei.of(3), 21_000L,
+                Optional.of(recipient), Wei.of(101), Bytes.EMPTY, List.of(), CHAIN_ID).sign(key, algo);
+        txs.put(liveTx);
+        proc.processMainBlock(List.of(ref(liveTx)), 3L, 1002L, BLOCK_HASH_2);
+        EvmReceipt liveReceipt = meta.getReceipt(liveTx.getHash()).orElseThrow();
+        assertEquals("height 3 (the activation height itself) must execute the type-2",
+                1, liveReceipt.status());
     }
 }

@@ -59,8 +59,9 @@ import org.hyperledger.besu.evm.worldstate.WorldUpdater;
  * {@link #processMainBlock} from {@code setMain} and {@link #rollbackTo} after {@code unWindMain}.
  *
  * <p>v1 policies (see the B2b plan's deviation ledger): gas settles in EVM wei (缺口2 / Path α) —
- * the sender is debited gasLimit*gasPrice upfront, refunded the unused gas, and the net gasUsed*gasPrice
- * is burned (no coinbase credit yet — P2); a ref whose blob is absent is deterministically skipped;
+ * the sender is debited gasLimit*effectiveGasPrice upfront, refunded the unused gas, and the net
+ * gasUsed*effectiveGasPrice is burned (no coinbase credit yet — P2); a ref whose blob is absent is
+ * deterministically skipped;
  * the per-height "state root" is a chained commitment
  * {@code root_h = keccak256(root_prev || (txHash || status || gasUsed)... || stateDelta_h)} where
  * {@code stateDelta_h} digests exactly the (puts, deletes) persisted that height (Phase 1). It commits
@@ -561,7 +562,7 @@ public class EvmBlockProcessor {
     private long peekGasLimit(Bytes blob, long height) {
         try {
             EvmTransaction tx = EvmTransaction.decode(blob);
-            if (tx.getType() == EvmTransaction.TYPE_EIP1559 && height < type2ActivationHeight) {
+            if (type2Gated(tx, height)) {
                 return -1L;
             }
             return tx.getGasLimit();
@@ -570,11 +571,16 @@ public class EvmBlockProcessor {
         }
     }
 
+    /** Defect-1 fork gate: type-2 (EIP-1559) txs are not executable below the activation height. */
+    private boolean type2Gated(EvmTransaction tx, long height) {
+        return tx.getType() == EvmTransaction.TYPE_EIP1559 && height < type2ActivationHeight;
+    }
+
     /**
-     * Executes a single tx. Validation failure (undecodable, wrong chain, bad nonce, value not
-     * covered, gas out of bounds) produces a status-0 receipt with zero gas and no state change —
-     * the tx stays part of consensus history but burns nothing (v1; Ethereum-style gas burn needs
-     * the P1 wei settlement).
+     * Executes a single tx. Validation failure (undecodable, type-2 before its activation height,
+     * wrong chain, bad nonce, value not covered, gas out of bounds) produces a status-0 receipt
+     * with zero gas and no state change — the tx stays part of consensus history but burns nothing
+     * (validation failures charge no gas by policy).
      */
     private EvmReceipt executeOne(RocksDbWorldUpdater root, Bytes rawRlp, long height,
                                   long timestampSeconds) {
@@ -584,7 +590,7 @@ public class EvmBlockProcessor {
         } catch (RuntimeException e) {
             return validationFailure("undecodable blob", e.getMessage());
         }
-        if (tx.getType() == EvmTransaction.TYPE_EIP1559 && height < type2ActivationHeight) {
+        if (type2Gated(tx, height)) {
             // Pre-activation, this receipt is byte-identical to the "undecodable blob" receipt a
             // non-upgraded node produces (receipts carry no reason), so the chained roots agree
             // across the upgrade window (spec §4).
@@ -608,6 +614,9 @@ public class EvmBlockProcessor {
         } catch (IllegalArgumentException e) {
             return validationFailure("oversized initcode", e.getMessage());
         }
+        // Also the backstop for an adversarial negative decoded gasLimit (readLongScalar accepts
+        // 2^63..2^64-1): it bypasses the earlier > comparisons but always fails here, deterministically
+        // on every node.
         if (intrinsicGas > tx.getGasLimit()) {
             return validationFailure("intrinsic gas above tx gas limit", String.valueOf(intrinsicGas));
         }
