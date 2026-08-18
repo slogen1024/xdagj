@@ -43,6 +43,7 @@ import io.xdag.evm.tx.EvmTransaction;
 import io.xdag.evm.tx.EvmTxPool;
 import io.xdag.evm.tx.EvmTxStore;
 import io.xdag.rpc.eth.EthHex;
+import io.xdag.rpc.eth.EthObjects;
 import io.xdag.rpc.error.JsonRpcException;
 import io.xdag.rpc.server.protocol.JsonRpcRequest;
 import java.math.BigInteger;
@@ -578,5 +579,126 @@ public class EthRequestHandlerTest {
         // Re-execute a new height-2 call (nonce back to 1 after replay) -> bloom regenerated -> found again.
         execAt(txStore, metaStore, proc, 1, Optional.of(contract), Bytes.EMPTY, 2L);
         assertEquals(1, ((List<?>) h.handle(request("eth_getLogs", byContract))).size());
+    }
+
+    // ---- Defect-1 Task 5: type-2 RPC surface (ethers v6.13 ground-truth vectors, chainId 0xCAFE) ----
+
+    /** Type-2 with access list: priority 1 gwei, cap 2 gwei, 1 entry {0x3535..35, 2 storage keys}. */
+    private static final Bytes VECTOR_B = Bytes.fromHexString(
+            "0x02f8cc82cafe01843b9aca00847735940082ea60943535353535353535353535353535353535"
+                    + "3535358084deadbeeff85bf859943535353535353535353535353535353535353535f842a00000"
+                    + "000000000000000000000000000000000000000000000000000000000001a000000000000000"
+                    + "0000000000000000000000000000000000000000000000000201a0ca5b5c2fad6148b287bbf1"
+                    + "00bfeaa05c0ee0aa0d4034cdd8d935392b433fe32aa057a7275ae418fdbf429749d14e72a813"
+                    + "4e5ccb4289da3fe62445731b7edd681f");
+
+    /** Plain type-2 transfer (empty access list) signed by private key 1. */
+    private static final Bytes VECTOR_A = Bytes.fromHexString(
+            "0x02f86c82cafe800102825208943535353535353535353535353535353535353535880de0b6b3a764"
+                    + "000080c080a0104918ce86f9f8d8cf9389231fd938103ff60ff2d4a6492346eaeed3b7988342"
+                    + "a00b06ab51bfa66f8c44836f79ae76dfbfcf491269bea8e99ccb7228f86451f6a2");
+
+    /** EIP-155 legacy vector (spec example): guards the type-0 JSON key-order contract. */
+    private static final Bytes EIP155_RAW = Bytes.fromHexString(
+            "0xf86c098504a817c800825208943535353535353535353535353535353535353535880de0b6b3a764"
+                    + "00008025a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a0"
+                    + "67cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83");
+
+    @Test
+    public void type2_transaction_json_has_1559_fields_and_type0_key_order_is_unchanged() {
+        EvmTransaction t2 = EvmTransaction.decode(VECTOR_B);
+        Map<String, Object> m = EthObjects.transaction(t2, 5L, "0xabc", 0);
+        assertEquals("0x2", m.get("type"));
+        assertEquals("0x77359400", m.get("maxFeePerGas"));
+        assertEquals("0x3b9aca00", m.get("maxPriorityFeePerGas"));
+        assertEquals("0x3b9aca00", m.get("gasPrice"));            // effective = min = 1 gwei
+        assertEquals(m.get("yParity"), m.get("v"));               // same value, geth-compatible
+        List<?> al = (List<?>) m.get("accessList");
+        assertEquals(1, al.size());
+        Map<?, ?> entry = (Map<?, ?>) al.get(0);
+        assertEquals("0x3535353535353535353535353535353535353535", entry.get("address"));
+        assertEquals(2, ((List<?>) entry.get("storageKeys")).size());
+        // Type-0 key ORDER is part of the byte-identical contract:
+        EvmTransaction legacy = EvmTransaction.decode(EIP155_RAW);
+        assertEquals(List.of("hash", "nonce", "blockHash", "blockNumber", "transactionIndex",
+                        "from", "to", "value", "gasPrice", "gas", "input", "chainId", "v", "r", "s", "type"),
+                List.copyOf(EthObjects.transaction(legacy, 5L, "0xabc", 0).keySet()));
+    }
+
+    @Test
+    public void type2_receipt_reports_type_and_effective_gas_price() {
+        EvmReceipt receipt = new EvmReceipt(1, 21_000L, Optional.empty(), List.of());
+        Map<String, Object> m = EthObjects.receipt(EvmTransaction.decode(VECTOR_B), receipt, 5L,
+                "0xabc", 0, List.of());
+        assertEquals("0x2", m.get("type"));
+        assertEquals("0x3b9aca00", m.get("effectiveGasPrice"));
+        // A legacy receipt still reports type 0x0 and its gasPrice as effectiveGasPrice.
+        EvmTransaction legacy = EvmTransaction.decode(EIP155_RAW);
+        Map<String, Object> lm = EthObjects.receipt(legacy, receipt, 5L, "0xabc", 0, List.of());
+        assertEquals("0x0", lm.get("type"));
+        assertEquals(EthHex.quantity(legacy.getGasPrice().getAsBigInteger()), lm.get("effectiveGasPrice"));
+    }
+
+    @Test
+    public void max_priority_fee_returns_min_gas_price_and_fee_history_shape_is_honest() throws Exception {
+        // Harness handler: minGasPrice = 1 gwei, latest main block = 4096.
+        assertEquals("0x3b9aca00", handler.handle(request("eth_maxPriorityFeePerGas")));
+
+        long newest = 4096L;
+        long oldest = Math.max(0L, newest - 4L + 1L);
+        long count = newest - oldest + 1L;
+        Map<?, ?> fh = (Map<?, ?>) handler.handle(
+                request("eth_feeHistory", "0x4", "latest", List.of(25.0d, 75.0d)));
+        assertEquals(EthHex.quantity(oldest), fh.get("oldestBlock"));
+        List<?> baseFees = (List<?>) fh.get("baseFeePerGas");
+        assertEquals(count + 1, baseFees.size());
+        for (Object fee : baseFees) {
+            assertEquals("0x0", fee);
+        }
+        List<?> ratios = (List<?>) fh.get("gasUsedRatio");
+        assertEquals(count, ratios.size());
+        for (Object ratio : ratios) {
+            assertEquals(0.0d, (Double) ratio, 0.0d);
+        }
+        List<?> reward = (List<?>) fh.get("reward");
+        assertEquals(count, reward.size());
+        for (Object rowObj : reward) {
+            List<?> row = (List<?>) rowObj;
+            assertEquals(2, row.size());
+            assertEquals("0x3b9aca00", row.get(0));
+            assertEquals("0x3b9aca00", row.get(1));
+        }
+
+        // Two params (no percentiles) -> NO reward key.
+        Map<?, ?> noReward = (Map<?, ?>) handler.handle(request("eth_feeHistory", "0x4", "latest"));
+        assertTrue(!noReward.containsKey("reward"));
+    }
+
+    @Test
+    public void send_raw_rejects_type2_before_activation() {
+        // Mirror writeHandler, changing ONLY the EvmConfig (type-2 activates at Long.MAX_VALUE).
+        InMemoryKVSource gatedStore = new InMemoryKVSource();
+        fundSender(gatedStore);
+        Blockchain bc = Mockito.mock(Blockchain.class);
+        Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(1L);
+        EthRequestHandler gated = new EthRequestHandler(
+                new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
+                        BigInteger.valueOf(0xCAFE), 30_000_000L, BigInteger.ONE, Long.MAX_VALUE),
+                BigInteger.ONE, bc, poolFor(gatedStore), new ArrayList<Bytes>()::add, null, null,
+                1024L, new HistoricalStateReader(gatedStore, new EvmStateJournal(new InMemoryKVSource()), 128));
+        JsonRpcException gate = assertThrows(JsonRpcException.class,
+                () -> gated.handle(request("eth_sendRawTransaction", VECTOR_A.toHexString())));
+        assertTrue("gate must mention activation, was: " + gate.getMessage(),
+                gate.getMessage() != null && gate.getMessage().contains("activated"));
+
+        // Default (active) handler: the same tx passes the gate. Funded with 2 ETH (1 ETH value + fees),
+        // it is accepted and returns its Ethereum hash.
+        InMemoryKVSource activeStore = new InMemoryKVSource();
+        RocksDbWorldUpdater w = new RocksDbWorldUpdater(activeStore);
+        w.createAccount(KEY1_SENDER, 0L, Wei.fromEth(2));
+        w.commit();
+        EthRequestHandler active = writeHandler(activeStore, poolFor(activeStore), new ArrayList<>());
+        String result = (String) active.handle(request("eth_sendRawTransaction", VECTOR_A.toHexString()));
+        assertEquals("0xb3fc4070c80b884bd43a25f925c2fd779f25bab8b31b4715a0fe29394b83a242", result);
     }
 }

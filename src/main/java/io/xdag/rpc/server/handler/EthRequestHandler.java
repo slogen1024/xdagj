@@ -43,6 +43,7 @@ import io.xdag.rpc.error.JsonRpcException;
 import io.xdag.rpc.server.protocol.JsonRpcRequest;
 import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -71,7 +72,7 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
             "eth_getBalance", "eth_getTransactionCount", "eth_getCode", "eth_getStorageAt",
             "eth_call", "eth_estimateGas", "eth_accounts", "net_listening", "eth_sendRawTransaction",
             "eth_getTransactionByHash", "eth_getTransactionReceipt", "eth_getBlockByNumber",
-            "eth_getBlockByHash", "eth_getLogs");
+            "eth_getBlockByHash", "eth_getLogs", "eth_maxPriorityFeePerGas", "eth_feeHistory");
 
     private final EvmConfig evmConfig;
     private final BigInteger minGasPriceWei;
@@ -163,6 +164,8 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
                     long intrinsic = IntrinsicGas.compute(args.data(), args.to() == null, java.util.List.of()); // call objects carry no access list
                     yield EthHex.quantity(intrinsic + r.gasUsed());
                 }
+                case "eth_maxPriorityFeePerGas" -> EthHex.quantity(minGasPriceWei);
+                case "eth_feeHistory" -> feeHistory(request);
                 case "eth_sendRawTransaction" -> sendRawTransaction(request);
                 case "eth_getTransactionByHash" -> getTransactionByHash(request);
                 case "eth_getTransactionReceipt" -> getTransactionReceipt(request);
@@ -196,12 +199,18 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
             throw JsonRpcException.internalError("EVM transactions are not enabled");
         }
         Bytes rlp = EthHex.decodeData(stringParam(request, 0));
-        String hash;
+        EvmTransaction tx;
         try {
-            hash = EthHex.data(EvmTransaction.decode(rlp).getHash().getBytes());
+            tx = EvmTransaction.decode(rlp);
         } catch (RuntimeException e) {
             throw JsonRpcException.invalidParams("invalid transaction RLP");
         }
+        // Node-local UX gate; consensus is enforced independently in EvmBlockProcessor (spec §4).
+        if (tx.getType() == EvmTransaction.TYPE_EIP1559
+                && blockchain.getLatestMainBlockNumber() + 1 < evmConfig.type2ActivationHeight()) {
+            throw JsonRpcException.invalidParams("type-2 transactions are not activated yet on this network");
+        }
+        String hash = EthHex.data(tx.getHash().getBytes());
         EvmTxPool.AddResult result = evmTxPool.add(rlp);
         switch (result) {
             case ADDED, REPLACED -> {
@@ -224,6 +233,55 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
             case POOL_FULL -> throw JsonRpcException.invalidParams("transaction pool is full");
         }
         throw JsonRpcException.internalError("unreachable add result");
+    }
+
+    /**
+     * eth_feeHistory with honest static content for a chain with no base-fee market (spec §6):
+     * base fees are genuinely 0, devnet gas usage is ≈0 of the 1e12 budget, and every effective
+     * priority fee equals the node's floor price.
+     */
+    private Map<String, Object> feeHistory(JsonRpcRequest request) {
+        Object[] params = request.getParams();
+        if (params == null || params.length < 2) {
+            throw new IllegalArgumentException("eth_feeHistory needs [blockCount, newestBlock(, percentiles)]");
+        }
+        long requested = params[0] instanceof Number n ? n.longValue()
+                : EthHex.decodeQuantity((String) params[0]).longValueExact();
+        long blockCount = Math.max(1L, Math.min(requested, 1024L));
+        long newest = resolveFeeHistoryTag((String) params[1]);
+        long oldest = Math.max(0L, newest - blockCount + 1);
+        long count = newest - oldest + 1;
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("oldestBlock", EthHex.quantity(oldest));
+        List<String> baseFees = new ArrayList<>();
+        for (long i = 0; i <= count; i++) {
+            baseFees.add("0x0");
+        }
+        m.put("baseFeePerGas", baseFees);
+        List<Double> ratios = new ArrayList<>();
+        for (long i = 0; i < count; i++) {
+            ratios.add(0.0d);
+        }
+        m.put("gasUsedRatio", ratios);
+        if (params.length > 2 && params[2] instanceof List<?> percentiles && !percentiles.isEmpty()) {
+            List<List<String>> rewards = new ArrayList<>();
+            for (long i = 0; i < count; i++) {
+                List<String> row = new ArrayList<>();
+                for (int p = 0; p < percentiles.size(); p++) {
+                    row.add(EthHex.quantity(minGasPriceWei));
+                }
+                rewards.add(row);
+            }
+            m.put("reward", rewards);
+        }
+        return m;
+    }
+
+    private long resolveFeeHistoryTag(String tag) {
+        if ("latest".equals(tag) || "pending".equals(tag)) {
+            return blockchain.getLatestMainBlockNumber();
+        }
+        return EthHex.decodeQuantity(tag).longValueExact();
     }
 
     /**

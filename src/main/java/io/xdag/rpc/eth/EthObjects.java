@@ -24,12 +24,14 @@
 package io.xdag.rpc.eth;
 
 import io.xdag.evm.state.EvmReceipt;
+import io.xdag.evm.tx.AccessListEntry;
 import io.xdag.evm.tx.EvmTransaction;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.apache.tuweni.bytes.Bytes32;
 import org.hyperledger.besu.datatypes.Hash;
 import org.hyperledger.besu.datatypes.Log;
 import org.hyperledger.besu.datatypes.LogTopic;
@@ -45,6 +47,7 @@ public final class EthObjects {
 
     public static Map<String, Object> transaction(EvmTransaction tx, long blockNumber,
                                                    String blockHash, int txIndex) {
+        boolean type2 = tx.getType() == EvmTransaction.TYPE_EIP1559;
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("hash", EthHex.data(tx.getHash().getBytes()));
         m.put("nonce", EthHex.quantity(tx.getNonce()));
@@ -54,18 +57,47 @@ public final class EthObjects {
         m.put("from", EthHex.data(tx.getSender().getBytes()));
         m.put("to", tx.getTo().map(a -> (Object) EthHex.data(a.getBytes())).orElse(null));
         m.put("value", EthHex.quantity(tx.getValue().getAsBigInteger()));
-        m.put("gasPrice", EthHex.quantity(tx.getGasPrice().getAsBigInteger()));
+        if (type2) {
+            // geth convention for included 1559 txs: gasPrice = the effective (charged) price.
+            m.put("gasPrice", EthHex.quantity(tx.getEffectiveGasPrice().getAsBigInteger()));
+            m.put("maxPriorityFeePerGas", EthHex.quantity(tx.getMaxPriorityFeePerGas().getAsBigInteger()));
+            m.put("maxFeePerGas", EthHex.quantity(tx.getMaxFeePerGas().getAsBigInteger()));
+        } else {
+            m.put("gasPrice", EthHex.quantity(tx.getGasPrice().getAsBigInteger()));
+        }
         m.put("gas", EthHex.quantity(tx.getGasLimit()));
         m.put("input", EthHex.data(tx.getPayload()));
         m.put("chainId", EthHex.quantity(tx.getChainId()));
-        // EIP-155 canonical v = chainId*2 + 35 + recId (not the bare recId), so a client can
-        // reconstruct/verify the raw signed tx from this object.
-        m.put("v", EthHex.quantity(tx.getChainId().shiftLeft(1)
-                .add(BigInteger.valueOf(35L + tx.getSignature().getRecId()))));
+        if (type2) {
+            m.put("accessList", accessListJson(tx.getAccessList()));
+            // Typed txs carry the bare yParity; geth serves it under BOTH keys (ethers reads v).
+            m.put("yParity", EthHex.quantity(tx.getSignature().getRecId()));
+            m.put("v", EthHex.quantity(tx.getSignature().getRecId()));
+        } else {
+            // EIP-155 canonical v = chainId*2 + 35 + recId (not the bare recId), so a client can
+            // reconstruct/verify the raw signed tx from this object.
+            m.put("v", EthHex.quantity(tx.getChainId().shiftLeft(1)
+                    .add(BigInteger.valueOf(35L + tx.getSignature().getRecId()))));
+        }
         m.put("r", EthHex.quantity(tx.getSignature().getR()));
         m.put("s", EthHex.quantity(tx.getSignature().getS()));
-        m.put("type", "0x0");
+        m.put("type", type2 ? "0x2" : "0x0");
         return m;
+    }
+
+    private static List<Object> accessListJson(List<AccessListEntry> accessList) {
+        List<Object> out = new ArrayList<>();
+        for (AccessListEntry e : accessList) {
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("address", EthHex.data(e.address().getBytes()));
+            List<String> keys = new ArrayList<>();
+            for (Bytes32 k : e.storageKeys()) {
+                keys.add(EthHex.data(k));
+            }
+            entry.put("storageKeys", keys);
+            out.add(entry);
+        }
+        return out;
     }
 
     public static Map<String, Object> receipt(EvmTransaction tx, EvmReceipt receipt, long blockNumber,
@@ -84,8 +116,8 @@ public final class EthObjects {
         m.put("logs", logs);
         m.put("logsBloom", ZERO_BLOOM);
         m.put("status", receipt.status() == 1 ? "0x1" : "0x0");
-        m.put("effectiveGasPrice", EthHex.quantity(tx.getGasPrice().getAsBigInteger()));
-        m.put("type", "0x0");
+        m.put("effectiveGasPrice", EthHex.quantity(tx.getEffectiveGasPrice().getAsBigInteger()));
+        m.put("type", tx.getType() == EvmTransaction.TYPE_EIP1559 ? "0x2" : "0x0");
         return m;
     }
 
