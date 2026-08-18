@@ -208,7 +208,8 @@ public class Kernel {
             java.math.BigInteger evmChainId = java.math.BigInteger.valueOf(config.getEvmSpec().getEvmChainId());
             io.xdag.evm.EvmConfig evmConfig = new io.xdag.evm.EvmConfig(
                     org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI, evmChainId,
-                    config.getEvmSpec().getEvmBlockGasLimit(), config.getEvmSpec().getEvmMinGasPrice());
+                    config.getEvmSpec().getEvmBlockGasLimit(), config.getEvmSpec().getEvmMinGasPrice(),
+                    config.getEvmSpec().getEvmType2ActivationHeight());
             evmTxStore = new io.xdag.evm.tx.EvmTxStore(evmTxSource);
             evmMetaStore = new io.xdag.evm.state.EvmMetaStore(evmMetaSource);
             evmTxPool = new io.xdag.evm.tx.EvmTxPool(evmTxStore, evmStateSource, evmChainId,

@@ -78,6 +78,8 @@ public class EvmBlockProcessor {
     private final long blockGasLimit;
     private final BigInteger minGasPrice;
     private final long activationHeight;
+    /** Height at which type-2 (EIP-1559) txs become executable (defect-1 fork gate). */
+    private final long type2ActivationHeight;
     private final KVSource<byte[], byte[]> stateStore;
     private final EvmTxStore txStore;
     private final EvmMetaStore metaStore;
@@ -120,6 +122,7 @@ public class EvmBlockProcessor {
         this.blockGasLimit = config.maxGasLimit();
         this.minGasPrice = config.minGasPrice();
         this.activationHeight = activationHeight;
+        this.type2ActivationHeight = config.type2ActivationHeight();
         this.stateStore = stateStore;
         this.txStore = txStore;
         this.metaStore = metaStore;
@@ -572,6 +575,12 @@ public class EvmBlockProcessor {
         } catch (RuntimeException e) {
             return validationFailure("undecodable blob", e.getMessage());
         }
+        if (tx.getType() == EvmTransaction.TYPE_EIP1559 && height < type2ActivationHeight) {
+            // Pre-activation, this receipt is byte-identical to the "undecodable blob" receipt a
+            // non-upgraded node produces (receipts carry no reason), so the chained roots agree
+            // across the upgrade window (spec §4).
+            return validationFailure("type-2 before activation", "height " + height);
+        }
         if (!chainId.equals(tx.getChainId())) {
             return validationFailure("wrong chain id", tx.getChainId().toString());
         }
@@ -597,9 +606,9 @@ public class EvmBlockProcessor {
         // carrier can reference a tx that skipped the pool, so execution must not trust it. Rejecting
         // anything below minGasPrice (and explicitly zero, in case a network sets minGasPrice = 0)
         // stops an underpriced tx from buying near-free compute.
-        BigInteger gasPriceWei = tx.getGasPrice().getAsBigInteger();
-        if (gasPriceWei.signum() == 0 || gasPriceWei.compareTo(minGasPrice) < 0) {
-            return validationFailure("gas price below minimum", tx.getGasPrice().toString());
+        BigInteger effectiveGasPrice = tx.getEffectiveGasPrice().getAsBigInteger();
+        if (effectiveGasPrice.signum() == 0 || effectiveGasPrice.compareTo(minGasPrice) < 0) {
+            return validationFailure("gas price below minimum", tx.getEffectiveGasPrice().toString());
         }
         Account senderAccount = root.getAccount(sender);
         long accountNonce = senderAccount == null ? 0L : senderAccount.getNonce();
@@ -608,12 +617,15 @@ public class EvmBlockProcessor {
             return validationFailure("nonce mismatch",
                     tx.getNonce() + " vs account " + accountNonce);
         }
-        // Gas settles in EVM wei (缺口2 / Path α): the sender must cover value + the maximum gas fee
-        // (gasLimit * gasPrice). The full fee is debited upfront and the unused gas refunded after
+        // Gas settles in EVM wei (缺口2 / Path α). Affordability is validated against value +
+        // feeCap * gasLimit (the Ethereum rule — for type-2 the cap is maxFeePerGas, which survives
+        // a future baseFee > 0), while the actual debit/refund/burn run at the EFFECTIVE price:
+        // effectiveGasPrice * gasLimit is debited upfront and the unused gas refunded after
         // execution, so a revert or out-of-gas still pays for the gas it burned. The net charge
-        // (gasUsed * gasPrice) is burned, not credited to a coinbase (v1; ADR-007 routing is P2).
-        BigInteger maxFee = gasPriceWei.multiply(BigInteger.valueOf(tx.getGasLimit()));
-        if (balance.getAsBigInteger().compareTo(tx.getValue().getAsBigInteger().add(maxFee)) < 0) {
+        // (gasUsed * effectiveGasPrice) is burned, not credited to a coinbase (v1; ADR-007 is P2).
+        BigInteger maxGasFee = tx.getFeeCapPerGas().getAsBigInteger()
+                .multiply(BigInteger.valueOf(tx.getGasLimit()));
+        if (balance.getAsBigInteger().compareTo(tx.getValue().getAsBigInteger().add(maxGasFee)) < 0) {
             return validationFailure("balance below value + gas fee", balance.toString());
         }
         SimpleBlockValues blockValues = new SimpleBlockValues();
@@ -632,7 +644,8 @@ public class EvmBlockProcessor {
         // provably non-underflowing (the affordability check above; the refund is additive), so the
         // reachable paths (success, revert, out-of-gas) behave exactly as before.
         try {
-            adjustBalance(root, sender, maxFee.negate()); // upfront gas debit, charged even on revert/OOG
+            BigInteger upfrontGasFee = effectiveGasPrice.multiply(BigInteger.valueOf(tx.getGasLimit()));
+            adjustBalance(root, sender, upfrontGasFee.negate()); // upfront gas debit, charged even on revert/OOG
             EvmReceipt receipt;
             if (tx.isContractCreation()) {
                 if (messageGas <= 0L) {
@@ -657,9 +670,9 @@ public class EvmBlockProcessor {
                     receipt = receiptOf(result, intrinsicGas);
                 }
             }
-            // Refund the gas the tx did not consume; the sender's net gas cost is gasUsed * gasPrice.
+            // Refund the unconsumed gas; the sender's net gas cost is gasUsed * effectiveGasPrice.
             long gasUsed = Math.min(receipt.gasUsed(), tx.getGasLimit());
-            BigInteger refund = gasPriceWei.multiply(BigInteger.valueOf(tx.getGasLimit() - gasUsed));
+            BigInteger refund = effectiveGasPrice.multiply(BigInteger.valueOf(tx.getGasLimit() - gasUsed));
             if (refund.signum() > 0) {
                 adjustBalance(root, sender, refund);
             }

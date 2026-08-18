@@ -77,6 +77,15 @@ public class EvmConfigSectionTest {
     }
 
     @Test
+    public void devnet_activates_type2_at_genesis_and_shared_nets_do_not() {
+        // Defect-1 fork gate: devnet accepts type-2 (EIP-1559) txs from genesis; testnet/mainnet
+        // omit the key (= Long.MAX_VALUE, not scheduled) until the fork is coordinated.
+        assertEquals(0L, new DevnetConfig().getEvmSpec().getEvmType2ActivationHeight());
+        assertEquals(Long.MAX_VALUE, new TestnetConfig().getEvmSpec().getEvmType2ActivationHeight());
+        assertEquals(Long.MAX_VALUE, new MainnetConfig().getEvmSpec().getEvmType2ActivationHeight());
+    }
+
+    @Test
     public void devnet_funds_the_standard_test_address_in_genesis_alloc() {
         // The funding on-ramp: devnet pre-funds the standard test address (private key 1); the other
         // networks fund nothing at genesis.

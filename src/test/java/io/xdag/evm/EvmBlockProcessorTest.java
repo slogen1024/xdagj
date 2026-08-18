@@ -850,4 +850,97 @@ public class EvmBlockProcessorTest {
                 metaStore.getReceipt(tx1.getHash()).isPresent());
         assertTrue("no longer pending", metaStore.pendingHeights().isEmpty());
     }
+
+    // -------------------------------------------------------------------------
+    // Defect 1: type-2 (EIP-1559) execution behind evm.type2ActivationHeight
+    // -------------------------------------------------------------------------
+
+    @Test
+    public void type2_executes_post_activation_and_charges_effective_price() {
+        // Devnet default config: type-2 active from height 0. The sender must be charged at the
+        // EFFECTIVE price min(priority 1, maxFee 3) = 1, not the fee cap — a feeCap-debit bug would
+        // charge 3 per gas and fail the exact balance assertion (21000-gas transfer: refund is zero,
+        // so the debit itself is what the balance drop pins).
+        Address recipient = Address.fromHexString("0x00000000000000000000000000000000000000bb");
+        EvmTransaction transfer = EvmTransaction.unsignedType2(0L, Wei.of(1), Wei.of(3), 21_000L,
+                Optional.of(recipient), Wei.of(12_345L), Bytes.EMPTY, List.of(), CHAIN_ID).sign(key, algo);
+        txStore.put(transfer);
+
+        BigInteger before = account(sender).getBalance().getAsBigInteger();
+        processor.processMainBlock(List.of(ref(transfer)), 1L, 1001L, BLOCK_HASH_1);
+
+        EvmReceipt receipt = metaStore.getReceipt(transfer.getHash()).orElseThrow();
+        assertEquals("type-2 transfer must succeed post-activation", 1, receipt.status());
+        BigInteger expectedDrop = BigInteger.valueOf(12_345L)
+                .add(BigInteger.valueOf(receipt.gasUsed())); // + gasUsed * effectiveGasPrice(1)
+        assertEquals("sender pays exactly value + gasUsed * effectiveGasPrice(1)",
+                before.subtract(expectedDrop), account(sender).getBalance().getAsBigInteger());
+        assertEquals("recipient receives the transferred value",
+                Wei.of(12_345L), account(recipient).getBalance());
+    }
+
+    @Test
+    public void type2_balance_check_uses_fee_cap() {
+        // Ethereum's affordability rule validates against value + feeCap * gasLimit — not the
+        // effective price — so a sender that could afford the effective charge but not the cap is
+        // rejected with a status-0 receipt and no debit at all.
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmTxStore txs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor proc = new EvmBlockProcessor(EvmConfig.devnet(), state, txs, meta);
+        long gasLimit = 21_000L;
+        long value = 100L;
+        // Covers value + effective(1) * gasLimit + 1 wei, but NOT value + feeCap(1000) * gasLimit.
+        Wei funded = Wei.of(value + gasLimit + 1);
+        RocksDbWorldUpdater w = new RocksDbWorldUpdater(state);
+        w.createAccount(sender, 0L, funded);
+        w.commit();
+
+        EvmTransaction tx = EvmTransaction.unsignedType2(0L, Wei.of(1), Wei.of(1_000L), gasLimit,
+                Optional.of(Address.fromHexString("0x00000000000000000000000000000000000000aa")),
+                Wei.of(value), Bytes.EMPTY, List.of(), CHAIN_ID).sign(key, algo);
+        txs.put(tx);
+        proc.processMainBlock(List.of(ref(tx)), 1L, 1001L, BLOCK_HASH_1);
+
+        EvmReceipt receipt = meta.getReceipt(tx.getHash()).orElseThrow();
+        assertEquals("unaffordable at the fee cap -> status-0 receipt", 0, receipt.status());
+        assertEquals("rejected before execution -> zero gas used", 0L, receipt.gasUsed());
+        assertEquals("sender must not be debited when the fee-cap check rejects the tx",
+                funded, new RocksDbWorldUpdater(state).getAccount(sender).getBalance());
+    }
+
+    @Test
+    public void type2_before_activation_is_byte_identical_to_an_undecodable_blob() {
+        // The upgrade-window safety property: pre-activation, an upgraded node's "type-2 before
+        // activation" receipt must equal — field for field, hence byte for byte — the "undecodable
+        // blob" receipt a non-upgraded node produces for the same ref (receipts carry no reason
+        // string), so the chained roots stay identical across upgraded and non-upgraded nodes.
+        EvmConfig gated = new EvmConfig(EvmSpecVersion.SHANGHAI, EvmConfig.DEVNET_CHAIN_ID,
+                EvmConfig.DEFAULT_MAX_GAS_LIMIT, EvmConfig.DEFAULT_MIN_GAS_PRICE, Long.MAX_VALUE);
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmTxStore txs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor proc = new EvmBlockProcessor(gated, state, txs, meta);
+        RocksDbWorldUpdater w = new RocksDbWorldUpdater(state);
+        w.createAccount(sender, 0L, Wei.fromEth(1)); // the type-2 WOULD execute if it were activated
+        w.commit();
+
+        EvmTransaction type2 = EvmTransaction.unsignedType2(0L, Wei.of(1), Wei.of(3), 21_000L,
+                Optional.of(Address.fromHexString("0x00000000000000000000000000000000000000aa")),
+                Wei.of(100), Bytes.EMPTY, List.of(), CHAIN_ID).sign(key, algo);
+        txs.put(type2);
+        Bytes garbage = Bytes.fromHexString("0xdeadbeef");
+        Hash garbageHash = Hash.hash(garbage);
+        txs.putRaw(garbageHash, garbage);
+
+        proc.processMainBlock(List.of(ref(type2), Bytes32.wrap(garbageHash.getBytes())), 1L, 1001L,
+                BLOCK_HASH_1);
+
+        EvmReceipt gatedReceipt = meta.getReceipt(type2.getHash()).orElseThrow();
+        EvmReceipt undecodableReceipt = meta.getReceipt(garbageHash).orElseThrow();
+        assertEquals("pre-activation type-2 must fail validation", 0, gatedReceipt.status());
+        assertEquals("garbage blob must fail validation", 0, undecodableReceipt.status());
+        assertEquals("pre-activation type-2 receipt must be byte-identical to the undecodable-blob "
+                + "receipt (record equality = field equality)", undecodableReceipt, gatedReceipt);
+    }
 }

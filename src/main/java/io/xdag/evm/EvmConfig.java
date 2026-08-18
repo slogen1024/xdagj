@@ -53,10 +53,14 @@ public final class EvmConfig {
     /** Default minimum gas price in wei; execution rejects any tx priced below it (anti-spam floor). */
     public static final BigInteger DEFAULT_MIN_GAS_PRICE = BigInteger.ONE;
 
+    /** Default type-2 activation: always active (tests/devnet factory); production passes the spec value. */
+    public static final long DEFAULT_TYPE2_ACTIVATION_HEIGHT = 0L;
+
     private final EvmSpecVersion fork;
     private final BigInteger chainId;
     private final long maxGasLimit;
     private final BigInteger minGasPrice;
+    private final long type2ActivationHeight;
 
     public EvmConfig(EvmSpecVersion fork, BigInteger chainId) {
         this(fork, chainId, DEFAULT_MAX_GAS_LIMIT);
@@ -67,10 +71,16 @@ public final class EvmConfig {
     }
 
     public EvmConfig(EvmSpecVersion fork, BigInteger chainId, long maxGasLimit, BigInteger minGasPrice) {
+        this(fork, chainId, maxGasLimit, minGasPrice, DEFAULT_TYPE2_ACTIVATION_HEIGHT);
+    }
+
+    public EvmConfig(EvmSpecVersion fork, BigInteger chainId, long maxGasLimit, BigInteger minGasPrice,
+                     long type2ActivationHeight) {
         this.fork = fork;
         this.chainId = chainId;
         this.maxGasLimit = maxGasLimit;
         this.minGasPrice = minGasPrice;
+        this.type2ActivationHeight = type2ActivationHeight;
     }
 
     /** Mainnet configuration: Shanghai fork + provisional mainnet chain id. */
@@ -104,5 +114,10 @@ public final class EvmConfig {
     /** Minimum gas price in wei; execution rejects any tx priced below it (anti-spam floor). */
     public BigInteger minGasPrice() {
         return minGasPrice;
+    }
+
+    /** Height at which type-2 (EIP-1559) txs activate; consensus-gated in EvmBlockProcessor. */
+    public long type2ActivationHeight() {
+        return type2ActivationHeight;
     }
 }

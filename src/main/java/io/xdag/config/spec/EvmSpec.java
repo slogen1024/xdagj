@@ -44,6 +44,9 @@ public interface EvmSpec {
      */
     long getEvmBatchActivationHeight();
 
+    /** Height at which type-2 (EIP-1559) transactions activate; Long.MAX_VALUE = not scheduled. */
+    long getEvmType2ActivationHeight();
+
     /** EIP-155 chain id for this network (devnet provisional: 51966 = 0xCAFE). */
     long getEvmChainId();
 

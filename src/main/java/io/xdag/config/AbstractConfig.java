@@ -164,6 +164,7 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected boolean evmEnabled = false;
     protected long evmActivationHeight = 0;
     protected long evmBatchActivationHeight = Long.MAX_VALUE;
+    protected long evmType2ActivationHeight = Long.MAX_VALUE;
     protected long evmChainId = 0xCAFE; // 51966, provisional devnet id
     protected long evmBlockGasLimit = 30_000_000L;
     protected long evmTxPoolTtlSeconds = 3600;
@@ -210,6 +211,11 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     @Override
     public long getEvmBatchActivationHeight() {
         return evmBatchActivationHeight;
+    }
+
+    @Override
+    public long getEvmType2ActivationHeight() {
+        return evmType2ActivationHeight;
     }
 
     @Override
@@ -391,6 +397,8 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
                 ? config.getLong("evm.activationHeight") : evmActivationHeight;
         evmBatchActivationHeight = config.hasPath("evm.batchActivationHeight")
                 ? config.getLong("evm.batchActivationHeight") : evmBatchActivationHeight;
+        evmType2ActivationHeight = config.hasPath("evm.type2ActivationHeight")
+                ? config.getLong("evm.type2ActivationHeight") : evmType2ActivationHeight;
         evmChainId = config.hasPath("evm.chainId") ? config.getLong("evm.chainId") : evmChainId;
         evmBlockGasLimit = config.hasPath("evm.blockGasLimit")
                 ? config.getLong("evm.blockGasLimit") : evmBlockGasLimit;
