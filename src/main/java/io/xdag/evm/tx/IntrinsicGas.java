@@ -42,9 +42,9 @@ public final class IntrinsicGas {
     public static final int MAX_INITCODE_SIZE = 49_152;
 
     /** EIP-2930: intrinsic cost per access-list address. */
-    public static final long ACCESS_LIST_ADDRESS_COST = 2_400L;
+    private static final long ACCESS_LIST_ADDRESS_COST = 2_400L;
     /** EIP-2930: intrinsic cost per access-list storage key. */
-    public static final long ACCESS_LIST_STORAGE_KEY_COST = 1_900L;
+    private static final long ACCESS_LIST_STORAGE_KEY_COST = 1_900L;
 
     private static final long TX_BASE_COST = 21_000L;
     private static final long ZERO_BYTE_COST = 4L;
@@ -55,6 +55,7 @@ public final class IntrinsicGas {
     private IntrinsicGas() {
     }
 
+    /** Equivalent to {@code compute(payload, isContractCreation, List.of())}. */
     public static long compute(Bytes payload, boolean isContractCreation) {
         return compute(payload, isContractCreation, List.of());
     }

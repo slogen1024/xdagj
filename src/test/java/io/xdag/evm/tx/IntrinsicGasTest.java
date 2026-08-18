@@ -64,13 +64,13 @@ public class IntrinsicGasTest {
         List<AccessListEntry> list = List.of(
                 new AccessListEntry(
                         Address.fromHexString("0x3535353535353535353535353535353535353535"),
-                        List.of(Bytes32.leftPad(Bytes.of(1)), Bytes32.leftPad(Bytes.of(2)))),
+                        List.of(Bytes32.leftPad(Bytes.of(1)), Bytes32.leftPad(Bytes.of(2)), Bytes32.leftPad(Bytes.of(3)))),
                 new AccessListEntry(
                         Address.fromHexString("0x3636363636363636363636363636363636363636"),
                         List.of()));
         long base = IntrinsicGas.compute(Bytes.EMPTY, false);
-        // 2 addresses * 2400 + 2 storage keys * 1900
-        assertEquals(base + 2 * 2400L + 2 * 1900L, IntrinsicGas.compute(Bytes.EMPTY, false, list));
+        // 2 addresses * 2400 + 3 storage keys * 1900
+        assertEquals(base + 2 * 2400L + 3 * 1900L, IntrinsicGas.compute(Bytes.EMPTY, false, list));
     }
 
     @Test

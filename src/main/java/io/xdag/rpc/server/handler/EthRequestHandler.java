@@ -160,7 +160,7 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
                     if (!r.success()) {
                         throw JsonRpcException.internalError(revertMessage(r));
                     }
-                    long intrinsic = IntrinsicGas.compute(args.data(), args.to() == null);
+                    long intrinsic = IntrinsicGas.compute(args.data(), args.to() == null, java.util.List.of()); // call objects carry no access list
                     yield EthHex.quantity(intrinsic + r.gasUsed());
                 }
                 case "eth_sendRawTransaction" -> sendRawTransaction(request);
