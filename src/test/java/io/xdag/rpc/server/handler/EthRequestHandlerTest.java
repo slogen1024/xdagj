@@ -24,6 +24,7 @@
 package io.xdag.rpc.server.handler;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -64,6 +65,7 @@ import org.hyperledger.besu.datatypes.Log;
 import org.hyperledger.besu.datatypes.LogTopic;
 import org.hyperledger.besu.datatypes.LogsBloomFilter;
 import org.hyperledger.besu.datatypes.Wei;
+import org.hyperledger.besu.evm.EvmSpecVersion;
 import org.hyperledger.besu.evm.account.MutableAccount;
 import org.junit.Before;
 import org.junit.Test;
@@ -79,7 +81,7 @@ public class EthRequestHandlerTest {
         Mockito.when(blockchain.getLatestMainBlockNumber()).thenReturn(4096L);
         InMemoryKVSource store = new InMemoryKVSource();
         handler = new EthRequestHandler(
-                new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
+                new EvmConfig(EvmSpecVersion.SHANGHAI,
                         BigInteger.valueOf(0xCAFE), 30_000_000L),
                 BigInteger.valueOf(1_000_000_000L), blockchain, null, null, null, null, 1024L,
                 new HistoricalStateReader(store, new EvmStateJournal(new InMemoryKVSource()), 128));
@@ -112,7 +114,7 @@ public class EthRequestHandlerTest {
         Blockchain bc = Mockito.mock(Blockchain.class);
         Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(head);
         return new EthRequestHandler(
-                new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
+                new EvmConfig(EvmSpecVersion.SHANGHAI,
                         BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, null, null, null, null, 1024L,
                 new HistoricalStateReader(store, new EvmStateJournal(new InMemoryKVSource()), 128));
     }
@@ -134,7 +136,7 @@ public class EthRequestHandlerTest {
         Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(1L);
         Consumer<Bytes> broadcaster = broadcasts::add;
         return new EthRequestHandler(
-                new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
+                new EvmConfig(EvmSpecVersion.SHANGHAI,
                         BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, pool, broadcaster, null, null,
                 1024L, new HistoricalStateReader(stateStore, new EvmStateJournal(new InMemoryKVSource()), 128));
     }
@@ -239,7 +241,7 @@ public class EthRequestHandlerTest {
         HistoricalStateReader historical = new HistoricalStateReader(state, journal, 128);
         Blockchain bc = Mockito.mock(Blockchain.class);
         EthRequestHandler h = new EthRequestHandler(
-                new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
+                new EvmConfig(EvmSpecVersion.SHANGHAI,
                         BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, null, null,
                 new EvmTxStore(new InMemoryKVSource()), meta, 1024L, historical);
 
@@ -306,7 +308,7 @@ public class EthRequestHandlerTest {
         Mockito.when(block.getTimestamp()).thenReturn(0L);
         Mockito.when(bc.getBlockByHeight(Mockito.anyLong())).thenReturn(block);
         return new EthRequestHandler(
-                new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
+                new EvmConfig(EvmSpecVersion.SHANGHAI,
                         BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc,
                 null, null, txStore, metaStore, 1024L,
                 new HistoricalStateReader(stateStore, new EvmStateJournal(new InMemoryKVSource()), 128));
@@ -352,7 +354,7 @@ public class EthRequestHandlerTest {
         Mockito.when(bc.getBlockByHeight(0L)).thenReturn(null);
         Mockito.when(bc.getBlockByHeight(1L)).thenReturn(block1);
         EthRequestHandler h = new EthRequestHandler(
-                new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
+                new EvmConfig(EvmSpecVersion.SHANGHAI,
                         BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc,
                 null, null, txStore, metaStore, 1024L,
                 new HistoricalStateReader(stateStore, new EvmStateJournal(new InMemoryKVSource()), 128));
@@ -613,6 +615,7 @@ public class EthRequestHandlerTest {
         assertEquals("0x3b9aca00", m.get("maxPriorityFeePerGas"));
         assertEquals("0x3b9aca00", m.get("gasPrice"));            // effective = min = 1 gwei
         assertEquals(m.get("yParity"), m.get("v"));               // same value, geth-compatible
+        assertEquals("0x1", m.get("yParity"));                    // VECTOR_B's signature has yParity 1
         List<?> al = (List<?>) m.get("accessList");
         assertEquals(1, al.size());
         Map<?, ?> entry = (Map<?, ?>) al.get(0);
@@ -671,7 +674,21 @@ public class EthRequestHandlerTest {
 
         // Two params (no percentiles) -> NO reward key.
         Map<?, ?> noReward = (Map<?, ?>) handler.handle(request("eth_feeHistory", "0x4", "latest"));
-        assertTrue(!noReward.containsKey("reward"));
+        assertFalse(noReward.containsKey("reward"));
+
+        // 5a: blockCount as a JSON Number (Integer) hits the instanceof Number branch.
+        Map<?, ?> numCount = (Map<?, ?>) handler.handle(
+                request("eth_feeHistory", Integer.valueOf(4), "latest", List.of(25.0d, 75.0d)));
+        assertEquals(fh.get("oldestBlock"), numCount.get("oldestBlock"));
+        assertEquals(((List<?>) fh.get("baseFeePerGas")).size(), ((List<?>) numCount.get("baseFeePerGas")).size());
+
+        // 5b: Integer (not Double) percentiles — Jackson deserialises JSON numbers as Integer; must still
+        // produce 3-entry reward rows.
+        Map<?, ?> intPct = (Map<?, ?>) handler.handle(
+                request("eth_feeHistory", "0x4", "latest", List.of(10, 20, 30)));
+        List<?> intReward = (List<?>) intPct.get("reward");
+        assertEquals(count, intReward.size());
+        assertEquals(3, ((List<?>) intReward.get(0)).size());
     }
 
     @Test
@@ -682,7 +699,7 @@ public class EthRequestHandlerTest {
         Blockchain bc = Mockito.mock(Blockchain.class);
         Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(1L);
         EthRequestHandler gated = new EthRequestHandler(
-                new EvmConfig(org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI,
+                new EvmConfig(EvmSpecVersion.SHANGHAI,
                         BigInteger.valueOf(0xCAFE), 30_000_000L, BigInteger.ONE, Long.MAX_VALUE),
                 BigInteger.ONE, bc, poolFor(gatedStore), new ArrayList<Bytes>()::add, null, null,
                 1024L, new HistoricalStateReader(gatedStore, new EvmStateJournal(new InMemoryKVSource()), 128));
@@ -690,6 +707,15 @@ public class EthRequestHandlerTest {
                 () -> gated.handle(request("eth_sendRawTransaction", VECTOR_A.toHexString())));
         assertTrue("gate must mention activation, was: " + gate.getMessage(),
                 gate.getMessage() != null && gate.getMessage().contains("activated"));
+
+        // 5c: A LEGACY (type-0) tx through the same gated handler must NOT hit the activation gate.
+        // It may fail for pool reasons (wrong chain id, balance, nonce) but not "activated".
+        try {
+            gated.handle(request("eth_sendRawTransaction", EIP155_RAW.toHexString()));
+        } catch (JsonRpcException legacyEx) {
+            assertFalse("legacy tx must not be rejected with activation message, was: " + legacyEx.getMessage(),
+                    legacyEx.getMessage() != null && legacyEx.getMessage().contains("activated"));
+        }
 
         // Default (active) handler: the same tx passes the gate. Funded with 2 ETH (1 ETH value + fees),
         // it is accepted and returns its Ethereum hash.

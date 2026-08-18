@@ -248,12 +248,16 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
         long requested = params[0] instanceof Number n ? n.longValue()
                 : EthHex.decodeQuantity((String) params[0]).longValueExact();
         long blockCount = Math.max(1L, Math.min(requested, 1024L));
-        long newest = resolveFeeHistoryTag((String) params[1]);
+        long newest = resolveHeight((String) params[1], blockchain.getLatestMainBlockNumber());
+        if (newest < 0) {
+            throw new IllegalArgumentException("invalid newestBlock");
+        }
         long oldest = Math.max(0L, newest - blockCount + 1);
         long count = newest - oldest + 1;
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("oldestBlock", EthHex.quantity(oldest));
         List<String> baseFees = new ArrayList<>();
+        // blockCount + 1 entries: includes the next block's base fee (EIP-1559 feeHistory shape).
         for (long i = 0; i <= count; i++) {
             baseFees.add("0x0");
         }
@@ -275,13 +279,6 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
             m.put("reward", rewards);
         }
         return m;
-    }
-
-    private long resolveFeeHistoryTag(String tag) {
-        if ("latest".equals(tag) || "pending".equals(tag)) {
-            return blockchain.getLatestMainBlockNumber();
-        }
-        return EthHex.decodeQuantity(tag).longValueExact();
     }
 
     /**
