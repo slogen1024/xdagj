@@ -176,8 +176,10 @@ public class EvmBlockProcessor {
      */
     public synchronized void processMainBlock(List<Bytes32> txRefs, long height, long timestampSeconds,
                                               Bytes32 blockHash, List<BridgeDeposit> deposits) {
-        boolean hasRefs = txRefs != null && !txRefs.isEmpty();
-        boolean hasDeposits = deposits != null && !deposits.isEmpty();
+        List<Bytes32> refs = txRefs == null ? List.of() : txRefs;
+        boolean hasRefs = !refs.isEmpty();
+        int depositCount = deposits == null ? 0 : deposits.size();
+        boolean hasDeposits = depositCount > 0;
         if (!hasRefs && !hasDeposits) {
             return;
         }
@@ -185,8 +187,8 @@ public class EvmBlockProcessor {
             // Before the EVM hard fork nothing here has consensus meaning (spec §3.1). The caller
             // gates deposits by its own bridgeActivationHeight; this guard only covers a bridge
             // scheduled before the EVM itself — a nonsensical config; ignoring is deterministic.
-            log.warn("Ignoring EVM payload in pre-activation main block at height {} (activates at {})",
-                    height, activationHeight);
+            log.warn("Ignoring EVM payload ({} ref(s), {} deposit(s)) in pre-activation main block "
+                    + "at height {} (activates at {})", refs.size(), depositCount, height, activationHeight);
             return;
         }
         if (hasDeposits) {
@@ -194,10 +196,11 @@ public class EvmBlockProcessor {
             // deposits when it later drains (executeList reads the 0x06 record).
             metaStore.putDeposits(height, deposits);
         }
-        Expansion exp = hasRefs ? expandRefs(txRefs) : new Expansion(List.of(), List.of(), List.of());
+        Expansion exp = expandRefs(refs); // an empty refs list expands to a complete, all-empty Expansion
         if (!metaStore.pendingHeights().isEmpty() || !exp.complete()) {
-            metaStore.putPending(height, blockHash, timestampSeconds, txRefs == null ? List.of() : txRefs);
-            log.warn("Deferring EVM execution of main block at height {} until blobs arrive", height);
+            metaStore.putPending(height, blockHash, timestampSeconds, refs);
+            log.warn("Deferring EVM execution of main block at height {} ({} ref(s), {} deposit(s)) "
+                    + "until blobs arrive", height, refs.size(), depositCount);
             return;
         }
         executeAndCheckpoint(exp.flat(), height, timestampSeconds, blockHash);
@@ -326,7 +329,8 @@ public class EvmBlockProcessor {
      * Executes a confirmed (or drained) main block's expanded refs and writes its EVM_META checkpoint.
      * {@code flatRefs} must already be the fully-expanded flat list (batch members inlined, no unknown
      * refs) — callers are responsible for running {@link #expandRefs} and gating on
-     * {@link Expansion#complete()} before invoking this method.
+     * {@link Expansion#complete()} before invoking this method. A height with deposits checkpoints
+     * even when it has no executable candidates.
      */
     private void executeAndCheckpoint(List<Bytes32> flatRefs, long height, long timestampSeconds,
                                       Bytes32 blockHash) {
@@ -516,10 +520,11 @@ public class EvmBlockProcessor {
 
     /**
      * Executes one height's txs on a fresh root updater, commits, writes receipts, and returns the
-     * chained root plus the executed subset. A deterministic per-main-block gas budget bounds the
-     * total work: once the sum of tx gas limits would exceed {@code blockGasLimit}, further refs are
-     * skipped (no receipt, absent from the tx list) so they stay executable in a later block. This
-     * caps the synchronous EVM work one block can force onto the import thread.
+     * chained root plus the executed subset. Mints the height's bridge deposits (EVM_META 0x06)
+     * before the first tx — same commit, same replay path. A deterministic per-main-block gas budget
+     * bounds the total work: once the sum of tx gas limits would exceed {@code blockGasLimit},
+     * further refs are skipped (no receipt, absent from the tx list) so they stay executable in a
+     * later block. This caps the synchronous EVM work one block can force onto the import thread.
      */
     private ExecutionOutcome executeList(List<Hash> txHashes, long height, long timestampSeconds,
                                          Bytes32 previousRoot) {

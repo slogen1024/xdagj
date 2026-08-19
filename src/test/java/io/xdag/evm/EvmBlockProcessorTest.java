@@ -898,8 +898,9 @@ public class EvmBlockProcessorTest {
         assertEquals("deposit-only height checkpoints with zero txs", 0, rec1.txCount());
         assertEquals(Optional.of(1L), metaStore.highestHeight());
 
-        // A second deposit-only height must chain onto the first: its root differs, proving each
-        // deposit-only height advances the chained root rather than repeating it.
+        // A second deposit-only height must chain onto the first: its root differs, checking that the
+        // checkpoint chain advances height over height. (The byte-level delta coverage of the mint is
+        // pinned by deposit_replay_is_byte_identical_after_rollback, not by this root inequality.)
         processor.processMainBlock(List.of(), 2L, 1002L, BLOCK_HASH_2,
                 List.of(new BridgeDeposit(a, 5L)));
         assertNotEquals("each deposit-only height advances the chained root", rec1.stateRoot(),
@@ -933,6 +934,50 @@ public class EvmBlockProcessorTest {
                 metaStore.getHeightRecord(2L).orElseThrow().stateRoot());
         assertEquals("replayed contract state is intact", UInt256.valueOf(42),
                 account(contract1).getStorageValue(UInt256.ZERO));
+    }
+
+    @Test
+    public void deferred_height_still_mints_its_deposits_when_it_drains() {
+        // Deposits are persisted to EVM_META 0x06 BEFORE any defer (spec §2.2): a height stalled on a
+        // missing blob mints nothing while pending, then mints when onBlobsAvailable drains it.
+        Address a = Address.fromHexString("0x00000000000000000000000000000000000000a7");
+        EvmTransaction deploy = EvmTransaction.unsigned(0L, Wei.of(1), 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo); // blob NOT stored -> the height defers
+        processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1,
+                List.of(new BridgeDeposit(a, 7L)));
+
+        assertNull("no mint while the height is deferred", account(a));
+        assertTrue("no checkpoint while the height is deferred", metaStore.getHeightRecord(1L).isEmpty());
+        assertEquals("height is queued, not dropped", List.of(1L), metaStore.pendingHeights());
+
+        // The blob arrives (as it would over P2P); draining executes the height incl. its mint.
+        txStore.putRaw(deploy.getHash(), deploy.getRawRlp());
+        processor.onBlobsAvailable();
+
+        assertEquals("the drained height mints its persisted 7-nano deposit", Wei.of(7_000_000_000L),
+                account(a).getBalance());
+        assertTrue("the drained height checkpoints", metaStore.getHeightRecord(1L).isPresent());
+        assertTrue("no longer pending", metaStore.pendingHeights().isEmpty());
+    }
+
+    @Test
+    public void deposit_only_height_survives_replay_of_higher_rollback() {
+        // Pins that a deposit-only height stays in the replay schedule: its putTxList(h, List.of())
+        // checkpoint is an EMPTY-VALUE key, which must survive the KV layer, or rollbackTo would
+        // silently drop the height (and its mint) from the wipe-and-replay.
+        Address b = Address.fromHexString("0x00000000000000000000000000000000000000b2");
+        processor.processMainBlock(List.of(), 1L, 1001L, BLOCK_HASH_1,
+                List.of(new BridgeDeposit(b, 42L)));
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        processor.processMainBlock(List.of(ref(deploy)), 2L, 1002L, BLOCK_HASH_2);
+        Bytes32 rootBefore = metaStore.getHeightRecord(1L).orElseThrow().stateRoot();
+
+        processor.rollbackTo(1L);
+
+        assertEquals("height 1 must replay, re-minting its deposit from EVM_META 0x06",
+                Wei.of(42_000_000_000L), account(b).getBalance());
+        assertEquals("the height-1 checkpoint root is unchanged by the rollback", rootBefore,
+                metaStore.getHeightRecord(1L).orElseThrow().stateRoot());
     }
 
     @Test

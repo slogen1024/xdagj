@@ -358,6 +358,9 @@ public class EvmMetaStore {
         byte[] value = new byte[deposits.size() * DEPOSIT_ENTRY_LENGTH];
         int pos = 0;
         for (BridgeDeposit d : deposits) {
+            if (d.amountNano() < 0) {
+                throw new IllegalArgumentException("negative deposit amount " + d.amountNano() + " for " + d.target());
+            }
             System.arraycopy(d.target().getBytes().toArray(), 0, value, pos, 20);
             long nano = d.amountNano();
             for (int i = 0; i < 8; i++) {
@@ -382,6 +385,10 @@ public class EvmMetaStore {
         for (int pos = 0; pos < raw.length; pos += DEPOSIT_ENTRY_LENGTH) {
             Address target = Address.wrap(Bytes.wrap(raw, pos, 20));
             long nano = Bytes.wrap(raw, pos + 20, 8).getLong(0);
+            if (nano < 0) {
+                throw new IllegalStateException(
+                        "corrupt EVM_META deposit record at height " + height + ": negative amount " + nano);
+            }
             out.add(new BridgeDeposit(target, nano));
         }
         return out;

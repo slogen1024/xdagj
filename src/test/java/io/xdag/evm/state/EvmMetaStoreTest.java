@@ -25,6 +25,7 @@ package io.xdag.evm.state;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import io.xdag.evm.bridge.BridgeDeposit;
@@ -218,10 +219,41 @@ public class EvmMetaStoreTest {
         assertEquals(List.of(), store.getDeposits(5L)); // wiped: above it
     }
 
+    @Test
+    public void putDeposits_rejects_a_negative_amount() {
+        // A producer bug (negative nano amount) must die at write time with a clear message, not be
+        // encoded into a record the sign-guarded reader would only reject later, inside setMain.
+        List<BridgeDeposit> bad = List.of(new BridgeDeposit(Address.ZERO, -1L));
+        assertThrows(IllegalArgumentException.class, () -> store.putDeposits(9L, bad));
+    }
+
+    @Test
+    public void deposit_record_with_the_sign_bit_set_fails_fast_on_read() {
+        // A raw 0x06 record whose amount field has the sign bit set decodes to a negative long; the
+        // reader must fail fast like the other corrupt-record readers, instead of letting the value
+        // reach Wei.of (and throw) inside the setMain-inline mint path.
+        InMemoryKVSource kv = new InMemoryKVSource();
+        EvmMetaStore meta = new EvmMetaStore(kv);
+        byte[] value = new byte[28]; // exactly one (target 20 | amountNano 8 BE) entry
+        value[20] = (byte) 0x80; // the amount's high byte: sign bit set -> negative long
+        kv.put(depositsKeyForTest(3L), value);
+        assertThrows(IllegalStateException.class, () -> meta.getDeposits(3L));
+    }
+
     /** Mirrors EvmMetaStore's private bloomKey layout (0x05 | height 8-byte BE) for the corrupt-value test. */
     private static byte[] bloomKeyForTest(long height) {
         byte[] key = new byte[9];
         key[0] = 0x05;
+        for (int i = 0; i < 8; i++) {
+            key[1 + i] = (byte) (height >>> (56 - 8 * i));
+        }
+        return key;
+    }
+
+    /** Mirrors EvmMetaStore's private depositsKey layout (0x06 | height 8-byte BE) for the corrupt-value test. */
+    private static byte[] depositsKeyForTest(long height) {
+        byte[] key = new byte[9];
+        key[0] = 0x06;
         for (int i = 0; i < 8; i++) {
             key[1 + i] = (byte) (height >>> (56 - 8 * i));
         }
