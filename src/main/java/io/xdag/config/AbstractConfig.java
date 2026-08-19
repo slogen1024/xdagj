@@ -165,6 +165,8 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected long evmActivationHeight = 0;
     protected long evmBatchActivationHeight = Long.MAX_VALUE;
     protected long evmType2ActivationHeight = Long.MAX_VALUE;
+    protected long evmBridgeActivationHeight = Long.MAX_VALUE;
+    protected String evmBridgeRecoveryAddress;
     protected long evmChainId = 0xCAFE; // 51966, provisional devnet id
     protected long evmBlockGasLimit = 30_000_000L;
     protected long evmTxPoolTtlSeconds = 3600;
@@ -216,6 +218,16 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     @Override
     public long getEvmType2ActivationHeight() {
         return evmType2ActivationHeight;
+    }
+
+    @Override
+    public long getEvmBridgeActivationHeight() {
+        return evmBridgeActivationHeight;
+    }
+
+    @Override
+    public String getEvmBridgeRecoveryAddress() {
+        return evmBridgeRecoveryAddress;
     }
 
     @Override
@@ -283,6 +295,28 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
             alloc.add(new GenesisAllocEntry(address, Wei.of(balance)));
         }
         return List.copyOf(alloc);
+    }
+
+    /**
+     * A scheduled bridge without a recovery address (or with a malformed one) is a
+     * misconfiguration that would strand mis-remarked deposits — refuse to start (S-36
+     * fund.address precedent). Static so the rule is unit-testable without a full config load.
+     */
+    static void validateBridgeConfig(com.typesafe.config.Config config) {
+        boolean scheduled = config.hasPath("evm.bridgeActivationHeight")
+                && config.getLong("evm.bridgeActivationHeight") != Long.MAX_VALUE;
+        if (!scheduled) {
+            return;
+        }
+        if (!config.hasPath("evm.bridgeRecoveryAddress")) {
+            throw new IllegalStateException("Missing required configuration 'evm.bridgeRecoveryAddress'. "
+                    + "A network that schedules evm.bridgeActivationHeight must set the recovery address.");
+        }
+        String addr = config.getString("evm.bridgeRecoveryAddress");
+        if (!addr.matches("0x[0-9a-fA-F]{40}")) {
+            throw new IllegalStateException(
+                    "evm.bridgeRecoveryAddress must be a 0x-prefixed 20-byte hex address, got: " + addr);
+        }
     }
 
     @Override
@@ -399,6 +433,11 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
                 ? config.getLong("evm.batchActivationHeight") : evmBatchActivationHeight;
         evmType2ActivationHeight = config.hasPath("evm.type2ActivationHeight")
                 ? config.getLong("evm.type2ActivationHeight") : evmType2ActivationHeight;
+        validateBridgeConfig(config);
+        evmBridgeActivationHeight = config.hasPath("evm.bridgeActivationHeight")
+                ? config.getLong("evm.bridgeActivationHeight") : evmBridgeActivationHeight;
+        evmBridgeRecoveryAddress = config.hasPath("evm.bridgeRecoveryAddress")
+                ? config.getString("evm.bridgeRecoveryAddress") : evmBridgeRecoveryAddress;
         evmChainId = config.hasPath("evm.chainId") ? config.getLong("evm.chainId") : evmChainId;
         evmBlockGasLimit = config.hasPath("evm.blockGasLimit")
                 ? config.getLong("evm.blockGasLimit") : evmBlockGasLimit;

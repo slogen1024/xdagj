@@ -47,6 +47,16 @@ public interface EvmSpec {
     /** Height at which type-2 (EIP-1559) transactions activate; Long.MAX_VALUE = not scheduled. */
     long getEvmType2ActivationHeight();
 
+    /** Height at which the XDAG<->EVM bridge activates; Long.MAX_VALUE = not scheduled. */
+    long getEvmBridgeActivationHeight();
+
+    /**
+     * EVM address minted to when a deposit's remark cannot be decoded (spec §2.2). Hex string
+     * (0x + 40); null only when the bridge is not scheduled — networks that activate the bridge
+     * MUST set it (fail-fast at config load).
+     */
+    String getEvmBridgeRecoveryAddress();
+
     /** EIP-155 chain id for this network (devnet provisional: 51966 = 0xCAFE). */
     long getEvmChainId();
 

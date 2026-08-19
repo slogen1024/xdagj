@@ -25,9 +25,11 @@ package io.xdag.config;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import io.xdag.config.spec.EvmSpec;
 import io.xdag.evm.GenesisAllocEntry;
@@ -111,6 +113,36 @@ public class EvmConfigSectionTest {
                 "evm.alloc=[{address=\"" + A1 + "\",balance=\"1\"},{address=\"" + A2 + "\",balance=\"2\"}]"));
         assertEquals(2, alloc.size());
         assertEquals(Wei.of(1), alloc.get(0).balance());
+    }
+
+    @Test
+    public void devnet_activates_bridge_at_genesis_and_shared_nets_do_not() {
+        // Defect-3 phase-3a bridge gate: devnet activates at genesis with a recovery address;
+        // testnet/mainnet omit the keys (= Long.MAX_VALUE / null, not scheduled).
+        EvmSpec devSpec = new DevnetConfig().getEvmSpec();
+        assertEquals(0L, devSpec.getEvmBridgeActivationHeight());
+        assertEquals("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf", devSpec.getEvmBridgeRecoveryAddress());
+
+        EvmSpec testSpec = new TestnetConfig().getEvmSpec();
+        assertEquals(Long.MAX_VALUE, testSpec.getEvmBridgeActivationHeight());
+        assertNull(testSpec.getEvmBridgeRecoveryAddress());
+
+        EvmSpec mainSpec = new MainnetConfig().getEvmSpec();
+        assertEquals(Long.MAX_VALUE, mainSpec.getEvmBridgeActivationHeight());
+        assertNull(mainSpec.getEvmBridgeRecoveryAddress());
+    }
+
+    @Test
+    public void bridge_activation_without_recovery_address_fails_fast() {
+        Config c = ConfigFactory.parseString("evm.bridgeActivationHeight = 5");
+        assertThrows(IllegalStateException.class, () -> AbstractConfig.validateBridgeConfig(c));
+    }
+
+    @Test
+    public void bridge_recovery_address_must_be_20_byte_hex() {
+        Config c = ConfigFactory.parseString(
+                "evm.bridgeActivationHeight = 5\nevm.bridgeRecoveryAddress = \"0x1234\"");
+        assertThrows(IllegalStateException.class, () -> AbstractConfig.validateBridgeConfig(c));
     }
 
     @Test
