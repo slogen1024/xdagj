@@ -1184,25 +1184,11 @@ public class BlockchainImpl implements Blockchain {
                     subtractAmount(BasicUtils.hash2byte(linkAddress), link.getAmount(), block);
                     processNonceAfterTransactionExecution(link);
                 } else if (link.getType() == XDAG_FIELD_OUTPUT) {
+                    Bytes outputAddress20 = BasicUtils.hash2byte(linkAddress);
                     XAmount credited = link.getAmount().subtract(outPutLimit(block));
-                    addAmount(BasicUtils.hash2byte(linkAddress), credited, block);
+                    addAmount(outputAddress20, credited, block);
                     blockGas = blockGas.add(outPutLimit(block));
-                    if (kernel != null
-                            && kernel.getConfig().getEvmSpec().getEvmBridgeActivationHeight() != Long.MAX_VALUE
-                            && BasicUtils.hash2byte(linkAddress).equals(BridgeConstants.LOCK_ADDRESS_20)
-                            && credited.isPositive()) {
-                        // Bridge deposit (spec §2.2): resolve the mint target NOW (remark decode is
-                        // pure; the recovery address is a consensus config value), keep DFS order.
-                        // Collection is skipped entirely when no bridge is scheduled (activation ==
-                        // Long.MAX_VALUE): no height can ever mint, and the recovery address — only
-                        // validated at config load when a bridge IS scheduled — may be null here.
-                        org.hyperledger.besu.datatypes.Address target =
-                                BridgeRemark.decode(block.getInfo().getRemark()).orElseGet(
-                                        () -> org.hyperledger.besu.datatypes.Address.fromHexString(
-                                                kernel.getConfig().getEvmSpec().getEvmBridgeRecoveryAddress()));
-                        deposits.add(new BridgeDeposit(target,
-                                credited.toDecimal(0, XUnit.NANO_XDAG).longValueExact()));
-                    }
+                    collectBridgeDeposit(block, outputAddress20, credited, deposits);
                 }
             }
         }
@@ -1233,6 +1219,28 @@ public class BlockchainImpl implements Blockchain {
         if (evmRefs != null && block.getEvmTxRef() != null) {
             evmRefs.add(block.getEvmTxRef());
         }
+    }
+
+    /**
+     * Collects a confirmed lock-address credit as a bridge deposit (spec §2.2), resolved to its
+     * EVM mint target in DFS order. Skipped entirely when no bridge is scheduled — the recovery
+     * address (only validated at config load when a bridge IS scheduled) may be null here.
+     */
+    private void collectBridgeDeposit(Block block, Bytes outputAddress20, XAmount credited,
+                                      List<BridgeDeposit> deposits) {
+        if (kernel == null
+                || kernel.getConfig().getEvmSpec().getEvmBridgeActivationHeight() == Long.MAX_VALUE) {
+            return;
+        }
+        if (!outputAddress20.equals(BridgeConstants.LOCK_ADDRESS_20) || !credited.isPositive()) {
+            return;
+        }
+        org.hyperledger.besu.datatypes.Address target =
+                BridgeRemark.decode(block.getInfo().getRemark()).orElseGet(
+                        () -> org.hyperledger.besu.datatypes.Address.fromHexString(
+                                kernel.getConfig().getEvmSpec().getEvmBridgeRecoveryAddress()));
+        deposits.add(new BridgeDeposit(target,
+                credited.toDecimal(0, XUnit.NANO_XDAG).longValueExact()));
     }
 
     // TODO: unapply block which in snapshot
@@ -1349,7 +1357,8 @@ public class BlockchainImpl implements Blockchain {
             // Recursively execute blocks referenced by main block and get fees
             List<Bytes32> evmRefs = new ArrayList<>();
             List<BridgeDeposit> deposits = new ArrayList<>();
-            XAmount mainBlockFee = applyBlock(true, block, evmRefs, deposits); //the mainBlock may have tx, return the fee to itself.
+            //the mainBlock may have tx, return the fee to itself.
+            XAmount mainBlockFee = applyBlock(true, block, evmRefs, deposits);
             if (mainBlockFee.compareTo(XAmount.ZERO) < 0) {// normal mainBlock will not go into this
                 return;
             } else {
@@ -1362,7 +1371,7 @@ public class BlockchainImpl implements Blockchain {
             // collected during the DFS, in visit order, against the persisted EVM world state.
             long timestampSeconds = XdagTime.xdagTimestampToMs(block.getTimestamp()) / 1000;
             EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
-            // Deposits are consensus-gated HERE by the bridge activation height (exact - mainNumber
+            // Deposits are consensus-gated HERE by the bridge activation height (exact: mainNumber
             // is the confirmed height). Pre-activation deposits are plain transfers: retained at the
             // lock address, never minted retroactively (spec §1).
             if (kernel == null
