@@ -319,6 +319,18 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
             throw new IllegalStateException(
                     "evm.bridgeRecoveryAddress must be a 0x-prefixed 20-byte hex address, got: " + addr);
         }
+        // A bridge scheduled before the EVM itself would deterministically drop every deposit
+        // confirmed in [bridgeActivation, evmActivation) — funds stranded at the lock address.
+        // Absent evm.activationHeight resolves to 0 (the evmActivationHeight field default), so
+        // mirror that here rather than treating absence as "never".
+        long evmActivation = config.hasPath("evm.activationHeight")
+                ? config.getLong("evm.activationHeight") : 0L;
+        long bridgeActivation = config.getLong("evm.bridgeActivationHeight");
+        if (bridgeActivation < evmActivation) {
+            throw new IllegalStateException("evm.bridgeActivationHeight (" + bridgeActivation
+                    + ") must not precede evm.activationHeight (" + evmActivation
+                    + "): deposits confirmed before the EVM activates would be dropped.");
+        }
     }
 
     @Override

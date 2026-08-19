@@ -146,6 +146,16 @@ public class EvmConfigSectionTest {
     }
 
     @Test
+    public void bridge_scheduled_before_the_evm_itself_fails_fast() {
+        // Deposits confirmed in [bridgeActivation, evmActivation) would be deterministically
+        // dropped (funds stranded at the lock address), so refuse to start.
+        Config c = ConfigFactory.parseString("evm.activationHeight = 10\n"
+                + "evm.bridgeActivationHeight = 5\n"
+                + "evm.bridgeRecoveryAddress = \"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\"");
+        assertThrows(IllegalStateException.class, () -> AbstractConfig.validateBridgeConfig(c));
+    }
+
+    @Test
     public void well_formed_or_unscheduled_bridge_config_passes_validation() {
         AbstractConfig.validateBridgeConfig(ConfigFactory.parseString(
                 "evm.bridgeActivationHeight = 5\n"
