@@ -225,6 +225,13 @@ public class Kernel {
             // the first EVM main block (idempotent; a restart with the marker present is a no-op).
             evmBlockProcessor.seedGenesisIfAbsent();
             log.info("EVM services init (chain id {}).", evmChainId);
+            if (config.getEvmSpec().getEvmBridgeActivationHeight() != Long.MAX_VALUE) {
+                log.info("XDAG<->EVM bridge deposits active from height {}: lock address {} (native form {})",
+                        config.getEvmSpec().getEvmBridgeActivationHeight(),
+                        io.xdag.evm.bridge.BridgeConstants.LOCK_ADDRESS_20,
+                        io.xdag.crypto.encoding.Base58.encodeCheck(
+                                io.xdag.evm.bridge.BridgeConstants.LOCK_ADDRESS_20));
+            }
         }
 
         // Initialize blockchain

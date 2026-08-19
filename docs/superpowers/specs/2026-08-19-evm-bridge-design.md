@@ -3,7 +3,8 @@
 日期：2026-08-19
 分支：dev-evm
 状态：已批准（brainstorming 定案；路线图方案 A 的第 3 个工程子项目，
-前置为缺陷 1 EIP-2718/type-2，已于 2026-08-18 交付并全绿 460）
+前置为缺陷 1 EIP-2718/type-2，已于 2026-08-18 交付并全绿 460）；
+Phase 3a（入金）已于 2026-08-19 交付（dev-evm，a691a29e..HEAD）
 
 对应缺陷：`.claude/docs/smart-contract-design-and-implementation.md` §13.1 缺陷 3
 （EVM 余额唯一来源是 evm.alloc 创世预分配——正式网即使激活 EVM 也是无资产空链）。

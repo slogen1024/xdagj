@@ -529,6 +529,7 @@ MetaMask 轮询:
 - 现状：EVM 余额唯一来源是 `evm.alloc` 创世预分配（§9）；devnet 预注资一个测试地址，`xdag-devnet.conf:50` 注释直说 "Testnet/mainnet fund nothing"——正式网即使激活 EVM 也是一条没有原生资产的空链。没有存取款交易类型、没有 precompile、没有双向锚定。
 - 解决方向：共识层双向锚定。**入金**：原生交易输出到系统锁定地址、remark 携带 EVM 目标地址 → `setMain` 确认后在 `EvmBlockProcessor` 执行序内等额 mint（挂在执行序即天然复用 `rollbackTo` 的 reorg 对称回滚）；**出金**：EVM 侧调用系统 precompile burn → 生成待解锁记录，共识层 N 主块确认后释放原生输出（延迟窗口吸收 reorg）。关键难点是两侧原子性与回滚对称。备选是 1:1 总量映射（主账本余额直接映射 EVM 账户），需统一账户模型，工程面远大于锚定方案。
 - 决策前置：锁定地址与出金确认深度 N 属于共识规则（硬分叉内容），须先于实现定案。
+- **已实现（Phase 3a 入金，2026-08-19，dev-evm）**：锁定地址协议常量 0x3109ff8cf0be958a428c12d86c0abf64f529f7db（keccak256("XDAG-EVM-BRIDGE-LOCK-v1") 末 20 字节，无私钥）；remark 编码 base58(0x45‖addr20‖keccak 前 2 字节) 恒 32 字符（标准 Base58Check 33 字符放不下的勘误已入 spec）；applyBlock 的 OUTPUT 记账分支按 DFS 序收集（金额=扣费后实际入账值，collectBridgeDeposit 助手），setMain 按确认高度门控（evm.bridgeActivationHeight devnet=0，且配置校验强制 ≥ evm.activationHeight）；EVM_META 0x06 进重放脚本（负数金额 fail-fast），executeList 先 mint 后执行交易（同高度可花、同一次 commit 入链式根），deposit-only 高度照常 checkpoint 并参与重放，rollbackTo 对称免费；非法 remark → evm.bridgeRecoveryAddress（排期即必填 fail-fast，devnet=测试地址）；1 nano = 10⁹ wei 无损。出金（Phase 3b：系统合约 + N 深度释放）未实现。
 
 **缺陷 4：testnet/mainnet 的 chainId 与激活高度未定**
 
