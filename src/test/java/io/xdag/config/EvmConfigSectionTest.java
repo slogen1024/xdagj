@@ -146,6 +146,16 @@ public class EvmConfigSectionTest {
     }
 
     @Test
+    public void well_formed_or_unscheduled_bridge_config_passes_validation() {
+        AbstractConfig.validateBridgeConfig(ConfigFactory.parseString(
+                "evm.bridgeActivationHeight = 5\n"
+                        + "evm.bridgeRecoveryAddress = \"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\""));
+        // explicit MAX_VALUE = not scheduled
+        AbstractConfig.validateBridgeConfig(ConfigFactory.parseString(
+                "evm.bridgeActivationHeight = 9223372036854775807"));
+    }
+
+    @Test
     public void evm_alloc_rejects_duplicate_zero_negative_and_oversized() {
         assertThrows("duplicate address", IllegalArgumentException.class, () -> AbstractConfig.parseEvmAlloc(
                 ConfigFactory.parseString("evm.alloc=[{address=\"" + A1 + "\",balance=\"1\"},"

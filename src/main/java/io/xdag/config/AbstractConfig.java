@@ -310,7 +310,9 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
         }
         if (!config.hasPath("evm.bridgeRecoveryAddress")) {
             throw new IllegalStateException("Missing required configuration 'evm.bridgeRecoveryAddress'. "
-                    + "A network that schedules evm.bridgeActivationHeight must set the recovery address.");
+                    + "A network that schedules evm.bridgeActivationHeight must set the recovery address."
+                    + " Set 'evm.bridgeRecoveryAddress' in the node configuration file,"
+                    + " or remove 'evm.bridgeActivationHeight' to leave the bridge unscheduled.");
         }
         String addr = config.getString("evm.bridgeRecoveryAddress");
         if (!addr.matches("0x[0-9a-fA-F]{40}")) {
