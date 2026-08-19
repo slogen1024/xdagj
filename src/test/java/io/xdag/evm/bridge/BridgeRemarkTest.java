@@ -26,8 +26,12 @@ package io.xdag.evm.bridge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+import io.xdag.crypto.encoding.Base58;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Optional;
+import org.apache.tuweni.bytes.Bytes;
+import org.hyperledger.besu.crypto.Hash;
 import org.hyperledger.besu.datatypes.Address;
 import org.junit.Test;
 
@@ -58,10 +62,14 @@ public class BridgeRemarkTest {
     }
 
     @Test
-    public void encoded_remark_always_fits_the_32_byte_field() {
-        assertTrue(BridgeRemark.encode(FUNDED).length() <= 32);
-        assertTrue(BridgeRemark.encode(
-                Address.fromHexString("0xffffffffffffffffffffffffffffffffffffffff")).length() <= 32);
+    public void encoded_remark_is_always_exactly_32_chars() {
+        assertEquals(32, BridgeRemark.encode(FUNDED).length());
+        assertEquals(32, BridgeRemark.encode(
+                Address.fromHexString("0x3535353535353535353535353535353535353535")).length());
+        assertEquals(32, BridgeRemark.encode(
+                Address.fromHexString("0xffffffffffffffffffffffffffffffffffffffff")).length());
+        assertEquals(32, BridgeRemark.encode(
+                Address.fromHexString("0x0000000000000000000000000000000000000000")).length());
     }
 
     @Test
@@ -77,7 +85,7 @@ public class BridgeRemarkTest {
         Address a = Address.fromHexString("0x00000000000000000000000000000000cafebabe");
         byte[] remark = new byte[32];
         byte[] ascii = BridgeRemark.encode(a).getBytes(StandardCharsets.US_ASCII);
-        System.arraycopy(ascii, 0, remark, 0, ascii.length); // shorter strings stay zero-padded
+        System.arraycopy(ascii, 0, remark, 0, ascii.length); // valid encodings always fill all 32 bytes — the pad here is a no-op, kept for the field shape
         assertEquals(Optional.of(a), BridgeRemark.decode(remark));
     }
 
@@ -97,13 +105,18 @@ public class BridgeRemarkTest {
     public void rejects_wrong_version_byte() {
         // Re-encode the funded address with version 0x46 and a VALID checksum over it: structure
         // ok, version wrong -> must be rejected (the version byte is load-bearing, not decorative).
-        org.apache.tuweni.bytes.Bytes payload = org.apache.tuweni.bytes.Bytes.concatenate(
-                org.apache.tuweni.bytes.Bytes.of(0x46), FUNDED.getBytes());
-        org.apache.tuweni.bytes.Bytes ck =
-                org.hyperledger.besu.crypto.Hash.keccak256(payload).slice(0, 2);
-        String s = io.xdag.crypto.encoding.Base58.encode(
-                org.apache.tuweni.bytes.Bytes.concatenate(payload, ck));
+        Bytes payload = Bytes.concatenate(Bytes.of(0x46), FUNDED.getBytes());
+        Bytes ck = Hash.keccak256(payload).slice(0, 2);
+        String s = Base58.encode(Bytes.concatenate(payload, ck));
         assertTrue(BridgeRemark.decode(pad(s)).isEmpty());
+    }
+
+    @Test
+    public void rejects_inputs_longer_than_the_remark_field() {
+        // First 32 bytes are a VALID encoded remark; bytes 33-40 are extra — must be rejected.
+        byte[] valid32 = BridgeRemark.encode(FUNDED).getBytes(StandardCharsets.US_ASCII);
+        byte[] oversized = Arrays.copyOf(valid32, 40); // pads with zeros beyond 32
+        assertTrue(BridgeRemark.decode(oversized).isEmpty());
     }
 
     private static byte[] pad(String s) {

@@ -46,7 +46,7 @@ public final class BridgeRemark {
     private BridgeRemark() {
     }
 
-    /** The <=32-char ASCII remark string for a deposit to {@code target}. */
+    /** The remark string for a deposit to {@code target} — always exactly 32 ASCII chars (fills the field). */
     public static String encode(Address target) {
         Bytes versioned = Bytes.concatenate(Bytes.of(VERSION), target.getBytes());
         Bytes checksum = Hash.keccak256(versioned).slice(0, 2);
@@ -59,7 +59,7 @@ public final class BridgeRemark {
      * this, so there must be no environment-dependent behavior.
      */
     public static Optional<Address> decode(byte[] remark) {
-        if (remark == null) {
+        if (remark == null || remark.length > 32) { // the native remark field is exactly 32 bytes
             return Optional.empty();
         }
         int end = remark.length;
