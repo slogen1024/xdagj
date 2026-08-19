@@ -24,11 +24,13 @@
 package io.xdag.evm.state;
 
 import io.xdag.db.rocksdb.KVSource;
+import io.xdag.evm.bridge.BridgeDeposit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
+import org.hyperledger.besu.datatypes.Address;
 import org.hyperledger.besu.datatypes.Hash;
 
 /**
@@ -41,6 +43,7 @@ import org.hyperledger.besu.datatypes.Hash;
  *   0x03 | mainHeight(8 BE) -> deferred (I4) pending block: blockHash(32) | timestamp(8 BE) | refs
  *   0x04 | txHash(32)       -> mainHeight(8 BE) | index(4 BE)  (reverse index for eth_getTransaction*)
  *   0x05 | mainHeight(8 BE) -> 256-byte logs bloom (C5 eth_getLogs skip index; advisory, not consensus)
+ *   0x06 | mainHeight(8 BE) -> confirmed bridge deposits: concatenated (address20 | amountNano 8 BE) entries
  * </pre>
  *
  * Height records are the reorg checkpoints: {@link #removeAbove(long)} truncates everything past a
@@ -57,6 +60,8 @@ public class EvmMetaStore {
     private static final byte PREFIX_TX_LOCATION = 0x04;
     /** Per-height 256-byte Ethereum logs bloom (C5): height -> OR of that height's logs' address+topics. */
     private static final byte PREFIX_LOG_BLOOM = 0x05;
+    /** Bridge deposits (spec §2.2): height -> concatenated (address20 | amountNano 8 BE) entries. */
+    private static final byte PREFIX_DEPOSITS = 0x06;
     private static final int HEIGHT_RECORD_LENGTH = 32 + 32 + 4 + 8;
     private static final int PENDING_HEADER_LENGTH = 32 + 8; // blockHash(32) | timestampSeconds(8)
     private static final int LOCATION_RECORD_LENGTH = 8 + 4; // height(8 BE) | index(4 BE)
@@ -303,6 +308,11 @@ public class EvmMetaStore {
                 store.delete(key);
             }
         }
+        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_DEPOSITS})) {
+            if (heightFromKey(key) > height) {
+                store.delete(key);
+            }
+        }
     }
 
     public void putReceipt(Hash txHash, EvmReceipt receipt) {
@@ -330,5 +340,44 @@ public class EvmMetaStore {
             return Optional.empty();
         }
         return Optional.of(Bytes.wrap(raw));
+    }
+
+    private static byte[] depositsKey(long height) {
+        byte[] key = heightKey(height);
+        key[0] = PREFIX_DEPOSITS;
+        return key;
+    }
+
+    /** Persists the height's ordered deposit list (part of the replay script; write-once per height). */
+    public void putDeposits(long height, List<BridgeDeposit> deposits) {
+        byte[] value = new byte[deposits.size() * 28];
+        int pos = 0;
+        for (BridgeDeposit d : deposits) {
+            System.arraycopy(d.target().getBytes().toArray(), 0, value, pos, 20);
+            long nano = d.amountNano();
+            for (int i = 0; i < 8; i++) {
+                value[pos + 20 + i] = (byte) (nano >>> (56 - 8 * i));
+            }
+            pos += 28;
+        }
+        store.put(depositsKey(height), value);
+    }
+
+    /** The height's ordered deposits; empty list when none were recorded. */
+    public List<BridgeDeposit> getDeposits(long height) {
+        byte[] raw = store.get(depositsKey(height));
+        if (raw == null || raw.length == 0) {
+            return List.of();
+        }
+        if (raw.length % 28 != 0) {
+            throw new IllegalStateException("corrupt EVM_META deposit record at height " + height);
+        }
+        List<BridgeDeposit> out = new ArrayList<>(raw.length / 28);
+        for (int pos = 0; pos < raw.length; pos += 28) {
+            Address target = Address.wrap(Bytes.wrap(raw, pos, 20));
+            long nano = Bytes.wrap(raw, pos + 20, 8).getLong(0);
+            out.add(new BridgeDeposit(target, nano));
+        }
+        return out;
     }
 }

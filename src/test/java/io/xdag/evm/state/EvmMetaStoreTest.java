@@ -27,6 +27,7 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+import io.xdag.evm.bridge.BridgeDeposit;
 import java.util.List;
 import java.util.Optional;
 import org.apache.tuweni.bytes.Bytes;
@@ -194,6 +195,25 @@ public class EvmMetaStoreTest {
         assertTrue(meta.getHeightBloom(1).isPresent());
         assertTrue(meta.getHeightBloom(2).isEmpty());
         assertTrue(meta.getHeightBloom(3).isEmpty());
+    }
+
+    @Test
+    public void deposit_records_round_trip_in_order() {
+        List<BridgeDeposit> deposits = List.of(
+                new BridgeDeposit(Address.fromHexString("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"), 5L),
+                new BridgeDeposit(Address.fromHexString("0x3535353535353535353535353535353535353535"), 7_000_000_000L));
+        store.putDeposits(3L, deposits);
+        assertEquals(deposits, store.getDeposits(3L));
+        assertEquals(List.of(), store.getDeposits(4L)); // absent height -> empty list
+    }
+
+    @Test
+    public void deposit_records_are_cleared_by_removeAbove() {
+        store.putDeposits(2L, List.of(new BridgeDeposit(Address.ZERO, 1L)));
+        store.putDeposits(5L, List.of(new BridgeDeposit(Address.ZERO, 2L)));
+        store.removeAbove(2L);
+        assertEquals(1, store.getDeposits(2L).size()); // kept: at the rollback point
+        assertEquals(List.of(), store.getDeposits(5L)); // wiped: above it
     }
 
     /** Mirrors EvmMetaStore's private bloomKey layout (0x05 | height 8-byte BE) for the corrupt-value test. */
