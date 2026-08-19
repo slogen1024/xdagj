@@ -24,6 +24,8 @@
 package io.xdag.evm;
 
 import io.xdag.db.rocksdb.KVSource;
+import io.xdag.evm.bridge.BridgeConstants;
+import io.xdag.evm.bridge.BridgeDeposit;
 import io.xdag.evm.state.EvmMetaStore;
 import io.xdag.evm.state.EvmReceipt;
 import io.xdag.evm.state.EvmStateJournal;
@@ -153,32 +155,49 @@ public class EvmBlockProcessor {
         stateStore.put(EvmStateSchema.genesisMarkerKey(), new byte[]{1});
     }
 
+    /** Deposit-less entry: a confirmed main block that carries only EVM tx refs. */
+    public synchronized void processMainBlock(List<Bytes32> txRefs, long height, long timestampSeconds,
+                                              Bytes32 blockHash) {
+        processMainBlock(txRefs, height, timestampSeconds, blockHash, List.of());
+    }
+
     /**
-     * Called from {@code setMain} for each confirmed main block that carries EVM tx refs.
+     * Called from {@code setMain} for each confirmed main block that carries EVM tx refs and/or
+     * confirmed bridge deposits.
      *
      * <p>Execution is strictly in height order and requires every referenced blob to be present. If
      * a blob is missing — or an earlier height is already stalled waiting for one — the block is
      * <b>deferred</b> (persisted to the pending queue), NOT skipped. Skipping would let a node that
      * has the blob and one that doesn't produce different state forever; deferring instead leaves
      * the blob-less node merely <i>behind</i>, and {@link #onBlobsAvailable()} resumes execution in
-     * order once the blobs arrive. Native consensus is unaffected either way (I4).
+     * order once the blobs arrive. Native consensus is unaffected either way (I4). Deposits are
+     * persisted to EVM_META 0x06 BEFORE any defer, so a stalled height still mints them when it
+     * later drains (spec §2.2).
      */
     public synchronized void processMainBlock(List<Bytes32> txRefs, long height, long timestampSeconds,
-                                              Bytes32 blockHash) {
-        if (txRefs == null || txRefs.isEmpty()) {
+                                              Bytes32 blockHash, List<BridgeDeposit> deposits) {
+        boolean hasRefs = txRefs != null && !txRefs.isEmpty();
+        boolean hasDeposits = deposits != null && !deposits.isEmpty();
+        if (!hasRefs && !hasDeposits) {
             return;
         }
         if (height < activationHeight) {
-            // Before the EVM hard fork, an EVM_TX_REF field carries no consensus meaning (spec §3.1).
-            log.warn("Ignoring {} EVM tx ref(s) in pre-activation main block at height {} (activates at {})",
-                    txRefs.size(), height, activationHeight);
+            // Before the EVM hard fork nothing here has consensus meaning (spec §3.1). The caller
+            // gates deposits by its own bridgeActivationHeight; this guard only covers a bridge
+            // scheduled before the EVM itself — a nonsensical config; ignoring is deterministic.
+            log.warn("Ignoring EVM payload in pre-activation main block at height {} (activates at {})",
+                    height, activationHeight);
             return;
         }
-        Expansion exp = expandRefs(txRefs);
+        if (hasDeposits) {
+            // Write-once per height, BEFORE any defer: a stalled height must still mint its
+            // deposits when it later drains (executeList reads the 0x06 record).
+            metaStore.putDeposits(height, deposits);
+        }
+        Expansion exp = hasRefs ? expandRefs(txRefs) : new Expansion(List.of(), List.of(), List.of());
         if (!metaStore.pendingHeights().isEmpty() || !exp.complete()) {
-            metaStore.putPending(height, blockHash, timestampSeconds, txRefs);
-            log.warn("Deferring EVM execution of main block at height {} ({} ref(s)) until blobs arrive",
-                    height, txRefs.size());
+            metaStore.putPending(height, blockHash, timestampSeconds, txRefs == null ? List.of() : txRefs);
+            log.warn("Deferring EVM execution of main block at height {} until blobs arrive", height);
             return;
         }
         executeAndCheckpoint(exp.flat(), height, timestampSeconds, blockHash);
@@ -335,11 +354,14 @@ public class EvmBlockProcessor {
                 log.error("EVM tx blob vanished for ref {} at height {}; skipping", txHash, height);
             }
         }
-        if (candidates.isEmpty()) {
+        // A deposit-carrying height MUST checkpoint even with zero executable txs (spec §2.2): the
+        // mint is a state change, so a node that skipped the height would fork the chained root.
+        boolean hasDeposits = !metaStore.getDeposits(height).isEmpty();
+        if (candidates.isEmpty() && !hasDeposits) {
             return;
         }
         ExecutionOutcome outcome = executeList(candidates, height, timestampSeconds, latestRoot());
-        if (outcome.executed().isEmpty()) {
+        if (outcome.executed().isEmpty() && !hasDeposits) {
             // Everything was over-budget — no state changed, no checkpoint.
             return;
         }
@@ -502,6 +524,16 @@ public class EvmBlockProcessor {
     private ExecutionOutcome executeList(List<Hash> txHashes, long height, long timestampSeconds,
                                          Bytes32 previousRoot) {
         RocksDbWorldUpdater root = new RocksDbWorldUpdater(stateStore);
+        // Bridge deposits mint FIRST (spec §2.2): a same-height tx may spend deposited funds, and the
+        // mints land on the SAME root updater so the height's state delta covers mints and executions
+        // in one commit. Reading from EVM_META (not a parameter) makes replay identical to live
+        // execution — rollbackTo re-runs this method and re-mints from the surviving 0x06 records.
+        for (BridgeDeposit deposit : metaStore.getDeposits(height)) {
+            MutableAccount account = root.getOrCreate(deposit.target());
+            Wei minted = Wei.of(BigInteger.valueOf(deposit.amountNano())
+                    .multiply(BridgeConstants.WEI_PER_NANO));
+            account.setBalance(account.getBalance().add(minted));
+        }
         List<Bytes> digest = new ArrayList<>(txHashes.size() + 2);
         digest.add(previousRoot);
         digest.add(Bytes.ofUnsignedLong(height)); // Phase 2: commit which height executed, not just outcomes

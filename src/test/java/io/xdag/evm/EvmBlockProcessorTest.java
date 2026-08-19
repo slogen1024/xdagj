@@ -29,6 +29,7 @@ import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import io.xdag.evm.bridge.BridgeDeposit;
 import io.xdag.evm.state.EvmMetaStore;
 import io.xdag.evm.state.EvmReceipt;
 import io.xdag.evm.state.EvmStateJournal;
@@ -849,6 +850,105 @@ public class EvmBlockProcessorTest {
         assertTrue("both receipts present after drain",
                 metaStore.getReceipt(tx1.getHash()).isPresent());
         assertTrue("no longer pending", metaStore.pendingHeights().isEmpty());
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 3a: bridge deposits mint before the height's txs, replay-covered via EVM_META 0x06
+    // -------------------------------------------------------------------------
+
+    @Test
+    public void deposit_mints_before_the_heights_txs_so_a_funded_sender_can_spend_same_height() {
+        // Sender S starts with ZERO EVM balance (no genesis alloc). ONE processMainBlock call carries
+        // BOTH the deposit that funds S and a transfer FROM S: the mint must land before the height's
+        // first tx on the SAME root updater, or the transfer fails "balance below value + gas fee"
+        // with a status-0 receipt and no value movement.
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmTxStore txs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor proc = new EvmBlockProcessor(EvmConfig.devnet(), state, txs, meta);
+        Address recipient = Address.fromHexString("0x00000000000000000000000000000000000000cc");
+        EvmTransaction transfer = EvmTransaction.unsigned(0L, Wei.of(1), 21_000L,
+                Optional.of(recipient), Wei.of(1234), Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+        txs.put(transfer);
+
+        proc.processMainBlock(List.of(ref(transfer)), 1L, 1001L, BLOCK_HASH_1,
+                List.of(new BridgeDeposit(sender, 1_000_000_000L))); // 1e9 nano -> 1e18 wei
+
+        assertEquals("the same-height transfer must spend the deposited funds", 1,
+                meta.getReceipt(transfer.getHash()).orElseThrow().status());
+        RocksDbWorldUpdater world = new RocksDbWorldUpdater(state);
+        assertEquals("sender keeps mint - value - gas (21000-gas transfer: refund is zero)",
+                BigInteger.TEN.pow(18).subtract(BigInteger.valueOf(1234L + 21_000L)),
+                world.getAccount(sender).getBalance().getAsBigInteger());
+        assertEquals("recipient receives the transferred value",
+                Wei.of(1234L), world.getAccount(recipient).getBalance());
+    }
+
+    @Test
+    public void deposit_only_height_checkpoints_and_advances_the_chained_root() {
+        // A main block with deposits but NO tx refs must still checkpoint (spec §2.2): the mint is a
+        // state change, so skipping the height would fork the chained root against a node that
+        // checkpoints it.
+        Address a = Address.fromHexString("0x00000000000000000000000000000000000000a1");
+        processor.processMainBlock(List.of(), 1L, 1001L, BLOCK_HASH_1,
+                List.of(new BridgeDeposit(a, 5L)));
+
+        assertEquals("5 nano mints 5e9 wei", Wei.of(5_000_000_000L), account(a).getBalance());
+        EvmMetaStore.HeightRecord rec1 = metaStore.getHeightRecord(1L).orElseThrow();
+        assertEquals("deposit-only height checkpoints with zero txs", 0, rec1.txCount());
+        assertEquals(Optional.of(1L), metaStore.highestHeight());
+
+        // A second deposit-only height must chain onto the first: its root differs, proving each
+        // deposit-only height advances the chained root rather than repeating it.
+        processor.processMainBlock(List.of(), 2L, 1002L, BLOCK_HASH_2,
+                List.of(new BridgeDeposit(a, 5L)));
+        assertNotEquals("each deposit-only height advances the chained root", rec1.stateRoot(),
+                metaStore.getHeightRecord(2L).orElseThrow().stateRoot());
+    }
+
+    @Test
+    public void deposit_replay_is_byte_identical_after_rollback() {
+        // Mirror of rollback_wipes_and_replays_deterministically with one new ingredient: an executed
+        // height carries a deposit. executeList reads deposits from EVM_META 0x06, so the replay
+        // re-mints without any extra plumbing and the chained root matches byte-for-byte.
+        Address depositee = Address.fromHexString("0x00000000000000000000000000000000000000dd");
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);
+        Address contract1 = metaStore.getReceipt(deploy.getHash()).orElseThrow().contractAddress().orElseThrow();
+
+        EvmTransaction call = storedTx(1, Optional.of(contract1), Bytes.EMPTY, 100_000L);
+        processor.processMainBlock(List.of(ref(call)), 2L, 1002L, BLOCK_HASH_2,
+                List.of(new BridgeDeposit(depositee, 42L)));
+        Bytes32 rootAt2 = metaStore.getHeightRecord(2L).orElseThrow().stateRoot();
+        assertEquals("42 nano mints 42e9 wei", Wei.of(42_000_000_000L), account(depositee).getBalance());
+
+        EvmTransaction deploy2 = storedTx(2, Optional.empty(), INIT_CODE, 200_000L);
+        processor.processMainBlock(List.of(ref(deploy2)), 3L, 1003L, BLOCK_HASH_3);
+
+        processor.rollbackTo(2L);
+
+        assertEquals("replay must re-mint the height-2 deposit from EVM_META 0x06",
+                Wei.of(42_000_000_000L), account(depositee).getBalance());
+        assertEquals("replay reproduces the identical chained root", rootAt2,
+                metaStore.getHeightRecord(2L).orElseThrow().stateRoot());
+        assertEquals("replayed contract state is intact", UInt256.valueOf(42),
+                account(contract1).getStorageValue(UInt256.ZERO));
+    }
+
+    @Test
+    public void rollback_wipes_a_deposited_balance() {
+        // Reorging out a deposit-carrying height must unwind the mint: the wipe-and-replay resets
+        // EVM_STATE and removeAbove sweeps the 0x06 record, so neither the balance nor the deposit
+        // record survives below-the-fork replay.
+        Address b = Address.fromHexString("0x00000000000000000000000000000000000000ee");
+        processor.processMainBlock(List.of(), 1L, 1001L, BLOCK_HASH_1,
+                List.of(new BridgeDeposit(b, 7L)));
+        assertEquals("pre-condition: the deposit minted", Wei.of(7_000_000_000L), account(b).getBalance());
+
+        processor.rollbackTo(0L);
+
+        assertNull("the deposited balance must be wiped with the reorg", account(b));
+        assertTrue("removeAbove must sweep the 0x06 deposit record", metaStore.getDeposits(1L).isEmpty());
     }
 
     // -------------------------------------------------------------------------
