@@ -205,6 +205,8 @@ public class EvmMetaStoreTest {
         store.putDeposits(3L, deposits);
         assertEquals(deposits, store.getDeposits(3L));
         assertEquals(List.of(), store.getDeposits(4L)); // absent height -> empty list
+        store.putDeposits(6L, List.of());
+        assertEquals(List.of(), store.getDeposits(6L)); // empty write == no record
     }
 
     @Test

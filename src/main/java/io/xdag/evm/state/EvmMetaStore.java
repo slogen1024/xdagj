@@ -66,6 +66,7 @@ public class EvmMetaStore {
     private static final int PENDING_HEADER_LENGTH = 32 + 8; // blockHash(32) | timestampSeconds(8)
     private static final int LOCATION_RECORD_LENGTH = 8 + 4; // height(8 BE) | index(4 BE)
     private static final int LOG_BLOOM_LENGTH = 256; // fixed Ethereum logs-bloom width (2048 bits)
+    private static final int DEPOSIT_ENTRY_LENGTH = 20 + 8; // target(20) | amountNano(8 BE)
 
     private final KVSource<byte[], byte[]> store;
 
@@ -348,9 +349,13 @@ public class EvmMetaStore {
         return key;
     }
 
-    /** Persists the height's ordered deposit list (part of the replay script; write-once per height). */
+    /**
+     * Persists the height's ordered deposit list (part of the replay script; write-once per height).
+     * A repeat call silently overwrites (last write wins); the processor writes at most once per height,
+     * before any defer.
+     */
     public void putDeposits(long height, List<BridgeDeposit> deposits) {
-        byte[] value = new byte[deposits.size() * 28];
+        byte[] value = new byte[deposits.size() * DEPOSIT_ENTRY_LENGTH];
         int pos = 0;
         for (BridgeDeposit d : deposits) {
             System.arraycopy(d.target().getBytes().toArray(), 0, value, pos, 20);
@@ -358,7 +363,7 @@ public class EvmMetaStore {
             for (int i = 0; i < 8; i++) {
                 value[pos + 20 + i] = (byte) (nano >>> (56 - 8 * i));
             }
-            pos += 28;
+            pos += DEPOSIT_ENTRY_LENGTH;
         }
         store.put(depositsKey(height), value);
     }
@@ -369,11 +374,12 @@ public class EvmMetaStore {
         if (raw == null || raw.length == 0) {
             return List.of();
         }
-        if (raw.length % 28 != 0) {
-            throw new IllegalStateException("corrupt EVM_META deposit record at height " + height);
+        if (raw.length % DEPOSIT_ENTRY_LENGTH != 0) {
+            throw new IllegalStateException(
+                    "corrupt EVM_META deposit record at height " + height + ": " + raw.length + " bytes");
         }
-        List<BridgeDeposit> out = new ArrayList<>(raw.length / 28);
-        for (int pos = 0; pos < raw.length; pos += 28) {
+        List<BridgeDeposit> out = new ArrayList<>(raw.length / DEPOSIT_ENTRY_LENGTH);
+        for (int pos = 0; pos < raw.length; pos += DEPOSIT_ENTRY_LENGTH) {
             Address target = Address.wrap(Bytes.wrap(raw, pos, 20));
             long nano = Bytes.wrap(raw, pos + 20, 8).getLong(0);
             out.add(new BridgeDeposit(target, nano));
