@@ -45,9 +45,14 @@
 
 ### 2.1 用户侧
 
-现有钱包 `xfer` 打款到锁定地址，remark 携带 **Base58Check 编码的 20 字节 EVM
-目标地址**（约 28 个 ASCII 字符 + 4 字节校验和，恰好塞进 32 字节 ASCII remark；
-hex 表示 42 字符塞不下——编码选 Base58Check 的硬原因）。
+现有钱包 `xfer` 打款到锁定地址，remark 携带编码后的 20 字节 EVM 目标地址。
+**编码格式（计划期勘误定案）**：`base58( 0x45 ‖ addr20 ‖ keccak256(0x45‖addr20)[0:2] )`
+——23 字节载荷（版本字节 'E' + 地址 + 2 字节校验），版本字节非零保证无前导零，
+编码后**恒为 32 个 ASCII 字符**，正好填满 32 字节 remark。勘误：brainstorming 时
+估的标准 Base58Check（24 字节载荷）实为 33 字符放不下（devnet conf 的 fund 地址
+即 33 字符实证）；hex 42 字符更放不下。版本字节还能确定性拒绝误贴的原生地址串
+（结构/长度不符 → 解码失败 → 回收地址）。外部向量（ethers base58 独立实现）：
+`0x7e5f4552091a69125d5dfcb7b8c2659029395bdf ↔ "2SFWAZL75Ejuc1MQZsyDT7kB7bjtsgA1"`。
 
 ### 2.2 检测与入账
 
@@ -55,8 +60,9 @@ hex 表示 42 字符塞不下——编码选 Base58Check 的硬原因）。
    锁定地址且高度 ≥ 激活门，按既有 DFS 确定序收集 `(EVM 目标, 金额 nano)`——与
    evmRefs 收集（`BlockchainImpl:1087-1190`）同一套顺序保证。旧式 `XDAG_FIELD_OUT`
    指向 32 字节块哈希、锁定地址是 20 字节钱包地址，故检测路径唯一。
-2. **remark 解析**：ASCII 去零填充 → Base58Check 解码 → 20 字节 EVM 地址；
-   任何失败（缺失/坏校验和/长度不符）→ 目标 = 回收地址。**所有入金必 mint**——
+2. **remark 解析**：去尾部零填充 → ASCII → base58 解码 → 23 字节校验
+   （版本 0x45 + keccak 前 2 字节校验和）→ 20 字节 EVM 地址；任何失败
+   （缺失/坏校验/坏版本/长度不符）→ 目标 = 回收地址。**所有入金必 mint**——
    守恒不变量因此干净（§4）。
 3. **入账**：deposit 列表随 `processMainBlock` 传入 EvmBlockProcessor：
    先持久化 EVM_META 新前缀 `0x06 | height → 有序 (address20, amountNano) 列表`
@@ -133,8 +139,9 @@ function withdraw(bytes20 nativeTarget) external payable {
 
 **Phase 3a**：E2E 原生转账→mint→`eth_getBalance`（真实 HTTP）；重放确定性
 （rollback 后链式根逐字节复现，含 deposit 高度）；重组撤销 mint（回退分支后余额
-消失）；非法 remark（缺失/坏校验和/截断）→ 回收地址 mint；Base58Check 往返与
-边界；激活门前后（门前打款不 mint）；换算精确（1 nano ↔ 10⁹ wei 无损）；
+消失）；非法 remark（缺失/坏校验和/坏版本/截断/原生地址串误贴）→ 回收地址 mint；
+remark 编码往返与外部向量；激活门前后（门前打款不 mint）；换算精确
+（1 nano ↔ 10⁹ wei 无损）；
 同高度多笔入金排序确定性。
 
 **Phase 3b**：burn→N 高度后释放→原生余额可查；成熟前重组（记录随 rollbackTo
