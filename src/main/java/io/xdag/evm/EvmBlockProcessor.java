@@ -628,6 +628,8 @@ public class EvmBlockProcessor {
      * Scans one executed receipt's logs for the bridge contract's Withdrawal events (spec §3.2) and
      * appends them to {@code burns} in emission order. Sourced from the exact receipt logs that feed
      * the height bloom, so the burn record and the bloom always agree on what this execution emitted.
+     * Events that do not match the Withdrawal shape, or whose amount is not nano-divisible or exceeds
+     * supply bounds, are skipped deterministically (error-logged) rather than aborting the block.
      */
     private void collectBridgeBurns(List<Log> logs, List<BridgeWithdrawal> burns, long height) {
         for (Log evmLog : logs) {
