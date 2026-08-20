@@ -53,6 +53,7 @@ import io.xdag.db.rocksdb.RocksdbFactory;
 import io.xdag.evm.EvmBlockProcessor;
 import io.xdag.evm.EvmConfig;
 import io.xdag.evm.bridge.BridgeConstants;
+import io.xdag.evm.bridge.BridgeDeposit;
 import io.xdag.evm.bridge.BridgeRemark;
 import io.xdag.evm.state.EvmMetaStore;
 import io.xdag.evm.state.RocksDbWorldUpdater;
@@ -107,6 +108,11 @@ public class BridgeDepositIntegrationTest {
     private KVSource<byte[], byte[]> evmStateSource;
     private EvmTxStore evmTxStore;
     private EvmMetaStore evmMetaStore;
+
+    /** Rolling-chain state of the Task 6 carry-forward harness (unused by the 3a flow tests). */
+    private ECKeyPair poolKey;
+    private long generateTime = 1600616700000L;
+    private Bytes32 ref;
 
     @Before
     public void setUp() throws Exception {
@@ -241,6 +247,105 @@ public class BridgeDepositIntegrationTest {
     }
 
     // ---------------------------------------------------------------------------------------------
+    // Task 6 carry-forwards: multi-deposit confirmation windows and the reorg wipe/remint rule.
+    // ---------------------------------------------------------------------------------------------
+
+    /** Second remark-encodable EVM target for the multi-deposit tests; distinct from every other pin. */
+    private static final org.hyperledger.besu.datatypes.Address SECOND_TARGET =
+            org.hyperledger.besu.datatypes.Address.fromHexString(
+                    "0x3636363636363636363636363636363636363636");
+
+    @Test
+    public void two_deposits_in_one_confirmation_window_mint_in_order() {
+        MockBlockchain blockchain = new MockBlockchain(kernel);
+        seedChain(blockchain);
+        blockchain.getAddressStore().updateBalance(poolKey.toAddress().toArray(),
+                XAmount.of(1000, XUnit.XDAG));
+
+        // Two lock-paying transfers in the SAME epoch (sequential account nonces — apply-time
+        // validation demands exactly executedNonce + 1, so the link order below must match),
+        // each remark encoding a DIFFERENT EVM target.
+        Block tx1 = connectLockTransfer(blockchain, BridgeRemark.encode(REMARK_TARGET), UInt64.ONE);
+        Block tx2 = connectLockTransfer(blockchain, BridgeRemark.encode(SECOND_TARGET), UInt64.valueOf(2));
+
+        // ONE main block confirms both: the linking extra block carries tx1 THEN tx2, so the DFS
+        // applies them in that order and the 0x06 record must preserve it.
+        Block link = addLinkingExtraBlock(blockchain, List.of(tx1, tx2));
+        long height = driveUntilMainConfirmed(blockchain, link);
+
+        List<BridgeDeposit> minted = evmMetaStore.getDeposits(height);
+        assertEquals("the confirming height's 0x06 record must carry BOTH deposits", 2, minted.size());
+        assertEquals("entry 0 must be the first-linked transfer's target",
+                REMARK_TARGET, minted.get(0).target());
+        assertEquals("entry 1 must be the second-linked transfer's target",
+                SECOND_TARGET, minted.get(1).target());
+        assertTrue("recorded deposit amounts must be positive", minted.get(0).amountNano() > 0);
+        assertEquals("identical transfers must record identical credits",
+                minted.get(0).amountNano(), minted.get(1).amountNano());
+        // Both balances: each mint equals ITS recorded native credit (1 nano = 10^9 wei), and the
+        // two records together equal the lock's actual native balance (conservation EQUALITY).
+        assertEquals(BigInteger.valueOf(minted.get(0).amountNano()).multiply(BridgeConstants.WEI_PER_NANO),
+                evmBalance(REMARK_TARGET));
+        assertEquals(BigInteger.valueOf(minted.get(1).amountNano()).multiply(BridgeConstants.WEI_PER_NANO),
+                evmBalance(SECOND_TARGET));
+        assertEquals("the 0x06 record must sum to the lock's native credit",
+                minted.get(0).amountNano() + minted.get(1).amountNano(), lockBalanceNano(blockchain));
+    }
+
+    /**
+     * A deposit confirmed on a branch that is later reorged away must lose its mint, and the
+     * replacement branch's DIFFERENT deposit must mint instead.
+     *
+     * <p>Route (stated honestly): this harness drives a single canonical chain and cannot grow a
+     * heavier competing fork, so the reorg is exercised by the same sanctioned direct-call route
+     * the withdrawal reorg test uses — invoking exactly the EVM rollback {@code unWindMain} runs
+     * after unwinding past the deposit height ({@code rollbackTo(depositHeight - 1)}), whose
+     * removeAbove sweep deletes the 0x06 record and whose replay rebuilds the world state without
+     * the mint. The native un-apply of the branch-A transfer (plain {@code unApplyBlock} debiting
+     * the lock, covered by core reorg tests) is NOT exercised here, so the lock keeps branch A's
+     * credit; the "new branch" is the same chain continuing with a different deposit — exactly the
+     * payload a replacement branch would carry.
+     */
+    @Test
+    public void fork_branch_deposit_is_wiped_and_new_branch_remints() {
+        MockBlockchain blockchain = new MockBlockchain(kernel);
+        seedChain(blockchain);
+        blockchain.getAddressStore().updateBalance(poolKey.toAddress().toArray(),
+                XAmount.of(1000, XUnit.XDAG));
+
+        // Branch A: a deposit for REMARK_TARGET, confirmed and minted.
+        Block txA = connectLockTransfer(blockchain, BridgeRemark.encode(REMARK_TARGET), UInt64.ONE);
+        Block linkA = addLinkingExtraBlock(blockchain, List.of(txA));
+        long depositHeight = driveUntilMainConfirmed(blockchain, linkA);
+        List<BridgeDeposit> mintedA = evmMetaStore.getDeposits(depositHeight);
+        assertEquals(List.of(new BridgeDeposit(REMARK_TARGET, mintedA.get(0).amountNano())), mintedA);
+        assertEquals(BigInteger.valueOf(mintedA.get(0).amountNano()).multiply(BridgeConstants.WEI_PER_NANO),
+                evmBalance(REMARK_TARGET));
+
+        // The reorg: unwind past the deposit height. The 0x06 record is swept and the replayed
+        // world state no longer contains branch A's mint.
+        kernel.getEvmBlockProcessor().rollbackTo(depositHeight - 1);
+        assertEquals("the unwound deposit record must be swept from 0x06",
+                List.of(), evmMetaStore.getDeposits(depositHeight));
+        assertEquals("branch A's mint must be gone after the reorg",
+                BigInteger.ZERO, evmBalance(REMARK_TARGET));
+
+        // Branch B: a DIFFERENT deposit (target and nonce advance), confirmed on the new branch.
+        Block txB = connectLockTransfer(blockchain, BridgeRemark.encode(SECOND_TARGET), UInt64.valueOf(2));
+        Block linkB = addLinkingExtraBlock(blockchain, List.of(txB));
+        long remintHeight = driveUntilMainConfirmed(blockchain, linkB);
+        assertTrue("the replacement deposit must confirm at a later height", remintHeight > depositHeight);
+
+        List<BridgeDeposit> mintedB = evmMetaStore.getDeposits(remintHeight);
+        assertEquals(List.of(new BridgeDeposit(SECOND_TARGET, mintedB.get(0).amountNano())), mintedB);
+        assertEquals("branch B's deposit must mint on the new branch",
+                BigInteger.valueOf(mintedB.get(0).amountNano()).multiply(BridgeConstants.WEI_PER_NANO),
+                evmBalance(SECOND_TARGET));
+        assertEquals("branch A's mint must stay gone",
+                BigInteger.ZERO, evmBalance(REMARK_TARGET));
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // Harness
     // ---------------------------------------------------------------------------------------------
 
@@ -300,12 +405,82 @@ public class BridgeDepositIntegrationTest {
         return lockBalance;
     }
 
+    /** Seeds {@code blockchain} (address block + 10 epochs + checkMain) so main promotion rolls. */
+    private void seedChain(MockBlockchain blockchain) {
+        poolKey = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
+        Block addressBlock = generateAddressBlock(config, poolKey, generateTime);
+        assertSame(IMPORTED_BEST, blockchain.tryToConnect(addressBlock));
+        ref = addressBlock.getHashLow();
+        for (int i = 1; i <= 10; i++) {
+            addOneExtraBlock(blockchain);
+        }
+        blockchain.checkMain();
+        assertTrue("the seed must confirm at least one main block", blockchain.getXdagStats().nmain > 0);
+    }
+
+    private void addOneExtraBlock(MockBlockchain blockchain) {
+        generateTime += 64000L;
+        List<Address> pending = new ArrayList<>();
+        pending.add(new Address(ref, XDAG_FIELD_OUT, false));
+        long xdagTime = XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime));
+        Block extraBlock = generateExtraBlock(config, poolKey, xdagTime, pending);
+        assertSame(IMPORTED_BEST, blockchain.tryToConnect(extraBlock));
+        ref = extraBlock.getHashLow();
+    }
+
+    /** Connects a 100-XDAG pool-to-lock transfer carrying {@code remark} in the CURRENT epoch. */
+    private Block connectLockTransfer(MockBlockchain blockchain, String remark, UInt64 nonce) {
+        Address from = new Address(BytesUtils.arrayToByte32(poolKey.toAddress().toArray()),
+                XDAG_FIELD_INPUT, true);
+        Address to = new Address(BytesUtils.arrayToByte32(BridgeConstants.LOCK_ADDRESS_20.toArray()),
+                XDAG_FIELD_OUTPUT, true);
+        long xdagTime = XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime));
+        Block txBlock = generateTransactionWithRemark(config, poolKey, xdagTime - 1, from, to,
+                XAmount.of(100, XUnit.XDAG), remark, nonce);
+        ImportResult result = blockchain.tryToConnect(txBlock);
+        assertTrue(result == IMPORTED_NOT_BEST || result == IMPORTED_BEST);
+        return txBlock;
+    }
+
+    /** Adds the next epoch's extra block linking {@code txBlocks} (in order) ahead of the chain ref. */
+    private Block addLinkingExtraBlock(MockBlockchain blockchain, List<Block> txBlocks) {
+        generateTime += 64000L;
+        List<Address> pending = new ArrayList<>();
+        for (Block txBlock : txBlocks) {
+            pending.add(new Address(txBlock.getHashLow(), false));
+        }
+        pending.add(new Address(ref, XDAG_FIELD_OUT, false));
+        long xdagTime = XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime));
+        Block extraBlock = generateExtraBlock(config, poolKey, xdagTime, pending);
+        assertSame(IMPORTED_BEST, blockchain.tryToConnect(extraBlock));
+        ref = extraBlock.getHashLow();
+        return extraBlock;
+    }
+
+    /** Drives one epoch at a time until {@code block} is promoted to main; returns its height. */
+    private long driveUntilMainConfirmed(MockBlockchain blockchain, Block block) {
+        int guard = 0;
+        while (blockchain.getBlockByHash(block.getHashLow(), false).getInfo().getHeight() == 0) {
+            assertTrue("block " + block.getHashLow().toHexString() + " was never confirmed as main",
+                    ++guard <= 300);
+            addOneExtraBlock(blockchain);
+        }
+        return blockchain.getBlockByHash(block.getHashLow(), false).getInfo().getHeight();
+    }
+
+    private long lockBalanceNano(MockBlockchain blockchain) {
+        return blockchain.getAddressStore()
+                .getBalanceByAddress(BridgeConstants.LOCK_ADDRESS_20.toArray())
+                .toDecimal(0, XUnit.NANO_XDAG).longValueExact();
+    }
+
     /**
      * {@code BlockBuilder.generateNewTransactionBlock} plus the remark parameter the deposit
      * protocol rides on ({@code Block}'s constructor threads it into the 32-byte remark field,
-     * exactly as the wallet's {@code createNewBlock} does).
+     * exactly as the wallet's {@code createNewBlock} does). Package-private: the Phase-3b
+     * {@link BridgeWithdrawalIntegrationTest} full-cycle harness reuses it for its deposit leg.
      */
-    private static Block generateTransactionWithRemark(Config config, ECKeyPair key, long xdagTime,
+    static Block generateTransactionWithRemark(Config config, ECKeyPair key, long xdagTime,
             Address from, Address to, XAmount amount, String remark, UInt64 nonce) {
         List<Address> refs = new ArrayList<>();
         List<ECKeyPair> keys = new ArrayList<>();
