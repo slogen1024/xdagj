@@ -29,6 +29,7 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import io.xdag.evm.bridge.BridgeDeposit;
+import io.xdag.evm.bridge.BridgeWithdrawal;
 import java.util.List;
 import java.util.Optional;
 import org.apache.tuweni.bytes.Bytes;
@@ -258,5 +259,35 @@ public class EvmMetaStoreTest {
             key[1 + i] = (byte) (height >>> (56 - 8 * i));
         }
         return key;
+    }
+
+    @Test
+    public void withdrawal_records_round_trip_in_order_and_clear_by_removeAbove() {
+        List<BridgeWithdrawal> ws = List.of(
+                new BridgeWithdrawal(Bytes.fromHexString("0x3109ff8cf0be958a428c12d86c0abf64f529f7db"), 5L),
+                new BridgeWithdrawal(Bytes.fromHexString("0x1111111111111111111111111111111111111111"), 7_000_000_000L));
+        store.putWithdrawals(3L, ws);
+        assertEquals(ws, store.getWithdrawals(3L));
+        assertEquals(List.of(), store.getWithdrawals(4L));
+        store.removeAbove(2L);
+        assertEquals(List.of(), store.getWithdrawals(3L));
+    }
+
+    @Test
+    public void release_journal_round_trips_and_deletes_explicitly() {
+        List<BridgeWithdrawal> released = List.of(
+                new BridgeWithdrawal(Bytes.fromHexString("0x2222222222222222222222222222222222222222"), 9L));
+        store.putReleases(7L, released);
+        assertEquals(released, store.getReleases(7L));
+        store.deleteReleases(7L);
+        assertEquals(List.of(), store.getReleases(7L));
+    }
+
+    @Test
+    public void release_journal_is_swept_by_removeAbove() {
+        store.putReleases(5L, List.of(new BridgeWithdrawal(Bytes.fromHexString(
+                "0x2222222222222222222222222222222222222222"), 1L)));
+        store.removeAbove(4L);
+        assertEquals(List.of(), store.getReleases(5L));
     }
 }

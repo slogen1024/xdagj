@@ -25,6 +25,7 @@ package io.xdag.evm.state;
 
 import io.xdag.db.rocksdb.KVSource;
 import io.xdag.evm.bridge.BridgeDeposit;
+import io.xdag.evm.bridge.BridgeWithdrawal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -44,6 +45,8 @@ import org.hyperledger.besu.datatypes.Hash;
  *   0x04 | txHash(32)       -> mainHeight(8 BE) | index(4 BE)  (reverse index for eth_getTransaction*)
  *   0x05 | mainHeight(8 BE) -> 256-byte logs bloom (C5 eth_getLogs skip index; advisory, not consensus)
  *   0x06 | mainHeight(8 BE) -> confirmed bridge deposits: concatenated (address20 | amountNano 8 BE) entries
+ *   0x07 | mainHeight(8 BE) -> bridge burns at burn height: concatenated (nativeTarget20 | amountNano 8 BE) entries
+ *   0x08 | mainHeight(8 BE) -> native releases at release height: same entry shape as 0x07
  * </pre>
  *
  * Height records are the reorg checkpoints: {@link #removeAbove(long)} truncates everything past a
@@ -62,11 +65,20 @@ public class EvmMetaStore {
     private static final byte PREFIX_LOG_BLOOM = 0x05;
     /** Bridge deposits (spec §2.2): height -> concatenated (address20 | amountNano 8 BE) entries. */
     private static final byte PREFIX_DEPOSITS = 0x06;
+    /** Bridge burns by burn height (spec §3.2): 0x07 | height(8 BE) -> (nativeTarget20 | amountNano 8 BE)*. */
+    private static final byte PREFIX_WITHDRAWALS = 0x07;
+    /**
+     * Native releases ACTUALLY performed at a release height: 0x08 | height(8 BE) -> same entry shape.
+     * Written by setMain when it releases, consumed (read + deleted) by the unwind reversal —
+     * reverse-what-you-did bookkeeping, immune to release-skip asymmetries.
+     */
+    private static final byte PREFIX_RELEASES = 0x08;
     private static final int HEIGHT_RECORD_LENGTH = 32 + 32 + 4 + 8;
     private static final int PENDING_HEADER_LENGTH = 32 + 8; // blockHash(32) | timestampSeconds(8)
     private static final int LOCATION_RECORD_LENGTH = 8 + 4; // height(8 BE) | index(4 BE)
     private static final int LOG_BLOOM_LENGTH = 256; // fixed Ethereum logs-bloom width (2048 bits)
-    private static final int DEPOSIT_ENTRY_LENGTH = 20 + 8; // target(20) | amountNano(8 BE)
+    // target/address(20) | amountNano(8 BE) — shared by the 0x06/0x07/0x08 record families
+    private static final int BRIDGE_ENTRY_LENGTH = 20 + 8;
 
     private final KVSource<byte[], byte[]> store;
 
@@ -314,6 +326,16 @@ public class EvmMetaStore {
                 store.delete(key);
             }
         }
+        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_WITHDRAWALS})) {
+            if (heightFromKey(key) > height) {
+                store.delete(key);
+            }
+        }
+        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_RELEASES})) {
+            if (heightFromKey(key) > height) {
+                store.delete(key);
+            }
+        }
     }
 
     public void putReceipt(Hash txHash, EvmReceipt receipt) {
@@ -355,7 +377,7 @@ public class EvmMetaStore {
      * before any defer.
      */
     public void putDeposits(long height, List<BridgeDeposit> deposits) {
-        byte[] value = new byte[deposits.size() * DEPOSIT_ENTRY_LENGTH];
+        byte[] value = new byte[deposits.size() * BRIDGE_ENTRY_LENGTH];
         int pos = 0;
         for (BridgeDeposit d : deposits) {
             if (d.amountNano() < 0) {
@@ -366,7 +388,7 @@ public class EvmMetaStore {
             for (int i = 0; i < 8; i++) {
                 value[pos + 20 + i] = (byte) (nano >>> (56 - 8 * i));
             }
-            pos += DEPOSIT_ENTRY_LENGTH;
+            pos += BRIDGE_ENTRY_LENGTH;
         }
         store.put(depositsKey(height), value);
     }
@@ -377,12 +399,12 @@ public class EvmMetaStore {
         if (raw == null || raw.length == 0) {
             return List.of();
         }
-        if (raw.length % DEPOSIT_ENTRY_LENGTH != 0) {
+        if (raw.length % BRIDGE_ENTRY_LENGTH != 0) {
             throw new IllegalStateException(
                     "corrupt EVM_META deposit record at height " + height + ": " + raw.length + " bytes");
         }
-        List<BridgeDeposit> out = new ArrayList<>(raw.length / DEPOSIT_ENTRY_LENGTH);
-        for (int pos = 0; pos < raw.length; pos += DEPOSIT_ENTRY_LENGTH) {
+        List<BridgeDeposit> out = new ArrayList<>(raw.length / BRIDGE_ENTRY_LENGTH);
+        for (int pos = 0; pos < raw.length; pos += BRIDGE_ENTRY_LENGTH) {
             Address target = Address.wrap(Bytes.wrap(raw, pos, 20));
             long nano = Bytes.wrap(raw, pos + 20, 8).getLong(0);
             if (nano < 0) {
@@ -392,5 +414,91 @@ public class EvmMetaStore {
             out.add(new BridgeDeposit(target, nano));
         }
         return out;
+    }
+
+    private static byte[] withdrawalsKey(long height) {
+        byte[] key = heightKey(height);
+        key[0] = PREFIX_WITHDRAWALS;
+        return key;
+    }
+
+    private static byte[] releasesKey(long height) {
+        byte[] key = heightKey(height);
+        key[0] = PREFIX_RELEASES;
+        return key;
+    }
+
+    /** Encodes a list of {@link BridgeWithdrawal} into raw bytes and stores them at {@code key}. */
+    private void putBridgeWithdrawals(byte[] key, List<BridgeWithdrawal> entries, String family) {
+        byte[] value = new byte[entries.size() * BRIDGE_ENTRY_LENGTH];
+        int pos = 0;
+        for (BridgeWithdrawal w : entries) {
+            if (w.amountNano() < 0) {
+                throw new IllegalArgumentException(
+                        "negative " + family + " amount " + w.amountNano() + " for " + w.nativeTarget20());
+            }
+            System.arraycopy(w.nativeTarget20().toArray(), 0, value, pos, 20);
+            long nano = w.amountNano();
+            for (int i = 0; i < 8; i++) {
+                value[pos + 20 + i] = (byte) (nano >>> (56 - 8 * i));
+            }
+            pos += BRIDGE_ENTRY_LENGTH;
+        }
+        store.put(key, value);
+    }
+
+    /** Decodes a list of {@link BridgeWithdrawal} from raw bytes stored at {@code key}. */
+    private List<BridgeWithdrawal> getBridgeWithdrawals(byte[] key, String family, long height) {
+        byte[] raw = store.get(key);
+        if (raw == null || raw.length == 0) {
+            return List.of();
+        }
+        if (raw.length % BRIDGE_ENTRY_LENGTH != 0) {
+            throw new IllegalStateException(
+                    "corrupt EVM_META " + family + " record at height " + height + ": " + raw.length + " bytes");
+        }
+        List<BridgeWithdrawal> out = new ArrayList<>(raw.length / BRIDGE_ENTRY_LENGTH);
+        for (int pos = 0; pos < raw.length; pos += BRIDGE_ENTRY_LENGTH) {
+            Bytes target = Bytes.wrap(raw, pos, 20).copy();
+            long nano = Bytes.wrap(raw, pos + 20, 8).getLong(0);
+            if (nano < 0) {
+                throw new IllegalStateException(
+                        "corrupt EVM_META " + family + " record at height " + height + ": negative amount " + nano);
+            }
+            out.add(new BridgeWithdrawal(target, nano));
+        }
+        return out;
+    }
+
+    /**
+     * Persists the height's ordered burn list (part of the replay script; write-once per height).
+     * Written by the executor at burn height; regenerated on replay; removeAbove-swept on reorg.
+     */
+    public void putWithdrawals(long height, List<BridgeWithdrawal> withdrawals) {
+        putBridgeWithdrawals(withdrawalsKey(height), withdrawals, "withdrawal record");
+    }
+
+    /** The height's ordered withdrawals; empty list when none were recorded. */
+    public List<BridgeWithdrawal> getWithdrawals(long height) {
+        return getBridgeWithdrawals(withdrawalsKey(height), "withdrawal record", height);
+    }
+
+    /**
+     * Persists the native releases ACTUALLY performed at {@code height} (release journal).
+     * Written by setMain when it releases; consumed (read + deleted) by the unwind reversal;
+     * also removeAbove-swept for hygiene.
+     */
+    public void putReleases(long height, List<BridgeWithdrawal> releases) {
+        putBridgeWithdrawals(releasesKey(height), releases, "release record");
+    }
+
+    /** The height's release-journal entries; empty list when none were recorded or after deletion. */
+    public List<BridgeWithdrawal> getReleases(long height) {
+        return getBridgeWithdrawals(releasesKey(height), "release record", height);
+    }
+
+    /** Deletes the release journal for {@code height} (consumed by the unwind reversal). */
+    public void deleteReleases(long height) {
+        store.delete(releasesKey(height));
     }
 }
