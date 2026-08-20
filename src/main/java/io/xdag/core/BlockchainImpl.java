@@ -45,6 +45,7 @@ import io.xdag.evm.EvmSubscriptionSink;
 import io.xdag.evm.bridge.BridgeConstants;
 import io.xdag.evm.bridge.BridgeDeposit;
 import io.xdag.evm.bridge.BridgeRemark;
+import io.xdag.evm.bridge.BridgeWithdrawal;
 import io.xdag.evm.state.EvmMetaStore;
 import io.xdag.evm.tx.EvmTransaction;
 import io.xdag.evm.tx.EvmTxStore;
@@ -1025,6 +1026,9 @@ public class BlockchainImpl implements Blockchain {
                     if (lowestUnwoundMainHeight < 0 || unwoundHeight < lowestUnwoundMainHeight) {
                         lowestUnwoundMainHeight = unwoundHeight;
                     }
+                    // Reverse this height's bridge releases while its 0x08 journal is still
+                    // readable — the trailing rollbackTo below sweeps EVM_META past the fork point.
+                    reverseReleasedWithdrawals(unwoundHeight);
                     unSetMain(tmp);
                     // Fix: Need to update block info in database like height 210729
                     blockStore.saveBlockInfo(tmp.getInfo());
@@ -1382,6 +1386,9 @@ public class BlockchainImpl implements Blockchain {
                 evmProcessor.processMainBlock(evmRefs, mainNumber, timestampSeconds,
                         Bytes32.wrap(block.getInfo().getHash()), deposits);
             }
+            // Spec §3.2 ordering: native accounting, then EVM execution, then matured releases.
+            // Deliberately OUTSIDE the refs/deposits guard — a release height needs neither.
+            releaseMaturedWithdrawals(mainNumber);
             // C6: a new main block became canonical -> drive newHeads. Fires once per confirmed main
             // block, independent of whether it carries EVM refs. Read the sink into a local so a
             // concurrent setSubscriptionSink(null) cannot NPE mid-method.
@@ -1398,6 +1405,97 @@ public class BlockchainImpl implements Blockchain {
             }
         }
 
+    }
+
+    /**
+     * Releases bridge withdrawals that matured at this confirmed height (spec §3.2): burns recorded
+     * at height {@code mainNumber - N} move nano from the lock address to their native targets.
+     * What is ACTUALLY released is journaled (EVM_META 0x08) so the unwind reversal reverses
+     * exactly that — release-skip asymmetries can never corrupt reversal bookkeeping.
+     * Releases mutate the AddressStore directly (no carrier block exists for a protocol transfer);
+     * the cached xdagStats.balance display aggregate is deliberately not touched.
+     */
+    private void releaseMaturedWithdrawals(long mainNumber) {
+        if (kernel == null) {
+            return;
+        }
+        EvmBlockProcessor evmProcessor = kernel.getEvmBlockProcessor();
+        EvmMetaStore metaStore = kernel.getEvmMetaStore();
+        long activation = kernel.getConfig().getEvmSpec().getEvmBridgeActivationHeight();
+        if (evmProcessor == null || metaStore == null || activation == Long.MAX_VALUE) {
+            return;
+        }
+        long burnHeight = mainNumber - kernel.getConfig().getEvmSpec().getEvmBridgeWithdrawalDelay();
+        if (burnHeight < activation) {
+            return; // no burns can exist before the bridge itself
+        }
+        if (evmProcessor.hasUnexecutedHeightAtOrBelow(burnHeight)) {
+            // DA lag (I4 defer): this node cannot know the burn set yet. Deterministic only when
+            // every node has the blobs — shared-net use is gated on the §13.3-2 DA hard-gate.
+            log.error("CRITICAL: bridge release at height {} skipped - EVM still stalled at or below "
+                    + "burn height {}; withdrawals there will NOT release on this node", mainNumber, burnHeight);
+            return;
+        }
+        List<BridgeWithdrawal> burns = metaStore.getWithdrawals(burnHeight);
+        if (burns.isEmpty()) {
+            return;
+        }
+        byte[] lockKey = BridgeConstants.LOCK_ADDRESS_20.toArray();
+        XAmount total = XAmount.ZERO;
+        for (BridgeWithdrawal burn : burns) {
+            total = total.add(XAmount.of(burn.amountNano()));
+        }
+        if (addressStore.getBalanceByAddress(lockKey).lessThan(total)) {
+            // Unreachable while the conservation invariant holds (spec §4); if it is ever violated,
+            // deterministic skip-all — the WHOLE height, not just the entries after the first
+            // shortfall — keeps every node identical and the height all-or-nothing.
+            log.error("CRITICAL: bridge lock balance {} cannot cover the {} total of {} release(s) at "
+                    + "height {}; skipping ALL releases of this height",
+                    addressStore.getBalanceByAddress(lockKey), total, burns.size(), mainNumber);
+            return;
+        }
+        for (BridgeWithdrawal burn : burns) {
+            XAmount amount = XAmount.of(burn.amountNano());
+            addressStore.updateBalance(lockKey,
+                    addressStore.getBalanceByAddress(lockKey).subtract(amount));
+            byte[] targetKey = burn.nativeTarget20().toArray();
+            addressStore.updateBalance(targetKey,
+                    addressStore.getBalanceByAddress(targetKey).add(amount));
+        }
+        metaStore.putReleases(mainNumber, burns);
+    }
+
+    /**
+     * Reverses the releases a now-unwound height actually performed (reads and deletes its 0x08
+     * journal). Runs inside the unWindMain loop BEFORE the trailing rollbackTo wipes EVM_META.
+     * Package-private (not private) only for testability: the integration harness drives a single
+     * canonical chain with no fork scaffold, and consensus-critical reversal arithmetic must be
+     * provable directly against a journaled release.
+     */
+    void reverseReleasedWithdrawals(long unwoundHeight) {
+        if (kernel == null) {
+            return;
+        }
+        EvmMetaStore metaStore = kernel.getEvmMetaStore();
+        if (metaStore == null) {
+            return;
+        }
+        List<BridgeWithdrawal> released = metaStore.getReleases(unwoundHeight);
+        if (released.isEmpty()) {
+            return;
+        }
+        byte[] lockKey = BridgeConstants.LOCK_ADDRESS_20.toArray();
+        // Reverse order of application, so the lock/target balance walk is the exact mirror.
+        for (BridgeWithdrawal release : released.reversed()) {
+            XAmount amount = XAmount.of(release.amountNano());
+            byte[] targetKey = release.nativeTarget20().toArray();
+            addressStore.updateBalance(targetKey,
+                    addressStore.getBalanceByAddress(targetKey).subtract(amount));
+            addressStore.updateBalance(lockKey,
+                    addressStore.getBalanceByAddress(lockKey).add(amount));
+        }
+        metaStore.deleteReleases(unwoundHeight);
+        log.info("Reversed {} bridge release(s) of unwound height {}", released.size(), unwoundHeight);
     }
 
     /**

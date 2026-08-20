@@ -304,6 +304,16 @@ public class EvmBlockProcessor {
         return missing;
     }
 
+    /** True if some deferred (blob-stalled) height at or below {@code height} is still unexecuted. */
+    public synchronized boolean hasUnexecutedHeightAtOrBelow(long height) {
+        for (long pending : metaStore.pendingHeights()) {
+            if (pending <= height) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Ambiguous refs that may be batch commitments, for EVM_BATCH_REQUEST retry. */
     public synchronized List<Bytes32> pendingMissingBatchHashes() {
         List<Bytes32> missing = new ArrayList<>();

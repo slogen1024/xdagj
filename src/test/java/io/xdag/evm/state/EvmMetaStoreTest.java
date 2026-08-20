@@ -290,4 +290,29 @@ public class EvmMetaStoreTest {
         store.removeAbove(4L);
         assertEquals(List.of(), store.getReleases(5L));
     }
+
+    @Test
+    public void bridge_record_families_are_independent_at_a_shared_height() {
+        // 0x06 (deposits), 0x07 (burns) and 0x08 (releases) legitimately coexist at one height —
+        // e.g. a release height that also carries new deposits and burns. Same-height writes must
+        // not clobber each other, and the explicit 0x08 delete must leave 0x06/0x07 intact.
+        List<BridgeDeposit> deposits = List.of(
+                new BridgeDeposit(Address.fromHexString("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"), 11L));
+        List<BridgeWithdrawal> withdrawals = List.of(
+                new BridgeWithdrawal(Bytes.fromHexString("0x1111111111111111111111111111111111111111"), 22L));
+        List<BridgeWithdrawal> releases = List.of(
+                new BridgeWithdrawal(Bytes.fromHexString("0x2222222222222222222222222222222222222222"), 33L));
+        store.putDeposits(7L, deposits);
+        store.putWithdrawals(7L, withdrawals);
+        store.putReleases(7L, releases);
+
+        assertEquals(deposits, store.getDeposits(7L));
+        assertEquals(withdrawals, store.getWithdrawals(7L));
+        assertEquals(releases, store.getReleases(7L));
+
+        store.deleteReleases(7L);
+        assertEquals(List.of(), store.getReleases(7L));
+        assertEquals("deleteReleases must not touch the 0x06 family", deposits, store.getDeposits(7L));
+        assertEquals("deleteReleases must not touch the 0x07 family", withdrawals, store.getWithdrawals(7L));
+    }
 }
