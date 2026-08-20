@@ -225,6 +225,9 @@ public class Kernel {
             // Seed the genesis allocation now so pre-funded balances are visible to the eth RPC before
             // the first EVM main block (idempotent; a restart with the marker present is a no-op).
             evmBlockProcessor.seedGenesisIfAbsent();
+            // Likewise the bridge contract code (no-op unless the bridge is scheduled), so eth_getCode
+            // and pool-side calls see it before the first bridge-height main block.
+            evmBlockProcessor.seedBridgeContractIfAbsent();
             log.info("EVM services init (chain id {}).", evmChainId);
             if (config.getEvmSpec().getEvmBridgeActivationHeight() != Long.MAX_VALUE) {
                 log.info("XDAG<->EVM bridge deposits active from height {}: lock address {} (native form {})",

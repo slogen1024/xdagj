@@ -47,6 +47,8 @@ public final class EvmStateSchema {
     public static final byte PREFIX_STORAGE = 0x02;
     /** Single-byte marker recording that the genesis allocation has been seeded (funding on-ramp). */
     public static final byte PREFIX_GENESIS = 0x03;
+    /** Bridge-contract seeded-once marker (spec §3.1); sibling of the genesis marker. */
+    public static final byte PREFIX_BRIDGE_CONTRACT = 0x04;
 
     /** Fixed on-disk size of an account record: nonce(8) || balance(32) || codeHash(32). */
     public static final int ACCOUNT_RECORD_LENGTH = 8 + 32 + 32;
@@ -57,6 +59,11 @@ public final class EvmStateSchema {
     /** The reserved 1-byte key whose presence means the genesis allocation is already in EVM_STATE. */
     public static byte[] genesisMarkerKey() {
         return new byte[]{PREFIX_GENESIS};
+    }
+
+    /** The reserved 1-byte key whose presence means the bridge contract code is already seeded. */
+    public static byte[] bridgeContractMarkerKey() {
+        return new byte[]{PREFIX_BRIDGE_CONTRACT};
     }
 
     public static byte[] accountKey(Address address) {

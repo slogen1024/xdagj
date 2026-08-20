@@ -29,10 +29,13 @@ import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import io.xdag.evm.bridge.BridgeContract;
 import io.xdag.evm.bridge.BridgeDeposit;
+import io.xdag.evm.bridge.BridgeWithdrawal;
 import io.xdag.evm.state.EvmMetaStore;
 import io.xdag.evm.state.EvmReceipt;
 import io.xdag.evm.state.EvmStateJournal;
+import io.xdag.evm.state.EvmStateSchema;
 import io.xdag.evm.state.HistoricalStateReader;
 import io.xdag.evm.state.InMemoryKVSource;
 import io.xdag.evm.state.RocksDbWorldUpdater;
@@ -1165,5 +1168,133 @@ public class EvmBlockProcessorTest {
         EvmReceipt liveReceipt = meta.getReceipt(liveTx.getHash()).orElseThrow();
         assertEquals("height 3 (the activation height itself) must execute the type-2",
                 1, liveReceipt.status());
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 3b Task 4: bridge contract seeding + burn scan (spec §3.1 / §3.2)
+    // -------------------------------------------------------------------------
+
+    /** Bridge scheduled from height 0 (the devnet spec value); everything else = devnet defaults. */
+    private static EvmConfig bridgeActiveConfig() {
+        return new EvmConfig(EvmSpecVersion.SHANGHAI, EvmConfig.DEVNET_CHAIN_ID,
+                EvmConfig.DEFAULT_MAX_GAS_LIMIT, EvmConfig.DEFAULT_MIN_GAS_PRICE,
+                EvmConfig.DEFAULT_TYPE2_ACTIVATION_HEIGHT, 0L);
+    }
+
+    private static final Bytes NATIVE_TARGET_20 =
+            Bytes.fromHexString("0x1111111111111111111111111111111111111111");
+
+    /** withdraw(bytes20) calldata: selector ‖ target20 ‖ 12 zero bytes (bytes20 is left-aligned). */
+    private static Bytes withdrawCalldata(Bytes target20) {
+        return Bytes.concatenate(BridgeContract.WITHDRAW_SELECTOR, target20, Bytes.repeat((byte) 0, 12));
+    }
+
+    /** A bridge-active processor over {@code state}/{@code txs}/{@code meta} with the sender funded. */
+    private EvmBlockProcessor seededBridgeProcessor(InMemoryKVSource state, EvmTxStore txs,
+                                                    EvmMetaStore meta) {
+        EvmBlockProcessor proc = new EvmBlockProcessor(bridgeActiveConfig(), state, txs, meta, 0L,
+                List.of(new GenesisAllocEntry(sender, Wei.fromEth(1))));
+        proc.seedGenesisIfAbsent();
+        proc.seedBridgeContractIfAbsent();
+        return proc;
+    }
+
+    private EvmTransaction withdrawTx(long nonce, Wei value) {
+        return EvmTransaction.unsigned(nonce, Wei.of(1), 100_000L, Optional.of(BridgeContract.ADDRESS),
+                value, withdrawCalldata(NATIVE_TARGET_20), CHAIN_ID).sign(key, algo);
+    }
+
+    @Test
+    public void bridge_contract_is_seeded_once_when_scheduled_and_never_when_not() {
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmBlockProcessor scheduled = new EvmBlockProcessor(bridgeActiveConfig(), state,
+                new EvmTxStore(new InMemoryKVSource()), new EvmMetaStore(new InMemoryKVSource()));
+        scheduled.seedBridgeContractIfAbsent();
+        assertEquals("a scheduled bridge seeds the pinned runtime bytecode at the protocol address",
+                BridgeContract.RUNTIME_BYTECODE,
+                new RocksDbWorldUpdater(state).get(BridgeContract.ADDRESS).getCode());
+
+        // No-op proof: remove the account record out-of-band; the marker must stop a re-seed.
+        state.delete(EvmStateSchema.accountKey(BridgeContract.ADDRESS));
+        scheduled.seedBridgeContractIfAbsent();
+        assertNull("a second seed call must be a marker-guarded no-op",
+                new RocksDbWorldUpdater(state).get(BridgeContract.ADDRESS));
+
+        InMemoryKVSource unscheduledState = new InMemoryKVSource();
+        EvmBlockProcessor unscheduled = new EvmBlockProcessor(EvmConfig.devnet(), unscheduledState,
+                new EvmTxStore(new InMemoryKVSource()), new EvmMetaStore(new InMemoryKVSource()));
+        unscheduled.seedBridgeContractIfAbsent();
+        assertNull("an unscheduled bridge must not plant contract code into the world state",
+                new RocksDbWorldUpdater(unscheduledState).get(BridgeContract.ADDRESS));
+        assertNull("an unscheduled bridge must not write the seeded marker either",
+                unscheduledState.get(EvmStateSchema.bridgeContractMarkerKey()));
+    }
+
+    @Test
+    public void a_withdraw_call_records_the_burn_in_evm_meta() {
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmTxStore txs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor proc = seededBridgeProcessor(state, txs, meta);
+
+        EvmTransaction withdraw = withdrawTx(0L, Wei.of(5_000_000_000L)); // 5e9 wei = 5 nano exactly
+        txs.put(withdraw);
+        proc.processMainBlock(List.of(ref(withdraw)), 1L, 1001L, BLOCK_HASH_1);
+
+        assertEquals("the withdraw call must execute cleanly on the pinned bytecode", 1,
+                meta.getReceipt(withdraw.getHash()).orElseThrow().status());
+        assertEquals("the burn scan must record (nativeTarget20, amountNano) from the Withdrawal event",
+                List.of(new BridgeWithdrawal(NATIVE_TARGET_20, 5L)), meta.getWithdrawals(1L));
+        assertEquals("the burned wei stays on the contract (burned-in-place audit balance)",
+                Wei.of(5_000_000_000L),
+                new RocksDbWorldUpdater(state).getAccount(BridgeContract.ADDRESS).getBalance());
+    }
+
+    @Test
+    public void dust_and_zero_value_withdrawals_revert_and_record_nothing() {
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmTxStore txs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor proc = seededBridgeProcessor(state, txs, meta);
+
+        // 1_500_000_001 wei is not a whole number of nano and zero value trips the same require:
+        // both revert (status 0), so there is no Withdrawal event and nothing to record. The dust
+        // tx still burns the sender nonce (Ethereum revert semantics), so the second tx is nonce 1.
+        EvmTransaction dust = withdrawTx(0L, Wei.of(1_500_000_001L));
+        EvmTransaction zero = withdrawTx(1L, Wei.ZERO);
+        txs.put(dust);
+        txs.put(zero);
+        proc.processMainBlock(List.of(ref(dust), ref(zero)), 1L, 1001L, BLOCK_HASH_1);
+
+        assertEquals("an indivisible (dust) value must revert", 0,
+                meta.getReceipt(dust.getHash()).orElseThrow().status());
+        assertEquals("a zero value must revert", 0,
+                meta.getReceipt(zero.getHash()).orElseThrow().status());
+        assertTrue("reverted withdrawals must record no burns", meta.getWithdrawals(1L).isEmpty());
+    }
+
+    @Test
+    public void withdrawal_records_regenerate_on_replay() {
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmTxStore txs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor proc = seededBridgeProcessor(state, txs, meta);
+
+        EvmTransaction withdraw = withdrawTx(0L, Wei.of(5_000_000_000L));
+        txs.put(withdraw);
+        proc.processMainBlock(List.of(ref(withdraw)), 1L, 1001L, BLOCK_HASH_1);
+        List<BridgeWithdrawal> recorded = meta.getWithdrawals(1L);
+        assertEquals("pre-condition: the live execution recorded the burn",
+                List.of(new BridgeWithdrawal(NATIVE_TARGET_20, 5L)), recorded);
+
+        proc.rollbackTo(0L);
+        assertTrue("the reorg sweep must remove the height-1 burn record",
+                meta.getWithdrawals(1L).isEmpty());
+
+        // The blob is still stored, so re-confirming the same main block re-executes the withdraw
+        // (its receipt was swept with the rollback) and must regenerate the identical record.
+        proc.processMainBlock(List.of(ref(withdraw)), 1L, 1001L, BLOCK_HASH_1);
+        assertEquals("re-execution must regenerate the identical burn record", recorded,
+                meta.getWithdrawals(1L));
     }
 }

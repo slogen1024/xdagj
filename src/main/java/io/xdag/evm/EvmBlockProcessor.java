@@ -25,7 +25,9 @@ package io.xdag.evm;
 
 import io.xdag.db.rocksdb.KVSource;
 import io.xdag.evm.bridge.BridgeConstants;
+import io.xdag.evm.bridge.BridgeContract;
 import io.xdag.evm.bridge.BridgeDeposit;
+import io.xdag.evm.bridge.BridgeWithdrawal;
 import io.xdag.evm.state.EvmMetaStore;
 import io.xdag.evm.state.EvmReceipt;
 import io.xdag.evm.state.EvmStateJournal;
@@ -83,6 +85,8 @@ public class EvmBlockProcessor {
     private final long activationHeight;
     /** Height at which type-2 (EIP-1559) txs become executable (defect-1 fork gate). */
     private final long type2ActivationHeight;
+    /** Height at which the XDAG<->EVM bridge activates; MAX_VALUE = not scheduled (no seeding). */
+    private final long bridgeActivationHeight;
     private final KVSource<byte[], byte[]> stateStore;
     private final EvmTxStore txStore;
     private final EvmMetaStore metaStore;
@@ -126,6 +130,7 @@ public class EvmBlockProcessor {
         this.minGasPrice = config.minGasPrice();
         this.activationHeight = activationHeight;
         this.type2ActivationHeight = config.type2ActivationHeight();
+        this.bridgeActivationHeight = config.bridgeActivationHeight();
         this.stateStore = stateStore;
         this.txStore = txStore;
         this.metaStore = metaStore;
@@ -153,6 +158,26 @@ public class EvmBlockProcessor {
         }
         world.commit();
         stateStore.put(EvmStateSchema.genesisMarkerKey(), new byte[]{1});
+    }
+
+    /**
+     * Seeds the bridge withdrawal contract's fixed runtime bytecode at its protocol address once
+     * per chain lifetime (spec §3.1), marker-guarded exactly like the genesis allocation and, like
+     * it, OUTSIDE the chained root (protocol state agreed out-of-band). No-op unless the bridge is
+     * scheduled — an always-on seed would plant contract code into every unrelated test state.
+     * rollbackTo's reset wipes marker + code; the restore call re-seeds before replay.
+     */
+    public synchronized void seedBridgeContractIfAbsent() {
+        if (bridgeActivationHeight == Long.MAX_VALUE) {
+            return;
+        }
+        if (stateStore.get(EvmStateSchema.bridgeContractMarkerKey()) != null) {
+            return;
+        }
+        RocksDbWorldUpdater world = new RocksDbWorldUpdater(stateStore);
+        world.getOrCreate(BridgeContract.ADDRESS).setCode(BridgeContract.RUNTIME_BYTECODE);
+        world.commit();
+        stateStore.put(EvmStateSchema.bridgeContractMarkerKey(), new byte[]{1});
     }
 
     /** Deposit-less entry: a confirmed main block that carries only EVM tx refs. */
@@ -335,6 +360,7 @@ public class EvmBlockProcessor {
     private void executeAndCheckpoint(List<Bytes32> flatRefs, long height, long timestampSeconds,
                                       Bytes32 blockHash) {
         seedGenesisIfAbsent(); // fund the genesis accounts before the first tx reads their balance
+        seedBridgeContractIfAbsent(); // and (when scheduled) the bridge contract before any tx calls it
         List<Hash> candidates = new ArrayList<>(flatRefs.size());
         Set<Hash> seen = new HashSet<>();
         for (Bytes32 refBytes : flatRefs) {
@@ -439,6 +465,7 @@ public class EvmBlockProcessor {
             journal.clear(); // Option A: replay below repopulates the window from genesis
         }
         seedGenesisIfAbsent(); // the reset wiped the marker + funded balances; restore before replay
+        seedBridgeContractIfAbsent(); // likewise the bridge contract's code (its marker was wiped too)
         Bytes32 previousRoot = genesisRoot();
         for (long h : metaStore.txListHeights()) {
             EvmMetaStore.HeightRecord record = metaStore.getHeightRecord(h).orElse(null);
@@ -544,6 +571,7 @@ public class EvmBlockProcessor {
         digest.add(Bytes.ofUnsignedLong(height)); // Phase 2: commit which height executed, not just outcomes
         List<Hash> executed = new ArrayList<>(txHashes.size());
         LogsBloomFilter.Builder bloomBuilder = LogsBloomFilter.builder();
+        List<BridgeWithdrawal> burns = new ArrayList<>();
         long gasBudget = blockGasLimit;
         for (Hash txHash : txHashes) {
             Bytes blob = txStore.get(txHash).orElse(null);
@@ -564,6 +592,7 @@ public class EvmBlockProcessor {
             EvmReceipt receipt = executeOne(root, blob, height, timestampSeconds);
             metaStore.putReceipt(txHash, receipt);
             receipt.logs().forEach(bloomBuilder::insertLog);
+            collectBridgeBurns(receipt.logs(), burns, height);
             executed.add(txHash);
             digest.add(Bytes.concatenate(txHash.getBytes(),
                     Bytes.of((byte) receipt.status()),
@@ -585,9 +614,40 @@ public class EvmBlockProcessor {
         // C5: persist this height's logs bloom so eth_getLogs can skip it without reading receipts.
         // Runs on normal execution AND reorg replay (like receipts), so replayed heights regenerate it.
         metaStore.putHeightBloom(height, bloomBuilder.build().getBytes());
+        // Phase 3b: record this height's bridge burns (spec §3.2). Same lifecycle as the bloom —
+        // regenerated on replay, so release/reversal always see what THIS execution produced.
+        if (!burns.isEmpty()) {
+            metaStore.putWithdrawals(height, burns);
+        }
         Bytes32 chainedRoot =
                 org.hyperledger.besu.crypto.Hash.keccak256(Bytes.concatenate(digest.toArray(new Bytes[0])));
         return new ExecutionOutcome(chainedRoot, executed);
+    }
+
+    /**
+     * Scans one executed receipt's logs for the bridge contract's Withdrawal events (spec §3.2) and
+     * appends them to {@code burns} in emission order. Sourced from the exact receipt logs that feed
+     * the height bloom, so the burn record and the bloom always agree on what this execution emitted.
+     */
+    private void collectBridgeBurns(List<Log> logs, List<BridgeWithdrawal> burns, long height) {
+        for (Log evmLog : logs) {
+            if (!BridgeContract.ADDRESS.equals(evmLog.getLogger()) || evmLog.getTopics().size() < 2
+                    || evmLog.getData().size() < 32
+                    || !BridgeContract.WITHDRAWAL_TOPIC0.equals(
+                            Bytes32.wrap(evmLog.getTopics().get(0).getBytes()))) {
+                continue;
+            }
+            Bytes target20 = evmLog.getTopics().get(1).getBytes().slice(0, 20);
+            BigInteger wei = evmLog.getData().slice(0, 32).toUnsignedBigInteger();
+            BigInteger[] div = wei.divideAndRemainder(BridgeConstants.WEI_PER_NANO);
+            if (div[1].signum() != 0 || div[0].bitLength() > 62) {
+                // Unreachable via the contract (it enforces divisibility; supply bounds the size) —
+                // deterministic skip keeps a crafted-state surprise from aborting consensus.
+                log.error("Skipping malformed bridge burn at height {}: {} wei", height, wei);
+                continue;
+            }
+            burns.add(new BridgeWithdrawal(target20, div[0].longValueExact()));
+        }
     }
 
     /**
