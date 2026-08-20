@@ -1445,15 +1445,18 @@ public class BlockchainImpl implements Blockchain {
         for (BridgeWithdrawal burn : burns) {
             total = total.add(XAmount.of(burn.amountNano()));
         }
-        if (addressStore.getBalanceByAddress(lockKey).lessThan(total)) {
+        XAmount lockBalance = addressStore.getBalanceByAddress(lockKey);
+        if (lockBalance.lessThan(total)) {
             // Unreachable while the conservation invariant holds (spec §4); if it is ever violated,
             // deterministic skip-all — the WHOLE height, not just the entries after the first
             // shortfall — keeps every node identical and the height all-or-nothing.
             log.error("CRITICAL: bridge lock balance {} cannot cover the {} total of {} release(s) at "
                     + "height {}; skipping ALL releases of this height",
-                    addressStore.getBalanceByAddress(lockKey), total, burns.size(), mainNumber);
+                    lockBalance, total, burns.size(), mainNumber);
             return;
         }
+        // Per-entry read-modify-write (no cached lock balance): alias-safe even if a target equals
+        // the lock, and the reversal walk is its exact mirror.
         for (BridgeWithdrawal burn : burns) {
             XAmount amount = XAmount.of(burn.amountNano());
             addressStore.updateBalance(lockKey,

@@ -206,8 +206,10 @@ public class BridgeWithdrawalIntegrationTest {
         driveToConfirmedHeight(burnHeight + delay);
 
         AddressStore addressStore = blockchain.getAddressStore();
-        assertEquals(XAmount.ZERO, addressStore.getBalanceByAddress(TARGET_1.toArray()));
-        assertEquals(XAmount.ZERO, addressStore.getBalanceByAddress(TARGET_2.toArray()));
+        assertEquals("a skipped height must not credit target 1",
+                XAmount.ZERO, addressStore.getBalanceByAddress(TARGET_1.toArray()));
+        assertEquals("a skipped height must not credit target 2",
+                XAmount.ZERO, addressStore.getBalanceByAddress(TARGET_2.toArray()));
         assertEquals("the lock must be untouched by a skipped height",
                 XAmount.of(10L), addressStore.getBalanceByAddress(BridgeConstants.LOCK_ADDRESS_20.toArray()));
         assertNoReleaseJournalAnywhere();
