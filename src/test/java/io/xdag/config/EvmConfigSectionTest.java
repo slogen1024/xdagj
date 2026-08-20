@@ -153,7 +153,8 @@ public class EvmConfigSectionTest {
     public void bridge_scheduled_before_the_evm_itself_fails_fast() {
         // Deposits confirmed in [bridgeActivation, evmActivation) would be deterministically
         // dropped (funds stranded at the lock address), so refuse to start.
-        Config c = ConfigFactory.parseString("evm.activationHeight = 10\n"
+        Config c = ConfigFactory.parseString("evm.enabled = true\n"
+                + "evm.activationHeight = 10\n"
                 + "evm.bridgeActivationHeight = 5\n"
                 + "evm.bridgeRecoveryAddress = \"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\"");
         assertThrows(IllegalStateException.class, () -> AbstractConfig.validateBridgeConfig(c));
@@ -171,10 +172,21 @@ public class EvmConfigSectionTest {
 
     @Test
     public void bridge_on_an_evm_disabled_network_fails_fast() {
+        // explicit false
         Config c = ConfigFactory.parseString("evm.enabled = false\nevm.activationHeight = 0\n"
                 + "evm.bridgeActivationHeight = 5\n"
                 + "evm.bridgeRecoveryAddress = \"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\"");
-        assertThrows(IllegalStateException.class, () -> AbstractConfig.validateBridgeConfig(c));
+        IllegalStateException ex1 = assertThrows(IllegalStateException.class,
+                () -> AbstractConfig.validateBridgeConfig(c));
+        assertTrue("message must name the predicate", ex1.getMessage().contains("evm.enabled is not"));
+
+        // absent key — should also fail (unset resolves to disabled)
+        Config cAbsent = ConfigFactory.parseString("evm.activationHeight = 0\n"
+                + "evm.bridgeActivationHeight = 5\n"
+                + "evm.bridgeRecoveryAddress = \"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\"");
+        IllegalStateException ex2 = assertThrows(IllegalStateException.class,
+                () -> AbstractConfig.validateBridgeConfig(cAbsent));
+        assertTrue("message must name the predicate", ex2.getMessage().contains("evm.enabled is not"));
     }
 
     @Test
@@ -183,7 +195,9 @@ public class EvmConfigSectionTest {
                 + "evm.bridgeActivationHeight = 5\n"
                 + "evm.bridgeRecoveryAddress = \"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\"\n"
                 + "evm.bridgeWithdrawalDelay = 0");
-        assertThrows(IllegalStateException.class, () -> AbstractConfig.validateBridgeConfig(c));
+        IllegalStateException ex = assertThrows(IllegalStateException.class,
+                () -> AbstractConfig.validateBridgeConfig(c));
+        assertTrue("message must name the constraint", ex.getMessage().contains("bridgeWithdrawalDelay must be >= 1"));
     }
 
     @Test

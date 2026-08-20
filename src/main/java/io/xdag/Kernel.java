@@ -232,12 +232,12 @@ public class Kernel {
                         io.xdag.evm.bridge.BridgeConstants.LOCK_ADDRESS_20,
                         io.xdag.crypto.encoding.Base58.encodeCheck(
                                 io.xdag.evm.bridge.BridgeConstants.LOCK_ADDRESS_20));
-            }
-            if (config.getEvmSpec().getEvmBridgeActivationHeight() != Long.MAX_VALUE
-                    && !config.getEvmSpec().getEvmGenesisAlloc().isEmpty()) {
-                log.warn("evm.alloc is non-empty on a bridge-scheduled network: genesis-allocated wei has NO "
-                        + "native backing and withdrawing it would drain depositors' locked funds (spec §4). "
-                        + "Acceptable only on a throwaway devnet.");
+                if (!config.getEvmSpec().getEvmGenesisAlloc().isEmpty()) {
+                    log.warn("evm.alloc has {} entr(ies) on a bridge-scheduled network: genesis-allocated wei has NO "
+                            + "native backing and withdrawing it would drain depositors' locked funds (spec §4). "
+                            + "Acceptable only on a throwaway devnet.",
+                            config.getEvmSpec().getEvmGenesisAlloc().size());
+                }
             }
         }
 

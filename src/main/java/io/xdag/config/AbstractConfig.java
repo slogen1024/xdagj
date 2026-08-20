@@ -325,9 +325,9 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
             throw new IllegalStateException(
                     "evm.bridgeRecoveryAddress must be a 0x-prefixed 20-byte hex address, got: " + addr);
         }
-        if (config.hasPath("evm.enabled") && !config.getBoolean("evm.enabled")) {
-            throw new IllegalStateException("evm.bridgeActivationHeight is scheduled but evm.enabled is false: "
-                    + "an EVM-disabled node would collect and silently drop deposits.");
+        if (!(config.hasPath("evm.enabled") && config.getBoolean("evm.enabled"))) {
+            throw new IllegalStateException("evm.bridgeActivationHeight is scheduled but evm.enabled is not "
+                    + "true (unset or false): an EVM-disabled node would collect and silently drop deposits.");
         }
         if (config.hasPath("evm.bridgeWithdrawalDelay") && config.getLong("evm.bridgeWithdrawalDelay") < 1) {
             throw new IllegalStateException("evm.bridgeWithdrawalDelay must be >= 1, got "

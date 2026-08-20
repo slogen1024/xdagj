@@ -27,7 +27,7 @@ import java.math.BigInteger;
 import org.hyperledger.besu.evm.EvmSpecVersion;
 
 /**
- * Immutable EVM execution configuration: the target hard fork and the chain id.
+ * Immutable EVM execution configuration: target fork, chain id, gas ceiling, price floor, and the type-2/bridge activation heights.
  *
  * <p>In Sub-project A only the {@code CHAINID} opcode reads {@link #chainId()}; the final
  * mainnet/testnet/devnet chain-id triple is decided (and reserved via ethereum-lists/chains)
