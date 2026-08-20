@@ -24,7 +24,10 @@
 package io.xdag.evm.bridge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
+import java.nio.charset.StandardCharsets;
 import org.apache.tuweni.bytes.Bytes;
 import org.hyperledger.besu.crypto.Hash;
 import org.junit.Test;
@@ -50,12 +53,26 @@ public class BridgeContractTest {
         assertEquals("0xcb0a8ccf10deec2c41d1723a1ab013f59377a9853e5f541e6894b47c2e413a42",
                 BridgeContract.WITHDRAWAL_TOPIC0.toHexString());
         // The compiler embeds the event topic in the runtime code — cross-checks source and constant.
-        assertEquals(Hash.keccak256(Bytes.wrap("Withdrawal(bytes20,uint256)".getBytes())).toHexString(),
+        assertEquals(Hash.keccak256(Bytes.wrap("Withdrawal(bytes20,uint256)".getBytes(StandardCharsets.US_ASCII))).toHexString(),
                 BridgeContract.WITHDRAWAL_TOPIC0.toHexString());
+        assertTrue(BridgeContract.RUNTIME_BYTECODE.toHexString()
+                .contains(BridgeContract.WITHDRAWAL_TOPIC0.toHexString().substring(2)));
     }
 
     @Test
     public void withdraw_selector_is_pinned() {
         assertEquals("0xdce0f64e", BridgeContract.WITHDRAW_SELECTOR.toHexString());
+        // The dispatcher embeds the selector (8063dce0f64e14) — ties the constant to the seeded code.
+        assertTrue(BridgeContract.RUNTIME_BYTECODE.toHexString()
+                .contains(BridgeContract.WITHDRAW_SELECTOR.toHexString().substring(2)));
+    }
+
+    @Test
+    public void withdrawal_record_rejects_bad_target_size_and_negative_amount() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new BridgeWithdrawal(Bytes.fromHexString("0x1122"), 1L));
+        assertThrows(IllegalArgumentException.class,
+                () -> new BridgeWithdrawal(Bytes.fromHexString(
+                        "0x1111111111111111111111111111111111111111"), -1L));
     }
 }

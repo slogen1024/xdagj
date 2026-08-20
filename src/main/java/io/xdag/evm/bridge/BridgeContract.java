@@ -39,7 +39,7 @@ import org.hyperledger.besu.datatypes.Address;
  */
 public final class BridgeContract {
 
-    /** 0x97d38b2e167709f0ddb4880d197ce2920241e3ea. */
+    /** EVM address of the bridge contract: 0x97d38b2e167709f0ddb4880d197ce2920241e3ea. */
     public static final Address ADDRESS = Address.wrap(
             Hash.keccak256(Bytes.wrap("XDAG-EVM-BRIDGE-CONTRACT-v1".getBytes(StandardCharsets.US_ASCII)))
                     .slice(12, 20));

@@ -44,3 +44,18 @@ The source of the pinned **runtime** bytecode in `io.xdag.evm.bridge.BridgeContr
 USDT fixtures there is no `.bin` here: the 634-byte runtime bytecode is consensus data, compiled
 offline once (solc `0.8.26+commit.8a97fa7a`, optimizer **off**, `metadata.bytecodeHash: none`) and
 embedded in Java, pinned by length/keccak/topic0/selector tests in `BridgeContractTest`.
+
+Compiled with solc-js (npm `solc@0.8.26`, version string `0.8.26+commit.8a97fa7a.Emscripten.clang`)
+via standard JSON — settings:
+
+```json
+{
+  "optimizer": { "enabled": false },
+  "evmVersion": "shanghai",
+  "metadata": { "bytecodeHash": "none" }
+}
+```
+
+The pinned constant is `evm.deployedBytecode.object` (634 bytes). Note: solc 0.8.26's default
+evmVersion (cancun) produces byte-identical output for this source — verified — but shanghai is
+pinned explicitly because the embedded EVM runs the Shanghai fork.
