@@ -57,6 +57,9 @@ public interface EvmSpec {
      */
     String getEvmBridgeRecoveryAddress();
 
+    /** Main blocks between an EVM burn and its native release (spec §3.2 N); devnet 2, recommended shared-net 16. */
+    long getEvmBridgeWithdrawalDelay();
+
     /** EIP-155 chain id for this network (devnet provisional: 51966 = 0xCAFE). */
     long getEvmChainId();
 

@@ -167,6 +167,7 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected long evmType2ActivationHeight = Long.MAX_VALUE;
     protected long evmBridgeActivationHeight = Long.MAX_VALUE;
     protected String evmBridgeRecoveryAddress;
+    protected long evmBridgeWithdrawalDelay = 16;
     protected long evmChainId = 0xCAFE; // 51966, provisional devnet id
     protected long evmBlockGasLimit = 30_000_000L;
     protected long evmTxPoolTtlSeconds = 3600;
@@ -228,6 +229,11 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     @Override
     public String getEvmBridgeRecoveryAddress() {
         return evmBridgeRecoveryAddress;
+    }
+
+    @Override
+    public long getEvmBridgeWithdrawalDelay() {
+        return evmBridgeWithdrawalDelay;
     }
 
     @Override
@@ -318,6 +324,14 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
         if (!addr.matches("0x[0-9a-fA-F]{40}")) {
             throw new IllegalStateException(
                     "evm.bridgeRecoveryAddress must be a 0x-prefixed 20-byte hex address, got: " + addr);
+        }
+        if (config.hasPath("evm.enabled") && !config.getBoolean("evm.enabled")) {
+            throw new IllegalStateException("evm.bridgeActivationHeight is scheduled but evm.enabled is false: "
+                    + "an EVM-disabled node would collect and silently drop deposits.");
+        }
+        if (config.hasPath("evm.bridgeWithdrawalDelay") && config.getLong("evm.bridgeWithdrawalDelay") < 1) {
+            throw new IllegalStateException("evm.bridgeWithdrawalDelay must be >= 1, got "
+                    + config.getLong("evm.bridgeWithdrawalDelay"));
         }
         // A bridge scheduled before the EVM itself would deterministically drop every deposit
         // confirmed in [bridgeActivation, evmActivation) — funds stranded at the lock address.
@@ -452,6 +466,8 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
                 ? config.getLong("evm.bridgeActivationHeight") : evmBridgeActivationHeight;
         evmBridgeRecoveryAddress = config.hasPath("evm.bridgeRecoveryAddress")
                 ? config.getString("evm.bridgeRecoveryAddress") : evmBridgeRecoveryAddress;
+        evmBridgeWithdrawalDelay = config.hasPath("evm.bridgeWithdrawalDelay")
+                ? config.getLong("evm.bridgeWithdrawalDelay") : evmBridgeWithdrawalDelay;
         evmChainId = config.hasPath("evm.chainId") ? config.getLong("evm.chainId") : evmChainId;
         evmBlockGasLimit = config.hasPath("evm.blockGasLimit")
                 ? config.getLong("evm.blockGasLimit") : evmBlockGasLimit;

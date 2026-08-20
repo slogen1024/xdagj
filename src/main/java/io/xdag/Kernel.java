@@ -209,7 +209,8 @@ public class Kernel {
             io.xdag.evm.EvmConfig evmConfig = new io.xdag.evm.EvmConfig(
                     org.hyperledger.besu.evm.EvmSpecVersion.SHANGHAI, evmChainId,
                     config.getEvmSpec().getEvmBlockGasLimit(), config.getEvmSpec().getEvmMinGasPrice(),
-                    config.getEvmSpec().getEvmType2ActivationHeight());
+                    config.getEvmSpec().getEvmType2ActivationHeight(),
+                    config.getEvmSpec().getEvmBridgeActivationHeight());
             evmTxStore = new io.xdag.evm.tx.EvmTxStore(evmTxSource);
             evmMetaStore = new io.xdag.evm.state.EvmMetaStore(evmMetaSource);
             evmTxPool = new io.xdag.evm.tx.EvmTxPool(evmTxStore, evmStateSource, evmChainId,
@@ -231,6 +232,12 @@ public class Kernel {
                         io.xdag.evm.bridge.BridgeConstants.LOCK_ADDRESS_20,
                         io.xdag.crypto.encoding.Base58.encodeCheck(
                                 io.xdag.evm.bridge.BridgeConstants.LOCK_ADDRESS_20));
+            }
+            if (config.getEvmSpec().getEvmBridgeActivationHeight() != Long.MAX_VALUE
+                    && !config.getEvmSpec().getEvmGenesisAlloc().isEmpty()) {
+                log.warn("evm.alloc is non-empty on a bridge-scheduled network: genesis-allocated wei has NO "
+                        + "native backing and withdrawing it would drain depositors' locked funds (spec §4). "
+                        + "Acceptable only on a throwaway devnet.");
             }
         }
 

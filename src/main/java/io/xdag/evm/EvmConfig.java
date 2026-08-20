@@ -56,11 +56,19 @@ public final class EvmConfig {
     /** Default type-2 activation: always active (tests/devnet factory); production passes the spec value. */
     public static final long DEFAULT_TYPE2_ACTIVATION_HEIGHT = 0L;
 
+    /**
+     * Default bridge activation: NOT scheduled. Unlike type2ActivationHeight (default active for
+     * tests), bridge activation gates contract-code SEEDING into EVM_STATE — an always-active
+     * default would silently plant the contract in every unrelated test's world state.
+     */
+    public static final long DEFAULT_BRIDGE_ACTIVATION_HEIGHT = Long.MAX_VALUE;
+
     private final EvmSpecVersion fork;
     private final BigInteger chainId;
     private final long maxGasLimit;
     private final BigInteger minGasPrice;
     private final long type2ActivationHeight;
+    private final long bridgeActivationHeight;
 
     public EvmConfig(EvmSpecVersion fork, BigInteger chainId) {
         this(fork, chainId, DEFAULT_MAX_GAS_LIMIT);
@@ -76,11 +84,17 @@ public final class EvmConfig {
 
     public EvmConfig(EvmSpecVersion fork, BigInteger chainId, long maxGasLimit, BigInteger minGasPrice,
                      long type2ActivationHeight) {
+        this(fork, chainId, maxGasLimit, minGasPrice, type2ActivationHeight, DEFAULT_BRIDGE_ACTIVATION_HEIGHT);
+    }
+
+    public EvmConfig(EvmSpecVersion fork, BigInteger chainId, long maxGasLimit, BigInteger minGasPrice,
+                     long type2ActivationHeight, long bridgeActivationHeight) {
         this.fork = fork;
         this.chainId = chainId;
         this.maxGasLimit = maxGasLimit;
         this.minGasPrice = minGasPrice;
         this.type2ActivationHeight = type2ActivationHeight;
+        this.bridgeActivationHeight = bridgeActivationHeight;
     }
 
     /**
@@ -129,5 +143,10 @@ public final class EvmConfig {
     /** Height at which type-2 (EIP-1559) txs activate; consensus-gated in EvmBlockProcessor. */
     public long type2ActivationHeight() {
         return type2ActivationHeight;
+    }
+
+    /** Height at which the XDAG<->EVM bridge activates (gates contract seeding); MAX_VALUE = not scheduled. */
+    public long bridgeActivationHeight() {
+        return bridgeActivationHeight;
     }
 }

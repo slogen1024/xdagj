@@ -56,7 +56,8 @@ public final class RpcHandlers {
         if (evmSpec.isEvmEnabled() && kernel.getEvmStateStore() != null) {
             EvmConfig evmConfig = new EvmConfig(EvmSpecVersion.SHANGHAI,
                     BigInteger.valueOf(evmSpec.getEvmChainId()), evmSpec.getEvmBlockGasLimit(),
-                    evmSpec.getEvmMinGasPrice(), evmSpec.getEvmType2ActivationHeight());
+                    evmSpec.getEvmMinGasPrice(), evmSpec.getEvmType2ActivationHeight(),
+                    evmSpec.getEvmBridgeActivationHeight());
             // Broadcast an accepted eth tx to every connected peer (C2 write path).
             Consumer<Bytes> broadcaster = rlp -> {
                 for (io.xdag.net.Channel ch : kernel.getChannelMgr().getActiveChannels()) {

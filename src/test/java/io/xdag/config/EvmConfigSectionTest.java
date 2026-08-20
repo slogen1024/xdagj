@@ -122,14 +122,18 @@ public class EvmConfigSectionTest {
         EvmSpec devSpec = new DevnetConfig().getEvmSpec();
         assertEquals(0L, devSpec.getEvmBridgeActivationHeight());
         assertEquals("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf", devSpec.getEvmBridgeRecoveryAddress());
+        // Phase-3b withdrawal maturation delay N (spec §3.2): devnet 2 (~2 min turnaround).
+        assertEquals(2L, devSpec.getEvmBridgeWithdrawalDelay());
 
         EvmSpec testSpec = new TestnetConfig().getEvmSpec();
         assertEquals(Long.MAX_VALUE, testSpec.getEvmBridgeActivationHeight());
         assertNull(testSpec.getEvmBridgeRecoveryAddress());
+        assertEquals(16L, testSpec.getEvmBridgeWithdrawalDelay()); // the shared-net default
 
         EvmSpec mainSpec = new MainnetConfig().getEvmSpec();
         assertEquals(Long.MAX_VALUE, mainSpec.getEvmBridgeActivationHeight());
         assertNull(mainSpec.getEvmBridgeRecoveryAddress());
+        assertEquals(16L, mainSpec.getEvmBridgeWithdrawalDelay()); // the shared-net default
     }
 
     @Test
@@ -158,11 +162,28 @@ public class EvmConfigSectionTest {
     @Test
     public void well_formed_or_unscheduled_bridge_config_passes_validation() {
         AbstractConfig.validateBridgeConfig(ConfigFactory.parseString(
-                "evm.bridgeActivationHeight = 5\n"
+                "evm.enabled = true\nevm.bridgeActivationHeight = 5\n"
                         + "evm.bridgeRecoveryAddress = \"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\""));
         // explicit MAX_VALUE = not scheduled
         AbstractConfig.validateBridgeConfig(ConfigFactory.parseString(
                 "evm.bridgeActivationHeight = 9223372036854775807"));
+    }
+
+    @Test
+    public void bridge_on_an_evm_disabled_network_fails_fast() {
+        Config c = ConfigFactory.parseString("evm.enabled = false\nevm.activationHeight = 0\n"
+                + "evm.bridgeActivationHeight = 5\n"
+                + "evm.bridgeRecoveryAddress = \"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\"");
+        assertThrows(IllegalStateException.class, () -> AbstractConfig.validateBridgeConfig(c));
+    }
+
+    @Test
+    public void bridge_withdrawal_delay_must_be_positive_when_scheduled() {
+        Config c = ConfigFactory.parseString("evm.enabled = true\nevm.activationHeight = 0\n"
+                + "evm.bridgeActivationHeight = 5\n"
+                + "evm.bridgeRecoveryAddress = \"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\"\n"
+                + "evm.bridgeWithdrawalDelay = 0");
+        assertThrows(IllegalStateException.class, () -> AbstractConfig.validateBridgeConfig(c));
     }
 
     @Test
