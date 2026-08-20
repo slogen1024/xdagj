@@ -37,3 +37,10 @@ tr -d '\n' < out/UsdtOz.bin > usdt_oz.bin
 
 > Always target `--evm-version shanghai` for `usdt_oz.sol` so the bytecode matches the EVM the
 > executor runs (Shanghai), and never emits Cancun-only opcodes (MCOPY/TLOAD).
+
+## `xdag_bridge.sol` — bridge withdrawal system contract (Phase 3b, no `.bin`)
+
+The source of the pinned **runtime** bytecode in `io.xdag.evm.bridge.BridgeContract`. Unlike the
+USDT fixtures there is no `.bin` here: the 634-byte runtime bytecode is consensus data, compiled
+offline once (solc `0.8.26+commit.8a97fa7a`, optimizer **off**, `metadata.bytecodeHash: none`) and
+embedded in Java, pinned by length/keccak/topic0/selector tests in `BridgeContractTest`.
