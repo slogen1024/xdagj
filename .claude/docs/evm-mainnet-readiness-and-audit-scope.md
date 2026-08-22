@@ -86,7 +86,7 @@ EVM 通过 `applyBlock`（收集）/ `setMain`（执行）/ `unWindMain`（回�
 
 1. **PoW 承诺的状态根**：当前链式 delta 根仅靠**链下 gossip(0x1E)检测**分歧,不进 PoW 承诺、不硬拒块（4-bit 字段码位已耗尽,设计文档 §1.1/§6.3）。关闭方向：块格式硬分叉腾码位把 (height,root) 锚回原生区块,或引入绝对状态根(MPT/SMT)。
 2. **DA 强制**：blob 真不可得时 EVM **停摆等待**(诚实但有活性风险,设计文档 §5.5/D10)。关闭方向：导入期载荷可用性检查,或共识层带超时跳过标记。**这是 bridge 出金 CRITICAL-skip 降级(§2.5)的前提门槛。**
-3. **费用路由与经济参数**：净费当前**燃烧**(不给 coinbase)；mempool 无 per-sender Sybil 配额；EIP-3529 退款按毛 gasUsed 收(偏高)。关闭方向：燃烧→coinbase 路由、per-sender 配额、精确退款。
+3. **费用路由与经济参数**：净费当前**燃烧**(不给 coinbase)；mempool 无 per-sender Sybil 配额；~~EIP-3529 退款按毛 gasUsed 收(偏高)~~ **EIP-3529 精确退款已实现(2026-08-22，G3-T2，门控 `evm.eip3529ActivationHeight`)**。剩余关闭方向：燃烧→coinbase 路由、per-sender 配额。
 
 > chainId 注册与激活高度见 §5 与设计文档 §13.1 缺陷 4——属配置/流程,非本节工程门槛。
 

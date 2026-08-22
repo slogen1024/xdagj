@@ -77,6 +77,11 @@ public final class XdagEvmExecutor {
         this.creationProcessor = new ContractCreationProcessor(evm, true, List.of(), 1L);
     }
 
+    /** EIP-3529 refund cap denominator from the configured fork's gas calculator (5 on Shanghai). */
+    public long maxRefundQuotient() {
+        return evm.getGasCalculator().getMaxRefundQuotient();
+    }
+
     /**
      * Deploy a contract with a default (empty) block context. {@code initCode} is the creation
      * bytecode with any ABI-encoded constructor arguments appended (standard CREATE semantics). On
@@ -268,6 +273,7 @@ public final class XdagEvmExecutor {
                 success,
                 frame.getOutputData(),
                 gasUsed,
+                success ? frame.getGasRefund() : 0L, // raw EIP-3529 refund (0 on failure/halt); EvmBlockProcessor caps + applies it
                 frame.getLogs(),
                 frame.getRevertReason(),
                 success ? createdContract : Optional.empty());

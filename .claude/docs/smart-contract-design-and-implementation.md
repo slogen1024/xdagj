@@ -546,7 +546,7 @@ MetaMask 轮询:
 
 - 状态根是**链式 delta 承诺**，非绝对状态 MPT：无 eth_getProof/轻客户端；跨节点一致性靠 gossip **检测**（链下、不 PoW 承诺、不硬拒）。
 - gas 净费**燃烧**（不给 coinbase，供应缓缩）；`GASPRICE` 操作码读 0；`BLOCKHASH/PREVRANDAO/BASEFEE/COINBASE` 皆 0（确定性占位，不分叉但无随机性）。
-- getLogs 扫描范围 ≤ `maxLogScanRange`（1024）；历史状态查询仅覆盖最近 `stateHistoryWindow`（128）个高度，更早的 archive 不可得（C4）；EIP-3529 退款按毛 gasUsed 收（略高于主网、永不少收）；mempool 每 sender 一笔、无 per-sender Sybil 配额；blob 真不可得时 EVM 停摆（诚实 DA 行为，活性风险）。
+- getLogs 扫描范围 ≤ `maxLogScanRange`（1024）；历史状态查询仅覆盖最近 `stateHistoryWindow`（128）个高度，更早的 archive 不可得（C4）；~~EIP-3529 退款按毛 gasUsed 收（略高于主网、永不少收）~~ **EIP-3529 精确退款已实现（2026-08-22，G3-T2）**：`min(refund, gasUsed/5)`（Besu Shanghai 削减额 + /5 上限），共识门控于 `evm.eip3529ActivationHeight`（devnet=0，testnet/mainnet 未排期），激活前逐字节维持毛 gasUsed；mempool 每 sender 一笔、无 per-sender Sybil 配额；blob 真不可得时 EVM 停摆（诚实 DA 行为，活性风险）。
 
 （2026-08 更新：C5 已交付 bloom 过滤 + 全 topic 匹配，C4 已交付窗口内 block-tag 历史状态查询——本节早期版本"无 bloom、RPC 只服务 latest"的记录已随之删除。）
 
@@ -554,7 +554,7 @@ MetaMask 轮询:
 
 1. **PoW 承诺的状态根**：块格式修订腾出字段码位，把 (height,root) 锚回原生区块（设计已批准，被码位耗尽推迟）；或引入绝对状态根（MPT/SMT）。
 2. **DA 强制**：导入期载荷可用性检查，或共识层带超时跳过标记——消除"blob 永不可得"的停摆。
-3. 费用路由（燃烧→coinbase）、mempool per-sender 配额、EIP-3529 精确退款；chainId 注册与激活高度见 §13.1 缺陷 4。
+3. 费用路由（燃烧→coinbase）、mempool per-sender 配额；~~EIP-3529 精确退款~~ **已实现（2026-08-22，门控于 `evm.eip3529ActivationHeight`，G3-T2）**；chainId 注册与激活高度见 §13.1 缺陷 4。
 
 ## 14. 源码索引
 

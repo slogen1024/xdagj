@@ -113,6 +113,16 @@ public class EvmConfigSectionTest {
     }
 
     @Test
+    public void devnet_activates_eip3529_at_genesis_and_shared_nets_do_not() {
+        // EIP-3529 precise gas refund cap: devnet active from genesis; testnet/mainnet unscheduled
+        // (Long.MAX_VALUE) until the hard-fork height is coordinated — changing the cap alters
+        // receipt.gasUsed which is folded into the chained state root.
+        assertEquals(0L, new DevnetConfig().getEvmSpec().getEvmEip3529ActivationHeight());
+        assertEquals(Long.MAX_VALUE, new TestnetConfig().getEvmSpec().getEvmEip3529ActivationHeight());
+        assertEquals(Long.MAX_VALUE, new MainnetConfig().getEvmSpec().getEvmEip3529ActivationHeight());
+    }
+
+    @Test
     public void devnet_funds_the_standard_test_address_in_genesis_alloc() {
         // The funding on-ramp: devnet pre-funds the standard test address (private key 1); the other
         // networks fund nothing at genesis.

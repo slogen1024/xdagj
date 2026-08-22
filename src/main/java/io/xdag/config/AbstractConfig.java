@@ -166,6 +166,7 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected long evmBatchActivationHeight = Long.MAX_VALUE;
     protected long evmType2ActivationHeight = Long.MAX_VALUE;
     protected long evmBridgeActivationHeight = Long.MAX_VALUE;
+    protected long evmEip3529ActivationHeight = Long.MAX_VALUE;
     protected String evmBridgeRecoveryAddress;
     protected long evmBridgeWithdrawalDelay = 16;
     protected long evmChainId = 0xCAFE; // 51966 (0xCAFE), reserved devnet id; per-network evm.chainId overrides
@@ -224,6 +225,11 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     @Override
     public long getEvmBridgeActivationHeight() {
         return evmBridgeActivationHeight;
+    }
+
+    @Override
+    public long getEvmEip3529ActivationHeight() {
+        return evmEip3529ActivationHeight;
     }
 
     @Override
@@ -464,6 +470,8 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
         validateBridgeConfig(config);
         evmBridgeActivationHeight = config.hasPath("evm.bridgeActivationHeight")
                 ? config.getLong("evm.bridgeActivationHeight") : evmBridgeActivationHeight;
+        evmEip3529ActivationHeight = config.hasPath("evm.eip3529ActivationHeight")
+                ? config.getLong("evm.eip3529ActivationHeight") : evmEip3529ActivationHeight;
         evmBridgeRecoveryAddress = config.hasPath("evm.bridgeRecoveryAddress")
                 ? config.getString("evm.bridgeRecoveryAddress") : evmBridgeRecoveryAddress;
         evmBridgeWithdrawalDelay = config.hasPath("evm.bridgeWithdrawalDelay")

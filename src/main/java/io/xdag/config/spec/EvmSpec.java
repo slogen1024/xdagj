@@ -50,6 +50,9 @@ public interface EvmSpec {
     /** Height at which the XDAG<->EVM bridge activates; Long.MAX_VALUE = not scheduled. */
     long getEvmBridgeActivationHeight();
 
+    /** Height at which EIP-3529 precise gas refunds activate; Long.MAX_VALUE = not scheduled. */
+    long getEvmEip3529ActivationHeight();
+
     /**
      * EVM address minted to when a deposit's remark cannot be decoded (spec §2.2). Hex string
      * (0x + 40); null only when the bridge is not scheduled — networks that activate the bridge

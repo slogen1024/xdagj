@@ -27,7 +27,7 @@ import java.math.BigInteger;
 import org.hyperledger.besu.evm.EvmSpecVersion;
 
 /**
- * Immutable EVM execution configuration: target fork, chain id, gas ceiling, price floor, and the type-2/bridge activation heights.
+ * Immutable EVM execution configuration: target fork, chain id, gas ceiling, price floor, and consensus activation heights (type-2, bridge, EIP-3529).
  *
  * <p>The {@code CHAINID} opcode reads {@link #chainId()}. The mainnet/testnet/devnet chain-id
  * triple below is the reserved (defect-4) value set — DISTINCT per network so signed-tx replay
@@ -63,12 +63,16 @@ public final class EvmConfig {
      */
     public static final long DEFAULT_BRIDGE_ACTIVATION_HEIGHT = Long.MAX_VALUE;
 
+    /** Default EIP-3529 activation: always active (tests/devnet factory); production passes the spec value. */
+    public static final long DEFAULT_EIP3529_ACTIVATION_HEIGHT = 0L;
+
     private final EvmSpecVersion fork;
     private final BigInteger chainId;
     private final long maxGasLimit;
     private final BigInteger minGasPrice;
     private final long type2ActivationHeight;
     private final long bridgeActivationHeight;
+    private final long eip3529ActivationHeight;
 
     public EvmConfig(EvmSpecVersion fork, BigInteger chainId) {
         this(fork, chainId, DEFAULT_MAX_GAS_LIMIT);
@@ -89,34 +93,43 @@ public final class EvmConfig {
 
     public EvmConfig(EvmSpecVersion fork, BigInteger chainId, long maxGasLimit, BigInteger minGasPrice,
                      long type2ActivationHeight, long bridgeActivationHeight) {
+        this(fork, chainId, maxGasLimit, minGasPrice, type2ActivationHeight, bridgeActivationHeight,
+                DEFAULT_EIP3529_ACTIVATION_HEIGHT);
+    }
+
+    public EvmConfig(EvmSpecVersion fork, BigInteger chainId, long maxGasLimit, BigInteger minGasPrice,
+                     long type2ActivationHeight, long bridgeActivationHeight, long eip3529ActivationHeight) {
         this.fork = fork;
         this.chainId = chainId;
         this.maxGasLimit = maxGasLimit;
         this.minGasPrice = minGasPrice;
         this.type2ActivationHeight = type2ActivationHeight;
         this.bridgeActivationHeight = bridgeActivationHeight;
+        this.eip3529ActivationHeight = eip3529ActivationHeight;
     }
 
     /**
-     * Mainnet configuration: Shanghai fork + reserved mainnet chain id. Type-2 is always active
-     * here (test/tooling default); production networks pass evm.type2ActivationHeight explicitly.
+     * Mainnet configuration: Shanghai fork + reserved mainnet chain id. Type-2 and EIP-3529 are
+     * always active here (test/tooling default); production networks pass evm.type2ActivationHeight
+     * and evm.eip3529ActivationHeight explicitly.
      */
     public static EvmConfig mainnet() {
         return new EvmConfig(EvmSpecVersion.SHANGHAI, MAINNET_CHAIN_ID);
     }
 
     /**
-     * Testnet configuration: Shanghai fork + reserved testnet chain id. Type-2 is always active
-     * here (test/tooling default); production networks pass evm.type2ActivationHeight explicitly.
+     * Testnet configuration: Shanghai fork + reserved testnet chain id. Type-2 and EIP-3529 are
+     * always active here (test/tooling default); production networks pass evm.type2ActivationHeight
+     * and evm.eip3529ActivationHeight explicitly.
      */
     public static EvmConfig testnet() {
         return new EvmConfig(EvmSpecVersion.SHANGHAI, TESTNET_CHAIN_ID);
     }
 
     /**
-     * Default development configuration: Shanghai fork + reserved devnet chain id. Type-2 is
-     * always active here (test/tooling default); production networks pass evm.type2ActivationHeight
-     * explicitly.
+     * Default development configuration: Shanghai fork + reserved devnet chain id. Type-2 and
+     * EIP-3529 are always active here (test/tooling defaults); production networks pass
+     * evm.type2ActivationHeight and evm.eip3529ActivationHeight explicitly.
      */
     public static EvmConfig devnet() {
         return new EvmConfig(EvmSpecVersion.SHANGHAI, DEVNET_CHAIN_ID);
@@ -148,5 +161,10 @@ public final class EvmConfig {
     /** Height at which the XDAG<->EVM bridge activates (gates contract seeding); MAX_VALUE = not scheduled. */
     public long bridgeActivationHeight() {
         return bridgeActivationHeight;
+    }
+
+    /** Height at which EIP-3529 precise gas refunds activate; consensus-gated in EvmBlockProcessor. */
+    public long eip3529ActivationHeight() {
+        return eip3529ActivationHeight;
     }
 }
