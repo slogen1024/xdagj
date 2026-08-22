@@ -168,7 +168,7 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected long evmBridgeActivationHeight = Long.MAX_VALUE;
     protected String evmBridgeRecoveryAddress;
     protected long evmBridgeWithdrawalDelay = 16;
-    protected long evmChainId = 0xCAFE; // 51966, provisional devnet id
+    protected long evmChainId = 0xCAFE; // 51966 (0xCAFE), reserved devnet id; per-network evm.chainId overrides
     protected long evmBlockGasLimit = 30_000_000L;
     protected long evmTxPoolTtlSeconds = 3600;
     protected int evmMaxP2pTxBytes = 131_072;

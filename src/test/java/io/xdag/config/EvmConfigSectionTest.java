@@ -39,7 +39,7 @@ import org.hyperledger.besu.datatypes.Address;
 import org.hyperledger.besu.datatypes.Wei;
 import org.junit.Test;
 
-/** The evm HOCON section (spec §9): devnet enabled with the provisional chain id, mainnet/testnet off. */
+/** The evm HOCON section (spec §9): devnet enabled; mainnet/testnet scaffolded with reserved chain ids but disabled. */
 public class EvmConfigSectionTest {
 
     @Test
@@ -47,7 +47,7 @@ public class EvmConfigSectionTest {
         EvmSpec spec = new DevnetConfig().getEvmSpec();
         assertTrue(spec.isEvmEnabled());
         assertEquals(0L, spec.getEvmActivationHeight());
-        assertEquals(51966L, spec.getEvmChainId()); // 0xCAFE provisional
+        assertEquals(51966L, spec.getEvmChainId()); // 0xCAFE reserved devnet id
         // Devnet gas budget is deliberately non-binding (1e12): batches fill to MAX_BATCH_TXS instead.
         assertEquals(1_000_000_000_000L, spec.getEvmBlockGasLimit());
         assertEquals(3600L, spec.getEvmTxPoolTtlSeconds());
@@ -69,6 +69,31 @@ public class EvmConfigSectionTest {
     public void mainnet_and_testnet_default_to_disabled() {
         assertFalse(new MainnetConfig().getEvmSpec().isEvmEnabled());
         assertFalse(new TestnetConfig().getEvmSpec().isEvmEnabled());
+    }
+
+    @Test
+    public void shared_nets_pin_their_reserved_chain_ids() {
+        // Defect-4: testnet/mainnet carry their reserved EIP-155 chain ids; devnet keeps 0xCAFE.
+        // The values are reserved in EvmConfig; confirming no collision on ethereum-lists/chains
+        // is an off-chain registration action that must precede launch.
+        assertEquals(51964L, new MainnetConfig().getEvmSpec().getEvmChainId()); // 0xCAFC
+        assertEquals(51965L, new TestnetConfig().getEvmSpec().getEvmChainId()); // 0xCAFD
+        assertEquals(51966L, new DevnetConfig().getEvmSpec().getEvmChainId());  // 0xCAFE
+    }
+
+    @Test
+    public void shared_nets_scaffold_every_fork_as_unscheduled() {
+        // Defect-4 scaffold: the shared-net conf files carry the full evm block but keep every
+        // hard-fork gate at Long.MAX_VALUE — including evm.activationHeight, so that a future
+        // evm.enabled=true flip cannot silently activate the EVM at height 0. Enabling on a shared
+        // network is gated on the §13.3 hard gates (see evm-mainnet-readiness-and-audit-scope.md).
+        for (EvmSpec spec : List.of(new TestnetConfig().getEvmSpec(), new MainnetConfig().getEvmSpec())) {
+            assertFalse(spec.isEvmEnabled());
+            assertEquals(Long.MAX_VALUE, spec.getEvmActivationHeight());
+            assertEquals(Long.MAX_VALUE, spec.getEvmBatchActivationHeight());
+            assertEquals(Long.MAX_VALUE, spec.getEvmType2ActivationHeight());
+            assertEquals(Long.MAX_VALUE, spec.getEvmBridgeActivationHeight());
+        }
     }
 
     @Test

@@ -29,23 +29,23 @@ import org.hyperledger.besu.evm.EvmSpecVersion;
 /**
  * Immutable EVM execution configuration: target fork, chain id, gas ceiling, price floor, and the type-2/bridge activation heights.
  *
- * <p>In Sub-project A only the {@code CHAINID} opcode reads {@link #chainId()}; the final
- * mainnet/testnet/devnet chain-id triple is decided (and reserved via ethereum-lists/chains)
- * in Sub-project B/C. The three ids below are DISTINCT and provisional so that signed-tx replay
- * across networks can be prevented once a tx layer exists; replace the values with the reserved
- * ones in B/C. The fork is fixed at Shanghai: it enables {@code PUSH0} (required by modern
- * Solidity) with legacy gas semantics and no blob/KZG machinery.
+ * <p>The {@code CHAINID} opcode reads {@link #chainId()}. The mainnet/testnet/devnet chain-id
+ * triple below is the reserved (defect-4) value set — DISTINCT per network so signed-tx replay
+ * across networks is prevented. At runtime the per-network HOCON {@code evm.chainId} key is
+ * authoritative; these constants are the test/tooling defaults. Confirm no collision on
+ * ethereum-lists/chains before launch. The fork is fixed at Shanghai: it enables {@code PUSH0}
+ * (required by modern Solidity) with legacy gas semantics and no blob/KZG machinery.
  */
 public final class EvmConfig {
 
-    /** Provisional mainnet chain id; replace with the reserved value in Sub-project B/C. */
-    public static final BigInteger MAINNET_CHAIN_ID = BigInteger.valueOf(0xCAFC); // 51964 (provisional)
+    /** Reserved mainnet chain id (confirm no collision on ethereum-lists/chains before launch). */
+    public static final BigInteger MAINNET_CHAIN_ID = BigInteger.valueOf(0xCAFC); // 51964
 
-    /** Provisional testnet chain id; replace with the reserved value in Sub-project B/C. */
-    public static final BigInteger TESTNET_CHAIN_ID = BigInteger.valueOf(0xCAFD); // 51965 (provisional)
+    /** Reserved testnet chain id (confirm no collision on ethereum-lists/chains before launch). */
+    public static final BigInteger TESTNET_CHAIN_ID = BigInteger.valueOf(0xCAFD); // 51965
 
-    /** Provisional devnet chain id; replace with the reserved value in Sub-project B/C. */
-    public static final BigInteger DEVNET_CHAIN_ID = BigInteger.valueOf(0xCAFE); // 51966 (provisional)
+    /** Reserved devnet chain id. */
+    public static final BigInteger DEVNET_CHAIN_ID = BigInteger.valueOf(0xCAFE); // 51966
 
     /** Default ceiling on the gas a single message may request (Ethereum-style block gas limit). */
     public static final long DEFAULT_MAX_GAS_LIMIT = 30_000_000L;
@@ -98,7 +98,7 @@ public final class EvmConfig {
     }
 
     /**
-     * Mainnet configuration: Shanghai fork + provisional mainnet chain id. Type-2 is always active
+     * Mainnet configuration: Shanghai fork + reserved mainnet chain id. Type-2 is always active
      * here (test/tooling default); production networks pass evm.type2ActivationHeight explicitly.
      */
     public static EvmConfig mainnet() {
@@ -106,7 +106,7 @@ public final class EvmConfig {
     }
 
     /**
-     * Testnet configuration: Shanghai fork + provisional testnet chain id. Type-2 is always active
+     * Testnet configuration: Shanghai fork + reserved testnet chain id. Type-2 is always active
      * here (test/tooling default); production networks pass evm.type2ActivationHeight explicitly.
      */
     public static EvmConfig testnet() {
@@ -114,7 +114,7 @@ public final class EvmConfig {
     }
 
     /**
-     * Default development configuration: Shanghai fork + provisional devnet chain id. Type-2 is
+     * Default development configuration: Shanghai fork + reserved devnet chain id. Type-2 is
      * always active here (test/tooling default); production networks pass evm.type2ActivationHeight
      * explicitly.
      */
