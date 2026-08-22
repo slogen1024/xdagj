@@ -1297,4 +1297,29 @@ public class EvmBlockProcessorTest {
         assertEquals("re-execution must regenerate the identical burn record", recorded,
                 meta.getWithdrawals(1L));
     }
+
+    // -------------------------------------------------------------------------
+    // EIP-3529 storage-refund cap helper (G3-T2)
+    // -------------------------------------------------------------------------
+
+    @Test
+    public void eip3529_cap_binds_when_refund_exceeds_a_fifth_of_gas_used() {
+        // rawRefund 50k > 100k/5 = 20k -> capped to 20k
+        assertEquals(20_000L, EvmBlockProcessor.cappedStorageRefund(100_000L, 50_000L, 5L));
+    }
+
+    @Test
+    public void eip3529_cap_passes_a_small_refund_through() {
+        assertEquals(4_800L, EvmBlockProcessor.cappedStorageRefund(100_000L, 4_800L, 5L));
+    }
+
+    @Test
+    public void eip3529_cap_is_zero_for_no_refund_or_no_gas() {
+        assertEquals(0L, EvmBlockProcessor.cappedStorageRefund(100_000L, 0L, 5L));
+        assertEquals(0L, EvmBlockProcessor.cappedStorageRefund(0L, 4_800L, 5L));
+        assertEquals(0L, EvmBlockProcessor.cappedStorageRefund(100_000L, -1L, 5L));
+        assertEquals(0L, EvmBlockProcessor.cappedStorageRefund(-100_000L, 4_800L, 5L)); // negative gross
+        assertEquals(0L, EvmBlockProcessor.cappedStorageRefund(100_000L, 4_800L, 0L));  // zero quotient, no div-by-zero
+        assertEquals(0L, EvmBlockProcessor.cappedStorageRefund(100_000L, 4_800L, -1L)); // negative quotient
+    }
 }

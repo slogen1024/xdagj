@@ -812,6 +812,19 @@ public class EvmBlockProcessor {
     }
 
     /**
+     * EIP-3529 storage-refund cap: a tx is credited at most {@code grossGasUsed / maxRefundQuotient}
+     * (a fifth on London+/Shanghai) of the refund its execution accumulated. Returns 0 for a
+     * non-positive raw refund or quotient. Besu already applies the reduced Shanghai clear-refund
+     * amounts, so this only caps what the frame reported.
+     */
+    static long cappedStorageRefund(long grossGasUsed, long rawRefund, long maxRefundQuotient) {
+        if (rawRefund <= 0L || maxRefundQuotient <= 0L || grossGasUsed <= 0L) {
+            return 0L;
+        }
+        return Math.min(rawRefund, grossGasUsed / maxRefundQuotient);
+    }
+
+    /**
      * Adds {@code deltaWei} (may be negative) to {@code sender}'s balance on the root journal. Callers
      * must ensure the result is non-negative (the executeOne affordability check does). If it is not,
      * this throws a descriptive error instead of {@code Wei.of}'s opaque one; because every caller runs
