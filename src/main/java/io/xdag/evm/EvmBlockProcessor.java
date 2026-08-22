@@ -837,7 +837,10 @@ public class EvmBlockProcessor {
      * EIP-3529 storage-refund cap: a tx is credited at most {@code grossGasUsed / maxRefundQuotient}
      * (a fifth on London+/Shanghai) of the refund its execution accumulated. Returns 0 for a
      * non-positive raw refund or quotient. Besu already applies the reduced Shanghai clear-refund
-     * amounts, so this only caps what the frame reported.
+     * amounts, so this only caps what the frame reported. Valid only while the executor's gas
+     * calculator returns {@code selfDestructRefundAmount() == 0} (London+/Shanghai), so the frame's
+     * accumulated refund is the complete execution refund; a pre-London fork would have to add the
+     * selfdestruct term here to match Besu.
      */
     static long cappedStorageRefund(long grossGasUsed, long rawRefund, long maxRefundQuotient) {
         if (rawRefund <= 0L || maxRefundQuotient <= 0L || grossGasUsed <= 0L) {
