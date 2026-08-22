@@ -87,6 +87,8 @@ public class EvmBlockProcessor {
     private final long type2ActivationHeight;
     /** Height at which the XDAG<->EVM bridge activates; MAX_VALUE = not scheduled (no seeding). */
     private final long bridgeActivationHeight;
+    /** Height at which EIP-3529 net storage refunds apply; MAX_VALUE = not scheduled (no refund). */
+    private final long eip3529ActivationHeight;
     private final KVSource<byte[], byte[]> stateStore;
     private final EvmTxStore txStore;
     private final EvmMetaStore metaStore;
@@ -131,6 +133,7 @@ public class EvmBlockProcessor {
         this.activationHeight = activationHeight;
         this.type2ActivationHeight = config.type2ActivationHeight();
         this.bridgeActivationHeight = config.bridgeActivationHeight();
+        this.eip3529ActivationHeight = config.eip3529ActivationHeight();
         this.stateStore = stateStore;
         this.txStore = txStore;
         this.metaStore = metaStore;
@@ -773,6 +776,7 @@ public class EvmBlockProcessor {
         try {
             BigInteger upfrontGasFee = effectiveGasPrice.multiply(BigInteger.valueOf(tx.getGasLimit()));
             adjustBalance(root, sender, upfrontGasFee.negate()); // upfront gas debit, charged even on revert/OOG
+            long rawStorageRefund = 0L;
             EvmReceipt receipt;
             if (tx.isContractCreation()) {
                 if (messageGas <= 0L) {
@@ -782,6 +786,7 @@ public class EvmBlockProcessor {
                     // deploy() bumps + commits the sender nonce itself, even when execution fails (S-24).
                     XdagExecutionResult result = executor.deploy(root.updater(), sender, tx.getPayload(),
                             tx.getValue(), messageGas, blockValues, Address.ZERO);
+                    rawStorageRefund = result.gasRefund();
                     receipt = receiptOf(result, intrinsicGas);
                 }
             } else {
@@ -794,14 +799,31 @@ public class EvmBlockProcessor {
                 } else {
                     XdagExecutionResult result = executor.call(root.updater(), sender, to, tx.getPayload(),
                             tx.getValue(), messageGas, blockValues, Address.ZERO);
+                    rawStorageRefund = result.gasRefund();
                     receipt = receiptOf(result, intrinsicGas);
                 }
             }
-            // Refund the unconsumed gas; the sender's net gas cost is gasUsed * effectiveGasPrice.
-            long gasUsed = Math.min(receipt.gasUsed(), tx.getGasLimit());
-            BigInteger refund = effectiveGasPrice.multiply(BigInteger.valueOf(tx.getGasLimit() - gasUsed));
-            if (refund.signum() > 0) {
-                adjustBalance(root, sender, refund);
+            // EIP-3529 storage refund (G3-T2). Consensus-gated: the chained root folds receipt.gasUsed,
+            // so below the activation height we keep charging gross (byte-identical to a non-upgraded
+            // node). A refund is earned only by successful execution; Besu already produced the reduced
+            // Shanghai clear-refund amounts, so we only cap (min with gasUsed/quotient) and apply.
+            long grossGasUsed = Math.min(receipt.gasUsed(), tx.getGasLimit());
+            long netGasUsed = grossGasUsed;
+            if (height >= eip3529ActivationHeight && receipt.status() == 1) {
+                long refundedGas =
+                        cappedStorageRefund(grossGasUsed, rawStorageRefund, executor.maxRefundQuotient());
+                if (refundedGas > 0L) {
+                    netGasUsed = grossGasUsed - refundedGas;
+                    receipt = new EvmReceipt(receipt.status(), netGasUsed,
+                            receipt.contractAddress(), receipt.logs());
+                }
+            }
+            // Refund the unused gas at the effective price; the sender's net gas cost is
+            // netGasUsed * effectiveGasPrice.
+            BigInteger gasFeeRefund =
+                    effectiveGasPrice.multiply(BigInteger.valueOf(tx.getGasLimit() - netGasUsed));
+            if (gasFeeRefund.signum() > 0) {
+                adjustBalance(root, sender, gasFeeRefund);
             }
             return receipt;
         } catch (RuntimeException e) {

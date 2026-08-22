@@ -1331,4 +1331,121 @@ public class EvmBlockProcessorTest {
                 30_000_000L, BigInteger.ONE, 0L, Long.MAX_VALUE, 123L);
         assertEquals(123L, scheduled.eip3529ActivationHeight());
     }
+
+    // -------------------------------------------------------------------------
+    // EIP-3529 net-gas integration (G3-T4): gated refund in executeOne
+    // -------------------------------------------------------------------------
+
+    /**
+     * Initcode: constructor SSTOREs slot0 = 42; runtime is {@code 6000600055} (SSTORE slot0 = 0).
+     * Deployed at height 1 (slot set). Called at height 2: clears slot0, earning a storage refund.
+     * The 7-byte runtime (0x60 0x00 0x60 0x00 0x55) is returned by the constructor via a
+     * CODECOPY+RETURN sequence.
+     * Bytecode breakdown:
+     *   602a 6000 55  — constructor: PUSH1 42, PUSH1 0, SSTORE  (slot0 = 42)
+     *   6005 6011 60 00 39 — PUSH1 5, PUSH1 17, PUSH1 0, CODECOPY  (copy 5 runtime bytes from offset 17)
+     *   6005 6000 f3  — PUSH1 5, PUSH1 0, RETURN  (return 5 runtime bytes)
+     *   60 00 60 00 55  — runtime: PUSH1 0, PUSH1 0, SSTORE  (slot0 = 0)
+     */
+    private static final Bytes INIT_SET_THEN_CLEAR =
+            Bytes.fromHexString("0x602a6000556005601160003960056000f36000600055");
+
+    /**
+     * EIP-3529 active vs gated: clearing a storage slot earns a refund only when the activation
+     * height gate is open. This test verifies the full integration: net gas &lt; gross gas when
+     * active, the cap is respected (net &ge; gross - gross/5), and the sender is refunded the
+     * wei difference between gross and net gas fees.
+     */
+    @Test
+    public void eip3529_active_run_charges_net_gas_and_refunds_fee_delta_to_sender() {
+        final BigInteger GAS_PRICE = BigInteger.valueOf(10);
+        final long GAS_LIMIT = 300_000L;
+
+        // --- Active config: EIP-3529 on from height 0 (devnet default). ---
+        EvmConfig activeConfig = EvmConfig.devnet(); // eip3529ActivationHeight = 0
+        InMemoryKVSource activeState = new InMemoryKVSource();
+        EvmTxStore activeTxs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore activeMeta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor activeProc = new EvmBlockProcessor(activeConfig, activeState, activeTxs, activeMeta,
+                0L, List.of(new GenesisAllocEntry(sender, Wei.fromEth(1))));
+        activeProc.seedGenesisIfAbsent();
+
+        // Deploy (height 1, nonce 0): constructor sets slot0 = 42 in the new contract.
+        EvmTransaction activeDeploy = EvmTransaction.unsigned(0L, Wei.of(GAS_PRICE), GAS_LIMIT,
+                Optional.empty(), Wei.ZERO, INIT_SET_THEN_CLEAR, CHAIN_ID).sign(key, algo);
+        activeTxs.put(activeDeploy);
+        activeProc.processMainBlock(List.of(ref(activeDeploy)), 1L, 1001L, BLOCK_HASH_1);
+        EvmReceipt activeDeployReceipt = activeMeta.getReceipt(activeDeploy.getHash()).orElseThrow();
+        assertEquals("active deploy must succeed", 1, activeDeployReceipt.status());
+        Address activeContract = activeDeployReceipt.contractAddress().orElseThrow();
+
+        // Call (height 2, nonce 1): runtime clears slot0 from 42 -> 0, earning a storage refund.
+        EvmTransaction activeCall = EvmTransaction.unsigned(1L, Wei.of(GAS_PRICE), GAS_LIMIT,
+                Optional.of(activeContract), Wei.ZERO, Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+        activeTxs.put(activeCall);
+        BigInteger balanceBeforeActiveCall =
+                new RocksDbWorldUpdater(activeState).getAccount(sender).getBalance().getAsBigInteger();
+        activeProc.processMainBlock(List.of(ref(activeCall)), 2L, 1002L, BLOCK_HASH_2);
+        EvmReceipt activeCallReceipt = activeMeta.getReceipt(activeCall.getHash()).orElseThrow();
+        assertEquals("active call must succeed", 1, activeCallReceipt.status());
+        long netGasUsed = activeCallReceipt.gasUsed();
+        BigInteger balanceAfterActiveCall =
+                new RocksDbWorldUpdater(activeState).getAccount(sender).getBalance().getAsBigInteger();
+
+        // --- Gated config: EIP-3529 activation height = MAX (never active). ---
+        EvmConfig gatedConfig = new EvmConfig(EvmSpecVersion.SHANGHAI, EvmConfig.DEVNET_CHAIN_ID,
+                EvmConfig.DEFAULT_MAX_GAS_LIMIT, EvmConfig.DEFAULT_MIN_GAS_PRICE,
+                EvmConfig.DEFAULT_TYPE2_ACTIVATION_HEIGHT, EvmConfig.DEFAULT_BRIDGE_ACTIVATION_HEIGHT,
+                Long.MAX_VALUE); // eip3529 gated off
+        InMemoryKVSource gatedState = new InMemoryKVSource();
+        EvmTxStore gatedTxs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore gatedMeta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor gatedProc = new EvmBlockProcessor(gatedConfig, gatedState, gatedTxs, gatedMeta,
+                0L, List.of(new GenesisAllocEntry(sender, Wei.fromEth(1))));
+        gatedProc.seedGenesisIfAbsent();
+
+        // Same deploy in gated world (height 1, nonce 0).
+        EvmTransaction gatedDeploy = EvmTransaction.unsigned(0L, Wei.of(GAS_PRICE), GAS_LIMIT,
+                Optional.empty(), Wei.ZERO, INIT_SET_THEN_CLEAR, CHAIN_ID).sign(key, algo);
+        gatedTxs.put(gatedDeploy);
+        gatedProc.processMainBlock(List.of(ref(gatedDeploy)), 1L, 1001L, BLOCK_HASH_1);
+        EvmReceipt gatedDeployReceipt = gatedMeta.getReceipt(gatedDeploy.getHash()).orElseThrow();
+        assertEquals("gated deploy must succeed", 1, gatedDeployReceipt.status());
+        Address gatedContract = gatedDeployReceipt.contractAddress().orElseThrow();
+
+        // Same call in gated world (height 2, nonce 1).
+        EvmTransaction gatedCall = EvmTransaction.unsigned(1L, Wei.of(GAS_PRICE), GAS_LIMIT,
+                Optional.of(gatedContract), Wei.ZERO, Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+        gatedTxs.put(gatedCall);
+        BigInteger balanceBeforeGatedCall =
+                new RocksDbWorldUpdater(gatedState).getAccount(sender).getBalance().getAsBigInteger();
+        gatedProc.processMainBlock(List.of(ref(gatedCall)), 2L, 1002L, BLOCK_HASH_2);
+        EvmReceipt gatedCallReceipt = gatedMeta.getReceipt(gatedCall.getHash()).orElseThrow();
+        assertEquals("gated call must succeed", 1, gatedCallReceipt.status());
+        long grossGasUsed = gatedCallReceipt.gasUsed();
+        BigInteger balanceAfterGatedCall =
+                new RocksDbWorldUpdater(gatedState).getAccount(sender).getBalance().getAsBigInteger();
+
+        // --- Assertions ---
+        assertTrue("EIP-3529 active run must charge strictly less net gas than the gated gross",
+                netGasUsed < grossGasUsed);
+        assertTrue("refund must not exceed gross/5 (the EIP-3529 /5 cap)",
+                (grossGasUsed - netGasUsed) <= grossGasUsed / 5);
+
+        // Active sender net cost = netGasUsed * gasPrice (upfront debit was GAS_LIMIT*price, then refunded unused+storage)
+        BigInteger activeCost = balanceBeforeActiveCall.subtract(balanceAfterActiveCall);
+        BigInteger gatedCost = balanceBeforeGatedCall.subtract(balanceAfterGatedCall);
+        BigInteger expectedFeeSaving = BigInteger.valueOf(grossGasUsed - netGasUsed).multiply(GAS_PRICE);
+        assertEquals("sender must receive exactly (gross-net)*gasPrice more in the active run",
+                expectedFeeSaving, gatedCost.subtract(activeCost));
+
+        // Absolute pin: each run's charged cost must equal exactly gasUsed * gasPrice.
+        // Value is zero for both CALL txs so cost is purely the gas fee. A symmetric over-refund
+        // bug (both runs refunded by the same wrong amount) would satisfy the relative assertion
+        // above while violating these two independent anchors.
+        assertEquals("active run: sender cost must equal netGasUsed * gasPrice",
+                BigInteger.valueOf(netGasUsed).multiply(GAS_PRICE), activeCost);
+        assertEquals("gated run: sender cost must equal grossGasUsed * gasPrice",
+                BigInteger.valueOf(grossGasUsed).multiply(GAS_PRICE), gatedCost);
+    }
 }
