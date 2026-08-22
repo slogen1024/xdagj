@@ -12,11 +12,19 @@ on:
     branches:
       - master
       - develop
+  # Nightly (and on-demand) run of the FULL suite, including the long-running tests that the
+  # per-PR gate excludes (RandomXSyncTest / SyncTest / SnapshotJTest). Keeps PRs fast while still
+  # covering the whole suite regularly — see .claude/docs/evm-mainnet-readiness-and-audit-scope.md §4.
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  # Fast gate: runs on every push/PR to master or develop. Excludes the long-running tests
+  # (surefire.test.excludes in pom.xml) so PRs stay quick.
   build:
 
     runs-on: ubuntu-latest
@@ -55,3 +63,47 @@ jobs:
 
       - name: Build with Maven
         run: mvn clean package
+
+  # Full-suite gate: nightly + manual only. Overrides surefire.test.excludes with a pattern that
+  # matches nothing, so EVERY test runs — including the long-running RandomXSyncTest / SyncTest /
+  # SnapshotJTest that the fast gate skips.
+  full-test:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      # pom requires a JDK 21 toolchain (see misc/toolchains.xml)
+      - name: Register Maven JDK toolchain
+        run: |
+          mkdir -p "$HOME/.m2"
+          cat > "$HOME/.m2/toolchains.xml" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <toolchains xmlns="http://maven.apache.org/TOOLCHAINS/1.1.0"
+                      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                      xsi:schemaLocation="http://maven.apache.org/TOOLCHAINS/1.1.0 https://maven.apache.org/xsd/toolchains-1.1.0.xsd">
+            <toolchain>
+              <type>jdk</type>
+              <provides>
+                <version>21</version>
+              </provides>
+              <configuration>
+                <jdkHome>${JAVA_HOME}</jdkHome>
+              </configuration>
+            </toolchain>
+          </toolchains>
+          EOF
+
+      - name: Build with Maven (full suite, no test exclusions)
+        run: mvn clean package -Dsurefire.test.excludes='**/DoesNotExist.java'
