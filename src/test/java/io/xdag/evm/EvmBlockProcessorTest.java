@@ -1448,4 +1448,137 @@ public class EvmBlockProcessorTest {
         assertEquals("gated run: sender cost must equal grossGasUsed * gasPrice",
                 BigInteger.valueOf(grossGasUsed).multiply(GAS_PRICE), gatedCost);
     }
+
+    // -------------------------------------------------------------------------
+    // EIP-3529 edge cases (G3-T2 step 5): revert earns no refund; replay determinism
+    // -------------------------------------------------------------------------
+
+    /**
+     * Initcode: constructor SSTOREs slot0 = 42; runtime clears slot0 (SSTORE slot0=0) then REVERTs.
+     * Bytecode breakdown:
+     *   602a 6000 55        — constructor: PUSH1 42, PUSH1 0, SSTORE  (slot0 = 42)
+     *   600a 6011 6000 39   — PUSH1 10, PUSH1 17, PUSH1 0, CODECOPY  (copy 10 runtime bytes from offset 17)
+     *   600a 6000 f3        — PUSH1 10, PUSH1 0, RETURN  (return 10 runtime bytes)
+     *   6000 6000 55        — runtime: PUSH1 0, PUSH1 0, SSTORE  (slot0 = 0)
+     *   6000 6000 fd        — runtime: PUSH1 0, PUSH1 0, REVERT
+     */
+    private static final Bytes INIT_CLEAR_THEN_REVERT =
+            Bytes.fromHexString("0x602a600055600a6011600039600a6000f3600060005560006000fd");
+
+    /**
+     * A reverting tx earns NO storage refund even if it cleared a slot during execution.
+     * The EIP-3529 gate is {@code status == 1}; a revert (status 0) bypasses the refund path,
+     * so the call receipt must record GROSS gas in both the active and gated worlds — the two
+     * gasUsed values must be equal.
+     */
+    @Test
+    public void eip3529_reverting_tx_earns_no_storage_refund() {
+        final long GAS_LIMIT = 300_000L;
+
+        // --- Active config: EIP-3529 on from height 0 (devnet default). ---
+        InMemoryKVSource activeState = new InMemoryKVSource();
+        EvmTxStore activeTxs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore activeMeta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor activeProc = new EvmBlockProcessor(EvmConfig.devnet(), activeState, activeTxs,
+                activeMeta, 0L, List.of(new GenesisAllocEntry(sender, Wei.fromEth(1))));
+        activeProc.seedGenesisIfAbsent();
+
+        // Deploy at height 1 (nonce 0): constructor sets slot0 = 42.
+        EvmTransaction activeDeploy = EvmTransaction.unsigned(0L, Wei.of(1), GAS_LIMIT,
+                Optional.empty(), Wei.ZERO, INIT_CLEAR_THEN_REVERT, CHAIN_ID).sign(key, algo);
+        activeTxs.put(activeDeploy);
+        activeProc.processMainBlock(List.of(ref(activeDeploy)), 1L, 1001L, BLOCK_HASH_1);
+        EvmReceipt activeDeployReceipt = activeMeta.getReceipt(activeDeploy.getHash()).orElseThrow();
+        assertEquals("active deploy must succeed", 1, activeDeployReceipt.status());
+        Address activeContract = activeDeployReceipt.contractAddress().orElseThrow();
+
+        // Call at height 2 (nonce 1): runtime clears slot0 then REVERTs.
+        EvmTransaction activeCall = EvmTransaction.unsigned(1L, Wei.of(1), GAS_LIMIT,
+                Optional.of(activeContract), Wei.ZERO, Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+        activeTxs.put(activeCall);
+        activeProc.processMainBlock(List.of(ref(activeCall)), 2L, 1002L, BLOCK_HASH_2);
+        EvmReceipt activeCallReceipt = activeMeta.getReceipt(activeCall.getHash()).orElseThrow();
+        assertEquals("the reverting call must have status 0", 0, activeCallReceipt.status());
+        long activeGasUsed = activeCallReceipt.gasUsed();
+
+        // --- Gated config: EIP-3529 activation height = MAX (never active). ---
+        EvmConfig gatedConfig = new EvmConfig(EvmSpecVersion.SHANGHAI, EvmConfig.DEVNET_CHAIN_ID,
+                EvmConfig.DEFAULT_MAX_GAS_LIMIT, EvmConfig.DEFAULT_MIN_GAS_PRICE,
+                EvmConfig.DEFAULT_TYPE2_ACTIVATION_HEIGHT, EvmConfig.DEFAULT_BRIDGE_ACTIVATION_HEIGHT,
+                Long.MAX_VALUE); // eip3529 gated off
+        InMemoryKVSource gatedState = new InMemoryKVSource();
+        EvmTxStore gatedTxs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore gatedMeta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor gatedProc = new EvmBlockProcessor(gatedConfig, gatedState, gatedTxs, gatedMeta,
+                0L, List.of(new GenesisAllocEntry(sender, Wei.fromEth(1))));
+        gatedProc.seedGenesisIfAbsent();
+
+        // Same deploy in gated world (height 1, nonce 0).
+        EvmTransaction gatedDeploy = EvmTransaction.unsigned(0L, Wei.of(1), GAS_LIMIT,
+                Optional.empty(), Wei.ZERO, INIT_CLEAR_THEN_REVERT, CHAIN_ID).sign(key, algo);
+        gatedTxs.put(gatedDeploy);
+        gatedProc.processMainBlock(List.of(ref(gatedDeploy)), 1L, 1001L, BLOCK_HASH_1);
+        EvmReceipt gatedDeployReceipt = gatedMeta.getReceipt(gatedDeploy.getHash()).orElseThrow();
+        assertEquals("gated deploy must succeed", 1, gatedDeployReceipt.status());
+        Address gatedContract = gatedDeployReceipt.contractAddress().orElseThrow();
+
+        // Same call in gated world (height 2, nonce 1).
+        EvmTransaction gatedCall = EvmTransaction.unsigned(1L, Wei.of(1), GAS_LIMIT,
+                Optional.of(gatedContract), Wei.ZERO, Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+        gatedTxs.put(gatedCall);
+        gatedProc.processMainBlock(List.of(ref(gatedCall)), 2L, 1002L, BLOCK_HASH_2);
+        EvmReceipt gatedCallReceipt = gatedMeta.getReceipt(gatedCall.getHash()).orElseThrow();
+        assertEquals("gated reverting call must also have status 0", 0, gatedCallReceipt.status());
+        long gatedGasUsed = gatedCallReceipt.gasUsed();
+
+        // A reverting tx never enters the refund gate (status != 1), so both worlds charge gross.
+        assertTrue("reverting call must have consumed non-trivial gas (> base 21000)",
+                activeGasUsed > 21_000L);
+        assertEquals("reverting tx earns no refund: active and gated gasUsed must be equal",
+                gatedGasUsed, activeGasUsed);
+    }
+
+    /**
+     * A refunded tx replays to an identical net gasUsed AND an identical chained state root after
+     * a rollback. The EIP-3529 refund path is deterministic: re-executing the same height post-reorg
+     * reproduces the same receipt and the same checkpoint that the chained root folds in.
+     */
+    @Test
+    public void eip3529_refunded_tx_replays_deterministically_after_rollback() {
+        final long GAS_LIMIT = 300_000L;
+
+        // Use the shared processor (EvmConfig.devnet(), EIP-3529 active from height 0).
+        // Deploy INIT_SET_THEN_CLEAR at height 1 (nonce 0): constructor sets slot0 = 42.
+        EvmTransaction deploy = EvmTransaction.unsigned(0L, Wei.of(1), GAS_LIMIT,
+                Optional.empty(), Wei.ZERO, INIT_SET_THEN_CLEAR, CHAIN_ID).sign(key, algo);
+        txStore.put(deploy);
+        processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);
+        EvmReceipt deployReceipt = metaStore.getReceipt(deploy.getHash()).orElseThrow();
+        assertEquals("deploy must succeed", 1, deployReceipt.status());
+        Address contract = deployReceipt.contractAddress().orElseThrow();
+
+        // Call at height 2 (nonce 1): runtime clears slot0 (42 -> 0), earning an EIP-3529 refund.
+        EvmTransaction callTx = EvmTransaction.unsigned(1L, Wei.of(1), GAS_LIMIT,
+                Optional.of(contract), Wei.ZERO, Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+        txStore.put(callTx);
+        processor.processMainBlock(List.of(ref(callTx)), 2L, 1002L, BLOCK_HASH_2);
+        EvmReceipt callReceipt = metaStore.getReceipt(callTx.getHash()).orElseThrow();
+        assertEquals("call must succeed and earn a refund", 1, callReceipt.status());
+        long netGasUsed = callReceipt.gasUsed();
+        Bytes32 rootAtTwo = metaStore.getHeightRecord(2L).orElseThrow().stateRoot();
+
+        // Reorg: roll back to height 1, then re-apply height 2 with the same tx.
+        // rollbackTo(1) wipes state above height 1 and replays heights 1..1 from EVM_META.
+        processor.rollbackTo(1L);
+
+        // Re-apply height 2: callTx blob is still in txStore; the same signed tx object is reused.
+        processor.processMainBlock(List.of(ref(callTx)), 2L, 1002L, BLOCK_HASH_2);
+        EvmReceipt replayedReceipt = metaStore.getReceipt(callTx.getHash()).orElseThrow();
+        assertEquals("replayed call must succeed", 1, replayedReceipt.status());
+
+        assertEquals("replayed net gasUsed must be identical to the original (refund is deterministic)",
+                netGasUsed, replayedReceipt.gasUsed());
+        assertEquals("replayed chained state root must be byte-identical (reorg symmetry)",
+                rootAtTwo, metaStore.getHeightRecord(2L).orElseThrow().stateRoot());
+    }
 }
