@@ -1322,4 +1322,13 @@ public class EvmBlockProcessorTest {
         assertEquals(0L, EvmBlockProcessor.cappedStorageRefund(100_000L, 4_800L, 0L));  // zero quotient, no div-by-zero
         assertEquals(0L, EvmBlockProcessor.cappedStorageRefund(100_000L, 4_800L, -1L)); // negative quotient
     }
+
+    @Test
+    public void eip3529_activation_height_defaults_active_on_devnet_and_roundtrips() {
+        assertEquals("devnet factory activates EIP-3529 at height 0",
+                0L, EvmConfig.devnet().eip3529ActivationHeight());
+        EvmConfig scheduled = new EvmConfig(EvmSpecVersion.SHANGHAI, EvmConfig.DEVNET_CHAIN_ID,
+                30_000_000L, BigInteger.ONE, 0L, Long.MAX_VALUE, 123L);
+        assertEquals(123L, scheduled.eip3529ActivationHeight());
+    }
 }
