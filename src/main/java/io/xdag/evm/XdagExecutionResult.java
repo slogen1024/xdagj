@@ -34,7 +34,8 @@ import org.hyperledger.besu.datatypes.Log;
  *
  * @param success         {@code true} iff the frame halted in {@code COMPLETED_SUCCESS}
  * @param returnData      the bytes returned by RETURN (or the revert payload on failure)
- * @param gasUsed         {@code gasLimit - remainingGas}
+ * @param gasUsed         {@code gasLimit - remainingGas} (gross; before any EIP-3529 refund)
+ * @param gasRefund       the frame's accumulated, UNCAPPED gas refund (EIP-3529 amounts, Besu-computed)
  * @param logs            the events emitted (LOG0..LOG4) during the message
  * @param revertReason    the REVERT reason payload, if the message reverted
  * @param createdContract the new contract address for a successful deployment
@@ -43,6 +44,7 @@ public record XdagExecutionResult(
         boolean success,
         Bytes returnData,
         long gasUsed,
+        long gasRefund,
         List<Log> logs,
         Optional<Bytes> revertReason,
         Optional<Address> createdContract) {
