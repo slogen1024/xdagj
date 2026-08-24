@@ -87,6 +87,10 @@ public class Block implements Cloneable {
     private Bytes32 nonce;
     /** Raw 32-byte EVM tx hash carried in an XDAG_FIELD_EVM_TX_REF field; null when absent. */
     private Bytes32 evmTxRef;
+    /** Block-format version, stored in header byte 0. 0 = legacy; >=1 unlocks the EVM state-root anchor. */
+    private int blockFormatVersion;
+    /** EVM state-root anchor (nibble 0x0A) carried in a versioned main block; null when absent. */
+    private EvmStateAnchor evmStateAnchor;
     private XdagBlock xdagBlock;
     private boolean parsed;
     private boolean isOurs;
@@ -265,6 +269,7 @@ public class Block implements Cloneable {
         this.info.setHash(calcHash());
         Bytes32 header = Bytes32.wrap(xdagBlock.getField(0).getData());
         this.transportHeader = header.getLong(0, ByteOrder.LITTLE_ENDIAN);
+        this.blockFormatVersion = (int) (this.transportHeader & 0xFFL);
         this.info.type = header.getLong(8, ByteOrder.LITTLE_ENDIAN);
         this.info.setTimestamp(header.getLong(16, ByteOrder.LITTLE_ENDIAN));
         this.info.setFee(XAmount.of(header.getLong(24, ByteOrder.LITTLE_ENDIAN), XUnit.NANO_XDAG));
@@ -405,6 +410,7 @@ public class Block implements Cloneable {
         byte[] time = BytesUtils.longToBytes(getTimestamp(), true);
         byte[] type = BytesUtils.longToBytes(getType(), true);
         byte[] transport = new byte[8];
+        transport[0] = (byte) blockFormatVersion; // 0 for legacy blocks => byte-identical
         return BytesUtils.merge(transport, type, time, fee);
     }
 
