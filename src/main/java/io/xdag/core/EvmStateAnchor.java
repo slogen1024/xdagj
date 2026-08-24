@@ -36,7 +36,8 @@ import org.apache.tuweni.bytes.MutableBytes;
  * <ul>
  *   <li>flags bit0 = DA-skip marker (ADR-015): this height's EVM execution was skipped.</li>
  *   <li>height = the anchored EVM height; the lag (evm.stateRootLag) is applied by the caller
- *       (G1-T2). This record is layout-only and stores whatever height it is given.</li>
+ *       (G1-T2). This record is layout-only and stores whatever height it is given.
+ *       height is treated as a signed non-negative long.</li>
  *   <li>rootLow = the low 23 bytes of the 32-byte chained state root committed for {@code height}.</li>
  * </ul>
  */
@@ -73,7 +74,11 @@ public record EvmStateAnchor(long height, Bytes rootLow, boolean daSkip) {
         if (field == null || field.size() != Bytes32.SIZE) {
             throw new IllegalArgumentException("anchor field must be 32 bytes");
         }
-        boolean daSkip = (field.get(0) & FLAG_DA_SKIP) != 0;
+        int flags = field.get(0) & 0xFF;
+        if ((flags & ~FLAG_DA_SKIP) != 0) {
+            throw new IllegalArgumentException("anchor flags has unknown bits set: 0x" + Integer.toHexString(flags));
+        }
+        boolean daSkip = (flags & FLAG_DA_SKIP) != 0;
         long height = field.getLong(1, ByteOrder.BIG_ENDIAN);
         Bytes rootLow = field.slice(9, ROOT_LOW_LENGTH);
         return new EvmStateAnchor(height, rootLow, daSkip);

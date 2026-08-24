@@ -30,6 +30,7 @@ import static org.junit.Assert.assertTrue;
 import java.nio.ByteOrder;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
+import org.apache.tuweni.bytes.MutableBytes;
 import org.junit.Test;
 
 public class EvmStateAnchorTest {
@@ -78,5 +79,24 @@ public class EvmStateAnchorTest {
     @Test(expected = IllegalArgumentException.class)
     public void parse_rejects_a_non_32_byte_field() {
         EvmStateAnchor.parse(Bytes.repeat((byte) 0x00, 16));
+    }
+
+    @Test
+    public void reencode_is_byte_identical() {
+        Bytes32 payload = new EvmStateAnchor(42L, ROOT_LOW, true).toBytes();
+        assertEquals(payload, EvmStateAnchor.parse(payload).toBytes());
+    }
+
+    @Test
+    public void height_zero_is_accepted_and_round_trips() {
+        EvmStateAnchor back = EvmStateAnchor.parse(new EvmStateAnchor(0L, ROOT_LOW, false).toBytes());
+        assertEquals(0L, back.height());
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void parse_rejects_unknown_flag_bits() {
+        MutableBytes bad = MutableBytes.create(32);
+        bad.set(0, (byte) 0x02); // an unknown (reserved) flag bit
+        EvmStateAnchor.parse(bad);
     }
 }
