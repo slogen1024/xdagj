@@ -3,6 +3,7 @@
 > 适用版本：`dev-evm` 分支。本文是**缺陷 5**（"主网未开、上线审计闭环未建立"）的落地产物，
 > 作为第三方安全审计的入口文档与 `evm.enabled = true` 于共享网络前的门槛清单。
 > 交叉引用：[智能合约设计与实施](smart-contract-design-and-implementation.md)（下称"设计文档"，本文 §x.y 均指其章节）。
+> **本文只覆盖"工程硬门槛 + 审计范围"（上线的必要条件）。完整的主网上线排期 + 生态配套（钱包/浏览器/桥 UI/RPC/dApp demo/文档/运营）见 [主网上线与生态建设详细计划](evm-mainnet-launch-and-ecosystem-plan.md)；本文的 §3 硬门槛即该计划的 Track A 关键路径。**
 
 ---
 
@@ -84,9 +85,11 @@ EVM 通过 `applyBlock`（收集）/ `setMain`（执行）/ `unWindMain`（回�
 
 ## 3. §13.3 主网硬门槛（阻塞清单）— 关闭前 `evm.enabled` 不得于共享网络置 true
 
-1. **PoW 承诺的状态根**：当前链式 delta 根仅靠**链下 gossip(0x1E)检测**分歧,不进 PoW 承诺、不硬拒块（4-bit 字段码位已耗尽,设计文档 §1.1/§6.3）。关闭方向：块格式硬分叉腾码位把 (height,root) 锚回原生区块,或引入绝对状态根(MPT/SMT)。
-2. **DA 强制**：blob 真不可得时 EVM **停摆等待**(诚实但有活性风险,设计文档 §5.5/D10)。关闭方向：导入期载荷可用性检查,或共识层带超时跳过标记。**这是 bridge 出金 CRITICAL-skip 降级(§2.5)的前提门槛。**
-3. **费用路由与经济参数**：净费当前**燃烧**(不给 coinbase)；mempool 无 per-sender Sybil 配额；~~EIP-3529 退款按毛 gasUsed 收(偏高)~~ **EIP-3529 精确退款已实现(2026-08-22，G3-T2，门控 `evm.eip3529ActivationHeight`)**。剩余关闭方向：燃烧→coinbase 路由、per-sender 配额。
+> **决策门已全关（2026-08-24）**：四个决策门 ADR-013…016 已裁定签署（`docs/superpowers/specs/2026-08-22-xdag-evm-mainnet-hardfork-adr.md`）。下列三门槛的**方案已定**，但**工程实现仍未完成**——三门槛打包进同一 `activationHeight`，键石 = G1-T1 块格式修订（同时腾 `EVM_STATE_ROOT` 与 DA 跳过标记）。
+
+1. **PoW 承诺的状态根**：当前链式 delta 根仅靠**链下 gossip(0x1E)检测**分歧,不进 PoW 承诺、不硬拒块（4-bit 字段码位已耗尽,设计文档 §1.1/§6.3）。**已裁定（ADR-013/014）**：块格式硬分叉腾码位,新增 `EVM_STATE_ROOT` 字段锚定链式 delta 根 `(height, root(H−δ))`；δ=`evm.stateRootLag`（建议 16）；分歧 mainnet 硬拒 / testnet 先告警；绝对状态根 MPT 排到主网后 fork。**工程待做**（G1-T1…T4）。
+2. **DA 强制**：blob 真不可得时 EVM **停摆等待**(诚实但有活性风险,设计文档 §5.5/D10)。**已裁定（ADR-015，方案 B）**：矿工在块内提交 EVM include/skip 标记（与 G1-T1 共用块格式），include 则必须已让 blob 可得否则块无效,skip 全网确定性跳过。**这是 bridge 出金 CRITICAL-skip 降级(§2.5)的前提门槛**——B 落地后该降级变为确定性有界路径。**工程待做**（G2-T1…T3）。
+3. **费用路由与经济参数**：净费当前**燃烧**(不给 coinbase)；mempool 无 per-sender Sybil 配额；~~EIP-3529 退款按毛 gasUsed 收(偏高)~~ **EIP-3529 精确退款已实现(2026-08-22，G3-T2，门控 `evm.eip3529ActivationHeight`)**。**已裁定（ADR-016）**：净费路由到**矿工奖励池 `PoolAwardManager`**（wei→nano 向下取整、尘额燃烧）,非 coinbase 直记；per-sender 配额（G3-T3，节点本地非 HF，即刻可做）。**工程待做**（G3-T1、G3-T3）。
 
 > chainId 注册与激活高度见 §5 与设计文档 §13.1 缺陷 4——属配置/流程,非本节工程门槛。
 
