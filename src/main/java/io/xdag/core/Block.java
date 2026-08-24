@@ -113,6 +113,7 @@ public class Block implements Cloneable {
         this(config, timestamp, links, pendings, mining, keys, remark, defKeyIndex, fee, txNonce, null);
     }
 
+    // Legacy 11-arg constructor (pre state-root anchor). Delegates with no anchor.
     public Block(
             Config config,
             long timestamp,
@@ -125,6 +126,23 @@ public class Block implements Cloneable {
             XAmount fee,
             UInt64 txNonce,
             Bytes32 evmTxRef) {
+        this(config, timestamp, links, pendings, mining, keys, remark, defKeyIndex, fee, txNonce,
+                evmTxRef, null);
+    }
+
+    public Block(
+            Config config,
+            long timestamp,
+            List<Address> links,
+            List<Address> pendings,
+            boolean mining,
+            List<ECKeyPair> keys,
+            String remark,
+            int defKeyIndex,
+            XAmount fee,
+            UInt64 txNonce,
+            Bytes32 evmTxRef,
+            EvmStateAnchor evmStateAnchor) {
         parsed = true;
         info = new BlockInfo();
         this.info.setTimestamp(timestamp);
@@ -171,6 +189,13 @@ public class Block implements Cloneable {
         if (evmTxRef != null) {
             this.evmTxRef = evmTxRef;
             setType(XDAG_FIELD_EVM_TX_REF, lenghth++);
+        }
+
+        if (evmStateAnchor != null) {
+            this.evmStateAnchor = evmStateAnchor;
+            this.blockFormatVersion = 1;
+            // Physical nibble 0x0A; a version>=1 block reinterprets it as EVM_STATE_ROOT on parse.
+            setType(XDAG_FIELD_SNAPSHOT, lenghth++);
         }
 
         if (StringUtils.isAsciiPrintable(remark)) {
@@ -282,6 +307,13 @@ public class Block implements Cloneable {
                 // Raw big-endian 32-byte EVM tx hash; deliberately NOT an Address/link (Address
                 // fields only carry 24-byte hashlows) and never written with .reverse().
                 case XDAG_FIELD_EVM_TX_REF -> this.evmTxRef = Bytes32.wrap(field.getData());
+                // Versioned reinterpretation: in a v>=1 block, nibble 0x0A is the EVM state-root
+                // anchor. In a legacy (v0) block it stays a snapshot field (ignored here, as before).
+                case XDAG_FIELD_SNAPSHOT -> {
+                    if (this.blockFormatVersion >= 1) {
+                        this.evmStateAnchor = EvmStateAnchor.parse(field.getData());
+                    }
+                }
                 case XDAG_FIELD_TRANSACTION_NONCE -> txNonceField = new TxAddress(field);
                 case XDAG_FIELD_IN -> inputs.add(new Address(field, false));
                 case XDAG_FIELD_INPUT -> inputs.add(new Address(field, true));
@@ -388,9 +420,13 @@ public class Block implements Cloneable {
         for (Address link : all) {
             encoder.writeField(link.getData().reverse().toArray());
         }
-        // Must mirror the constructor's setType order: links, then the EVM tx ref, then remark.
+        // Must mirror the constructor's setType order: links, then the EVM tx ref, then the
+        // state-root anchor, then remark.
         if (evmTxRef != null) {
             encoder.writeField(evmTxRef.toArray());
+        }
+        if (evmStateAnchor != null) {
+            encoder.writeField(evmStateAnchor.toBytes().toArray());
         }
         if (info.getRemark() != null) {
             encoder.write(info.getRemark());

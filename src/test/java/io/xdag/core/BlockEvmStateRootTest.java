@@ -24,6 +24,10 @@
 package io.xdag.core;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
@@ -37,6 +41,7 @@ public class BlockEvmStateRootTest {
 
     private final Config config = new DevnetConfig();
     private final ECKeyPair key = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
+    private final Bytes rootLow = Bytes.repeat((byte) 0xCD, EvmStateAnchor.ROOT_LOW_LENGTH);
 
     private long now() {
         return XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(System.currentTimeMillis()));
@@ -67,5 +72,39 @@ public class BlockEvmStateRootTest {
                 XAmount.ZERO, null);
         block.setBlockFormatVersion(256);
         block.getXdagBlock(); // triggers getEncodedHeader() -> range guard
+    }
+
+    @Test
+    public void anchor_round_trips_and_marks_version_1() {
+        EvmStateAnchor anchor = new EvmStateAnchor(42L, rootLow, false);
+        Block block = new Block(config, now(), null, null, false, null, null, -1,
+                XAmount.ZERO, null, null, anchor);
+        block.signOut(key);
+
+        Block reparsed = roundTrip(block);
+        assertEquals(1, reparsed.getBlockFormatVersion());
+        assertNotNull(reparsed.getEvmStateAnchor());
+        assertEquals(42L, reparsed.getEvmStateAnchor().height());
+        assertEquals(rootLow, reparsed.getEvmStateAnchor().rootLow());
+        assertFalse(reparsed.getEvmStateAnchor().daSkip());
+        assertTrue("anchor is not a DAG link", reparsed.getLinks().isEmpty());
+        assertNotNull("signature survives the anchor field", reparsed.getOutsig());
+    }
+
+    @Test
+    public void a_da_skip_anchor_round_trips() {
+        EvmStateAnchor anchor = new EvmStateAnchor(9L, rootLow, true);
+        Block block = new Block(config, now(), null, null, false, null, null, -1,
+                XAmount.ZERO, null, null, anchor);
+        block.signOut(key);
+        assertTrue(roundTrip(block).getEvmStateAnchor().daSkip());
+    }
+
+    @Test
+    public void a_block_without_an_anchor_parses_to_null() {
+        Block block = new Block(config, now(), null, null, false, null, null, -1,
+                XAmount.ZERO, null);
+        block.signOut(key);
+        assertNull(roundTrip(block).getEvmStateAnchor());
     }
 }
