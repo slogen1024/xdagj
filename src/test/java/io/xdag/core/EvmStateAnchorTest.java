@@ -65,10 +65,14 @@ public class EvmStateAnchorTest {
     }
 
     @Test
-    public void rootLowOf_takes_the_low_23_bytes_of_a_full_root() {
-        Bytes32 full = Bytes32.wrap(Bytes.concatenate(
-                Bytes.fromHexString("0x1122"), Bytes.repeat((byte) 0, 30)));
-        assertEquals(full.slice(9, 23), EvmStateAnchor.rootLowOf(full));
+    public void rootLowOf_takes_the_low_23_bytes_dropping_the_high_9() {
+        MutableBytes b = MutableBytes.create(32);
+        for (int i = 0; i < 32; i++) {
+            b.set(i, (byte) i); // 0x00,0x01,...,0x1F — every byte distinct
+        }
+        Bytes expected = Bytes.fromHexString("0x090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+        assertEquals(expected, EvmStateAnchor.rootLowOf(Bytes32.wrap(b)));
+        assertEquals(23, EvmStateAnchor.rootLowOf(Bytes32.wrap(b)).size());
     }
 
     @Test(expected = IllegalArgumentException.class)
@@ -91,6 +95,15 @@ public class EvmStateAnchorTest {
     public void height_zero_is_accepted_and_round_trips() {
         EvmStateAnchor back = EvmStateAnchor.parse(new EvmStateAnchor(0L, ROOT_LOW, false).toBytes());
         assertEquals(0L, back.height());
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void parse_rejects_a_high_bit_height_as_negative() {
+        // Byte 1 is the top byte of the big-endian height; 0xFF there decodes to a negative long,
+        // which the "signed non-negative long" contract must reject on parse.
+        MutableBytes field = MutableBytes.create(32);
+        field.set(1, (byte) 0xFF);
+        EvmStateAnchor.parse(field);
     }
 
     @Test(expected = IllegalArgumentException.class)

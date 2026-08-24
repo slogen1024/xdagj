@@ -311,6 +311,8 @@ public class Block implements Cloneable {
                 // anchor. In a legacy (v0) block it stays a snapshot field (ignored here, as before).
                 case XDAG_FIELD_SNAPSHOT -> {
                     if (this.blockFormatVersion >= 1) {
+                        // NOTE: every version >= 1 is treated as the v1 anchor layout; a future
+                        // format version that redefines nibble 0x0A must branch on the exact version.
                         this.evmStateAnchor = EvmStateAnchor.parse(field.getData());
                     }
                 }
