@@ -33,8 +33,13 @@ import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
 import io.xdag.crypto.SampleKeys;
 import io.xdag.crypto.keys.ECKeyPair;
+import io.xdag.utils.BytesUtils;
 import io.xdag.utils.XdagTime;
+import java.nio.ByteOrder;
 import org.apache.tuweni.bytes.Bytes;
+import org.apache.tuweni.bytes.Bytes32;
+import org.apache.tuweni.bytes.MutableBytes;
+import org.hyperledger.besu.crypto.Hash;
 import org.junit.Test;
 
 public class BlockEvmStateRootTest {
@@ -106,5 +111,39 @@ public class BlockEvmStateRootTest {
                 XAmount.ZERO, null);
         block.signOut(key);
         assertNull(roundTrip(block).getEvmStateAnchor());
+    }
+
+    @Test
+    public void a_legacy_v0_block_with_a_0x0A_nibble_is_not_read_as_an_anchor() {
+        // Craft a legacy block, then manually flip an unused slot's nibble to 0x0A (SNAPSHOT). Because
+        // the format version stays 0, parse must NOT treat it as an EVM anchor (legacy path intact).
+        Block block = new Block(config, now(), null, null, false, null, null, -1,
+                XAmount.ZERO, null);
+        block.signOut(key);
+
+        MutableBytes data = block.getXdagBlock().getData().mutableCopy();
+        long typeWord = data.getLong(8, ByteOrder.LITTLE_ENDIAN);
+        typeWord |= 0x0AL << (5 * 4);                       // slot 5 nibble = 0x0A, unused in this block
+        data.set(8, Bytes.wrap(BytesUtils.longToBytes(typeWord, true)));
+
+        Block reparsed = new Block(new XdagBlock(data));
+        reparsed.parse();
+        assertEquals(0, reparsed.getBlockFormatVersion());
+        assertNull("a v0 0x0A stays a snapshot field, never an anchor", reparsed.getEvmStateAnchor());
+    }
+
+    @Test
+    public void the_anchor_coexists_with_the_evm_tx_ref_and_a_remark() {
+        Bytes32 txRef = Hash.keccak256(Bytes.wrap("batch".getBytes()));
+        EvmStateAnchor anchor = new EvmStateAnchor(100L, rootLow, false);
+        Block block = new Block(config, now(), null, null, false, null, "hi", -1,
+                XAmount.ZERO, null, txRef, anchor);
+        block.signOut(key);
+
+        Block reparsed = roundTrip(block);
+        assertEquals(txRef, reparsed.getEvmTxRef());
+        assertEquals(100L, reparsed.getEvmStateAnchor().height());
+        assertNotNull(reparsed.getInfo().getRemark());
+        assertNotNull(reparsed.getOutsig());
     }
 }
