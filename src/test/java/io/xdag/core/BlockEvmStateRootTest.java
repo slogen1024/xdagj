@@ -60,4 +60,12 @@ public class BlockEvmStateRootTest {
         Bytes transport = reparsed.getXdagBlock().getData().slice(0, 8);
         assertEquals(Bytes.repeat((byte) 0x00, 8), transport);
     }
+
+    @Test(expected = IllegalStateException.class)
+    public void a_version_beyond_one_byte_is_rejected() {
+        Block block = new Block(config, now(), null, null, false, null, null, -1,
+                XAmount.ZERO, null);
+        block.setBlockFormatVersion(256);
+        block.getXdagBlock(); // triggers getEncodedHeader() -> range guard
+    }
 }

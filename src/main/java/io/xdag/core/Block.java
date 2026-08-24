@@ -409,6 +409,9 @@ public class Block implements Cloneable {
         byte[] fee = BytesUtils.longToBytes(Long.parseLong(getFee().toString()), true);
         byte[] time = BytesUtils.longToBytes(getTimestamp(), true);
         byte[] type = BytesUtils.longToBytes(getType(), true);
+        if (blockFormatVersion < 0 || blockFormatVersion > 0xFF) {
+            throw new IllegalStateException("blockFormatVersion out of 1-byte range: " + blockFormatVersion);
+        }
         byte[] transport = new byte[8];
         transport[0] = (byte) blockFormatVersion; // 0 for legacy blocks => byte-identical
         return BytesUtils.merge(transport, type, time, fee);
