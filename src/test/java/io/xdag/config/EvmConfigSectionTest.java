@@ -135,6 +135,13 @@ public class EvmConfigSectionTest {
     }
 
     @Test
+    public void state_root_hard_reject_is_off_by_default_and_on_for_mainnet() {
+        assertFalse(new DevnetConfig().getEvmSpec().isEvmStateRootHardReject());
+        assertFalse(new TestnetConfig().getEvmSpec().isEvmStateRootHardReject());
+        assertTrue(new MainnetConfig().getEvmSpec().isEvmStateRootHardReject());
+    }
+
+    @Test
     public void devnet_funds_the_standard_test_address_in_genesis_alloc() {
         // The funding on-ramp: devnet pre-funds the standard test address (private key 1); the other
         // networks fund nothing at genesis.

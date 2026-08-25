@@ -31,6 +31,7 @@ import com.google.common.cache.CacheBuilder;
 import io.xdag.Kernel;
 import io.xdag.Wallet;
 import io.xdag.config.MainnetConfig;
+import io.xdag.config.spec.EvmSpec;
 import io.xdag.core.XdagField.FieldType;
 import io.xdag.consensus.RandomX;
 import io.xdag.crypto.core.CryptoProvider;
@@ -1349,6 +1350,31 @@ public class BlockchainImpl implements Blockchain {
         synchronized (this) {
             // Set reward
             long mainNumber = xdagStats.nmain + 1;
+            // Lock order invariant: we hold the BlockchainImpl monitor and reach into the
+            // EvmBlockProcessor monitor (chainedRootAt). Consistent with setMain->processMainBlock and
+            // unWindMain->rollbackTo; EvmBlockProcessor never calls back into BlockchainImpl, so there
+            // is no reverse edge and no deadlock.
+            EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
+            if (evmProcessor != null) {
+                EvmSpec evmSpec = kernel.getConfig().getEvmSpec();
+                EvmStateAnchor blockAnchor = block.getEvmStateAnchor();
+                AnchorVerdict verdict = verifyStateRootAnchor(blockAnchor, mainNumber,
+                        evmSpec.getEvmStateRootActivationHeight(), evmSpec.getEvmStateRootLag(),
+                        evmProcessor::chainedRootAt);
+                if (verdict == AnchorVerdict.MISMATCH) {
+                    long anchorHeight = mainNumber - evmSpec.getEvmStateRootLag();
+                    Bytes32 expectedRoot = evmProcessor.chainedRootAt(anchorHeight);
+                    if (evmSpec.isEvmStateRootHardReject()) {
+                        log.error("CRITICAL: EVM state-root anchor mismatch at height {} - refusing to "
+                                + "advance the main chain (hard-reject). committed={}, this node's root "
+                                + "as-of {} = {}", mainNumber, blockAnchor, anchorHeight, expectedRoot);
+                        return;
+                    }
+                    log.warn("EVM state-root anchor mismatch at height {} - proceeding (warn-only). "
+                            + "committed={}, this node's root as-of {} = {}",
+                            mainNumber, blockAnchor, anchorHeight, expectedRoot);
+                }
+            }
             log.debug("mainNumber = {},hash = {}", mainNumber, Hex.toHexString(block.getInfo().getHash()));
             XAmount reward = getReward(mainNumber);
             block.getInfo().setHeight(mainNumber);
@@ -1374,7 +1400,6 @@ public class BlockchainImpl implements Blockchain {
             // EVM finality is aligned with main-block confirmation (spec §7.1): execute the refs
             // collected during the DFS, in visit order, against the persisted EVM world state.
             long timestampSeconds = XdagTime.xdagTimestampToMs(block.getTimestamp()) / 1000;
-            EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
             // Deposits are consensus-gated HERE by the bridge activation height (exact: mainNumber
             // is the confirmed height). Pre-activation deposits are plain transfers: retained at the
             // lock address, never minted retroactively (spec §1).
@@ -1614,6 +1639,40 @@ public class BlockchainImpl implements Blockchain {
             return null;
         }
         return new EvmStateAnchor(anchorHeight, EvmStateAnchor.rootLowOf(rootAt.apply(anchorHeight)), false);
+    }
+
+    /** Verdict of validating a main block's state-root anchor against this node's own chained root. */
+    public enum AnchorVerdict {
+        /** Anchor present and both its height and root agree with this node. */
+        MATCH,
+        /** Anchor missing when required, or its height/root disagree -- a definite divergence. */
+        MISMATCH,
+        /** Anchoring is not active at this height (below activation, or too early to lag) -- ignore. */
+        ABSENT
+    }
+
+    /**
+     * Validates a main block's state-root anchor. Mirrors {@link #computeStateRootAnchor}'s guards so
+     * an honest miner and this validator agree: below {@code activationHeight} or when {@code
+     * height - lag < 0} anchoring is inactive (ABSENT). Otherwise an anchor is REQUIRED and must
+     * commit BOTH the exact lag height {@code height - lag} AND the chained root as of that height
+     * (via {@code rootAt}, in production {@code EvmBlockProcessor::chainedRootAt}). Pure/static for
+     * testability. {@code lag} is assumed >= 1 (config-enforced; see computeStateRootAnchor).
+     */
+    static AnchorVerdict verifyStateRootAnchor(EvmStateAnchor anchor, long height, long activationHeight,
+            long lag, java.util.function.LongFunction<Bytes32> rootAt) {
+        if (height < activationHeight) {
+            return AnchorVerdict.ABSENT;
+        }
+        long expectedHeight = height - lag;
+        if (expectedHeight < 0) {
+            return AnchorVerdict.ABSENT;
+        }
+        if (anchor == null || anchor.height() != expectedHeight) {
+            return AnchorVerdict.MISMATCH;
+        }
+        Bytes expectedLow = EvmStateAnchor.rootLowOf(rootAt.apply(expectedHeight));
+        return anchor.rootLow().equals(expectedLow) ? AnchorVerdict.MATCH : AnchorVerdict.MISMATCH;
     }
 
     public Block createMainBlock() {
