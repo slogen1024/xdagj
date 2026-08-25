@@ -26,6 +26,7 @@ package io.xdag.evm;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -855,6 +856,25 @@ public class EvmBlockProcessorTest {
         assertTrue("no longer pending", metaStore.pendingHeights().isEmpty());
     }
 
+    @Test
+    public void chained_root_at_returns_the_root_as_of_a_height() {
+        Bytes32 root5 = Bytes32.fromHexString("0x" + "aa".repeat(32));
+        Bytes32 root9 = Bytes32.fromHexString("0x" + "bb".repeat(32));
+        metaStore.putHeightRecord(5L, root5, Bytes32.ZERO, 1, 1L);
+        metaStore.putHeightRecord(9L, root9, Bytes32.ZERO, 1, 2L);
+
+        assertEquals(root9, processor.chainedRootAt(9L));   // exact top
+        assertEquals(root9, processor.chainedRootAt(20L));  // above all -> latest
+        assertEquals(root5, processor.chainedRootAt(8L));   // between -> floor is height 5
+        assertEquals(root5, processor.chainedRootAt(5L));   // exact lower
+
+        // Below the first checkpoint: the genesis origin root (deterministic, non-null, not a seeded root).
+        Bytes32 belowAll = processor.chainedRootAt(4L);
+        assertNotNull(belowAll);
+        assertEquals("genesis default is stable", belowAll, processor.chainedRootAt(0L));
+        assertNotEquals(root5, belowAll);
+    }
+
     // -------------------------------------------------------------------------
     // Phase 3a: bridge deposits mint before the height's txs, replay-covered via EVM_META 0x06
     // -------------------------------------------------------------------------
@@ -1580,5 +1600,19 @@ public class EvmBlockProcessorTest {
                 netGasUsed, replayedReceipt.gasUsed());
         assertEquals("replayed chained state root must be byte-identical (reorg symmetry)",
                 rootAtTwo, metaStore.getHeightRecord(2L).orElseThrow().stateRoot());
+    }
+
+    @Test
+    public void chained_root_at_follows_a_reorg_unwind() {
+        Bytes32 root3 = Bytes32.fromHexString("0x" + "33".repeat(32));
+        Bytes32 root7 = Bytes32.fromHexString("0x" + "77".repeat(32));
+        metaStore.putHeightRecord(3L, root3, Bytes32.ZERO, 1, 1L);
+        metaStore.putHeightRecord(7L, root7, Bytes32.ZERO, 1, 2L);
+        assertEquals(root7, processor.chainedRootAt(9L)); // top before the unwind
+
+        metaStore.removeAbove(5L); // reorg: drop every checkpoint above height 5 (removes height 7)
+
+        assertEquals("after unwinding past height 7, the as-of root falls back to the height-3 floor",
+                root3, processor.chainedRootAt(9L));
     }
 }

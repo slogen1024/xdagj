@@ -157,6 +157,23 @@ public class EvmMetaStore {
         return max < 0 ? Optional.empty() : Optional.of(max);
     }
 
+    /**
+     * The highest checkpointed main height that is {@code <= ceiling}, or empty if none. Bounded
+     * variant of {@link #highestHeight()} — used to read the chained root "as of" a height (empty
+     * and deposit-only heights inherit the prior checkpoint, since the chained root only advances
+     * on checkpointed heights).
+     */
+    public Optional<Long> highestHeightAtMost(long ceiling) {
+        long max = -1;
+        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_HEIGHT})) {
+            long h = heightFromKey(key);
+            if (h <= ceiling) {
+                max = Math.max(max, h);
+            }
+        }
+        return max < 0 ? Optional.empty() : Optional.of(max);
+    }
+
     private static byte[] txListKey(long height) {
         byte[] key = heightKey(height);
         key[0] = PREFIX_TX_LIST;

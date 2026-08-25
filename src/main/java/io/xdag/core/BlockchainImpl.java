@@ -1594,6 +1594,28 @@ public class BlockchainImpl implements Blockchain {
         return new Block(kernel.getConfig(), sendTime[0], all, refs, mining, keys, remark, defKeyIndex, fee, txNonce);
     }
 
+    /**
+     * The state-root anchor to embed in the next main block, or {@code null} when anchoring is not
+     * yet active or there is no lagged height to anchor. Static and pure for testability -- {@code
+     * rootAt} supplies the chained root as of a height (in production, {@code EvmBlockProcessor::
+     * chainedRootAt}). G1-T2 never sets the DA-skip flag (that is G2). The lag must be >= 1: a lag of
+     * 0 would anchor root(H), which is not yet executed when H is mined.
+     */
+    static EvmStateAnchor computeStateRootAnchor(long nextHeight, long activationHeight, long lag,
+            java.util.function.LongFunction<Bytes32> rootAt) {
+        if (lag < 1) {
+            throw new IllegalArgumentException("evm.stateRootLag must be >= 1 (got " + lag + ")");
+        }
+        if (nextHeight < activationHeight) {
+            return null;
+        }
+        long anchorHeight = nextHeight - lag;
+        if (anchorHeight < 0) {
+            return null;
+        }
+        return new EvmStateAnchor(anchorHeight, EvmStateAnchor.rootLowOf(rootAt.apply(anchorHeight)), false);
+    }
+
     public Block createMainBlock() {
         // <header + remark + outsig + nonce>
         int res = 1 + 1 + 2 + 1;
@@ -1620,20 +1642,37 @@ public class BlockchainImpl implements Blockchain {
         refs.add(coinbase);
         res++;
 
-        List<Address> orphans = getBlockFromOrphanPool(16 - res, sendTime, true);
-        if (CollectionUtils.isNotEmpty(orphans)) {
-            refs.addAll(orphans);
-        }
         // Predict this block's height as nmain+1; the confirmed height may differ after a reorg, but
         // the executor's dual-lookup (EvmBlockProcessor.expandRefs) is content-addressed — it accepts
         // both ref forms at any height — so a boundary mis-prediction is liveness-safe.
         long nextHeight = xdagStats.nmain + 1;
+        // Compute the state-root anchor before the orphan/evmTxRef budget is spent so its one field
+        // slot is reserved (the anchor occupies a field like evmTxRef does).
+        // Best-effort snapshot: nmain and chainedRootAt are read outside the blockchain monitor, so a
+        // concurrent setMain/rollbackTo could make this anchor stale or off-by-one. Liveness-safe like
+        // the evmTxRef above -- the candidate's anchor is re-validated against this node's own
+        // post-setMain root at import time (G1-T3), so a stale anchor yields a discarded candidate,
+        // never a fork.
+        EvmStateAnchor stateRootAnchor = null;
+        EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
+        if (evmProcessor != null) {
+            io.xdag.config.spec.EvmSpec evmSpec = kernel.getConfig().getEvmSpec();
+            stateRootAnchor = computeStateRootAnchor(nextHeight, evmSpec.getEvmStateRootActivationHeight(),
+                    evmSpec.getEvmStateRootLag(), evmProcessor::chainedRootAt);
+        }
+        if (stateRootAnchor != null) {
+            res++; // reserve the anchor's field slot
+        }
+        List<Address> orphans = getBlockFromOrphanPool(16 - res, sendTime, true);
+        if (CollectionUtils.isNotEmpty(orphans)) {
+            refs.addAll(orphans);
+        }
         boolean batchFork = nextHeight >= kernel.getConfig().getEvmSpec().getEvmBatchActivationHeight();
         boolean type2Active = nextHeight >= kernel.getConfig().getEvmSpec().getEvmType2ActivationHeight();
         Bytes32 evmTxRef = batchFork ? selectEvmBatch(16 - res - orphans.size(), type2Active)
                 : selectEvmTxRef(16 - res - orphans.size(), type2Active);
         return new Block(kernel.getConfig(), sendTime[0], null, refs, true, null,
-                kernel.getConfig().getNodeSpec().getNodeTag(), -1, XAmount.ZERO, null, evmTxRef);
+                kernel.getConfig().getNodeSpec().getNodeTag(), -1, XAmount.ZERO, null, evmTxRef, stateRootAnchor);
     }
 
     /**
