@@ -1349,6 +1349,21 @@ public class BlockchainImpl implements Blockchain {
         synchronized (this) {
             // Set reward
             long mainNumber = xdagStats.nmain + 1;
+            EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
+            if (evmProcessor != null) {
+                io.xdag.config.spec.EvmSpec evmSpec = kernel.getConfig().getEvmSpec();
+                AnchorVerdict verdict = verifyStateRootAnchor(block.getEvmStateAnchor(), mainNumber,
+                        evmSpec.getEvmStateRootActivationHeight(), evmSpec.getEvmStateRootLag(),
+                        evmProcessor::chainedRootAt);
+                if (verdict == AnchorVerdict.MISMATCH) {
+                    if (evmSpec.isEvmStateRootHardReject()) {
+                        log.error("CRITICAL: EVM state-root anchor mismatch at height {} - refusing to "
+                                + "advance the main chain (hard-reject)", mainNumber);
+                        return;
+                    }
+                    log.error("EVM state-root anchor mismatch at height {} - proceeding (warn-only)", mainNumber);
+                }
+            }
             log.debug("mainNumber = {},hash = {}", mainNumber, Hex.toHexString(block.getInfo().getHash()));
             XAmount reward = getReward(mainNumber);
             block.getInfo().setHeight(mainNumber);
@@ -1374,7 +1389,6 @@ public class BlockchainImpl implements Blockchain {
             // EVM finality is aligned with main-block confirmation (spec §7.1): execute the refs
             // collected during the DFS, in visit order, against the persisted EVM world state.
             long timestampSeconds = XdagTime.xdagTimestampToMs(block.getTimestamp()) / 1000;
-            EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
             // Deposits are consensus-gated HERE by the bridge activation height (exact: mainNumber
             // is the confirmed height). Pre-activation deposits are plain transfers: retained at the
             // lock address, never minted retroactively (spec §1).
