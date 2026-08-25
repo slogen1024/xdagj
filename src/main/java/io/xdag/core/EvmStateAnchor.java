@@ -37,7 +37,9 @@ import org.apache.tuweni.bytes.MutableBytes;
  *   <li>flags bit0 = DA-skip marker (ADR-015): this height's EVM execution was skipped.</li>
  *   <li>height = the anchored EVM height; the lag (evm.stateRootLag) is applied by the caller
  *       (G1-T2). This record is layout-only and stores whatever height it is given.
- *       height is treated as a signed non-negative long.</li>
+ *       height is treated as a signed non-negative long (this is the REQUESTED lag height, not
+ *       necessarily the checkpoint height the root came from; validators recompute via
+ *       EvmBlockProcessor.chainedRootAt(height)).</li>
  *   <li>rootLow = the low 23 bytes of the 32-byte chained state root committed for {@code height}.</li>
  * </ul>
  */

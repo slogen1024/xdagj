@@ -1648,6 +1648,11 @@ public class BlockchainImpl implements Blockchain {
         long nextHeight = xdagStats.nmain + 1;
         // Compute the state-root anchor before the orphan/evmTxRef budget is spent so its one field
         // slot is reserved (the anchor occupies a field like evmTxRef does).
+        // Best-effort snapshot: nmain and chainedRootAt are read outside the blockchain monitor, so a
+        // concurrent setMain/rollbackTo could make this anchor stale or off-by-one. Liveness-safe like
+        // the evmTxRef above -- the candidate's anchor is re-validated against this node's own
+        // post-setMain root at import time (G1-T3), so a stale anchor yields a discarded candidate,
+        // never a fork.
         EvmStateAnchor stateRootAnchor = null;
         EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
         if (evmProcessor != null) {

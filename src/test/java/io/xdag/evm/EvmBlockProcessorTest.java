@@ -1601,4 +1601,18 @@ public class EvmBlockProcessorTest {
         assertEquals("replayed chained state root must be byte-identical (reorg symmetry)",
                 rootAtTwo, metaStore.getHeightRecord(2L).orElseThrow().stateRoot());
     }
+
+    @Test
+    public void chained_root_at_follows_a_reorg_unwind() {
+        Bytes32 root3 = Bytes32.fromHexString("0x" + "33".repeat(32));
+        Bytes32 root7 = Bytes32.fromHexString("0x" + "77".repeat(32));
+        metaStore.putHeightRecord(3L, root3, Bytes32.ZERO, 1, 1L);
+        metaStore.putHeightRecord(7L, root7, Bytes32.ZERO, 1, 2L);
+        assertEquals(root7, processor.chainedRootAt(9L)); // top before the unwind
+
+        metaStore.removeAbove(5L); // reorg: drop every checkpoint above height 5 (removes height 7)
+
+        assertEquals("after unwinding past height 7, the as-of root falls back to the height-3 floor",
+                root3, processor.chainedRootAt(9L));
+    }
 }

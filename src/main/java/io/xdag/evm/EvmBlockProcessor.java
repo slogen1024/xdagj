@@ -549,6 +549,12 @@ public class EvmBlockProcessor {
      * checkpoints — the miner (G1-T2) commits this at H-delta and the validator (G1-T3) recomputes the
      * same value. Empty/deposit-only heights inherit the prior checkpoint (the chained root only
      * advances on checkpointed heights).
+     *
+     * <p><b>Validator contract (G1-T3):</b> a block's {@code EvmStateAnchor.height} is the REQUESTED
+     * lag height H-delta, which may be an empty/deposit-only height whose root actually comes from a
+     * lower floor checkpoint. A validator MUST therefore recompute the anchor via {@code
+     * chainedRootAt(anchor.height())} (same floor semantics), NEVER by looking up the checkpoint at
+     * exactly that height -- otherwise honest empty/deposit-only lag heights would spuriously DIVERGE.
      */
     public synchronized Bytes32 chainedRootAt(long height) {
         return metaStore.highestHeightAtMost(height)
