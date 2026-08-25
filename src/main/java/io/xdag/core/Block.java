@@ -87,6 +87,10 @@ public class Block implements Cloneable {
     private Bytes32 nonce;
     /** Raw 32-byte EVM tx hash carried in an XDAG_FIELD_EVM_TX_REF field; null when absent. */
     private Bytes32 evmTxRef;
+    /** Block-format version, stored in header byte 0. 0 = legacy; >=1 unlocks the EVM state-root anchor. */
+    private int blockFormatVersion;
+    /** EVM state-root anchor (nibble 0x0A) carried in a versioned main block; null when absent. */
+    private EvmStateAnchor evmStateAnchor;
     private XdagBlock xdagBlock;
     private boolean parsed;
     private boolean isOurs;
@@ -109,6 +113,7 @@ public class Block implements Cloneable {
         this(config, timestamp, links, pendings, mining, keys, remark, defKeyIndex, fee, txNonce, null);
     }
 
+    // Legacy 11-arg constructor (pre state-root anchor). Delegates with no anchor.
     public Block(
             Config config,
             long timestamp,
@@ -121,6 +126,23 @@ public class Block implements Cloneable {
             XAmount fee,
             UInt64 txNonce,
             Bytes32 evmTxRef) {
+        this(config, timestamp, links, pendings, mining, keys, remark, defKeyIndex, fee, txNonce,
+                evmTxRef, null);
+    }
+
+    public Block(
+            Config config,
+            long timestamp,
+            List<Address> links,
+            List<Address> pendings,
+            boolean mining,
+            List<ECKeyPair> keys,
+            String remark,
+            int defKeyIndex,
+            XAmount fee,
+            UInt64 txNonce,
+            Bytes32 evmTxRef,
+            EvmStateAnchor evmStateAnchor) {
         parsed = true;
         info = new BlockInfo();
         this.info.setTimestamp(timestamp);
@@ -167,6 +189,13 @@ public class Block implements Cloneable {
         if (evmTxRef != null) {
             this.evmTxRef = evmTxRef;
             setType(XDAG_FIELD_EVM_TX_REF, lenghth++);
+        }
+
+        if (evmStateAnchor != null) {
+            this.evmStateAnchor = evmStateAnchor;
+            this.blockFormatVersion = 1;
+            // Physical nibble 0x0A; a version>=1 block reinterprets it as EVM_STATE_ROOT on parse.
+            setType(XDAG_FIELD_SNAPSHOT, lenghth++);
         }
 
         if (StringUtils.isAsciiPrintable(remark)) {
@@ -265,6 +294,7 @@ public class Block implements Cloneable {
         this.info.setHash(calcHash());
         Bytes32 header = Bytes32.wrap(xdagBlock.getField(0).getData());
         this.transportHeader = header.getLong(0, ByteOrder.LITTLE_ENDIAN);
+        this.blockFormatVersion = (int) (this.transportHeader & 0xFFL);
         this.info.type = header.getLong(8, ByteOrder.LITTLE_ENDIAN);
         this.info.setTimestamp(header.getLong(16, ByteOrder.LITTLE_ENDIAN));
         this.info.setFee(XAmount.of(header.getLong(24, ByteOrder.LITTLE_ENDIAN), XUnit.NANO_XDAG));
@@ -277,6 +307,15 @@ public class Block implements Cloneable {
                 // Raw big-endian 32-byte EVM tx hash; deliberately NOT an Address/link (Address
                 // fields only carry 24-byte hashlows) and never written with .reverse().
                 case XDAG_FIELD_EVM_TX_REF -> this.evmTxRef = Bytes32.wrap(field.getData());
+                // Versioned reinterpretation: in a v>=1 block, nibble 0x0A is the EVM state-root
+                // anchor. In a legacy (v0) block it stays a snapshot field (ignored here, as before).
+                case XDAG_FIELD_SNAPSHOT -> {
+                    if (this.blockFormatVersion >= 1) {
+                        // NOTE: every version >= 1 is treated as the v1 anchor layout; a future
+                        // format version that redefines nibble 0x0A must branch on the exact version.
+                        this.evmStateAnchor = EvmStateAnchor.parse(field.getData());
+                    }
+                }
                 case XDAG_FIELD_TRANSACTION_NONCE -> txNonceField = new TxAddress(field);
                 case XDAG_FIELD_IN -> inputs.add(new Address(field, false));
                 case XDAG_FIELD_INPUT -> inputs.add(new Address(field, true));
@@ -383,9 +422,13 @@ public class Block implements Cloneable {
         for (Address link : all) {
             encoder.writeField(link.getData().reverse().toArray());
         }
-        // Must mirror the constructor's setType order: links, then the EVM tx ref, then remark.
+        // Must mirror the constructor's setType order: links, then the EVM tx ref, then the
+        // state-root anchor, then remark.
         if (evmTxRef != null) {
             encoder.writeField(evmTxRef.toArray());
+        }
+        if (evmStateAnchor != null) {
+            encoder.writeField(evmStateAnchor.toBytes().toArray());
         }
         if (info.getRemark() != null) {
             encoder.write(info.getRemark());
@@ -404,7 +447,11 @@ public class Block implements Cloneable {
         byte[] fee = BytesUtils.longToBytes(Long.parseLong(getFee().toString()), true);
         byte[] time = BytesUtils.longToBytes(getTimestamp(), true);
         byte[] type = BytesUtils.longToBytes(getType(), true);
+        if (blockFormatVersion < 0 || blockFormatVersion > 0xFF) {
+            throw new IllegalStateException("blockFormatVersion out of 1-byte range: " + blockFormatVersion);
+        }
         byte[] transport = new byte[8];
+        transport[0] = (byte) blockFormatVersion; // 0 for legacy blocks => byte-identical
         return BytesUtils.merge(transport, type, time, fee);
     }
 
