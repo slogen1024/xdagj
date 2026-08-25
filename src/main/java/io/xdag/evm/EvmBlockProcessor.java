@@ -544,6 +544,20 @@ public class EvmBlockProcessor {
     }
 
     /**
+     * The chained EVM state root as of {@code height}: the root of the highest checkpoint at height
+     * {@code <= height}, or the genesis origin root if there is none. Deterministic given the node's
+     * checkpoints — the miner (G1-T2) commits this at H-delta and the validator (G1-T3) recomputes the
+     * same value. Empty/deposit-only heights inherit the prior checkpoint (the chained root only
+     * advances on checkpointed heights).
+     */
+    public synchronized Bytes32 chainedRootAt(long height) {
+        return metaStore.highestHeightAtMost(height)
+                .flatMap(metaStore::getHeightRecord)
+                .map(EvmMetaStore.HeightRecord::stateRoot)
+                .orElse(genesisRoot());
+    }
+
+    /**
      * Compares a peer's claimed chained root at {@code height} against this node's checkpoint. Only a
      * height this node has itself executed yields a definite AGREE/DIVERGE; an absent checkpoint is
      * UNKNOWN, never a mismatch (the node may simply be behind or that height had no EVM txs).

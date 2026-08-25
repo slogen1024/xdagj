@@ -26,6 +26,7 @@ package io.xdag.evm;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -853,6 +854,25 @@ public class EvmBlockProcessorTest {
         assertTrue("both receipts present after drain",
                 metaStore.getReceipt(tx1.getHash()).isPresent());
         assertTrue("no longer pending", metaStore.pendingHeights().isEmpty());
+    }
+
+    @Test
+    public void chained_root_at_returns_the_root_as_of_a_height() {
+        Bytes32 root5 = Bytes32.fromHexString("0x" + "aa".repeat(32));
+        Bytes32 root9 = Bytes32.fromHexString("0x" + "bb".repeat(32));
+        metaStore.putHeightRecord(5L, root5, Bytes32.ZERO, 1, 1L);
+        metaStore.putHeightRecord(9L, root9, Bytes32.ZERO, 1, 2L);
+
+        assertEquals(root9, processor.chainedRootAt(9L));   // exact top
+        assertEquals(root9, processor.chainedRootAt(20L));  // above all -> latest
+        assertEquals(root5, processor.chainedRootAt(8L));   // between -> floor is height 5
+        assertEquals(root5, processor.chainedRootAt(5L));   // exact lower
+
+        // Below the first checkpoint: the genesis origin root (deterministic, non-null, not a seeded root).
+        Bytes32 belowAll = processor.chainedRootAt(4L);
+        assertNotNull(belowAll);
+        assertEquals("genesis default is stable", belowAll, processor.chainedRootAt(0L));
+        assertNotEquals(root5, belowAll);
     }
 
     // -------------------------------------------------------------------------
