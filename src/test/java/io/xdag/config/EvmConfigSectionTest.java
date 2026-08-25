@@ -123,6 +123,18 @@ public class EvmConfigSectionTest {
     }
 
     @Test
+    public void state_root_anchoring_knobs_are_scaffolded_per_network() {
+        assertEquals(0L, new DevnetConfig().getEvmSpec().getEvmStateRootActivationHeight());
+        assertEquals(1L, new DevnetConfig().getEvmSpec().getEvmStateRootLag());
+
+        assertEquals(Long.MAX_VALUE, new TestnetConfig().getEvmSpec().getEvmStateRootActivationHeight());
+        assertEquals(16L, new TestnetConfig().getEvmSpec().getEvmStateRootLag());
+
+        assertEquals(Long.MAX_VALUE, new MainnetConfig().getEvmSpec().getEvmStateRootActivationHeight());
+        assertEquals(16L, new MainnetConfig().getEvmSpec().getEvmStateRootLag());
+    }
+
+    @Test
     public void devnet_funds_the_standard_test_address_in_genesis_alloc() {
         // The funding on-ramp: devnet pre-funds the standard test address (private key 1); the other
         // networks fund nothing at genesis.

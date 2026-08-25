@@ -53,6 +53,12 @@ public interface EvmSpec {
     /** Height at which EIP-3529 precise gas refunds activate; Long.MAX_VALUE = not scheduled. */
     long getEvmEip3529ActivationHeight();
 
+    /** Height at which the miner starts embedding EVM state-root anchors; Long.MAX_VALUE = not scheduled. */
+    long getEvmStateRootActivationHeight();
+
+    /** Lag delta (in main heights): a block at height H anchors the chained root as of H-delta. Must be >= 1. */
+    long getEvmStateRootLag();
+
     /**
      * EVM address minted to when a deposit's remark cannot be decoded (spec §2.2). Hex string
      * (0x + 40); null only when the bridge is not scheduled — networks that activate the bridge
