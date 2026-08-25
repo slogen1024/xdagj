@@ -24,9 +24,11 @@
 package io.xdag.core;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import io.xdag.Kernel;
+import io.xdag.core.BlockchainImpl.AnchorVerdict;
 import io.xdag.Wallet;
 import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
@@ -159,5 +161,30 @@ public class StateRootAnchorRejectTest {
 
         assertEquals("hard-reject must not advance the main chain",
                 nmainBefore, blockchain.getXdagStats().nmain);
+    }
+
+    @Test
+    public void a_freshly_mined_anchor_passes_validation_on_the_same_node() {
+        // Seed a run of checkpoints (same root) so chainedRootAt is concrete for any lag height,
+        // then a block mined via createMainBlock (G1-T2) must validate MATCH against this node's own
+        // verifyStateRootAnchor (G1-T3) at its predicted confirm height. This pins miner<->validator
+        // agreement end to end.
+        long nextHeight = blockchain.getXdagStats().nmain + 1;
+        Bytes32 realRoot = Bytes32.fromHexString("0x" + "bb".repeat(32));
+        for (long h = 0; h <= nextHeight; h++) {
+            evmMetaStore.putHeightRecord(h, realRoot, Bytes32.ZERO, 0, 1L);
+        }
+
+        Block mined = blockchain.createMainBlock();
+        EvmStateAnchor anchor = mined.getEvmStateAnchor();
+        assertNotNull("createMainBlock must attach an anchor on active devnet", anchor);
+
+        AnchorVerdict verdict = BlockchainImpl.verifyStateRootAnchor(anchor, nextHeight,
+                config.getEvmSpec().getEvmStateRootActivationHeight(),
+                config.getEvmSpec().getEvmStateRootLag(),
+                kernel.getEvmBlockProcessor()::chainedRootAt);
+
+        assertEquals("a freshly mined anchor must validate MATCH on its own node",
+                AnchorVerdict.MATCH, verdict);
     }
 }
