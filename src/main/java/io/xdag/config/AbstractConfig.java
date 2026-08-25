@@ -169,6 +169,7 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected long evmEip3529ActivationHeight = Long.MAX_VALUE;
     protected long evmStateRootActivationHeight = Long.MAX_VALUE;
     protected long evmStateRootLag = 16;
+    protected boolean evmStateRootHardReject = false;
     protected String evmBridgeRecoveryAddress;
     protected long evmBridgeWithdrawalDelay = 16;
     protected long evmChainId = 0xCAFE; // 51966 (0xCAFE), reserved devnet id; per-network evm.chainId overrides
@@ -242,6 +243,11 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     @Override
     public long getEvmStateRootLag() {
         return evmStateRootLag;
+    }
+
+    @Override
+    public boolean isEvmStateRootHardReject() {
+        return evmStateRootHardReject;
     }
 
     @Override
@@ -488,6 +494,8 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
                 ? config.getLong("evm.stateRootActivationHeight") : evmStateRootActivationHeight;
         evmStateRootLag = config.hasPath("evm.stateRootLag")
                 ? config.getLong("evm.stateRootLag") : evmStateRootLag;
+        evmStateRootHardReject = config.hasPath("evm.stateRootHardReject")
+                ? config.getBoolean("evm.stateRootHardReject") : evmStateRootHardReject;
         evmBridgeRecoveryAddress = config.hasPath("evm.bridgeRecoveryAddress")
                 ? config.getString("evm.bridgeRecoveryAddress") : evmBridgeRecoveryAddress;
         evmBridgeWithdrawalDelay = config.hasPath("evm.bridgeWithdrawalDelay")

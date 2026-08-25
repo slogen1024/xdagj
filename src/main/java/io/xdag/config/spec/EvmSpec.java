@@ -59,6 +59,9 @@ public interface EvmSpec {
     /** Lag delta (in main heights): a block at height H anchors the chained root as of H-delta. Must be >= 1. */
     long getEvmStateRootLag();
 
+    /** Whether a state-root anchor mismatch hard-rejects the block (true) or only warns (false). */
+    boolean isEvmStateRootHardReject();
+
     /**
      * EVM address minted to when a deposit's remark cannot be decoded (spec §2.2). Hex string
      * (0x + 40); null only when the bridge is not scheduled — networks that activate the bridge
