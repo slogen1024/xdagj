@@ -1616,6 +1616,40 @@ public class BlockchainImpl implements Blockchain {
         return new EvmStateAnchor(anchorHeight, EvmStateAnchor.rootLowOf(rootAt.apply(anchorHeight)), false);
     }
 
+    /** Verdict of validating a main block's state-root anchor against this node's own chained root. */
+    public enum AnchorVerdict {
+        /** Anchor present and both its height and root agree with this node. */
+        MATCH,
+        /** Anchor missing when required, or its height/root disagree -- a definite divergence. */
+        MISMATCH,
+        /** Anchoring is not active at this height (below activation, or too early to lag) -- ignore. */
+        ABSENT
+    }
+
+    /**
+     * Validates a main block's state-root anchor. Mirrors {@link #computeStateRootAnchor}'s guards so
+     * an honest miner and this validator agree: below {@code activationHeight} or when {@code
+     * height - lag < 0} anchoring is inactive (ABSENT). Otherwise an anchor is REQUIRED and must
+     * commit BOTH the exact lag height {@code height - lag} AND the chained root as of that height
+     * (via {@code rootAt}, in production {@code EvmBlockProcessor::chainedRootAt}). Pure/static for
+     * testability. {@code lag} is assumed >= 1 (config-enforced; see computeStateRootAnchor).
+     */
+    static AnchorVerdict verifyStateRootAnchor(EvmStateAnchor anchor, long height, long activationHeight,
+            long lag, java.util.function.LongFunction<Bytes32> rootAt) {
+        if (height < activationHeight) {
+            return AnchorVerdict.ABSENT;
+        }
+        long expectedHeight = height - lag;
+        if (expectedHeight < 0) {
+            return AnchorVerdict.ABSENT;
+        }
+        if (anchor == null || anchor.height() != expectedHeight) {
+            return AnchorVerdict.MISMATCH;
+        }
+        Bytes expectedLow = EvmStateAnchor.rootLowOf(rootAt.apply(expectedHeight));
+        return anchor.rootLow().equals(expectedLow) ? AnchorVerdict.MATCH : AnchorVerdict.MISMATCH;
+    }
+
     public Block createMainBlock() {
         // <header + remark + outsig + nonce>
         int res = 1 + 1 + 2 + 1;
