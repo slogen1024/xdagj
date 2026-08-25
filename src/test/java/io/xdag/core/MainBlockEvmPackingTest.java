@@ -24,6 +24,7 @@
 package io.xdag.core;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -44,6 +45,8 @@ import io.xdag.db.rocksdb.DatabaseName;
 import io.xdag.db.rocksdb.KVSource;
 import io.xdag.db.rocksdb.OrphanBlockStoreImpl;
 import io.xdag.db.rocksdb.RocksdbFactory;
+import io.xdag.evm.EvmBlockProcessor;
+import io.xdag.evm.EvmConfig;
 import io.xdag.evm.state.EvmMetaStore;
 import io.xdag.evm.state.EvmReceipt;
 import io.xdag.evm.state.InMemoryKVSource;
@@ -94,6 +97,7 @@ public class MainBlockEvmPackingTest {
     private EvmTxStore evmTxStore;
     private EvmTxPool evmTxPool;
     private EvmMetaStore evmMetaStore;
+    private EvmBlockProcessor evmBlockProcessor;
     private BlockchainImpl blockchain;
 
     @Before
@@ -138,10 +142,14 @@ public class MainBlockEvmPackingTest {
         evmTxStore = new EvmTxStore(new InMemoryKVSource());
         evmTxPool = new EvmTxPool(evmTxStore, evmStateSource,
                 BigInteger.valueOf(0xCAFE), 30_000_000L, Wei.ONE, 3600L, () -> 1000L);
+        // A processor backed by the same stores, so createMainBlock's state-root anchor (G1-T2)
+        // reads chainedRootAt from the very checkpoints this harness seeds.
+        evmBlockProcessor = new EvmBlockProcessor(EvmConfig.devnet(), evmStateSource, evmTxStore, evmMetaStore);
         kernel.setEvmStateStore(evmStateSource);
         kernel.setEvmMetaStore(evmMetaStore);
         kernel.setEvmTxPool(evmTxPool);
         kernel.setEvmTxStore(evmTxStore);
+        kernel.setEvmBlockProcessor(evmBlockProcessor);
 
         RocksDbWorldUpdater w = new RocksDbWorldUpdater(evmStateSource);
         w.createAccount(evmSender, 0L, Wei.fromEth(1));
@@ -385,5 +393,24 @@ public class MainBlockEvmPackingTest {
         EvmTransaction tx = pooledTx(evmKey, 0);
         evmMetaStore.putReceipt(tx.getHash(), new EvmReceipt(1, 21_000L, Optional.empty(), List.of()));
         assertNull("a tx with a receipt must not be re-packed", blockchain.createMainBlock().getEvmTxRef());
+    }
+
+    @Test
+    public void createMainBlock_attaches_the_state_root_anchor_when_active() {
+        // devnet: activation=0, lag=1 => the mined block carries an anchor of the chained root
+        // as-of H-1. Seed a run of checkpoints all with the SAME root so the assertion is robust to
+        // the exact next height on a fresh harness (the floor checkpoint <= any anchorHeight>=0 is
+        // still `seeded`), and assert on rootLow rather than a hardcoded height.
+        Bytes32 seeded = Bytes32.fromHexString("0x" + "11".repeat(32));
+        for (long h = 0; h <= 4; h++) {
+            evmMetaStore.putHeightRecord(h, seeded, Bytes32.ZERO, 0, 1000L);
+        }
+
+        Block main = blockchain.createMainBlock();
+
+        EvmStateAnchor anchor = main.getEvmStateAnchor();
+        assertNotNull("an active devnet main block must carry a state-root anchor", anchor);
+        assertEquals(EvmStateAnchor.rootLowOf(seeded), anchor.rootLow());
+        assertFalse("G1-T2 never sets DA-skip", anchor.daSkip());
     }
 }
