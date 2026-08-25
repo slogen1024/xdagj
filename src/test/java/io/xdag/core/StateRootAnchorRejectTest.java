@@ -151,6 +151,9 @@ public class StateRootAnchorRejectTest {
         EvmStateAnchor bad = new EvmStateAnchor(expectedHeight, wrongLow, false);
         Block block = new Block(config, XdagTime.getMainTime(), null, null, true, null, null, -1,
                 XAmount.ZERO, null, null, bad);
+        // Materialize info.hash so a MISSING check would advance nmain (a real regression), instead
+        // of NPE-ing on the log.debug(Hex.toHexString(hash)) line for an unrelated reason.
+        block.getHash();
 
         blockchain.setMain(block);
 

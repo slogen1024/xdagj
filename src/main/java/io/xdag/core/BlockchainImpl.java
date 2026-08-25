@@ -31,6 +31,7 @@ import com.google.common.cache.CacheBuilder;
 import io.xdag.Kernel;
 import io.xdag.Wallet;
 import io.xdag.config.MainnetConfig;
+import io.xdag.config.spec.EvmSpec;
 import io.xdag.core.XdagField.FieldType;
 import io.xdag.consensus.RandomX;
 import io.xdag.crypto.core.CryptoProvider;
@@ -1349,19 +1350,29 @@ public class BlockchainImpl implements Blockchain {
         synchronized (this) {
             // Set reward
             long mainNumber = xdagStats.nmain + 1;
+            // Lock order invariant: we hold the BlockchainImpl monitor and reach into the
+            // EvmBlockProcessor monitor (chainedRootAt). Consistent with setMain->processMainBlock and
+            // unWindMain->rollbackTo; EvmBlockProcessor never calls back into BlockchainImpl, so there
+            // is no reverse edge and no deadlock.
             EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
             if (evmProcessor != null) {
-                io.xdag.config.spec.EvmSpec evmSpec = kernel.getConfig().getEvmSpec();
-                AnchorVerdict verdict = verifyStateRootAnchor(block.getEvmStateAnchor(), mainNumber,
+                EvmSpec evmSpec = kernel.getConfig().getEvmSpec();
+                EvmStateAnchor blockAnchor = block.getEvmStateAnchor();
+                AnchorVerdict verdict = verifyStateRootAnchor(blockAnchor, mainNumber,
                         evmSpec.getEvmStateRootActivationHeight(), evmSpec.getEvmStateRootLag(),
                         evmProcessor::chainedRootAt);
                 if (verdict == AnchorVerdict.MISMATCH) {
+                    long anchorHeight = mainNumber - evmSpec.getEvmStateRootLag();
+                    Bytes32 expectedRoot = evmProcessor.chainedRootAt(anchorHeight);
                     if (evmSpec.isEvmStateRootHardReject()) {
                         log.error("CRITICAL: EVM state-root anchor mismatch at height {} - refusing to "
-                                + "advance the main chain (hard-reject)", mainNumber);
+                                + "advance the main chain (hard-reject). committed={}, this node's root "
+                                + "as-of {} = {}", mainNumber, blockAnchor, anchorHeight, expectedRoot);
                         return;
                     }
-                    log.error("EVM state-root anchor mismatch at height {} - proceeding (warn-only)", mainNumber);
+                    log.warn("EVM state-root anchor mismatch at height {} - proceeding (warn-only). "
+                            + "committed={}, this node's root as-of {} = {}",
+                            mainNumber, blockAnchor, anchorHeight, expectedRoot);
                 }
             }
             log.debug("mainNumber = {},hash = {}", mainNumber, Hex.toHexString(block.getInfo().getHash()));
