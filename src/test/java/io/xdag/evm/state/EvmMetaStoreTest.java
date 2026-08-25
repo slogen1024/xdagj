@@ -70,6 +70,18 @@ public class EvmMetaStoreTest {
     }
 
     @Test
+    public void highest_height_at_most_returns_the_floor_checkpoint() {
+        store.putHeightRecord(5L, rootA, blockA, 1, 1L);
+        store.putHeightRecord(9L, rootA, blockA, 1, 2L);
+
+        assertEquals(java.util.Optional.of(9L), store.highestHeightAtMost(100L)); // above all
+        assertEquals(java.util.Optional.of(9L), store.highestHeightAtMost(9L));   // exact top
+        assertEquals(java.util.Optional.of(5L), store.highestHeightAtMost(8L));   // between: floor is 5
+        assertEquals(java.util.Optional.of(5L), store.highestHeightAtMost(5L));   // exact lower
+        assertEquals(java.util.Optional.empty(), store.highestHeightAtMost(4L));  // below all
+    }
+
+    @Test
     public void removeAbove_deletes_only_higher_heights() {
         store.putHeightRecord(5L, rootA, blockA, 1, 1L);
         store.putHeightRecord(6L, rootA, blockA, 1, 2L);
