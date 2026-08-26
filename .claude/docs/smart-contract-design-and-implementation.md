@@ -11,7 +11,7 @@
 
 **问题**：XDAG 是 DAG 结构的 PoW 链——512 字节定长区块、无全局账户状态树、无 gas 市场、区块间只有偏序关系。以太坊式智能合约需要的东西它一样都没有：任意长度的交易载荷、全序执行、世界状态与状态承诺、gas 计费、兼容钱包的 RPC。
 
-**最终形态**（一句话）：**内嵌 Hyperledger Besu Shanghai EVM；EVM 交易以"32 字节引用 + 旁路载荷"的方式上链（守住 512 字节墙）；执行顺序 = 主链确认序 × applyBlock DFS 序（复用 XDAG 既有的确定性）；世界状态落 RocksDB 平面 KV；状态承诺用"链式 delta 根"并经 P2P gossip 做跨节点分歧检测；gas 以 EVM wei 结算并燃烧；对外暴露 19 个 eth_* JSON-RPC 方法，MetaMask/Hardhat 可直接部署使用 USDT。**
+**最终形态**（一句话）：**内嵌 Hyperledger Besu Shanghai EVM；EVM 交易以"32 字节引用 + 旁路载荷"的方式上链（守住 512 字节墙）；执行顺序 = 主链确认序 × applyBlock DFS 序（复用 XDAG 既有的确定性）；世界状态落 RocksDB 平面 KV；状态承诺用"链式 delta 根"，锚进原生区块字段（PoW 承诺）、`setMain` 硬拒分歧（G1-T1..T4；旧 P2P gossip 0x1E 已退役）；gas 以 EVM wei 结算并燃烧；对外暴露 19 个 eth_* JSON-RPC 方法，MetaMask/Hardhat 可直接部署使用 USDT。**
 
 ```
  MetaMask/Hardhat
@@ -32,7 +32,7 @@
  ┌──────────────────────────┐
  │ applyBlock DFS 收集 refs  │ → EvmBlockProcessor.processMainBlock
  │  → executeList 逐笔执行   │ → 收据 + 链式状态根 + 检查点 (EVM_META)
- │  → 世界状态落 EVM_STATE   │ → 状态根 gossip 0x1E 跨节点比对
+ │  → 世界状态落 EVM_STATE   │ → 状态根锚进区块字段(PoW) + setMain 硬拒分歧
  └──────────────────────────┘
 ```
 
@@ -126,7 +126,7 @@ XDAG 的存储范式是：**每个 `DatabaseName` 一个独立 RocksDB 实例（
 | **D3** | **R1 载荷按引用**：签名 RLP 存 EVM_TX 库（内容寻址），区块只携带 32 字节 hash（新字段 0x0F），载荷走 P2P 旁路 | R2 内联限长 calldata：几百字节部署不了真合约，为 USDT 否决；R3 独立 EVM 排序层（mempool→"EVM 块"锚定主块）：要第二套确定性共识，最复杂最险 |
 | **D4** | **执行序 = (主块高度, applyBlock DFS 序)**；只在 `setMain` 执行（终局性对齐），不做投机执行 | 导入即执行（tryToConnect）：孤块/分叉块会执行又回滚，状态管理爆炸；独立排序层见 R3 |
 | **D5** | **世界状态 = RocksDB 平面 KV**（EvmStateSchema 三前缀），非 MPT | 引 Besu 的 Bonsai/Forest trie 需 `besu-ethereum` 大依赖（JDK21 兼容风险），且 v1 不需要 per-account proof |
-| **D6** | **状态承诺 = 链式 delta 根**：`root_h = keccak(root_prev ‖ height ‖ per-tx(txHash,status,gasUsed)… ‖ stateDelta_h)`，origin = genesisRoot；跨节点用 **P2P gossip（0x1E）做分歧检测**（v1 只检测不硬拒） | 绝对状态 MPT 根：同 D5；**原生区块字段锚定**（把 (height,root) 打进新字段类型）：设计已批准但被 §1.1 的 4-bit 码位耗尽堵死——需要块格式硬分叉才有空位，留作后路 |
+| **D6** | **状态承诺 = 链式 delta 根**：`root_h = keccak(root_prev ‖ height ‖ per-tx(txHash,status,gasUsed)… ‖ stateDelta_h)`，origin = genesisRoot。**跨节点承诺：G1-T1..T4 已将根锚进原生区块字段（PoW 承诺，`EvmStateAnchor`）+ `setMain` 硬拒分歧**——4-bit 码位耗尽由 G1-T1 的块格式修订（版本字节 + 0x0A 重解）解决，无需新码位。~~v1 曾用 P2P gossip（0x1E）只检测不硬拒~~ **已于 G1-T4 退役** | 绝对状态 MPT 根：同 D5，留作主网后独立 fork（含 `eth_getProof`/轻客户端）。历史：原生字段锚定曾被 §1.1 的 4-bit 码位耗尽堵死、退而用 gossip——G1-T1 后此约束解除 |
 | **D7** | **gas 用 EVM wei 结算（Path α）**：准入查 `balance ≥ value + gasLimit×gasPrice`；执行先全额扣 maxFee、跑完退未用、净费**燃烧**（不给 coinbase，P2 再路由） | ADR-007"计量不结算"（v1 曾用）：免费 30M gas/块 + 零成本 Sybil 塞池，审计定为 HIGH 经济漏洞后废除；原生 XDAG 付 gas：要先打通 10⁹↔10¹⁸ 桥，改动面大 |
 | **D8** | **资金上桥 = 配置化创世分配** `evm.alloc`（HOCON，仅 devnet 预注资） | 原生↔EVM 双向桥：主网前不需要，工程量与攻击面大得多 |
 | **D9** | **回滚 = Option-A 擦盘重放**：`removeAbove` + `stateStore.reset()` + 重播 EVM_META 的逐高度 tx 列表，并自检重放根==存根 | 逐笔 undo 日志：EVM 状态 delta 复杂（SELFDESTRUCT/clearStorage/嵌套调用），undo 正确性难证；重放以存储换正确性，且 reorg 罕见 |
@@ -139,7 +139,7 @@ XDAG 的存储范式是：**每个 `DatabaseName` 一个独立 RocksDB 实例（
 EIP-155 tx (D11) ──► EvmTxPool 准入 (D7 余额含费) ──► 载荷入 EVM_TX + hash 上块 (D3, 0x0F)
       ──► PoW 承诺 ──► setMain 终局 (D4) ──► DFS 序执行 (D4) ──► Besu Shanghai (D1/D2)
       ──► wei 扣费/退款/燃烧 (D7, 资金来自 D8 创世注资) ──► 状态落 EVM_STATE (D5)
-      ──► 链式根 + gossip 比对 (D6) ──► reorg 时擦盘重放 (D9) ──► 缺 blob 停摆等待 (D10)
+      ──► 链式根锚进区块字段(PoW) + setMain 硬拒分歧 (D6/G1-T1..T4) ──► reorg 时擦盘重放 (D9) ──► 缺 blob 停摆等待 (D10)
 ```
 
 ---
@@ -346,7 +346,7 @@ return digest        // child 永远返回 Bytes32.ZERO——只有 root 摘要
 3. **Phase 2**（ebc97ac3 + 7829e906）：
    - **origin = `genesisRoot()`**（`EvmBlockProcessor.java:312`）= keccak(排序后的 `addr(20)‖balance(32)`…)——创世配置错的节点从第 0 步就分叉（此前 alloc 错误在账户被触碰前不可见）；空 alloc = keccak(空) 固定常数。
    - **height 折入**每级根（跨高度错位可检）。
-   - **跨节点比对**：原计划把 (height,root) 锚进原生区块字段（PoW 承诺、进 DAG 不可抹），但 §1.1 的 4-bit 码位耗尽使其必须硬分叉——退而选 **P2P gossip 0x1E**（§7.3）。取舍明记：gossip 是链下的、靠诚实节点，弱于字段锚定；v1 只**检测**分歧（响亮告警，节点仍跟随 PoW 最重链——不拿原生活性给 EVM 正确性陪葬），升级为硬共识规则留作后路。
+   - **跨节点比对**：原计划把 (height,root) 锚进原生区块字段（PoW 承诺、进 DAG 不可抹），曾被 §1.1 的 4-bit 码位耗尽堵死、退而用 **P2P gossip 0x1E**（只检测不硬拒）。**G1-T1..T4 已落地字段锚定并退役 gossip**：G1-T1 用块格式修订（版本字节 + 0x0A 重解）腾出承诺位 → `EvmStateAnchor` 把 `root(H−δ)` 锚进主块（PoW 承诺）→ `setMain` 用 `chainedRootAt(H−δ)` 重算比对、分歧**硬拒**（mainnet；testnet 先告警）→ G1-T4 删除 0x1E gossip（§7.3 已退役）。承诺从"链下、靠诚实节点、只检测"升级为"PoW 承诺、共识硬拒"。
 
 ### 6.4 `EvmMetaStore` — 检查点、收据、重放脚本、反向索引
 
@@ -360,18 +360,19 @@ return digest        // child 永远返回 Bytes32.ZERO——只有 root 摘要
 
 ---
 
-## 7. 实现：P2P 旁路（载荷 gossip 与状态根比对）
+## 7. 实现：P2P 旁路（载荷 gossip）
 
-### 7.1 消息面（4 个新码，`MessageCode.java:90-95`）
+### 7.1 消息面（`MessageCode.java` EVM 区段）
 
 | 码 | 消息 | 体 |
 |----|------|-----|
 | 0x1B | EVM_TX_BROADCAST | raw RLP |
 | 0x1C | EVM_TX_REQUEST | txHash(32) |
 | 0x1D | EVM_TX_REPLY | raw RLP |
-| 0x1E | EVM_STATE_ROOT | height(long)‖root(32) |
+| ~~0x1E~~ | ~~EVM_STATE_ROOT~~ | **G1-T4 已退役**（状态根改由区块字段 PoW 承诺，见 §6.3/§7.3）；码位空出，勿复用 |
+| 0x1F / 0x20 | EVM_BATCH_REQUEST / REPLY | batchHash(32) / raw 批次体 |
 
-路由注意：`XdagP2pHandler.channelRead0:221` 显式把这四个码转 `onXdag`——**这行是修复**：EVM 三个码原先没进路由表，掉进 default 被 fireChannelRead 吞掉，整条 EVM gossip 路径曾是死的（只有直调 handler 的单测在跑）。新增消息码务必检查 channelRead0 路由。
+路由注意：`XdagP2pHandler.channelRead0` 显式把这些 EVM 码转 `onXdag`——**这行是修复**：EVM 码原先没进路由表，掉进 default 被 fireChannelRead 吞掉，整条 EVM 旁路曾是死的（只有直调 handler 的单测在跑）。新增消息码务必检查 channelRead0 路由。
 
 ### 7.2 载荷流转
 
@@ -380,10 +381,9 @@ return digest        // child 永远返回 Bytes32.ZERO——只有 root 摘要
 - `requestMissingEvmBlob`（`:404-413`）：NEW_BLOCK / 同步块两个入口，看到块携带 ref 而本地无 blob，即向宣布该块的 peer 发 0x1C。
 - `requestPendingEvmBlobs`（`:423-435`）：15 秒定时兜底，把 `pendingMissingBlobHashes()` 逐个补拉。
 
-### 7.3 状态根 gossip（Phase 2 stage 2）
+### 7.3 状态根 gossip（Phase 2 stage 2）— **G1-T4 已退役**
 
-- `gossipEvmStateRoot`（`:443-454`）：搭 15s tick 顺风车，把 `latestExecutedStateRoot()`（最高检查点的 (height,root)）发给 peer。
-- `processEvmStateRoot`（`:461-476`）：`compareStateRoot` 三态——**AGREE**（trace 级）；**DIVERGE**（**ERROR 级响亮持续告警**："EVM world states have forked"）；**UNKNOWN**（本节点该高度无检查点 = 落后或无交易，**绝不误报**）。v1 检测不拒块（D6 取舍）。
+历史（已删除）：曾搭 15s tick 顺风车用 `gossipEvmStateRoot`/`processEvmStateRoot` 做 0x1E 状态根 gossip 三态比对（AGREE/DIVERGE/UNKNOWN，只检测不拒块）。**G1-T1..T4 用原生区块字段锚定 + `setMain` 硬拒取代之**（§6.3）：链下 gossip 是弱于 PoW 承诺的手段，且 UNKNOWN 态易误报（见 §12.13 已随之消除）。已删除 `EvmStateRootMessage`、`MessageCode.EVM_STATE_ROOT(0x1E)`、`gossipEvmStateRoot`/`processEvmStateRoot` 及处理器侧 `latestExecutedStateRoot`/`compareStateRoot`。15s tick 现只跑 `requestPendingEvmBlobs`（I4 补拉）。
 
 ---
 
@@ -436,7 +436,8 @@ MetaMask(chainId 51966) ──eth_sendRawTransaction──► EthRequestHandler
             → USDT runtime code 落 EVM_STATE(0x01 codeHash 寻址) → 退未用 gas，净费燃烧
             → 收据(status=1, contractAddress, logs) 入 EVM_META 0x01
             → chainedRoot = keccak(prev‖height‖(tx,status,gas)‖stateDelta) 入检查点
-  └ 15s tick: EVM_STATE_ROOT(0x1E) gossip → peer compareStateRoot → AGREE(trace)
+       └ chainedRoot 锚进主块 EvmStateAnchor (root(H−δ), PoW 承诺) → setMain 用 chainedRootAt 重算硬拒分歧
+  └ 15s tick: requestPendingEvmBlobs（I4 缺 blob 补拉；状态根 gossip 已于 G1-T4 退役）
 MetaMask 轮询:
   └ eth_getTransactionReceipt: findTxLocation O(1) → 收据 + 合约地址
   └ 之后 eth_call balanceOf(...)：simulate 一次性 updater，读最新世界状态，永不落盘
@@ -462,11 +463,12 @@ MetaMask 轮询:
 | **C2** | 写路径 | eth_sendRawTransaction + 矿工自动打包（28a630b7） |
 | **C3** | 查询面 | getTransactionByHash/Receipt、getBlockBy*、getLogs、合成 eth 块（17acb28b）——**A→B→C 终验达成** |
 | **安全审计与加固** | 2026-07-28/29 两轮多评审员对抗审计 | eth_call 持久化 HIGH 修复（simulate* 双入口）、EIP-2 low-s（04974f33）、O(1) 反向索引、delete 集内容寻址（f632d3f0） |
-| **状态根 P1/P2** | delta 折根 → 创世原点+高度+gossip | e9a41d08、ebc97ac3、7829e906（原生字段锚定被 4-bit 耗尽阻断，改 gossip） |
+| **状态根 P1/P2** | delta 折根 → 创世原点+高度+gossip | e9a41d08、ebc97ac3、7829e906（P2 曾因 4-bit 耗尽改 gossip） |
+| **状态根进 PoW（G1-T1..T4）** | 块格式修订 → 原生字段锚定 → miner 写锚 → setMain 硬拒 → 退役 gossip | G1-T1 版本字节+0x0A 重解 `EvmStateAnchor`；G1-T2 `computeStateRootAnchor`；G1-T3 `verifyStateRootAnchor`+`evm.stateRootHardReject`（mainnet 硬拒/testnet 告警）；G1-T4 删 0x1E gossip（本文对齐） |
 | **gas 结算 + 上桥** | Path α + 创世分配 | 21f49d04、125d0210、加固 cee99a05 |
 | **★ 终验** | JDK 21 全量构建 | **340 tests, 0 failures**（a3cacd36）；devnet MetaMask/Hardhat USDT 端到端可用 |
 
-集成测试锚点：`EvmConsensusIntegrationTest`（签名部署随载体块确认而执行）、`MainBlockEvmPackingTest`（打包/空池/已执行跳过）、`MinerPackingSeamTest`（矿工打包→处理器执行→收据可查闭环）、`EvmBlockProcessorTest`（链式根抓纯状态分叉、创世幂等/重组恢复、停摆-drain 确定性、gas 预算、回滚删收据、根比对三态）。
+集成测试锚点：`EvmConsensusIntegrationTest`（签名部署随载体块确认而执行）、`MainBlockEvmPackingTest`（打包/空池/已执行跳过）、`MinerPackingSeamTest`（矿工打包→处理器执行→收据可查闭环）、`EvmBlockProcessorTest`（链式根抓纯状态分叉、创世幂等/重组恢复、停摆-drain 确定性、gas 预算、回滚删收据）。
 
 ---
 
@@ -484,7 +486,7 @@ MetaMask 轮询:
 10. **eth_call/estimateGas 永不落盘**：只能走 `simulateCall/simulateDeploy`；把 root updater 交给会 `parent.commit()` 的 `call()/deploy()` 就是重现那个 HIGH 漏洞。
 11. **只存"正在等"的 blob**：`ingestEvmTxBlob` 的 `isAwaitingBlob` 闸是 unsolicited-blob 磁盘 DoS 的唯一防线。
 12. **新 P2P 消息码必须进 `channelRead0` 路由**：EVM 三码曾整体漏路由而静默死亡——单测直调 handler 测不出这个。
-13. **UNKNOWN ≠ DIVERGE**：状态根比对里"本节点无该高度检查点"是常态（落后/无交易），当成分歧告警会天天误报。
+13. ~~**UNKNOWN ≠ DIVERGE**~~：**已随 0x1E gossip 于 G1-T4 一并消除**——曾是 gossip 比对的误报陷阱（"本节点无该高度检查点"是落后/无交易的常态）；改用区块字段锚定后，validator 用 `chainedRootAt(H−δ)` 对确定的滞后高度重算比对，无 UNKNOWN 态。
 14. **nonce 语义**：验证失败（chainId/余额/nonce 不符）不涨 nonce；进入执行后（含 revert/OOG）必涨——与以太坊一致，钱包重发依赖它。
 15. **码位耗尽是硬约束**：想给区块加任何新字段类型都需要块格式硬分叉；设计新特性前先看 §1.1 的表。
 
@@ -544,7 +546,7 @@ MetaMask 轮询:
 
 ### 13.2 其他 v1 限制（devnet 可用、诚实记录）
 
-- 状态根是**链式 delta 承诺**，非绝对状态 MPT：无 eth_getProof/轻客户端；跨节点一致性靠 gossip **检测**（链下、不 PoW 承诺、不硬拒）。
+- 状态根是**链式 delta 承诺**，非绝对状态 MPT：无 eth_getProof/轻客户端（绝对状态 MPT 留作主网后独立 fork）。**跨节点一致性已进 PoW 共识**（G1-T1..T4）：根锚进原生区块字段 + `setMain` 硬拒分歧（mainnet；testnet 先告警）——不再靠链下 gossip 检测（0x1E 已退役）。
 - gas 净费**燃烧**（不给 coinbase，供应缓缩）；`GASPRICE` 操作码读 0；`BLOCKHASH/PREVRANDAO/BASEFEE/COINBASE` 皆 0（确定性占位，不分叉但无随机性）。
 - getLogs 扫描范围 ≤ `maxLogScanRange`（1024）；历史状态查询仅覆盖最近 `stateHistoryWindow`（128）个高度，更早的 archive 不可得（C4）；~~EIP-3529 退款按毛 gasUsed 收（略高于主网、永不少收）~~ **EIP-3529 精确退款已实现（2026-08-22，G3-T2）**：`min(refund, gasUsed/5)`（Besu Shanghai 削减额 + /5 上限），共识门控于 `evm.eip3529ActivationHeight`（devnet=0，testnet/mainnet 未排期），激活前逐字节维持毛 gasUsed；mempool 每 sender 一笔、无 per-sender Sybil 配额；blob 真不可得时 EVM 停摆（诚实 DA 行为，活性风险）。
 
@@ -552,7 +554,7 @@ MetaMask 轮询:
 
 ### 13.3 主网启用（`evm.enabled=true` 于共享网络）前的硬门槛
 
-1. **PoW 承诺的状态根**：块格式修订腾出字段码位，把 (height,root) 锚回原生区块（设计已批准，被码位耗尽推迟）；或引入绝对状态根（MPT/SMT）。
+1. ~~**PoW 承诺的状态根**~~ **✅ 已实现（G1-T1..T4，2026-08-25/26）**：块格式修订（版本字节 + 0x0A 重解）把 `(height, root(H−δ))` 锚回原生区块 `EvmStateAnchor`，`setMain` 用 `chainedRootAt(H−δ)` 重算硬拒分歧（`evm.stateRootHardReject`：mainnet true/testnet 告警），0x1E gossip 已退役。绝对状态根（MPT/SMT + eth_getProof）留作主网后独立 fork。
 2. **DA 强制**：导入期载荷可用性检查，或共识层带超时跳过标记——消除"blob 永不可得"的停摆。
 3. 费用路由（燃烧→coinbase）、mempool per-sender 配额；~~EIP-3529 精确退款~~ **已实现（2026-08-22，门控于 `evm.eip3529ActivationHeight`，G3-T2）**；chainId 注册与激活高度见 §13.1 缺陷 4。
 
@@ -570,7 +572,7 @@ MetaMask 轮询:
 | 交易 / 池 / 内在 gas | `evm/tx/EvmTransaction.java:96-189`、`EvmTxPool.java:89-177`、`IntrinsicGas.java:54-68` |
 | 世界状态（更新器/账户/键布局） | `evm/state/RocksDbWorldUpdater.java:185-276`、`RocksDbAccount.java:114-220`、`EvmStateSchema.java:36-115` |
 | 元存储（检查点/收据/重放/反向索引） | `evm/state/EvmMetaStore.java:100-300` |
-| P2P（码/路由/blob/根 gossip） | `net/message/MessageCode.java:90-95`、`net/XdagP2pHandler.java:221 / 404-533` |
+| P2P（码/路由/blob 补拉；0x1E 根 gossip 已退役 G1-T4） | `net/message/MessageCode.java` EVM 区段、`net/XdagP2pHandler.java` channelRead0/onXdag/requestPendingEvmBlobs |
 | RPC（注册/处理器/模拟） | `rpc/server/core/JsonRpcServer.java:75-98`、`rpc/server/handler/EthRequestHandler.java:67-472` |
 | 配置（EvmSpec/解析/alloc） | `config/spec/EvmSpec.java:34-60`、`config/AbstractConfig.java:245-264 / 372-387`、`resources/xdag-devnet.conf:34-49` |
 | Kernel 接线 | `Kernel.java:188-215` |
