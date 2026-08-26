@@ -43,4 +43,11 @@ public class MessageCodeTest {
         byte b = (byte) 0xff;
         assertNull(MessageCode.of(b));
     }
+
+    @Test
+    public void evm_state_root_codepoint_0x1e_is_retired() {
+        // G1-T4: the EVM state-root gossip (0x1E) was retired once the chained state root became
+        // PoW-committed in the block anchor (G1-T1..T3). The codepoint must now be unassigned.
+        assertNull(MessageCode.of(0x1E));
+    }
 }
