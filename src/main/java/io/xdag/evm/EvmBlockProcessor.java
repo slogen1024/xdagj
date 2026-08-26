@@ -523,26 +523,6 @@ public class EvmBlockProcessor {
         return org.hyperledger.besu.crypto.Hash.keccak256(Bytes.concatenate(parts.toArray(new Bytes[0])));
     }
 
-    /** A node's EVM chained state root at a specific executed main height (gossiped between peers). */
-    public record StateRootAt(long height, Bytes32 root) {
-    }
-
-    /** The verdict of comparing a peer's claimed root at a height against this node's own. */
-    public enum RootComparison {
-        /** This node executed the height and computed the same root — cross-node agreement. */
-        AGREE,
-        /** This node executed the height but computed a DIFFERENT root — a definite divergence. */
-        DIVERGE,
-        /** This node has no checkpoint at the height (behind, no EVM txs there, or reorged away). */
-        UNKNOWN
-    }
-
-    /** This node's highest executed EVM height and its chained root, for gossiping the commitment. */
-    public synchronized Optional<StateRootAt> latestExecutedStateRoot() {
-        return metaStore.highestHeight()
-                .flatMap(h -> metaStore.getHeightRecord(h).map(r -> new StateRootAt(h, r.stateRoot())));
-    }
-
     /**
      * The chained EVM state root as of {@code height}: the root of the highest checkpoint at height
      * {@code <= height}, or the genesis origin root if there is none. Deterministic given the node's
@@ -561,17 +541,6 @@ public class EvmBlockProcessor {
                 .flatMap(metaStore::getHeightRecord)
                 .map(EvmMetaStore.HeightRecord::stateRoot)
                 .orElse(genesisRoot());
-    }
-
-    /**
-     * Compares a peer's claimed chained root at {@code height} against this node's checkpoint. Only a
-     * height this node has itself executed yields a definite AGREE/DIVERGE; an absent checkpoint is
-     * UNKNOWN, never a mismatch (the node may simply be behind or that height had no EVM txs).
-     */
-    public synchronized RootComparison compareStateRoot(long height, Bytes32 root) {
-        return metaStore.getHeightRecord(height)
-                .map(r -> r.stateRoot().equals(root) ? RootComparison.AGREE : RootComparison.DIVERGE)
-                .orElse(RootComparison.UNKNOWN);
     }
 
     /** The world root plus the txs that actually executed (survived the per-block gas budget). */
