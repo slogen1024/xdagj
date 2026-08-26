@@ -67,7 +67,6 @@ import io.xdag.evm.tx.EvmTxPool;
 import io.xdag.evm.tx.EvmTxStore;
 import org.hyperledger.besu.datatypes.Hash;
 import io.xdag.net.message.p2p.DisconnectMessage;
-import io.xdag.net.message.p2p.EvmStateRootMessage;
 import io.xdag.net.message.p2p.EvmTxBroadcastMessage;
 import io.xdag.net.message.p2p.EvmBatchReplyMessage;
 import io.xdag.net.message.p2p.EvmBatchRequestMessage;
@@ -220,7 +219,7 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
             case BLOCKS_REQUEST, BLOCKS_REPLY, SUMS_REQUEST, SUMS_REPLY, BLOCKEXT_REQUEST, BLOCKEXT_REPLY, BLOCK_REQUEST, NEW_BLOCK, SYNC_BLOCK, SYNCBLOCK_REQUEST ->
                     onXdag(msg);
             /* evm — routed to onXdag where the EVM handlers live; without this they never dispatch */
-            case EVM_TX_BROADCAST, EVM_TX_REQUEST, EVM_TX_REPLY, EVM_STATE_ROOT,
+            case EVM_TX_BROADCAST, EVM_TX_REQUEST, EVM_TX_REPLY,
                     EVM_BATCH_REQUEST, EVM_BATCH_REPLY -> onXdag(msg);
             default -> ctx.fireChannelRead(msg);
         }
@@ -345,7 +344,6 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
             case EVM_TX_BROADCAST -> processEvmTxBroadcast((EvmTxBroadcastMessage) msg);
             case EVM_TX_REQUEST -> processEvmTxRequest((EvmTxRequestMessage) msg);
             case EVM_TX_REPLY -> processEvmTxReply((EvmTxReplyMessage) msg);
-            case EVM_STATE_ROOT -> processEvmStateRoot((EvmStateRootMessage) msg);
             case EVM_BATCH_REQUEST -> processEvmBatchRequest((EvmBatchRequestMessage) msg);
             case EVM_BATCH_REPLY -> processEvmBatchReply((EvmBatchReplyMessage) msg);
             default -> throw new UnreachableException();
@@ -378,13 +376,10 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
             pingPong = exec.scheduleAtFixedRate(() -> msgQueue.sendMessage(new PingMessage()),
                     channel.isInbound() ? 1 : 0, 1, TimeUnit.MINUTES);
 
-            // Periodic per-peer EVM housekeeping: (I4) re-request any blob a deferred height still lacks
-            // so a stalled height self-heals, and (Phase 2) gossip this node's latest EVM state root so
-            // peers can detect cross-node divergence. Both no-op when EVM is disabled or nothing applies.
-            evmBlobRetry = exec.scheduleAtFixedRate(() -> {
-                requestPendingEvmBlobs();
-                gossipEvmStateRoot();
-            }, EVM_BLOB_RETRY_SECONDS, EVM_BLOB_RETRY_SECONDS, TimeUnit.SECONDS);
+            // Periodic per-peer EVM housekeeping (I4): re-request any blob a deferred height still lacks
+            // so a stalled height self-heals. No-op when EVM is disabled or nothing is pending.
+            evmBlobRetry = exec.scheduleAtFixedRate(this::requestPendingEvmBlobs,
+                    EVM_BLOB_RETRY_SECONDS, EVM_BLOB_RETRY_SECONDS, TimeUnit.SECONDS);
         } else {
             msgQueue.disconnect(ReasonCode.HANDSHAKE_EXISTS);
         }
@@ -446,47 +441,6 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
         } catch (RuntimeException e) {
             log.debug("requestPendingEvmBlobs failed for node {}: {}", channel.getRemoteAddress(), e.toString());
         }
-    }
-
-    /**
-     * Phase 2: gossip this node's latest executed EVM (height, chained root) to the peer so it can
-     * detect cross-node divergence. Fire-and-forget; no-op when EVM is disabled or nothing has executed.
-     * The field-type space is exhausted, so the commitment travels as a message, not a native block
-     * field. Failures are swallowed so a bad tick cannot cancel the periodic task.
-     */
-    private void gossipEvmStateRoot() {
-        EvmBlockProcessor evmProcessor = kernel.getEvmBlockProcessor();
-        if (evmProcessor == null) {
-            return;
-        }
-        try {
-            evmProcessor.latestExecutedStateRoot().ifPresent(latest ->
-                    msgQueue.sendMessage(new EvmStateRootMessage(latest.height(), latest.root())));
-        } catch (RuntimeException e) {
-            log.debug("gossipEvmStateRoot failed for node {}: {}", channel.getRemoteAddress(), e.toString());
-        }
-    }
-
-    /**
-     * Phase 2: compare a peer's claimed EVM state root against this node's own checkpoint. A definite
-     * mismatch (both nodes executed the height, roots differ) is a fork of the EVM world states — logged
-     * loudly. This is detection only (v1): the node still follows the PoW-heaviest native chain.
-     */
-    private void processEvmStateRoot(EvmStateRootMessage msg) {
-        EvmBlockProcessor evmProcessor = kernel.getEvmBlockProcessor();
-        if (evmProcessor == null) {
-            return;
-        }
-        EvmBlockProcessor.RootComparison verdict = evmProcessor.compareStateRoot(msg.getHeight(), msg.getRoot());
-        if (verdict == EvmBlockProcessor.RootComparison.DIVERGE) {
-            log.error("EVM STATE DIVERGENCE at height {}: peer {} reports root {} but this node computed a "
-                    + "different root — the EVM world states have forked", msg.getHeight(),
-                    channel.getRemoteAddress(), msg.getRoot().toHexString());
-        } else if (verdict == EvmBlockProcessor.RootComparison.AGREE) {
-            log.trace("EVM state root agrees with peer {} at height {}",
-                    channel.getRemoteAddress(), msg.getHeight());
-        }
-        // UNKNOWN: this node has no checkpoint at that height (behind / no EVM txs); nothing to compare.
     }
 
     private void processEvmTxBroadcast(EvmTxBroadcastMessage msg) {

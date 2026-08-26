@@ -28,7 +28,6 @@ import io.xdag.net.message.consensus.*;
 import io.xdag.net.message.p2p.DisconnectMessage;
 import io.xdag.net.message.p2p.EvmBatchReplyMessage;
 import io.xdag.net.message.p2p.EvmBatchRequestMessage;
-import io.xdag.net.message.p2p.EvmStateRootMessage;
 import io.xdag.net.message.p2p.EvmTxBroadcastMessage;
 import io.xdag.net.message.p2p.EvmTxReplyMessage;
 import io.xdag.net.message.p2p.EvmTxRequestMessage;
@@ -48,7 +47,7 @@ public class MessageFactory {
      *            The message code
      * @param body
      *            The message body
-     * @return The decoded message, or NULL if the message type is not unknown
+     * @return The decoded message, or NULL if the message type is unknown
      * @throws MessageException
      *             when the encoding is illegal
      */
@@ -81,7 +80,6 @@ public class MessageFactory {
                 case EVM_TX_BROADCAST -> new EvmTxBroadcastMessage(body);
                 case EVM_TX_REQUEST -> new EvmTxRequestMessage(body);
                 case EVM_TX_REPLY -> new EvmTxReplyMessage(body);
-                case EVM_STATE_ROOT -> new EvmStateRootMessage(body);
                 case EVM_BATCH_REQUEST -> new EvmBatchRequestMessage(body);
                 case EVM_BATCH_REPLY -> new EvmBatchReplyMessage(body);
             };
