@@ -235,6 +235,47 @@ public class EvmBlockProcessor {
     }
 
     /**
+     * Gate 2 (G2-T1a): the setMain entry point under delta-lagged execution. Buffers this confirmed
+     * main block's EVM execution inputs and, if some earlier height has now reached finality depth
+     * {@code lag}, executes that MATURED height ({@code confirmedHeight - lag + 1}) via the unchanged
+     * {@link #processMainBlock}. EVM therefore touches only heights that are {@code lag - 1}
+     * confirmations deep, so shallow reorgs never rewrite executed EVM state and the lagged
+     * {@code root(N - lag)} an honest miner anchored is always reproducible. At {@code lag == 1} this
+     * reduces to immediate execution, byte-identical to the pre-Gate-2 path.
+     *
+     * <p>MUST be called for every confirmed main block (even payload-free ones) so buffered heights
+     * actually mature. Pre-activation heights preserve the old behavior exactly (a payload-bearing
+     * pre-activation block is handed straight to {@code processMainBlock}, which warns and returns).
+     * The {@code daSkip} bit is still ignored here (G2-T1b), and a genuinely-missing blob at maturity
+     * still defers through the existing pending queue.
+     */
+    public synchronized void processConfirmedBlock(List<Bytes32> refs, long confirmedHeight,
+            long timestampSeconds, Bytes32 blockHash, List<BridgeDeposit> deposits, long lag) {
+        List<Bytes32> safeRefs = refs == null ? List.of() : refs;
+        List<BridgeDeposit> safeDeposits = deposits == null ? List.of() : deposits;
+        boolean hasPayload = !safeRefs.isEmpty() || !safeDeposits.isEmpty();
+        if (confirmedHeight < activationHeight) {
+            // Pre-activation: identical to the old direct call (processMainBlock warns + returns).
+            if (hasPayload) {
+                processMainBlock(safeRefs, confirmedHeight, timestampSeconds, blockHash, safeDeposits);
+            }
+            return;
+        }
+        if (hasPayload) {
+            metaStore.putMaturityEntry(confirmedHeight, blockHash, timestampSeconds, safeRefs, safeDeposits);
+        }
+        long matured = maturedEvmHeight(confirmedHeight, lag);
+        if (matured < activationHeight) {
+            return; // still filling the initial lag-1 window (or the matured height is below genesis)
+        }
+        metaStore.getMaturityEntry(matured).ifPresent(entry -> {
+            metaStore.removeMaturityEntry(matured);
+            processMainBlock(entry.refs(), matured, entry.timestampSeconds(), entry.blockHash(),
+                    entry.deposits());
+        });
+    }
+
+    /**
      * Resumes deferred execution after new blobs are stored (e.g. an EVM_TX_REPLY over P2P). Runs
      * stalled heights in ascending order for as long as each one's blobs are all present, stopping
      * at the first still-incomplete height so ordering is never violated.
