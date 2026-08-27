@@ -304,6 +304,63 @@ public class EvmMetaStoreTest {
     }
 
     @Test
+    public void maturity_entry_round_trips_refs_deposits_hash_and_timestamp() {
+        Bytes32 hash = Bytes32.fromHexString("0x" + "77".repeat(32));
+        Bytes32 refA = Bytes32.fromHexString("0x" + "aa".repeat(32));
+        Bytes32 refB = Bytes32.fromHexString("0x" + "bb".repeat(32));
+        Address target = Address.fromHexString("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf");
+        BridgeDeposit dep = new BridgeDeposit(target, 12345L);
+
+        store.putMaturityEntry(7L, hash, 1700L, List.of(refA, refB), List.of(dep));
+
+        EvmMetaStore.MaturityEntry back = store.getMaturityEntry(7L).orElseThrow();
+        assertEquals(hash, back.blockHash());
+        assertEquals(1700L, back.timestampSeconds());
+        assertEquals(List.of(refA, refB), back.refs());
+        assertEquals(1, back.deposits().size());
+        assertEquals(target, back.deposits().get(0).target());
+        assertEquals(12345L, back.deposits().get(0).amountNano());
+    }
+
+    @Test
+    public void maturity_entry_handles_empty_refs_and_empty_deposits() {
+        Bytes32 hash = Bytes32.fromHexString("0x" + "05".repeat(32));
+        Address target = Address.fromHexString("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf");
+        store.putMaturityEntry(3L, hash, 900L, List.of(), List.of(new BridgeDeposit(target, 7L)));
+        EvmMetaStore.MaturityEntry depOnly = store.getMaturityEntry(3L).orElseThrow();
+        assertTrue(depOnly.refs().isEmpty());
+        assertEquals(1, depOnly.deposits().size());
+
+        Bytes32 ref = Bytes32.fromHexString("0x" + "cc".repeat(32));
+        store.putMaturityEntry(4L, hash, 901L, List.of(ref), List.of());
+        EvmMetaStore.MaturityEntry refOnly = store.getMaturityEntry(4L).orElseThrow();
+        assertEquals(List.of(ref), refOnly.refs());
+        assertTrue(refOnly.deposits().isEmpty());
+    }
+
+    @Test
+    public void maturity_entry_is_absent_and_removable() {
+        assertTrue(store.getMaturityEntry(99L).isEmpty());
+        Bytes32 hash = Bytes32.fromHexString("0x" + "01".repeat(32));
+        store.putMaturityEntry(5L, hash, 500L, List.of(), List.of());
+        assertTrue(store.getMaturityEntry(5L).isPresent());
+        store.removeMaturityEntry(5L);
+        assertTrue(store.getMaturityEntry(5L).isEmpty());
+    }
+
+    @Test
+    public void remove_above_clears_maturity_entries_beyond_the_height() {
+        Bytes32 hash = Bytes32.fromHexString("0x" + "01".repeat(32));
+        store.putMaturityEntry(4L, hash, 400L, List.of(), List.of());
+        store.putMaturityEntry(5L, hash, 500L, List.of(), List.of());
+        store.putMaturityEntry(6L, hash, 600L, List.of(), List.of());
+        store.removeAbove(4L);
+        assertTrue("<=4 survives", store.getMaturityEntry(4L).isPresent());
+        assertTrue(">4 is swept", store.getMaturityEntry(5L).isEmpty());
+        assertTrue(">4 is swept", store.getMaturityEntry(6L).isEmpty());
+    }
+
+    @Test
     public void bridge_record_families_are_independent_at_a_shared_height() {
         // 0x06 (deposits), 0x07 (burns) and 0x08 (releases) legitimately coexist at one height —
         // e.g. a release height that also carries new deposits and burns. Same-height writes must
