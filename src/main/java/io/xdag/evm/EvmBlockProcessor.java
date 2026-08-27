@@ -524,6 +524,21 @@ public class EvmBlockProcessor {
     }
 
     /**
+     * The EVM height that a block confirming at {@code confirmedHeight} matures under delta-lagged
+     * execution (Gate 2, G2-T1a): {@code confirmedHeight - lag + 1}. This is the unique index that
+     * keeps G1's anchor semantics (block N commits root(N - lag)) while making that root exist at mine
+     * time (see the Gate 2 design doc, section 1). {@code lag} must be >= 1 (config-enforced; mirrors
+     * {@link io.xdag.core.BlockchainImpl#computeStateRootAnchor}). Callers must additionally guard the
+     * result against activation/genesis (a result below the activation height matures nothing).
+     */
+    public static long maturedEvmHeight(long confirmedHeight, long lag) {
+        if (lag < 1) {
+            throw new IllegalArgumentException("evm.stateRootLag must be >= 1 (got " + lag + ")");
+        }
+        return confirmedHeight - lag + 1;
+    }
+
+    /**
      * The chained EVM state root as of {@code height}: the root of the highest checkpoint at height
      * {@code <= height}, or the genesis origin root if there is none. Deterministic given the node's
      * checkpoints — the miner (G1-T2) commits this at H-delta and the validator (G1-T3) recomputes the

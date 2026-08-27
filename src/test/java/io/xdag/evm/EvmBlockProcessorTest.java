@@ -1598,4 +1598,22 @@ public class EvmBlockProcessorTest {
         assertEquals("after unwinding past height 7, the as-of root falls back to the height-3 floor",
                 root3, processor.chainedRootAt(9L));
     }
+
+    // -------------------------------------------------------------------------
+    // G2-T1a: maturedEvmHeight index for delta-lagged EVM execution
+    // -------------------------------------------------------------------------
+
+    @Test
+    public void matured_evm_height_is_confirmed_minus_lag_plus_one() {
+        // G2-T1a: setMain(N) executes the height that has just reached finality depth = N - lag + 1.
+        assertEquals(10L, EvmBlockProcessor.maturedEvmHeight(10L, 1L));  // lag=1 -> immediate (today)
+        assertEquals(9L, EvmBlockProcessor.maturedEvmHeight(10L, 2L));   // lag=2 -> one behind
+        assertEquals(-5L, EvmBlockProcessor.maturedEvmHeight(10L, 16L)); // deep lag -> below genesis (caller guards)
+        assertEquals(1L, EvmBlockProcessor.maturedEvmHeight(16L, 16L));  // first height that matures at lag=16
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void matured_evm_height_rejects_lag_below_one() {
+        EvmBlockProcessor.maturedEvmHeight(10L, 0L);
+    }
 }
