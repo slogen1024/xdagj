@@ -1654,4 +1654,22 @@ public class EvmBlockProcessorTest {
         assertTrue("missing-blob height defers to the pending queue",
                 metaStore.pendingHeights().contains(1L));
     }
+
+    @Test
+    public void a_buffered_unmatured_height_truncated_by_a_reorg_leaves_no_execution_artifact() {
+        // lag=2: confirm height 5 with a real deploy -> it is buffered, NOT executed (matured = 4,
+        // and height 4 was never buffered here). A reorg that unwinds height 5 truncates the buffer;
+        // because the height never executed, there is no checkpoint/receipt to roll back.
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        processor.processConfirmedBlock(List.of(ref(deploy)), 5L, 1005L, BLOCK_HASH_1, List.of(), 2L);
+        assertTrue("height 5 is buffered", metaStore.getMaturityEntry(5L).isPresent());
+        assertTrue("height 5 never executed", metaStore.getHeightRecord(5L).isEmpty());
+
+        // Simulate the reorg truncation setMain->rollbackTo would perform.
+        metaStore.removeAbove(4L);
+
+        assertTrue("buffer entry is swept", metaStore.getMaturityEntry(5L).isEmpty());
+        assertTrue("no checkpoint existed to roll back", metaStore.getHeightRecord(5L).isEmpty());
+        assertTrue("nothing left pending either", metaStore.pendingHeights().isEmpty());
+    }
 }
