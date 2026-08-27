@@ -248,6 +248,10 @@ public class EvmBlockProcessor {
      * pre-activation block is handed straight to {@code processMainBlock}, which warns and returns).
      * The {@code daSkip} bit is still ignored here (G2-T1b), and a genuinely-missing blob at maturity
      * still defers through the existing pending queue.
+     *
+     * <p>Note: {@code activationHeight} here is the EVM hard-fork height ({@code evm.activationHeight}),
+     * which gates whether EVM executes at all — distinct from the state-root <i>anchor</i> activation
+     * ({@code evm.stateRootActivationHeight}) that gates anchor verification in {@code BlockchainImpl.setMain}.
      */
     public synchronized void processConfirmedBlock(List<Bytes32> refs, long confirmedHeight,
             long timestampSeconds, Bytes32 blockHash, List<BridgeDeposit> deposits, long lag) {
