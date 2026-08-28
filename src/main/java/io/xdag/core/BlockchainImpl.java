@@ -1637,11 +1637,13 @@ public class BlockchainImpl implements Blockchain {
      * The state-root anchor to embed in the next main block, or {@code null} when anchoring is not
      * yet active or there is no lagged height to anchor. Static and pure for testability -- {@code
      * rootAt} supplies the chained root as of a height (in production, {@code EvmBlockProcessor::
-     * chainedRootAt}). G1-T2 never sets the DA-skip flag (that is G2). The lag must be >= 1: a lag of
-     * 0 would anchor root(H), which is not yet executed when H is mined.
+     * chainedRootAt}). The {@code daSkip} bit is the miner's committed skip decision for the height
+     * this block will mature ({@code nextHeight - lag + 1}), computed by the caller from
+     * {@code EvmBlockProcessor.maturedPayloadAvailable}. The lag must be >= 1: a lag of 0 would
+     * anchor root(H), which is not yet executed when H is mined.
      */
     static EvmStateAnchor computeStateRootAnchor(long nextHeight, long activationHeight, long lag,
-            java.util.function.LongFunction<Bytes32> rootAt) {
+            java.util.function.LongFunction<Bytes32> rootAt, boolean daSkip) {
         if (lag < 1) {
             throw new IllegalArgumentException("evm.stateRootLag must be >= 1 (got " + lag + ")");
         }
@@ -1652,7 +1654,7 @@ public class BlockchainImpl implements Blockchain {
         if (anchorHeight < 0) {
             return null;
         }
-        return new EvmStateAnchor(anchorHeight, EvmStateAnchor.rootLowOf(rootAt.apply(anchorHeight)), false);
+        return new EvmStateAnchor(anchorHeight, EvmStateAnchor.rootLowOf(rootAt.apply(anchorHeight)), daSkip);
     }
 
     /** Verdict of validating a main block's state-root anchor against this node's own chained root. */
@@ -1752,8 +1754,16 @@ public class BlockchainImpl implements Blockchain {
         EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
         if (evmProcessor != null) {
             io.xdag.config.spec.EvmSpec evmSpec = kernel.getConfig().getEvmSpec();
+            long lag = evmSpec.getEvmStateRootLag();
+            // G2-T1c: commit a skip for the height this block will mature (nextHeight - lag + 1) iff its
+            // buffered EVM payload is not locally available. At lag=1 the matured height is this
+            // not-yet-confirmed block, which is never buffered, so daSkip stays false (devnet unchanged).
+            // Best-effort like the root above: a stale/racy daSkip cannot fork -- it only affects
+            // root(nextHeight - lag + 1), which the NEXT block's anchor commits and every node re-derives
+            // and verifies at import, so a divergent winning daSkip yields a discarded candidate, not a split.
+            boolean daSkip = !evmProcessor.maturedPayloadAvailable(nextHeight, lag);
             stateRootAnchor = computeStateRootAnchor(nextHeight, evmSpec.getEvmStateRootActivationHeight(),
-                    evmSpec.getEvmStateRootLag(), evmProcessor::chainedRootAt);
+                    lag, evmProcessor::chainedRootAt, daSkip);
         }
         if (stateRootAnchor != null) {
             res++; // reserve the anchor's field slot
