@@ -1758,6 +1758,9 @@ public class BlockchainImpl implements Blockchain {
             // G2-T1c: commit a skip for the height this block will mature (nextHeight - lag + 1) iff its
             // buffered EVM payload is not locally available. At lag=1 the matured height is this
             // not-yet-confirmed block, which is never buffered, so daSkip stays false (devnet unchanged).
+            // Best-effort like the root above: a stale/racy daSkip cannot fork -- it only affects
+            // root(nextHeight - lag + 1), which the NEXT block's anchor commits and every node re-derives
+            // and verifies at import, so a divergent winning daSkip yields a discarded candidate, not a split.
             boolean daSkip = !evmProcessor.maturedPayloadAvailable(nextHeight, lag);
             stateRootAnchor = computeStateRootAnchor(nextHeight, evmSpec.getEvmStateRootActivationHeight(),
                     lag, evmProcessor::chainedRootAt, daSkip);

@@ -616,7 +616,8 @@ public class EvmBlockProcessor {
     /**
      * G2-T1c (miner): whether this node can make the EVM payload of the height that a block confirming
      * at {@code confirmedHeight} would mature ({@code confirmedHeight - lag + 1}) available -- i.e.
-     * every buffered ref of that height expands to a present blob. Used at pack time to set the block's
+     * every buffered ref of that height expands to a present blob (no unknown or missing-blob refs).
+     * Used at pack time to set the block's
      * committed {@code daSkip} bit: available -> include ({@code daSkip=false}); unavailable -> skip
      * ({@code daSkip=true}). Returns true (include) when nothing is buffered at the matured height:
      * there is nothing to skip. Lag-agnostic -- it has no lag=1 branch; the "lag=1 never skips"
