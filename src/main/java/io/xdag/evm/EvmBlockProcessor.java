@@ -217,6 +217,12 @@ public class EvmBlockProcessor {
         boolean hasRefs = !refs.isEmpty();
         int depositCount = deposits == null ? 0 : deposits.size();
         boolean hasDeposits = depositCount > 0;
+        // A committed-skip height (G2-T1b) must reach executeAndCheckpoint to fold its SKIP_SENTINEL,
+        // so it is not swallowed by this empty-payload early-return. In production the skip path enters
+        // via skipMaturedHeight -> executeAndCheckpoint (never here) and always passes empty refs; this
+        // guard only keeps the direct processMainBlock entry point coherent for a marked height. Note a
+        // marked height carrying non-empty refs whose blob is missing would defer below rather than skip
+        // (harmless today: production skips carry no refs; do NOT route marked+refs heights here).
         boolean skipMarked = metaStore.isSkipped(height);
         if (!hasRefs && !hasDeposits && !skipMarked) {
             return;
