@@ -25,6 +25,7 @@ package io.xdag.evm.state;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -358,6 +359,25 @@ public class EvmMetaStoreTest {
         assertTrue("<=4 survives", store.getMaturityEntry(4L).isPresent());
         assertTrue(">4 is swept", store.getMaturityEntry(5L).isEmpty());
         assertTrue(">4 is swept", store.getMaturityEntry(6L).isEmpty());
+    }
+
+    @Test
+    public void skip_marker_round_trips_and_defaults_false() {
+        assertFalse("unmarked height is not skipped", store.isSkipped(8L));
+        store.putSkipMarker(8L);
+        assertTrue("marked height is skipped", store.isSkipped(8L));
+        assertFalse("a different height is unaffected", store.isSkipped(9L));
+    }
+
+    @Test
+    public void remove_above_clears_skip_markers_beyond_the_height() {
+        store.putSkipMarker(4L);
+        store.putSkipMarker(5L);
+        store.putSkipMarker(6L);
+        store.removeAbove(4L);
+        assertTrue("<=4 survives", store.isSkipped(4L));
+        assertFalse(">4 is swept", store.isSkipped(5L));
+        assertFalse(">4 is swept", store.isSkipped(6L));
     }
 
     @Test

@@ -48,6 +48,7 @@ import org.hyperledger.besu.datatypes.Hash;
  *   0x07 | mainHeight(8 BE) -> bridge burns at burn height: concatenated (nativeTarget20 | amountNano 8 BE) entries
  *   0x08 | mainHeight(8 BE) -> native releases at release height: same entry shape as 0x07
  *   0x09 | mainHeight(8 BE) -> maturity buffer (G2-T1a): blockHash(32) | timestamp(8 BE) | refCount(4 BE) | refs(32 each) | deposits(28 each)
+ *   0x0A | mainHeight(8 BE) -> committed-skip marker (G2-T1b): a 1-byte presence flag (value {0x01})
  * </pre>
  *
  * Height records are the reorg checkpoints: {@link #removeAbove(long)} truncates everything past a
@@ -80,6 +81,13 @@ public class EvmMetaStore {
      * height's EVM execution inputs until it reaches finality depth delta.
      */
     private static final byte PREFIX_MATURITY = 0x09;
+    /**
+     * Committed-skip marker (G2-T1b): 0x0A | height(8 BE) -> 1-byte presence flag ({@code 0x01}).
+     * Written once by setMain when a block-committed "skip" bit causes the height to be skipped.
+     * Read by {@code EvmBlockProcessor.executeList} on live execution and reorg replay so both fold
+     * the SKIP_SENTINEL identically. Swept by removeAbove on reorg.
+     */
+    private static final byte PREFIX_SKIP = 0x0A;
     private static final int HEIGHT_RECORD_LENGTH = 32 + 32 + 4 + 8;
     private static final int PENDING_HEADER_LENGTH = 32 + 8; // blockHash(32) | timestampSeconds(8)
     private static final int LOCATION_RECORD_LENGTH = 8 + 4; // height(8 BE) | index(4 BE)
@@ -280,6 +288,12 @@ public class EvmMetaStore {
         return key;
     }
 
+    private static byte[] skipKey(long height) {
+        byte[] key = heightKey(height);
+        key[0] = PREFIX_SKIP;
+        return key;
+    }
+
     private static byte[] bloomKey(long height) {
         byte[] key = heightKey(height);
         key[0] = PREFIX_LOG_BLOOM;
@@ -413,11 +427,26 @@ public class EvmMetaStore {
     }
 
     /**
+     * Marks a main height as committed-skip (ADR-015 / G2-T1b): its EVM txs do NOT execute, but the
+     * height still checkpoints with a canonical SKIP_SENTINEL root. Read by {@code EvmBlockProcessor.
+     * executeList} on both live execution and reorg replay so the two fold the sentinel identically.
+     * removeAbove-swept on reorg. Presence-only (value {@code 0x01}); write-once per height.
+     */
+    public void putSkipMarker(long height) {
+        store.put(skipKey(height), new byte[]{1});
+    }
+
+    /** True iff {@code height} was committed-skip (see {@link #putSkipMarker}). */
+    public boolean isSkipped(long height) {
+        return store.get(skipKey(height)) != null;
+    }
+
+    /**
      * Deletes every height record, tx list, per-tx receipt, reverse-index entry, pending record,
-     * logs bloom, deposits, withdrawals, releases, and maturity buffer strictly above {@code height}
-     * (reorg truncation). Receipts and reverse-index entries must go too, otherwise a reorged-out tx
-     * keeps advertising a stale success/contract-address through {@link #getReceipt} or a stale
-     * (height, index) through {@link #findTxLocation}.
+     * logs bloom, deposits, withdrawals, releases, maturity buffer, and skip markers strictly above
+     * {@code height} (reorg truncation). Receipts and reverse-index entries must go too, otherwise a
+     * reorged-out tx keeps advertising a stale success/contract-address through {@link #getReceipt}
+     * or a stale (height, index) through {@link #findTxLocation}.
      */
     public void removeAbove(long height) {
         for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_TX_LIST})) {
@@ -460,6 +489,11 @@ public class EvmMetaStore {
             }
         }
         for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_MATURITY})) {
+            if (heightFromKey(key) > height) {
+                store.delete(key);
+            }
+        }
+        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_SKIP})) {
             if (heightFromKey(key) > height) {
                 store.delete(key);
             }
