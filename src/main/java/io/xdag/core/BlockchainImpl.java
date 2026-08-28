@@ -1408,13 +1408,15 @@ public class BlockchainImpl implements Blockchain {
                 deposits = List.of();
             }
             if (evmProcessor != null) {
-                // Gate 2 (G2-T1a): buffer this confirmed height and mature the height that has just
-                // reached finality depth (mainNumber - stateRootLag + 1). Driven on EVERY confirmed
-                // main block (even payload-free ones) so buffered heights actually mature; at lag=1
-                // this executes mainNumber immediately (byte-identical to the pre-Gate-2 path).
+                // Gate 2 (G2-T1a/T1b): buffer this confirmed height and mature the height that reached
+                // finality depth (mainNumber - stateRootLag + 1). This block's anchor.daSkip is the
+                // committed skip decision FOR THE MATURED HEIGHT (not for mainNumber): honor it so a
+                // node lacking the blob and one holding it converge on the same skipped root.
+                EvmStateAnchor confirmedAnchor = block.getEvmStateAnchor();
+                boolean daSkip = confirmedAnchor != null && confirmedAnchor.daSkip();
                 evmProcessor.processConfirmedBlock(evmRefs, mainNumber, timestampSeconds,
                         Bytes32.wrap(block.getInfo().getHash()), deposits,
-                        kernel.getConfig().getEvmSpec().getEvmStateRootLag());
+                        kernel.getConfig().getEvmSpec().getEvmStateRootLag(), daSkip);
             }
             // Spec §3.2 ordering: native accounting, then EVM execution, then matured releases.
             // Deliberately OUTSIDE the refs/deposits guard — a release height needs neither.

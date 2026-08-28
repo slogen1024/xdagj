@@ -1625,7 +1625,7 @@ public class EvmBlockProcessorTest {
     public void confirmed_block_at_lag_one_executes_the_confirmed_height_immediately() {
         // lag=1: matured = confirmedHeight, so execution is immediate (byte-identical to the old path).
         EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
-        processor.processConfirmedBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1, List.of(), 1L);
+        processor.processConfirmedBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1, List.of(), 1L, false);
         assertTrue("height 1 checkpoints immediately at lag=1", metaStore.getHeightRecord(1L).isPresent());
     }
 
@@ -1633,12 +1633,12 @@ public class EvmBlockProcessorTest {
     public void confirmed_block_at_lag_two_defers_execution_by_one_confirmed_block() {
         // lag=2: confirming height 1 buffers it (matured = 0, nothing matures yet).
         EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
-        processor.processConfirmedBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1, List.of(), 2L);
+        processor.processConfirmedBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1, List.of(), 2L, false);
         assertTrue("height 1 not yet executed at lag=2", metaStore.getHeightRecord(1L).isEmpty());
         assertTrue("height 1 is buffered", metaStore.getMaturityEntry(1L).isPresent());
 
         // Confirming an empty height 2 matures height 1 (2 - 2 + 1 = 1).
-        processor.processConfirmedBlock(List.of(), 2L, 1002L, BLOCK_HASH_2, List.of(), 2L);
+        processor.processConfirmedBlock(List.of(), 2L, 1002L, BLOCK_HASH_2, List.of(), 2L, false);
         assertTrue("height 1 executes when height 2 confirms", metaStore.getHeightRecord(1L).isPresent());
         assertTrue("height 1 buffer entry consumed", metaStore.getMaturityEntry(1L).isEmpty());
     }
@@ -1649,7 +1649,7 @@ public class EvmBlockProcessorTest {
         // queue (existing I4 path) rather than checkpointing. The BEHIND-verdict trap repair is G2-T1b;
         // here we only assert the deferral still composes.
         Bytes32 phantom = Bytes32.fromHexString("0x" + "ab".repeat(32));
-        processor.processConfirmedBlock(List.of(phantom), 1L, 1001L, BLOCK_HASH_1, List.of(), 1L);
+        processor.processConfirmedBlock(List.of(phantom), 1L, 1001L, BLOCK_HASH_1, List.of(), 1L, false);
         assertTrue("missing-blob height does not checkpoint", metaStore.getHeightRecord(1L).isEmpty());
         assertTrue("missing-blob height defers to the pending queue",
                 metaStore.pendingHeights().contains(1L));
@@ -1661,7 +1661,7 @@ public class EvmBlockProcessorTest {
         // and height 4 was never buffered here). A reorg that unwinds height 5 truncates the buffer;
         // because the height never executed, there is no checkpoint/receipt to roll back.
         EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
-        processor.processConfirmedBlock(List.of(ref(deploy)), 5L, 1005L, BLOCK_HASH_1, List.of(), 2L);
+        processor.processConfirmedBlock(List.of(ref(deploy)), 5L, 1005L, BLOCK_HASH_1, List.of(), 2L, false);
         assertTrue("height 5 is buffered", metaStore.getMaturityEntry(5L).isPresent());
         assertTrue("height 5 never executed", metaStore.getHeightRecord(5L).isEmpty());
 
@@ -1745,5 +1745,40 @@ public class EvmBlockProcessorTest {
         assertTrue("skip marker survives the reorg truncation at its own height", metaStore.isSkipped(1L));
         Bytes32 after = metaStore.getHeightRecord(1L).orElseThrow().stateRoot();
         assertEquals("replay reproduces the skip root byte-for-byte", before, after);
+    }
+
+    // -------------------------------------------------------------------------
+    // G2-T1b step 3: processConfirmedBlock honors the committed daSkip bit
+    // -------------------------------------------------------------------------
+
+    @Test
+    public void a_committed_skip_is_honored_even_when_the_blob_is_present_at_lag_two() {
+        // lag=2, daSkip=true for the matured height. Confirm height 1 (buffers the deploy, blob PRESENT),
+        // then confirm height 2 with daSkip=true -> matures height 1 as a SKIP, not an execution, even
+        // though this node holds the blob. The deploy must NOT execute; height 1 checkpoints as skipped.
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        processor.processConfirmedBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1, List.of(), 2L, false);
+        assertTrue("height 1 buffered", metaStore.getMaturityEntry(1L).isPresent());
+
+        // block 2 commits daSkip=true for the height it matures (height 1).
+        processor.processConfirmedBlock(List.of(), 2L, 1002L, BLOCK_HASH_2, List.of(), 2L, true);
+
+        assertTrue("height 1 checkpointed", metaStore.getHeightRecord(1L).isPresent());
+        assertTrue("height 1 recorded as skipped", metaStore.isSkipped(1L));
+        assertTrue("height 1 has an empty tx list (skipped)", metaStore.getTxList(1L).isEmpty());
+        assertTrue("the deploy did NOT execute despite its blob being present",
+                metaStore.getReceipt(deploy.getHash()).isEmpty());
+        assertTrue("buffer entry consumed", metaStore.getMaturityEntry(1L).isEmpty());
+    }
+
+    @Test
+    public void a_committed_include_still_executes_at_lag_two() {
+        // Control: daSkip=false matures height 1 by EXECUTING it (T1a behavior), no skip marker.
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        processor.processConfirmedBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1, List.of(), 2L, false);
+        processor.processConfirmedBlock(List.of(), 2L, 1002L, BLOCK_HASH_2, List.of(), 2L, false);
+        assertTrue("height 1 executed", metaStore.getHeightRecord(1L).isPresent());
+        assertFalse("height 1 not marked skipped", metaStore.isSkipped(1L));
+        assertTrue("the deploy executed", metaStore.getReceipt(deploy.getHash()).isPresent());
     }
 }
