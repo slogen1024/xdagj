@@ -1810,4 +1810,47 @@ public class EvmBlockProcessorTest {
         assertTrue(metaStore.isSkipped(1L));
         assertTrue(metaB.isSkipped(1L));
     }
+
+    // -------------------------------------------------------------------------
+    // G2-T1c: maturedPayloadAvailable pack-time DA check
+    // -------------------------------------------------------------------------
+
+    @Test
+    public void matured_payload_available_true_when_the_buffered_refs_blob_is_present() {
+        // lag=2: matured for confirmedHeight 3 is height 2. Buffer height 2 with a ref whose blob IS
+        // in txStore -> the miner can make it available -> include (available == true).
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L); // stored in txStore
+        metaStore.putMaturityEntry(2L, BLOCK_HASH_1, 1002L, List.of(ref(deploy)), List.of());
+        assertTrue("all buffered blobs present -> available",
+                processor.maturedPayloadAvailable(3L, 2L));
+    }
+
+    @Test
+    public void matured_payload_available_false_when_a_buffered_refs_blob_is_missing() {
+        // Buffer height 2 with a ref whose blob was NEVER stored -> unavailable -> the miner must skip.
+        Bytes32 phantom = Bytes32.fromHexString("0x" + "ab".repeat(32));
+        metaStore.putMaturityEntry(2L, BLOCK_HASH_1, 1002L, List.of(phantom), List.of());
+        assertFalse("a missing blob -> not available",
+                processor.maturedPayloadAvailable(3L, 2L));
+    }
+
+    @Test
+    public void matured_payload_available_true_when_nothing_is_buffered() {
+        // No buffer entry at the matured height (an empty height, or a height not yet confirmed):
+        // nothing to skip -> include trivially.
+        assertTrue("no buffered payload -> available (nothing to skip)",
+                processor.maturedPayloadAvailable(9L, 2L)); // matured = 8, never buffered
+    }
+
+    @Test
+    public void matured_payload_available_returns_true_for_present_blob_regardless_of_lag() {
+        // The method's contract is purely "is the matured height's buffered payload available",
+        // independent of lag. At lag=1, matured for confirmedHeight 5 is height 5; buffer it with a
+        // PRESENT blob -> available. (The "lag=1 never skips" property comes from the caller, where the
+        // matured height is the unconfirmed block being mined and is therefore never buffered.)
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        metaStore.putMaturityEntry(5L, BLOCK_HASH_1, 1005L, List.of(ref(deploy)), List.of());
+        assertTrue("buffered present blob at lag 1 -> available",
+                processor.maturedPayloadAvailable(5L, 1L)); // matured = 5
+    }
 }

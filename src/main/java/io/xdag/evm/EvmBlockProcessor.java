@@ -614,6 +614,25 @@ public class EvmBlockProcessor {
     }
 
     /**
+     * G2-T1c (miner): whether this node can make the EVM payload of the height that a block confirming
+     * at {@code confirmedHeight} would mature ({@code confirmedHeight - lag + 1}) available -- i.e.
+     * every buffered ref of that height expands to a present blob. Used at pack time to set the block's
+     * committed {@code daSkip} bit: available -> include ({@code daSkip=false}); unavailable -> skip
+     * ({@code daSkip=true}). Returns true (include) when nothing is buffered at the matured height:
+     * there is nothing to skip. Lag-agnostic -- it has no lag=1 branch; the "lag=1 never skips"
+     * property is the caller's, where at lag=1 the matured height is the unconfirmed block being mined
+     * and is therefore never in the buffer.
+     */
+    public synchronized boolean maturedPayloadAvailable(long confirmedHeight, long lag) {
+        long matured = maturedEvmHeight(confirmedHeight, lag);
+        EvmMetaStore.MaturityEntry entry = metaStore.getMaturityEntry(matured).orElse(null);
+        if (entry == null) {
+            return true; // nothing buffered to skip -> include trivially
+        }
+        return expandRefs(entry.refs()).complete();
+    }
+
+    /**
      * The EVM height that a block confirming at {@code confirmedHeight} matures under delta-lagged
      * execution (Gate 2, G2-T1a): {@code confirmedHeight - lag + 1}. This is the unique index that
      * keeps G1's anchor semantics (block N commits root(N - lag)) while making that root exist at mine
