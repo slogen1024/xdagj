@@ -47,6 +47,7 @@ import org.hyperledger.besu.datatypes.Hash;
  *   0x06 | mainHeight(8 BE) -> confirmed bridge deposits: concatenated (address20 | amountNano 8 BE) entries
  *   0x07 | mainHeight(8 BE) -> bridge burns at burn height: concatenated (nativeTarget20 | amountNano 8 BE) entries
  *   0x08 | mainHeight(8 BE) -> native releases at release height: same entry shape as 0x07
+ *   0x09 | mainHeight(8 BE) -> maturity buffer (G2-T1a): blockHash(32) | timestamp(8 BE) | refCount(4 BE) | refs(32 each) | deposits(28 each)
  * </pre>
  *
  * Height records are the reorg checkpoints: {@link #removeAbove(long)} truncates everything past a
@@ -73,12 +74,22 @@ public class EvmMetaStore {
      * reverse-what-you-did bookkeeping, immune to release-skip asymmetries.
      */
     private static final byte PREFIX_RELEASES = 0x08;
+    /**
+     * Maturity buffer (G2-T1a): 0x09 | height(8 BE) -> blockHash(32) | timestampSeconds(8 BE) |
+     * refCount(4 BE) | refs(32 each) | deposits(BRIDGE_ENTRY_LENGTH each). Holds a confirmed
+     * height's EVM execution inputs until it reaches finality depth delta.
+     */
+    private static final byte PREFIX_MATURITY = 0x09;
     private static final int HEIGHT_RECORD_LENGTH = 32 + 32 + 4 + 8;
     private static final int PENDING_HEADER_LENGTH = 32 + 8; // blockHash(32) | timestampSeconds(8)
     private static final int LOCATION_RECORD_LENGTH = 8 + 4; // height(8 BE) | index(4 BE)
     private static final int LOG_BLOOM_LENGTH = 256; // fixed Ethereum logs-bloom width (2048 bits)
     // target/address(20) | amountNano(8 BE) — shared by the 0x06/0x07/0x08 record families
     private static final int BRIDGE_ENTRY_LENGTH = 20 + 8;
+    // Maturity buffer (G2-T1a): blockHash(32) | timestampSeconds(8 BE) | refCount(4 BE) | refs(32 each)
+    // | deposits(BRIDGE_ENTRY_LENGTH each). Holds a confirmed height's EVM execution inputs until the
+    // height reaches finality depth delta and setMain matures it.
+    private static final int MATURITY_HEADER_LENGTH = 32 + 8 + 4;
 
     private final KVSource<byte[], byte[]> store;
 
@@ -88,6 +99,11 @@ public class EvmMetaStore {
 
     /** A deferred main block: its identity, timestamp, and the tx refs awaiting blobs (I4). */
     public record PendingBlock(Bytes32 blockHash, long timestampSeconds, List<Bytes32> refs) {
+    }
+
+    /** A confirmed main block's EVM execution inputs, buffered until the height matures (G2-T1a). */
+    public record MaturityEntry(Bytes32 blockHash, long timestampSeconds, List<Bytes32> refs,
+                                List<BridgeDeposit> deposits) {
     }
 
     /** Decoded per-height checkpoint record; the timestamp feeds deterministic replay (TIMESTAMP opcode). */
@@ -258,6 +274,12 @@ public class EvmMetaStore {
         return key;
     }
 
+    private static byte[] maturityKey(long height) {
+        byte[] key = heightKey(height);
+        key[0] = PREFIX_MATURITY;
+        return key;
+    }
+
     private static byte[] bloomKey(long height) {
         byte[] key = heightKey(height);
         key[0] = PREFIX_LOG_BLOOM;
@@ -308,10 +330,94 @@ public class EvmMetaStore {
     }
 
     /**
-     * Deletes every height record, tx list, per-tx receipt, reverse-index entry, pending record, and
-     * logs bloom strictly above {@code height} (reorg truncation). Receipts and reverse-index entries must go
-     * too, otherwise a reorged-out tx keeps advertising a stale success/contract-address through
-     * {@link #getReceipt} or a stale (height, index) through {@link #findTxLocation}.
+     * Buffers a confirmed main block's EVM execution inputs until its height reaches finality depth
+     * delta (G2-T1a). Written once per confirmed payload-bearing height; matured (and removed) by
+     * {@code EvmBlockProcessor.processConfirmedBlock}. Deposit amounts are non-negative (guarded).
+     */
+    public void putMaturityEntry(long height, Bytes32 blockHash, long timestampSeconds,
+                                 List<Bytes32> refs, List<BridgeDeposit> deposits) {
+        byte[] value = new byte[MATURITY_HEADER_LENGTH + refs.size() * 32
+                + deposits.size() * BRIDGE_ENTRY_LENGTH];
+        System.arraycopy(blockHash.toArray(), 0, value, 0, 32);
+        for (int i = 0; i < 8; i++) {
+            value[32 + i] = (byte) (timestampSeconds >>> (56 - 8 * i));
+        }
+        int refCount = refs.size();
+        for (int i = 0; i < 4; i++) {
+            value[40 + i] = (byte) (refCount >>> (24 - 8 * i));
+        }
+        int pos = MATURITY_HEADER_LENGTH;
+        for (Bytes32 ref : refs) {
+            System.arraycopy(ref.toArray(), 0, value, pos, 32);
+            pos += 32;
+        }
+        for (BridgeDeposit d : deposits) {
+            if (d.amountNano() < 0) {
+                throw new IllegalArgumentException(
+                        "negative deposit amount " + d.amountNano() + " for " + d.target());
+            }
+            System.arraycopy(d.target().getBytes().toArray(), 0, value, pos, 20);
+            long nano = d.amountNano();
+            for (int i = 0; i < 8; i++) {
+                value[pos + 20 + i] = (byte) (nano >>> (56 - 8 * i));
+            }
+            pos += BRIDGE_ENTRY_LENGTH;
+        }
+        store.put(maturityKey(height), value);
+    }
+
+    /** The buffered execution inputs at {@code height}, or empty if none is buffered. */
+    public Optional<MaturityEntry> getMaturityEntry(long height) {
+        byte[] raw = store.get(maturityKey(height));
+        if (raw == null) {
+            return Optional.empty();
+        }
+        if (raw.length < MATURITY_HEADER_LENGTH) {
+            throw new IllegalStateException("corrupt EVM_META maturity record at height " + height
+                    + ": " + raw.length + " bytes");
+        }
+        Bytes b = Bytes.wrap(raw);
+        Bytes32 blockHash = Bytes32.wrap(b.slice(0, 32));
+        long timestampSeconds = b.getLong(32);
+        int refCount = b.getInt(40);
+        // long arithmetic: a corrupt record could carry a refCount whose *32 overflows an int and
+        // wraps back into a "valid-looking" offset (matching a header-only length), which would then
+        // drive a runaway refs loop. Widening makes the corruption guard catch it.
+        long depositsOffsetLong = (long) MATURITY_HEADER_LENGTH + (long) refCount * 32;
+        if (refCount < 0 || depositsOffsetLong > raw.length
+                || (raw.length - depositsOffsetLong) % BRIDGE_ENTRY_LENGTH != 0) {
+            throw new IllegalStateException("corrupt EVM_META maturity record at height " + height
+                    + ": " + raw.length + " bytes, refCount " + refCount);
+        }
+        int depositsOffset = (int) depositsOffsetLong; // <= raw.length after the guard, so narrowing is safe
+        List<Bytes32> refs = new ArrayList<>(refCount);
+        for (int i = 0; i < refCount; i++) {
+            refs.add(Bytes32.wrap(b.slice(MATURITY_HEADER_LENGTH + i * 32, 32)));
+        }
+        List<BridgeDeposit> deposits = new ArrayList<>();
+        for (int off = depositsOffset; off < raw.length; off += BRIDGE_ENTRY_LENGTH) {
+            Address target = Address.wrap(Bytes.wrap(raw, off, 20));
+            long nano = Bytes.wrap(raw, off + 20, 8).getLong(0);
+            if (nano < 0) {
+                throw new IllegalStateException("corrupt EVM_META maturity record at height " + height
+                        + ": negative deposit amount " + nano);
+            }
+            deposits.add(new BridgeDeposit(target, nano));
+        }
+        return Optional.of(new MaturityEntry(blockHash, timestampSeconds, refs, deposits));
+    }
+
+    /** Drops the buffered entry at {@code height} once it has been matured (G2-T1a). */
+    public void removeMaturityEntry(long height) {
+        store.delete(maturityKey(height));
+    }
+
+    /**
+     * Deletes every height record, tx list, per-tx receipt, reverse-index entry, pending record,
+     * logs bloom, deposits, withdrawals, releases, and maturity buffer strictly above {@code height}
+     * (reorg truncation). Receipts and reverse-index entries must go too, otherwise a reorged-out tx
+     * keeps advertising a stale success/contract-address through {@link #getReceipt} or a stale
+     * (height, index) through {@link #findTxLocation}.
      */
     public void removeAbove(long height) {
         for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_TX_LIST})) {
@@ -349,6 +455,11 @@ public class EvmMetaStore {
             }
         }
         for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_RELEASES})) {
+            if (heightFromKey(key) > height) {
+                store.delete(key);
+            }
+        }
+        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_MATURITY})) {
             if (heightFromKey(key) > height) {
                 store.delete(key);
             }

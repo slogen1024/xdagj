@@ -1407,9 +1407,14 @@ public class BlockchainImpl implements Blockchain {
                     || mainNumber < kernel.getConfig().getEvmSpec().getEvmBridgeActivationHeight()) {
                 deposits = List.of();
             }
-            if (evmProcessor != null && (!evmRefs.isEmpty() || !deposits.isEmpty())) {
-                evmProcessor.processMainBlock(evmRefs, mainNumber, timestampSeconds,
-                        Bytes32.wrap(block.getInfo().getHash()), deposits);
+            if (evmProcessor != null) {
+                // Gate 2 (G2-T1a): buffer this confirmed height and mature the height that has just
+                // reached finality depth (mainNumber - stateRootLag + 1). Driven on EVERY confirmed
+                // main block (even payload-free ones) so buffered heights actually mature; at lag=1
+                // this executes mainNumber immediately (byte-identical to the pre-Gate-2 path).
+                evmProcessor.processConfirmedBlock(evmRefs, mainNumber, timestampSeconds,
+                        Bytes32.wrap(block.getInfo().getHash()), deposits,
+                        kernel.getConfig().getEvmSpec().getEvmStateRootLag());
             }
             // Spec §3.2 ordering: native accounting, then EVM execution, then matured releases.
             // Deliberately OUTSIDE the refs/deposits guard — a release height needs neither.

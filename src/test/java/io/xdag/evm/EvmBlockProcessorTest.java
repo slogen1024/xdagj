@@ -1598,4 +1598,78 @@ public class EvmBlockProcessorTest {
         assertEquals("after unwinding past height 7, the as-of root falls back to the height-3 floor",
                 root3, processor.chainedRootAt(9L));
     }
+
+    // -------------------------------------------------------------------------
+    // G2-T1a: maturedEvmHeight index for delta-lagged EVM execution
+    // -------------------------------------------------------------------------
+
+    @Test
+    public void matured_evm_height_is_confirmed_minus_lag_plus_one() {
+        // G2-T1a: setMain(N) executes the height that has just reached finality depth = N - lag + 1.
+        assertEquals(10L, EvmBlockProcessor.maturedEvmHeight(10L, 1L));  // lag=1 -> immediate (today)
+        assertEquals(9L, EvmBlockProcessor.maturedEvmHeight(10L, 2L));   // lag=2 -> one behind
+        assertEquals(-5L, EvmBlockProcessor.maturedEvmHeight(10L, 16L)); // deep lag -> below genesis (caller guards)
+        assertEquals(1L, EvmBlockProcessor.maturedEvmHeight(16L, 16L));  // first height that matures at lag=16
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void matured_evm_height_rejects_lag_below_one() {
+        EvmBlockProcessor.maturedEvmHeight(10L, 0L);
+    }
+
+    // -------------------------------------------------------------------------
+    // G2-T1a step 3: processConfirmedBlock buffers + matures at finality depth
+    // -------------------------------------------------------------------------
+
+    @Test
+    public void confirmed_block_at_lag_one_executes_the_confirmed_height_immediately() {
+        // lag=1: matured = confirmedHeight, so execution is immediate (byte-identical to the old path).
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        processor.processConfirmedBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1, List.of(), 1L);
+        assertTrue("height 1 checkpoints immediately at lag=1", metaStore.getHeightRecord(1L).isPresent());
+    }
+
+    @Test
+    public void confirmed_block_at_lag_two_defers_execution_by_one_confirmed_block() {
+        // lag=2: confirming height 1 buffers it (matured = 0, nothing matures yet).
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        processor.processConfirmedBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1, List.of(), 2L);
+        assertTrue("height 1 not yet executed at lag=2", metaStore.getHeightRecord(1L).isEmpty());
+        assertTrue("height 1 is buffered", metaStore.getMaturityEntry(1L).isPresent());
+
+        // Confirming an empty height 2 matures height 1 (2 - 2 + 1 = 1).
+        processor.processConfirmedBlock(List.of(), 2L, 1002L, BLOCK_HASH_2, List.of(), 2L);
+        assertTrue("height 1 executes when height 2 confirms", metaStore.getHeightRecord(1L).isPresent());
+        assertTrue("height 1 buffer entry consumed", metaStore.getMaturityEntry(1L).isEmpty());
+    }
+
+    @Test
+    public void confirmed_block_defers_a_matured_height_whose_blob_is_missing() {
+        // A ref whose blob was never stored: at maturity (lag=1) the height defers to the pending
+        // queue (existing I4 path) rather than checkpointing. The BEHIND-verdict trap repair is G2-T1b;
+        // here we only assert the deferral still composes.
+        Bytes32 phantom = Bytes32.fromHexString("0x" + "ab".repeat(32));
+        processor.processConfirmedBlock(List.of(phantom), 1L, 1001L, BLOCK_HASH_1, List.of(), 1L);
+        assertTrue("missing-blob height does not checkpoint", metaStore.getHeightRecord(1L).isEmpty());
+        assertTrue("missing-blob height defers to the pending queue",
+                metaStore.pendingHeights().contains(1L));
+    }
+
+    @Test
+    public void a_buffered_unmatured_height_truncated_by_a_reorg_leaves_no_execution_artifact() {
+        // lag=2: confirm height 5 with a real deploy -> it is buffered, NOT executed (matured = 4,
+        // and height 4 was never buffered here). A reorg that unwinds height 5 truncates the buffer;
+        // because the height never executed, there is no checkpoint/receipt to roll back.
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        processor.processConfirmedBlock(List.of(ref(deploy)), 5L, 1005L, BLOCK_HASH_1, List.of(), 2L);
+        assertTrue("height 5 is buffered", metaStore.getMaturityEntry(5L).isPresent());
+        assertTrue("height 5 never executed", metaStore.getHeightRecord(5L).isEmpty());
+
+        // Simulate the reorg truncation setMain->rollbackTo would perform.
+        metaStore.removeAbove(4L);
+
+        assertTrue("buffer entry is swept", metaStore.getMaturityEntry(5L).isEmpty());
+        assertTrue("no checkpoint existed to roll back", metaStore.getHeightRecord(5L).isEmpty());
+        assertTrue("nothing left pending either", metaStore.pendingHeights().isEmpty());
+    }
 }

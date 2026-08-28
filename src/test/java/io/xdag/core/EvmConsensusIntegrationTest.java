@@ -104,10 +104,23 @@ public class EvmConsensusIntegrationTest {
 
     @Before
     public void setUp() throws Exception {
-        config.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
-        config.getNodeSpec().setStoreBackupDir(root.newFolder().getAbsolutePath());
+        // The shared fixture runs at devnet lag=1 (immediate execution). The lag-2 test builds its own
+        // kernel/stores over a lag-2 config via #buildFixture, so setUp's wiring must not diverge.
+        buildFixture(config);
+    }
 
-        wallet = new Wallet(config);
+    /**
+     * Wires a fresh RocksDB-backed kernel + EVM stores over {@code cfg}, exactly as
+     * {@code Kernel.startComponents} does for evm.enabled networks, and stashes the results in the
+     * instance fields ({@link #kernel}, {@link #dbFactory}, {@link #evmStateSource}, {@link #evmTxStore},
+     * {@link #evmMetaStore}). Called by {@link #setUp} for the shared devnet (lag=1) fixture and by the
+     * lag-2 test for its own lag-2 fixture; @After tears down whichever fixture is live.
+     */
+    private void buildFixture(Config cfg) throws Exception {
+        cfg.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
+        cfg.getNodeSpec().setStoreBackupDir(root.newFolder().getAbsolutePath());
+
+        wallet = new Wallet(cfg);
         if (wallet.exists()) {
             wallet.delete();
         }
@@ -116,8 +129,8 @@ public class EvmConsensusIntegrationTest {
         wallet.setAccounts(Collections.singletonList(key));
         wallet.flush();
 
-        kernel = new Kernel(config, key);
-        dbFactory = new RocksdbFactory(config);
+        kernel = new Kernel(cfg, key);
+        dbFactory = new RocksdbFactory(cfg);
 
         BlockStore blockStore = new BlockStoreImpl(
                 dbFactory.getDB(DatabaseName.INDEX),
@@ -157,8 +170,16 @@ public class EvmConsensusIntegrationTest {
 
     @After
     public void tearDown() throws Exception {
-        wallet.delete();
-        dbFactory.close();
+        // Idempotent: a test that rebuilds the fixture (e.g. the lag-2 test) calls this to release the
+        // devnet fixture before rebuilding, and @After then runs it a second time on the live fixture.
+        if (wallet != null) {
+            wallet.delete();
+            wallet = null;
+        }
+        if (dbFactory != null) {
+            dbFactory.close();
+            dbFactory = null;
+        }
     }
 
     @Test
@@ -225,6 +246,126 @@ public class EvmConsensusIntegrationTest {
         // EVM_META checkpoint at the carrier's main height.
         assertEquals(List.of(deployTx.getHash()), evmMetaStore.getTxList(carrierHeight));
         assertEquals(1, evmMetaStore.getHeightRecord(carrierHeight).orElseThrow().txCount());
+    }
+
+    @Test
+    public void evmExecutionLagsMainConfirmationByOneHeightAtLagTwo() throws Exception {
+        // ── Fixture at lag=2 ─────────────────────────────────────────────────────────────────────
+        // setUp built the shared fixture at devnet lag=1 (immediate execution). Tear it down and
+        // rebuild over a lag=2 config: setMain(N) must now mature height N-lag+1 == N-1, so a payload
+        // height K is BUFFERED when its own main block confirms and EXECUTES only when K+1 confirms.
+        // This is precisely what the setMain wiring (processConfirmedBlock passing stateRootLag) buys;
+        // at lag=1 the very same drive executes K immediately (no buffer, no lag), so every assertion
+        // below is chosen to FAIL under immediate execution — that is what proves the lag is honoured.
+        tearDown();
+        Config lag2 = new DevnetConfig() {
+            @Override
+            public long getEvmStateRootLag() {
+                return 2L;
+            }
+        };
+        buildFixture(lag2);
+        assertEquals(2L, kernel.getConfig().getEvmSpec().getEvmStateRootLag());
+
+        BlockchainImpl blockchain = new BlockchainImpl(kernel);
+        ECKeyPair poolKey = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
+
+        // A deploy tx riding the carrier block's EVM ref (same shape as the lag-1 deploy test).
+        SECP256K1 algo = new SECP256K1();
+        KeyPair evmKey = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
+        EvmTransaction deployTx = EvmTransaction.unsigned(0L, Wei.of(1), 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, BigInteger.valueOf(0xCAFE)).sign(evmKey, algo);
+        evmTxStore.put(deployTx);
+        Bytes32 evmRef = Bytes32.wrap(deployTx.getHash().getBytes());
+
+        RocksDbWorldUpdater funding = new RocksDbWorldUpdater(evmStateSource);
+        funding.createAccount(deployTx.getSender(), 0L, Wei.fromEth(1));
+        funding.commit();
+
+        long generateTime = 1600616700000L;
+        Block addressBlock = generateAddressBlock(config, poolKey, generateTime);
+        assertSame(IMPORTED_BEST, blockchain.tryToConnect(addressBlock));
+
+        Bytes32 ref = addressBlock.getHashLow();
+        Block carrier = null;
+        long carrierEvmHeight = -1; // set once the carrier is buried into a confirmed main block
+
+        // ── Drive the chain until the carrier's EVM height K first confirms, then assert the window ──
+        // We advance one block at a time and detect the exact iteration where setMain(K) has just run
+        // (K == the carrier's confirmed height, first observed as nmain reaching K). Detecting the
+        // window empirically instead of hard-coding it keeps the test robust to tryToConnect's burial
+        // timing (the block-I -> matured-height mapping is not 1:1 and must not be assumed).
+        for (int i = 1; i <= 20; i++) {
+            generateTime += 64000L;
+            List<io.xdag.core.Address> pending = new ArrayList<>();
+            pending.add(new io.xdag.core.Address(ref, XDAG_FIELD_OUT, false));
+            long xdagTime = XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime));
+            Block extraBlock;
+            if (i == 3) {
+                extraBlock = new Block(config, xdagTime, null, pending, true, null, null, -1,
+                        XAmount.ZERO, null, evmRef);
+                extraBlock.signOut(poolKey);
+                extraBlock.setNonce(HashUtils.sha256(Bytes.wrap(new byte[]{0x12, 0x34})));
+                carrier = extraBlock;
+            } else {
+                extraBlock = generateExtraBlock(config, poolKey, xdagTime, pending);
+            }
+            assertSame(IMPORTED_BEST, blockchain.tryToConnect(extraBlock));
+            ref = extraBlock.getHashLow();
+
+            if (carrier == null) {
+                continue;
+            }
+            long confirmedHeight = blockchain.getBlockByHash(carrier.getHashLow(), false).getInfo().getHeight();
+            if (confirmedHeight <= 0) {
+                continue; // carrier not yet a confirmed main block
+            }
+            if (carrierEvmHeight < 0) {
+                // ── Phase 1: the block that confirms K (nmain has just reached K) ──────────────────
+                carrierEvmHeight = confirmedHeight;
+                long nmain = blockchain.getXdagStats().nmain;
+                assertEquals("setMain(K) must have just run: nmain == carrier's confirmed height K",
+                        carrierEvmHeight, nmain);
+
+                // Under lag=2, setMain(K) BUFFERS height K (matures K-1, which carries nothing) and does
+                // NOT execute it. Under lag=1 / the pre-Gate-2 immediate path, height K would already be
+                // checkpointed here with no buffer — so BOTH of these assertions fail at lag=1.
+                assertTrue("K must be buffered in the maturity buffer at the block that confirms it",
+                        evmMetaStore.getMaturityEntry(carrierEvmHeight).isPresent());
+                assertTrue("K must NOT yet be executed (no height checkpoint) when it merely confirms",
+                        evmMetaStore.getHeightRecord(carrierEvmHeight).isEmpty());
+                assertTrue("the carrier's deploy receipt must not exist before K matures",
+                        evmMetaStore.getReceipt(deployTx.getHash()).isEmpty());
+                // Execution demonstrably LAGS the native head: nothing is checkpointed at the head yet.
+                assertTrue("no EVM checkpoint may exist at or above the confirmed head under lag=2",
+                        evmMetaStore.highestHeight().isEmpty()
+                                || evmMetaStore.highestHeight().orElseThrow() < carrierEvmHeight);
+
+                // ── Phase 2: drive exactly ONE more main confirmation so setMain(K+1) runs ─────────
+                long targetNmain = nmain + 1;
+                do {
+                    generateTime += 64000L;
+                    List<io.xdag.core.Address> nextPending = new ArrayList<>();
+                    nextPending.add(new io.xdag.core.Address(ref, XDAG_FIELD_OUT, false));
+                    long nextXdagTime = XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime));
+                    Block next = generateExtraBlock(config, poolKey, nextXdagTime, nextPending);
+                    assertSame(IMPORTED_BEST, blockchain.tryToConnect(next));
+                    ref = next.getHashLow();
+                } while (blockchain.getXdagStats().nmain < targetNmain);
+
+                // setMain(K+1) matured K == (K+1)-lag+1: it is now executed and the buffer is drained.
+                assertTrue("K must be executed (height checkpoint present) once K+1 confirms",
+                        evmMetaStore.getHeightRecord(carrierEvmHeight).isPresent());
+                assertTrue("K's maturity buffer entry must be consumed after it matures",
+                        evmMetaStore.getMaturityEntry(carrierEvmHeight).isEmpty());
+                // The deploy actually executed at K (not at K+1): its receipt exists and its tx list is
+                // checkpointed at K, exactly one height behind the block (K+1) that triggered execution.
+                assertEquals(1, evmMetaStore.getReceipt(deployTx.getHash()).orElseThrow().status());
+                assertEquals(List.of(deployTx.getHash()), evmMetaStore.getTxList(carrierEvmHeight));
+                return;
+            }
+        }
+        throw new AssertionError("carrier's EVM height K never confirmed within the drive window");
     }
 
     // ---------------------------------------------------------------------------------------------
