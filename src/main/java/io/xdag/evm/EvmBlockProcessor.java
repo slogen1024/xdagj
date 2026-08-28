@@ -37,6 +37,7 @@ import io.xdag.evm.tx.EvmTransaction;
 import io.xdag.evm.tx.EvmTxStore;
 import io.xdag.evm.tx.IntrinsicGas;
 import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -100,6 +101,14 @@ public class EvmBlockProcessor {
     private final int historyWindow;
     /** Optional late-bound observer for WebSocket subscriptions (C6); null when no WS server runs. */
     private volatile EvmSubscriptionSink subscriptionSink;
+
+    /**
+     * Domain-separated marker folded into a committed-skip height's chained root (ADR-015 / G2-T1b) in
+     * place of the per-tx digest entries, so a skipped height's root is deterministic and distinct from
+     * an executed or empty height. A fixed keccak of an ASCII domain string — identical on every node.
+     */
+    private static final Bytes DA_SKIP_SENTINEL = org.hyperledger.besu.crypto.Hash.keccak256(
+            Bytes.wrap("XDAG-EVM-DA-SKIP-v1".getBytes(StandardCharsets.US_ASCII)));
 
     public void setSubscriptionSink(EvmSubscriptionSink sink) {
         this.subscriptionSink = sink;
@@ -208,7 +217,8 @@ public class EvmBlockProcessor {
         boolean hasRefs = !refs.isEmpty();
         int depositCount = deposits == null ? 0 : deposits.size();
         boolean hasDeposits = depositCount > 0;
-        if (!hasRefs && !hasDeposits) {
+        boolean skipMarked = metaStore.isSkipped(height);
+        if (!hasRefs && !hasDeposits && !skipMarked) {
             return;
         }
         if (height < activationHeight) {
@@ -442,14 +452,17 @@ public class EvmBlockProcessor {
                 log.error("EVM tx blob vanished for ref {} at height {}; skipping", txHash, height);
             }
         }
-        // A deposit-carrying height MUST checkpoint even with zero executable txs (spec §2.2): the
-        // mint is a state change, so a node that skipped the height would fork the chained root.
+        // A deposit-carrying or skip-marked height MUST checkpoint even with zero executable txs
+        // (spec §2.2 and ADR-015): a deposit is a state change; a skip folds the SKIP_SENTINEL so
+        // the chained root is deterministic and distinct from an executed or empty height.
         boolean hasDeposits = !metaStore.getDeposits(height).isEmpty();
-        if (candidates.isEmpty() && !hasDeposits) {
+        boolean skipped = metaStore.isSkipped(height);
+        if (candidates.isEmpty() && !hasDeposits && !skipped) {
             return;
         }
-        ExecutionOutcome outcome = executeList(candidates, height, timestampSeconds, latestRoot());
-        if (outcome.executed().isEmpty() && !hasDeposits) {
+        List<Hash> toExecute = skipped ? List.of() : candidates;
+        ExecutionOutcome outcome = executeList(toExecute, height, timestampSeconds, latestRoot());
+        if (outcome.executed().isEmpty() && !hasDeposits && !skipped) {
             // Everything was over-budget — no state changed, no checkpoint.
             return;
         }
@@ -635,30 +648,37 @@ public class EvmBlockProcessor {
         LogsBloomFilter.Builder bloomBuilder = LogsBloomFilter.builder();
         List<BridgeWithdrawal> burns = new ArrayList<>();
         long gasBudget = blockGasLimit;
-        for (Hash txHash : txHashes) {
-            Bytes blob = txStore.get(txHash).orElse(null);
-            if (blob == null) {
-                // Only reachable in replay if EVM_TX was externally damaged; keep the trace honest.
-                log.error("EVM tx blob vanished for {} at height {}", txHash, height);
-                continue;
+        if (metaStore.isSkipped(height)) {
+            // Committed-skip (ADR-015 / G2-T1b): no txs execute. Deposits already minted above; fold a
+            // canonical sentinel where the per-tx entries would go so this root is deterministic and
+            // distinct from an executed/empty height. `executed` stays empty -> putTxList(height, []).
+            digest.add(DA_SKIP_SENTINEL);
+        } else {
+            for (Hash txHash : txHashes) {
+                Bytes blob = txStore.get(txHash).orElse(null);
+                if (blob == null) {
+                    // Only reachable in replay if EVM_TX was externally damaged; keep the trace honest.
+                    log.error("EVM tx blob vanished for {} at height {}", txHash, height);
+                    continue;
+                }
+                long txGasLimit = peekGasLimit(blob, height); // -1 when undecodable (executeOne records the failure)
+                if (txGasLimit > gasBudget) {
+                    log.warn("EVM tx {} gas limit {} exceeds remaining block budget {} at height {}; skipping",
+                            txHash, txGasLimit, gasBudget, height);
+                    continue;
+                }
+                if (txGasLimit > 0) {
+                    gasBudget -= txGasLimit;
+                }
+                EvmReceipt receipt = executeOne(root, blob, height, timestampSeconds);
+                metaStore.putReceipt(txHash, receipt);
+                receipt.logs().forEach(bloomBuilder::insertLog);
+                collectBridgeBurns(receipt.logs(), burns, height);
+                executed.add(txHash);
+                digest.add(Bytes.concatenate(txHash.getBytes(),
+                        Bytes.of((byte) receipt.status()),
+                        Bytes.ofUnsignedLong(receipt.gasUsed())));
             }
-            long txGasLimit = peekGasLimit(blob, height); // -1 when undecodable (executeOne records the failure)
-            if (txGasLimit > gasBudget) {
-                log.warn("EVM tx {} gas limit {} exceeds remaining block budget {} at height {}; skipping",
-                        txHash, txGasLimit, gasBudget, height);
-                continue;
-            }
-            if (txGasLimit > 0) {
-                gasBudget -= txGasLimit;
-            }
-            EvmReceipt receipt = executeOne(root, blob, height, timestampSeconds);
-            metaStore.putReceipt(txHash, receipt);
-            receipt.logs().forEach(bloomBuilder::insertLog);
-            collectBridgeBurns(receipt.logs(), burns, height);
-            executed.add(txHash);
-            digest.add(Bytes.concatenate(txHash.getBytes(),
-                    Bytes.of((byte) receipt.status()),
-                    Bytes.ofUnsignedLong(receipt.gasUsed())));
         }
         // Fold the persisted world-state delta into the chained root (Phase 1): the digest is a keccak
         // over exactly the (puts, deletes) this commit writes, so two nodes diverging on any balance or

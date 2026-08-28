@@ -1672,4 +1672,78 @@ public class EvmBlockProcessorTest {
         assertTrue("no checkpoint existed to roll back", metaStore.getHeightRecord(5L).isEmpty());
         assertTrue("nothing left pending either", metaStore.pendingHeights().isEmpty());
     }
+
+    // -------------------------------------------------------------------------
+    // G2-T1b: committed-skip heights fold a canonical SKIP_SENTINEL (ADR-015)
+    // -------------------------------------------------------------------------
+
+    @Test
+    public void a_marked_height_checkpoints_a_skip_without_executing_its_txs() {
+        // Pre-mark height 1 as committed-skip, then feed it a real deploy ref via processMainBlock.
+        // The deploy's blob is present, but the skip means it must NOT execute: no receipt, empty tx
+        // list, yet the height still checkpoints (frontier must advance) with a SKIP_SENTINEL root.
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        metaStore.putSkipMarker(1L);
+        processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);
+
+        assertTrue("skipped height still checkpoints", metaStore.getHeightRecord(1L).isPresent());
+        assertTrue("skipped height has an empty tx list", metaStore.getTxList(1L).isEmpty());
+        assertTrue("the skipped deploy never executed (no receipt)",
+                metaStore.getReceipt(deploy.getHash()).isEmpty());
+    }
+
+    @Test
+    public void a_skipped_height_has_a_distinct_root_from_an_empty_execution() {
+        // Same height number, same inputs, but one is skip-marked and one is not: their checkpoint
+        // roots must differ, proving the sentinel makes a skip distinct (not merely "no txs ran").
+        EvmTransaction deployA = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        metaStore.putSkipMarker(1L);
+        processor.processMainBlock(List.of(ref(deployA)), 1L, 1001L, BLOCK_HASH_1);
+        Bytes32 skipRoot = metaStore.getHeightRecord(1L).orElseThrow().stateRoot();
+
+        // Fresh processor/stores, height 1 NOT skipped, deploy executes normally.
+        InMemoryKVSource state2 = new InMemoryKVSource();
+        EvmTxStore txs2 = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore meta2 = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor p2 = new EvmBlockProcessor(EvmConfig.devnet(), state2, txs2, meta2, 0L,
+                List.of(new GenesisAllocEntry(sender, Wei.fromEth(1))));
+        p2.seedGenesisIfAbsent();
+        EvmTransaction deployB = EvmTransaction.unsigned(0, Wei.of(1), 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);
+        txs2.put(deployB);
+        p2.processMainBlock(List.of(Bytes32.wrap(deployB.getHash().getBytes())), 1L, 1001L, BLOCK_HASH_1);
+        Bytes32 execRoot = meta2.getHeightRecord(1L).orElseThrow().stateRoot();
+
+        assertNotEquals("a committed-skip root must differ from an executed root", execRoot, skipRoot);
+    }
+
+    @Test
+    public void a_skipped_height_still_mints_its_bridge_deposits() {
+        // Deposits are native facts, blob-independent, so a skip still mints them (spec 3.2).
+        Address depositTarget = Address.fromHexString("0x00000000000000000000000000000000000000cc");
+        metaStore.putDeposits(1L, List.of(new io.xdag.evm.bridge.BridgeDeposit(depositTarget, 5L)));
+        metaStore.putSkipMarker(1L);
+        processor.processMainBlock(List.of(), 1L, 1001L, BLOCK_HASH_1);
+
+        assertTrue("skipped-but-deposit height checkpoints", metaStore.getHeightRecord(1L).isPresent());
+        long minted = new RocksDbWorldUpdater(stateSource).getAccount(depositTarget)
+                .getBalance().getAsBigInteger().longValueExact();
+        assertEquals("deposit minted despite the skip",
+                5L * io.xdag.evm.bridge.BridgeConstants.WEI_PER_NANO.longValueExact(), minted);
+    }
+
+    @Test
+    public void a_skipped_height_root_survives_reorg_replay() {
+        // rollbackTo replays from EVM_META tx lists with no block access, so the skip marker (0x0A)
+        // is what makes replay fold the same SKIP_SENTINEL. Root must be byte-stable across replay.
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        metaStore.putSkipMarker(1L);
+        processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);
+        Bytes32 before = metaStore.getHeightRecord(1L).orElseThrow().stateRoot();
+
+        processor.rollbackTo(1L); // removeAbove(1) keeps height 1 + its skip marker, then replays it
+        assertTrue("skip marker survives the reorg truncation at its own height", metaStore.isSkipped(1L));
+        Bytes32 after = metaStore.getHeightRecord(1L).orElseThrow().stateRoot();
+        assertEquals("replay reproduces the skip root byte-for-byte", before, after);
+    }
 }
