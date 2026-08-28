@@ -1360,7 +1360,7 @@ public class BlockchainImpl implements Blockchain {
                 EvmStateAnchor blockAnchor = block.getEvmStateAnchor();
                 AnchorVerdict verdict = verifyStateRootAnchor(blockAnchor, mainNumber,
                         evmSpec.getEvmStateRootActivationHeight(), evmSpec.getEvmStateRootLag(),
-                        evmProcessor::chainedRootAt);
+                        evmProcessor::chainedRootAt, evmProcessor::hasUnexecutedHeightAtOrBelow);
                 if (verdict == AnchorVerdict.MISMATCH) {
                     long anchorHeight = mainNumber - evmSpec.getEvmStateRootLag();
                     Bytes32 expectedRoot = evmProcessor.chainedRootAt(anchorHeight);
@@ -1373,6 +1373,13 @@ public class BlockchainImpl implements Blockchain {
                     log.warn("EVM state-root anchor mismatch at height {} - proceeding (warn-only). "
                             + "committed={}, this node's root as-of {} = {}",
                             mainNumber, blockAnchor, anchorHeight, expectedRoot);
+                } else if (verdict == AnchorVerdict.BEHIND) {
+                    // The node is behind on EVM execution (a committed-include height is blob-deferred),
+                    // not forked. Advance the native chain WITHOUT hard-rejecting; EVM catches up via
+                    // onBlobsAvailable and re-verifies on the next block. This closes the G1 latent trap.
+                    log.info("EVM state-root anchor at height {} not yet verifiable (node behind on EVM "
+                            + "execution at height {}); proceeding without hard-reject", mainNumber,
+                            mainNumber - evmSpec.getEvmStateRootLag());
                 }
             }
             log.debug("mainNumber = {},hash = {}", mainNumber, Hex.toHexString(block.getInfo().getHash()));
@@ -1408,13 +1415,15 @@ public class BlockchainImpl implements Blockchain {
                 deposits = List.of();
             }
             if (evmProcessor != null) {
-                // Gate 2 (G2-T1a): buffer this confirmed height and mature the height that has just
-                // reached finality depth (mainNumber - stateRootLag + 1). Driven on EVERY confirmed
-                // main block (even payload-free ones) so buffered heights actually mature; at lag=1
-                // this executes mainNumber immediately (byte-identical to the pre-Gate-2 path).
+                // Gate 2 (G2-T1a/T1b): buffer this confirmed height and mature the height that reached
+                // finality depth (mainNumber - stateRootLag + 1). This block's anchor.daSkip is the
+                // committed skip decision FOR THE MATURED HEIGHT (not for mainNumber): honor it so a
+                // node lacking the blob and one holding it converge on the same skipped root.
+                EvmStateAnchor confirmedAnchor = block.getEvmStateAnchor();
+                boolean daSkip = confirmedAnchor != null && confirmedAnchor.daSkip();
                 evmProcessor.processConfirmedBlock(evmRefs, mainNumber, timestampSeconds,
                         Bytes32.wrap(block.getInfo().getHash()), deposits,
-                        kernel.getConfig().getEvmSpec().getEvmStateRootLag());
+                        kernel.getConfig().getEvmSpec().getEvmStateRootLag(), daSkip);
             }
             // Spec §3.2 ordering: native accounting, then EVM execution, then matured releases.
             // Deliberately OUTSIDE the refs/deposits guard — a release height needs neither.
@@ -1653,7 +1662,13 @@ public class BlockchainImpl implements Blockchain {
         /** Anchor missing when required, or its height/root disagree -- a definite divergence. */
         MISMATCH,
         /** Anchoring is not active at this height (below activation, or too early to lag) -- ignore. */
-        ABSENT
+        ABSENT,
+        /**
+         * The anchor is well-formed but this node has not yet executed the anchored height (an earlier
+         * committed-include height is blob-deferred), so it cannot verify the root -- defer, do NOT
+         * hard-reject (G2-T1b): the node is behind, not forked, and converges via onBlobsAvailable.
+         */
+        BEHIND
     }
 
     /**
@@ -1663,9 +1678,20 @@ public class BlockchainImpl implements Blockchain {
      * commit BOTH the exact lag height {@code height - lag} AND the chained root as of that height
      * (via {@code rootAt}, in production {@code EvmBlockProcessor::chainedRootAt}). Pure/static for
      * testability. {@code lag} is assumed >= 1 (config-enforced; see computeStateRootAnchor).
+     *
+     * <p>If the anchor passes the structural check (height matches) but {@code hasDeferredAtOrBelow}
+     * reports that a committed-include height at or below the anchored height is still blob-deferred,
+     * the node has not yet executed that height and cannot verify the root: returns BEHIND (do NOT
+     * hard-reject; the node converges via onBlobsAvailable). A structurally wrong anchor (null or
+     * wrong height) is always MISMATCH regardless of deferred state.
+     *
+     * @param hasDeferredAtOrBelow predicate: {@code true} iff some pending (blob-deferred) height is
+     *                             &lt;= the argument. In production: {@code
+     *                             EvmBlockProcessor::hasUnexecutedHeightAtOrBelow}.
      */
     static AnchorVerdict verifyStateRootAnchor(EvmStateAnchor anchor, long height, long activationHeight,
-            long lag, java.util.function.LongFunction<Bytes32> rootAt) {
+            long lag, java.util.function.LongFunction<Bytes32> rootAt,
+            java.util.function.LongPredicate hasDeferredAtOrBelow) {
         if (height < activationHeight) {
             return AnchorVerdict.ABSENT;
         }
@@ -1675,6 +1701,11 @@ public class BlockchainImpl implements Blockchain {
         }
         if (anchor == null || anchor.height() != expectedHeight) {
             return AnchorVerdict.MISMATCH;
+        }
+        if (hasDeferredAtOrBelow.test(expectedHeight)) {
+            // This node has a blob-deferred height at/below the anchored height, so it has not executed
+            // expectedHeight yet; chainedRootAt would return a stale floor root and false-MISMATCH.
+            return AnchorVerdict.BEHIND;
         }
         Bytes expectedLow = EvmStateAnchor.rootLowOf(rootAt.apply(expectedHeight));
         return anchor.rootLow().equals(expectedLow) ? AnchorVerdict.MATCH : AnchorVerdict.MISMATCH;

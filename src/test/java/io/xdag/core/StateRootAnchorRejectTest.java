@@ -182,7 +182,7 @@ public class StateRootAnchorRejectTest {
         AnchorVerdict verdict = BlockchainImpl.verifyStateRootAnchor(anchor, nextHeight,
                 config.getEvmSpec().getEvmStateRootActivationHeight(),
                 config.getEvmSpec().getEvmStateRootLag(),
-                kernel.getEvmBlockProcessor()::chainedRootAt);
+                kernel.getEvmBlockProcessor()::chainedRootAt, deferredHeight -> false);
 
         assertEquals("a freshly mined anchor must validate MATCH on its own node",
                 AnchorVerdict.MATCH, verdict);

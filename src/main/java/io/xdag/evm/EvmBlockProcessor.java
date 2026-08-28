@@ -37,6 +37,7 @@ import io.xdag.evm.tx.EvmTransaction;
 import io.xdag.evm.tx.EvmTxStore;
 import io.xdag.evm.tx.IntrinsicGas;
 import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -100,6 +101,14 @@ public class EvmBlockProcessor {
     private final int historyWindow;
     /** Optional late-bound observer for WebSocket subscriptions (C6); null when no WS server runs. */
     private volatile EvmSubscriptionSink subscriptionSink;
+
+    /**
+     * Domain-separated marker folded into a committed-skip height's chained root (ADR-015 / G2-T1b) in
+     * place of the per-tx digest entries, so a skipped height's root is deterministic and distinct from
+     * an executed or empty height. A fixed keccak of an ASCII domain string — identical on every node.
+     */
+    private static final Bytes DA_SKIP_SENTINEL = org.hyperledger.besu.crypto.Hash.keccak256(
+            Bytes.wrap("XDAG-EVM-DA-SKIP-v1".getBytes(StandardCharsets.US_ASCII)));
 
     public void setSubscriptionSink(EvmSubscriptionSink sink) {
         this.subscriptionSink = sink;
@@ -208,7 +217,14 @@ public class EvmBlockProcessor {
         boolean hasRefs = !refs.isEmpty();
         int depositCount = deposits == null ? 0 : deposits.size();
         boolean hasDeposits = depositCount > 0;
-        if (!hasRefs && !hasDeposits) {
+        // A committed-skip height (G2-T1b) must reach executeAndCheckpoint to fold its SKIP_SENTINEL,
+        // so it is not swallowed by this empty-payload early-return. In production the skip path enters
+        // via skipMaturedHeight -> executeAndCheckpoint (never here) and always passes empty refs; this
+        // guard only keeps the direct processMainBlock entry point coherent for a marked height. Note a
+        // marked height carrying non-empty refs whose blob is missing would defer below rather than skip
+        // (harmless today: production skips carry no refs; do NOT route marked+refs heights here).
+        boolean skipMarked = metaStore.isSkipped(height);
+        if (!hasRefs && !hasDeposits && !skipMarked) {
             return;
         }
         if (height < activationHeight) {
@@ -235,7 +251,7 @@ public class EvmBlockProcessor {
     }
 
     /**
-     * Gate 2 (G2-T1a): the setMain entry point under delta-lagged execution. Buffers this confirmed
+     * Gate 2 (G2-T1a/T1b): the setMain entry point under delta-lagged execution. Buffers this confirmed
      * main block's EVM execution inputs and, if some earlier height has now reached finality depth
      * {@code lag}, executes that MATURED height ({@code confirmedHeight - lag + 1}) via the unchanged
      * {@link #processMainBlock}. EVM therefore touches only heights that are {@code lag - 1}
@@ -246,15 +262,20 @@ public class EvmBlockProcessor {
      * <p>MUST be called for every confirmed main block (even payload-free ones) so buffered heights
      * actually mature. Pre-activation heights preserve the old behavior exactly (a payload-bearing
      * pre-activation block is handed straight to {@code processMainBlock}, which warns and returns).
-     * The {@code daSkip} bit is still ignored here (G2-T1b), and a genuinely-missing blob at maturity
-     * still defers through the existing pending queue.
+     * A genuinely-missing blob at maturity still defers through the existing pending queue.
+     *
+     * <p>The {@code daSkip} bit (block-committed for the matured height) is honored: when true the
+     * matured height is skipped (no tx execution, deposits still mint, SKIP_SENTINEL checkpoint)
+     * unconditionally; when false it executes as before. This ensures a node lacking the blob and one
+     * holding it converge on the same skipped root (ADR-015 / G2-T1b).
      *
      * <p>Note: {@code activationHeight} here is the EVM hard-fork height ({@code evm.activationHeight}),
      * which gates whether EVM executes at all — distinct from the state-root <i>anchor</i> activation
      * ({@code evm.stateRootActivationHeight}) that gates anchor verification in {@code BlockchainImpl.setMain}.
      */
     public synchronized void processConfirmedBlock(List<Bytes32> refs, long confirmedHeight,
-            long timestampSeconds, Bytes32 blockHash, List<BridgeDeposit> deposits, long lag) {
+            long timestampSeconds, Bytes32 blockHash, List<BridgeDeposit> deposits, long lag,
+            boolean daSkip) {
         List<Bytes32> safeRefs = refs == null ? List.of() : refs;
         List<BridgeDeposit> safeDeposits = deposits == null ? List.of() : deposits;
         boolean hasPayload = !safeRefs.isEmpty() || !safeDeposits.isEmpty();
@@ -274,9 +295,30 @@ public class EvmBlockProcessor {
         }
         metaStore.getMaturityEntry(matured).ifPresent(entry -> {
             metaStore.removeMaturityEntry(matured);
-            processMainBlock(entry.refs(), matured, entry.timestampSeconds(), entry.blockHash(),
-                    entry.deposits());
+            if (daSkip) {
+                skipMaturedHeight(matured, entry);
+            } else {
+                processMainBlock(entry.refs(), matured, entry.timestampSeconds(), entry.blockHash(),
+                        entry.deposits());
+            }
         });
+    }
+
+    /**
+     * Honors a block-committed skip (ADR-015 / G2-T1b) for a matured height: the buffered txs do NOT
+     * execute (regardless of whether this node holds their blob), but the height's deposits still mint
+     * and it checkpoints with the canonical SKIP_SENTINEL root. Persisting the skip marker BEFORE the
+     * checkpoint makes {@code executeList} fold the sentinel, and makes {@code rollbackTo} replay
+     * reproduce it. Called only from {@link #processConfirmedBlock}.
+     */
+    private void skipMaturedHeight(long height, EvmMetaStore.MaturityEntry entry) {
+        if (!entry.deposits().isEmpty()) {
+            metaStore.putDeposits(height, entry.deposits()); // deposits mint on skip (native facts)
+        }
+        metaStore.putSkipMarker(height);
+        // The buffered refs are ignored (List.of()): executeAndCheckpoint sees the skip marker and
+        // folds SKIP_SENTINEL instead of executing.
+        executeAndCheckpoint(List.of(), height, entry.timestampSeconds(), entry.blockHash());
     }
 
     /**
@@ -442,14 +484,17 @@ public class EvmBlockProcessor {
                 log.error("EVM tx blob vanished for ref {} at height {}; skipping", txHash, height);
             }
         }
-        // A deposit-carrying height MUST checkpoint even with zero executable txs (spec §2.2): the
-        // mint is a state change, so a node that skipped the height would fork the chained root.
+        // A deposit-carrying or skip-marked height MUST checkpoint even with zero executable txs
+        // (spec §2.2 and ADR-015): a deposit is a state change; a skip folds the SKIP_SENTINEL so
+        // the chained root is deterministic and distinct from an executed or empty height.
         boolean hasDeposits = !metaStore.getDeposits(height).isEmpty();
-        if (candidates.isEmpty() && !hasDeposits) {
+        boolean skipped = metaStore.isSkipped(height);
+        if (candidates.isEmpty() && !hasDeposits && !skipped) {
             return;
         }
-        ExecutionOutcome outcome = executeList(candidates, height, timestampSeconds, latestRoot());
-        if (outcome.executed().isEmpty() && !hasDeposits) {
+        List<Hash> toExecute = skipped ? List.of() : candidates;
+        ExecutionOutcome outcome = executeList(toExecute, height, timestampSeconds, latestRoot());
+        if (outcome.executed().isEmpty() && !hasDeposits && !skipped) {
             // Everything was over-budget — no state changed, no checkpoint.
             return;
         }
@@ -635,30 +680,37 @@ public class EvmBlockProcessor {
         LogsBloomFilter.Builder bloomBuilder = LogsBloomFilter.builder();
         List<BridgeWithdrawal> burns = new ArrayList<>();
         long gasBudget = blockGasLimit;
-        for (Hash txHash : txHashes) {
-            Bytes blob = txStore.get(txHash).orElse(null);
-            if (blob == null) {
-                // Only reachable in replay if EVM_TX was externally damaged; keep the trace honest.
-                log.error("EVM tx blob vanished for {} at height {}", txHash, height);
-                continue;
+        if (metaStore.isSkipped(height)) {
+            // Committed-skip (ADR-015 / G2-T1b): no txs execute. Deposits already minted above; fold a
+            // canonical sentinel where the per-tx entries would go so this root is deterministic and
+            // distinct from an executed/empty height. `executed` stays empty -> putTxList(height, []).
+            digest.add(DA_SKIP_SENTINEL);
+        } else {
+            for (Hash txHash : txHashes) {
+                Bytes blob = txStore.get(txHash).orElse(null);
+                if (blob == null) {
+                    // Only reachable in replay if EVM_TX was externally damaged; keep the trace honest.
+                    log.error("EVM tx blob vanished for {} at height {}", txHash, height);
+                    continue;
+                }
+                long txGasLimit = peekGasLimit(blob, height); // -1 when undecodable (executeOne records the failure)
+                if (txGasLimit > gasBudget) {
+                    log.warn("EVM tx {} gas limit {} exceeds remaining block budget {} at height {}; skipping",
+                            txHash, txGasLimit, gasBudget, height);
+                    continue;
+                }
+                if (txGasLimit > 0) {
+                    gasBudget -= txGasLimit;
+                }
+                EvmReceipt receipt = executeOne(root, blob, height, timestampSeconds);
+                metaStore.putReceipt(txHash, receipt);
+                receipt.logs().forEach(bloomBuilder::insertLog);
+                collectBridgeBurns(receipt.logs(), burns, height);
+                executed.add(txHash);
+                digest.add(Bytes.concatenate(txHash.getBytes(),
+                        Bytes.of((byte) receipt.status()),
+                        Bytes.ofUnsignedLong(receipt.gasUsed())));
             }
-            long txGasLimit = peekGasLimit(blob, height); // -1 when undecodable (executeOne records the failure)
-            if (txGasLimit > gasBudget) {
-                log.warn("EVM tx {} gas limit {} exceeds remaining block budget {} at height {}; skipping",
-                        txHash, txGasLimit, gasBudget, height);
-                continue;
-            }
-            if (txGasLimit > 0) {
-                gasBudget -= txGasLimit;
-            }
-            EvmReceipt receipt = executeOne(root, blob, height, timestampSeconds);
-            metaStore.putReceipt(txHash, receipt);
-            receipt.logs().forEach(bloomBuilder::insertLog);
-            collectBridgeBurns(receipt.logs(), burns, height);
-            executed.add(txHash);
-            digest.add(Bytes.concatenate(txHash.getBytes(),
-                    Bytes.of((byte) receipt.status()),
-                    Bytes.ofUnsignedLong(receipt.gasUsed())));
         }
         // Fold the persisted world-state delta into the chained root (Phase 1): the digest is a keccak
         // over exactly the (puts, deletes) this commit writes, so two nodes diverging on any balance or
