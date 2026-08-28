@@ -395,6 +395,79 @@ public class MainBlockEvmPackingTest {
         assertNull("a tx with a receipt must not be re-packed", blockchain.createMainBlock().getEvmTxRef());
     }
 
+    /**
+     * End-to-end G2-T1c capstone at lag=2: the miner's daSkip decision is committed correctly into
+     * the block's EvmStateAnchor depending on whether the matured height's buffered blob is present.
+     *
+     * <p>At lag=2 with nmain=1: nextHeight=2, anchorHeight=2-2=0 (non-null anchor),
+     * maturedEvmHeight=2-2+1=1. Seeding a checkpoint at h=0 lets chainedRootAt(0) resolve.
+     * Case A (missing blob): putMaturityEntry at h=1 with a phantom hash not in evmTxStore →
+     * expandRefs returns it as unknown → maturedPayloadAvailable=false → daSkip=true.
+     * Case B (present blob): putMaturityEntry at h=1 with the hash of a pooled tx that IS in
+     * evmTxStore → expandRefs finds it → maturedPayloadAvailable=true → daSkip=false.
+     */
+    @Test
+    public void createMainBlock_commits_daskip_when_the_matured_height_blob_is_missing_at_lag_two()
+            throws Exception {
+        // Lag-2 DevnetConfig: override only the stateRootLag; all other fork heights remain devnet
+        // defaults (activation=0, batchFork=0, type2=0). A fresh kernel is wired over the same shared
+        // EVM stores so the maturity/tx lookups hit the same data this test seeds below.
+        Config lag2 = new DevnetConfig() {
+            @Override
+            public long getEvmStateRootLag() {
+                return 2L;
+            }
+        };
+        lag2.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
+        lag2.getNodeSpec().setStoreBackupDir(root.newFolder().getAbsolutePath());
+
+        Kernel lag2Kernel = new Kernel(lag2, wallet.getDefKey());
+        lag2Kernel.setBlockStore(kernel.getBlockStore());
+        lag2Kernel.setOrphanBlockStore(kernel.getOrphanBlockStore());
+        lag2Kernel.setAddressStore(kernel.getAddressStore());
+        lag2Kernel.setTxHistoryStore(kernel.getTxHistoryStore());
+        lag2Kernel.setWallet(wallet);
+        lag2Kernel.setEvmStateStore(evmStateSource);
+        lag2Kernel.setEvmMetaStore(evmMetaStore);
+        lag2Kernel.setEvmTxPool(evmTxPool);
+        lag2Kernel.setEvmTxStore(evmTxStore);
+        // A processor over the shared stores so maturedPayloadAvailable reads the maturity entries
+        // and tx blobs that this test seeds below.
+        lag2Kernel.setEvmBlockProcessor(
+                new EvmBlockProcessor(EvmConfig.devnet(), evmStateSource, evmTxStore, evmMetaStore));
+
+        BlockchainImpl lag2Chain = new BlockchainImpl(lag2Kernel);
+        // nmain=1 → nextHeight=2 → anchorHeight=2-2=0 (non-null) → maturedEvmHeight=1
+        lag2Chain.getXdagStats().nmain = 1;
+
+        // Seed a checkpoint at h=0 so chainedRootAt(0) resolves (required for a non-null anchor).
+        Bytes32 seeded = Bytes32.fromHexString("0x" + "11".repeat(32));
+        evmMetaStore.putHeightRecord(0L, seeded, Bytes32.ZERO, 0, 1000L);
+
+        // ── Case A: matured height 1 has a ref whose blob is NOT in evmTxStore ──────────────────
+        // phantom is unknown to txStore → expandRefs → unknownRefs non-empty → complete()=false
+        // → maturedPayloadAvailable=false → daSkip=true
+        Bytes32 phantom = Bytes32.fromHexString("0x" + "ab".repeat(32));
+        evmMetaStore.putMaturityEntry(1L,
+                Bytes32.fromHexString("0x" + "cc".repeat(32)), 1001L,
+                List.of(phantom), List.of());
+        EvmStateAnchor skipAnchor = lag2Chain.createMainBlock().getEvmStateAnchor();
+        assertNotNull("lag-2 block at nextHeight>=2 must carry a state-root anchor", skipAnchor);
+        assertTrue("missing matured-height blob => miner commits daSkip=true", skipAnchor.daSkip());
+
+        // ── Case B: same height buffered with a blob that IS present in evmTxStore ─────────────
+        // pooledTx stores the tx blob via evmTxPool.add → evmTxStore; use its hash as the ref.
+        EvmTransaction present = pooledTx(evmKey, 0);
+        Bytes32 presentRef = Bytes32.wrap(present.getHash().getBytes());
+        evmMetaStore.putMaturityEntry(1L,
+                Bytes32.fromHexString("0x" + "cc".repeat(32)), 1001L,
+                List.of(presentRef), List.of());
+        EvmStateAnchor includeAnchor = lag2Chain.createMainBlock().getEvmStateAnchor();
+        assertNotNull("lag-2 block at nextHeight>=2 must carry a state-root anchor", includeAnchor);
+        assertFalse("present matured-height blob => miner commits daSkip=false",
+                includeAnchor.daSkip());
+    }
+
     @Test
     public void createMainBlock_attaches_the_state_root_anchor_when_active() {
         // devnet: activation=0, lag=1 => the mined block carries an anchor of the chained root
