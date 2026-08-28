@@ -411,7 +411,8 @@ public class MainBlockEvmPackingTest {
         EvmStateAnchor anchor = main.getEvmStateAnchor();
         assertNotNull("an active devnet main block must carry a state-root anchor", anchor);
         assertEquals(EvmStateAnchor.rootLowOf(seeded), anchor.rootLow());
-        assertFalse("G1-T2 never sets DA-skip", anchor.daSkip());
+        assertFalse("devnet lag=1: matured height is the unconfirmed block, so daSkip stays false",
+                anchor.daSkip());
         assertEquals("anchored main block still serializes to 512 bytes",
                 512, main.getXdagBlock().getData().size());
     }
