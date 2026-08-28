@@ -1781,4 +1781,33 @@ public class EvmBlockProcessorTest {
         assertFalse("height 1 not marked skipped", metaStore.isSkipped(1L));
         assertTrue("the deploy executed", metaStore.getReceipt(deploy.getHash()).isPresent());
     }
+
+    @Test
+    public void a_committed_skip_yields_the_same_root_on_a_blob_holding_and_a_blob_lacking_node() {
+        // Node A HAS the blob; node B does NOT. Both see block-2's daSkip=true for matured height 1.
+        // They must reach the SAME checkpoint root for height 1 (that is the whole point of a skip).
+        long lag = 2L;
+
+        // Node A: blob present (this test's `processor`, whose txStore gets the deploy blob).
+        EvmTransaction deploy = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        processor.processConfirmedBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1, List.of(), lag, false);
+        processor.processConfirmedBlock(List.of(), 2L, 1002L, BLOCK_HASH_2, List.of(), lag, true);
+        Bytes32 rootA = metaStore.getHeightRecord(1L).orElseThrow().stateRoot();
+
+        // Node B: same genesis alloc, but the deploy blob is NEVER stored in txsB.
+        InMemoryKVSource stateB = new InMemoryKVSource();
+        EvmTxStore txsB = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore metaB = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor procB = new EvmBlockProcessor(EvmConfig.devnet(), stateB, txsB, metaB, 0L,
+                List.of(new GenesisAllocEntry(sender, Wei.fromEth(1))));
+        procB.seedGenesisIfAbsent();
+        Bytes32 sameRef = Bytes32.wrap(deploy.getHash().getBytes()); // ref only; blob absent in txsB
+        procB.processConfirmedBlock(List.of(sameRef), 1L, 1001L, BLOCK_HASH_1, List.of(), lag, false);
+        procB.processConfirmedBlock(List.of(), 2L, 1002L, BLOCK_HASH_2, List.of(), lag, true);
+        Bytes32 rootB = metaB.getHeightRecord(1L).orElseThrow().stateRoot();
+
+        assertEquals("a committed-skip converges both nodes to the same root", rootA, rootB);
+        assertTrue(metaStore.isSkipped(1L));
+        assertTrue(metaB.isSkipped(1L));
+    }
 }
