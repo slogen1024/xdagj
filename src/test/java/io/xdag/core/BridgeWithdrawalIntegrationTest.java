@@ -139,10 +139,20 @@ public class BridgeWithdrawalIntegrationTest {
 
     @Before
     public void setUp() throws Exception {
-        config.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
-        config.getNodeSpec().setStoreBackupDir(root.newFolder().getAbsolutePath());
+        buildFixture(config);
+    }
 
-        wallet = new Wallet(config);
+    /**
+     * Wires a fresh RocksDB-backed kernel + EVM stores over {@code cfg}, exactly as
+     * {@code Kernel.startComponents} does for evm.enabled networks. Called by {@link #setUp} for the
+     * shared devnet (lag=1) fixture and by the lag-2 tests via {@link #rebuildAtStateRootLag}; @After
+     * tears down whichever fixture is live.
+     */
+    private void buildFixture(Config cfg) throws Exception {
+        cfg.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
+        cfg.getNodeSpec().setStoreBackupDir(root.newFolder().getAbsolutePath());
+
+        wallet = new Wallet(cfg);
         if (wallet.exists()) {
             wallet.delete();
         }
@@ -151,8 +161,8 @@ public class BridgeWithdrawalIntegrationTest {
         wallet.setAccounts(Collections.singletonList(key));
         wallet.flush();
 
-        kernel = new Kernel(config, key);
-        dbFactory = new RocksdbFactory(config);
+        kernel = new Kernel(cfg, key);
+        dbFactory = new RocksdbFactory(cfg);
 
         BlockStore blockStore = new BlockStoreImpl(
                 dbFactory.getDB(DatabaseName.INDEX),
@@ -172,10 +182,6 @@ public class BridgeWithdrawalIntegrationTest {
         kernel.setTxHistoryStore(txHistoryStore);
         kernel.setWallet(wallet);
 
-        // EVM services exactly as Kernel.startComponents wires them for evm.enabled networks. The
-        // EvmConfig mirrors Kernel's 6-arg construction: the PROCESSOR must carry the devnet spec
-        // bridgeActivationHeight (0) or the bridge contract never seeds and the burn scan is dead
-        // code — the EvmConfig.devnet() factory alone keeps the bridge unscheduled (MAX_VALUE).
         evmStateSource = dbFactory.getDB(DatabaseName.EVM_STATE);
         evmStateSource.init();
         evmStateSource.reset();
@@ -192,10 +198,10 @@ public class BridgeWithdrawalIntegrationTest {
         EvmConfig evmConfig = new EvmConfig(EvmSpecVersion.SHANGHAI, EvmConfig.DEVNET_CHAIN_ID,
                 EvmConfig.DEFAULT_MAX_GAS_LIMIT, EvmConfig.DEFAULT_MIN_GAS_PRICE,
                 EvmConfig.DEFAULT_TYPE2_ACTIVATION_HEIGHT,
-                config.getEvmSpec().getEvmBridgeActivationHeight());
+                cfg.getEvmSpec().getEvmBridgeActivationHeight());
         EvmBlockProcessor evmBlockProcessor =
                 new EvmBlockProcessor(evmConfig, evmStateSource, evmTxStore, evmMetaStore);
-        evmBlockProcessor.seedBridgeContractIfAbsent(); // Kernel invokes this at startup; mirror it
+        evmBlockProcessor.seedBridgeContractIfAbsent();
         kernel.setEvmBlockProcessor(evmBlockProcessor);
 
         blockchain = new BridgeDepositIntegrationTest.MockBlockchain(kernel);
@@ -203,8 +209,16 @@ public class BridgeWithdrawalIntegrationTest {
 
     @After
     public void tearDown() throws Exception {
-        wallet.delete();
-        dbFactory.close();
+        // Idempotent: a test that rebuilds the fixture (the lag-2 tests) calls this to release the
+        // devnet fixture before rebuilding; @After then runs it a second time on the live fixture.
+        if (wallet != null) {
+            wallet.delete();
+            wallet = null;
+        }
+        if (dbFactory != null) {
+            dbFactory.close();
+            dbFactory = null;
+        }
     }
 
     @Test
@@ -408,6 +422,51 @@ public class BridgeWithdrawalIntegrationTest {
                 evmBalance(EVM_SENDER));
     }
 
+    @Test
+    public void delta_two_release_fires_at_burn_plus_delay_without_skip() throws Exception {
+        rebuildAtStateRootLag(2L);
+        assertEquals("W must still be 2 so the invariant W >= lag-1 (2 >= 1) holds", 2L,
+                kernel.getConfig().getEvmSpec().getEvmBridgeWithdrawalDelay());
+
+        seedChain();
+        long delay = pinnedDevnetDelay(); // W = 2
+        AddressStore addressStore = blockchain.getAddressStore();
+        addressStore.updateBalance(poolKey.toAddress().toArray(), XAmount.of(1000, XUnit.XDAG));
+
+        Block depositTx = connectLockTransfer(BridgeRemark.encode(EVM_SENDER), UInt64.ONE);
+        EvmTransaction burnTx = EvmTransaction.unsigned(0L, Wei.of(1), 100_000L,
+                Optional.of(BridgeContract.ADDRESS), Wei.of(BURN_WEI), withdrawCalldata(TARGET_1),
+                EvmConfig.DEVNET_CHAIN_ID).sign(EVM_KEY, EVM_ALGO);
+        evmTxStore.put(burnTx);
+        Block depositLink = addLinkingExtraBlock(depositTx, null);
+        Block burnCarrier = addLinkingExtraBlock(null, Bytes32.wrap(burnTx.getHash().getBytes()));
+        driveUntilMainConfirmed(depositLink);
+        long burnHeight = driveUntilMainConfirmed(burnCarrier);
+
+        // delta-sensitive guard: at setMain(burnHeight) under lag=2 the burn payload is BUFFERED, so its
+        // 0x07 record is NOT yet present. Under lag=1 it would already be recorded -> this line FAILS,
+        // which is exactly what proves the lag is honoured.
+        assertTrue("under lag=2 the burn executes one setMain LATER; not yet recorded at its own height",
+                evmMetaStore.getWithdrawals(burnHeight).isEmpty());
+
+        // Drive to K+W-1 == K+1: setMain(K+1) executes the deferred burn payload of height K. Still no release.
+        driveToConfirmedHeight(burnHeight + delay - 1);
+        assertEquals("the deferred burn is recorded by K+W-1 under lag=2",
+                List.of(new BridgeWithdrawal(TARGET_1, BURN_NANO)), evmMetaStore.getWithdrawals(burnHeight));
+        assertEquals("no release before maturity",
+                XAmount.ZERO, addressStore.getBalanceByAddress(TARGET_1.toArray()));
+        assertTrue("no release journal before maturity",
+                evmMetaStore.getReleases(burnHeight + delay).isEmpty());
+
+        // Drive to K+W: the release fires. Non-empty release journal proves NO CRITICAL-skip occurred
+        // (the burn height was executed by release time, i.e. W >= lag-1 held end-to-end).
+        driveToConfirmedHeight(burnHeight + delay);
+        assertEquals("T must receive exactly the burned nano at K+W under lag=2",
+                XAmount.of(BURN_NANO), addressStore.getBalanceByAddress(TARGET_1.toArray()));
+        assertEquals("the release journal proves no CRITICAL-skip under lag=2",
+                List.of(new BridgeWithdrawal(TARGET_1, BURN_NANO)), evmMetaStore.getReleases(burnHeight + delay));
+    }
+
     // ---------------------------------------------------------------------------------------------
     // Harness
     // ---------------------------------------------------------------------------------------------
@@ -443,6 +502,23 @@ public class BridgeWithdrawalIntegrationTest {
         long delay = config.getEvmSpec().getEvmBridgeWithdrawalDelay();
         assertEquals("devnet evm.bridgeWithdrawalDelay must be 2 for these vectors", 2L, delay);
         return delay;
+    }
+
+    /**
+     * Tears down the shared devnet (lag=1) fixture and rebuilds over a devnet config whose only
+     * override is {@code stateRootLag}. Block-generation helpers keep using the {@code config} field
+     * (structurally identical for block generation); the KERNEL runs at the requested lag.
+     */
+    private void rebuildAtStateRootLag(long stateRootLag) throws Exception {
+        tearDown();
+        Config lagged = new DevnetConfig() {
+            @Override
+            public long getEvmStateRootLag() {
+                return stateRootLag;
+            }
+        };
+        buildFixture(lagged);
+        assertEquals(stateRootLag, kernel.getConfig().getEvmSpec().getEvmStateRootLag());
     }
 
     /**
