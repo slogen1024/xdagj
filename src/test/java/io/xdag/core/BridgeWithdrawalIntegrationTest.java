@@ -362,6 +362,65 @@ public class BridgeWithdrawalIntegrationTest {
     }
 
     @Test
+    public void delta_two_full_cycle_keeps_conservation_equality() throws Exception {
+        rebuildAtStateRootLag(2L);
+
+        seedChain();
+        long delay = pinnedDevnetDelay();
+        AddressStore addressStore = blockchain.getAddressStore();
+        addressStore.updateBalance(poolKey.toAddress().toArray(), XAmount.of(1000, XUnit.XDAG));
+
+        // 1. Native deposit: 100 XDAG pool -> lock, remark = encode(E).
+        Block depositTx = connectLockTransfer(BridgeRemark.encode(EVM_SENDER), UInt64.ONE);
+
+        // 2. E's burn: a withdraw(TARGET_1) call of exactly BURN_WEI, carried on a 0x0F-ref extra block.
+        EvmTransaction burnTx = EvmTransaction.unsigned(0L, Wei.of(1), 100_000L,
+                Optional.of(BridgeContract.ADDRESS), Wei.of(BURN_WEI), withdrawCalldata(TARGET_1),
+                EvmConfig.DEVNET_CHAIN_ID).sign(EVM_KEY, EVM_ALGO);
+        evmTxStore.put(burnTx);
+        Block depositLink = addLinkingExtraBlock(depositTx, null);
+        Block burnCarrier = addLinkingExtraBlock(null, Bytes32.wrap(burnTx.getHash().getBytes()));
+        long depositHeight = driveUntilMainConfirmed(depositLink);
+        long burnHeight = driveUntilMainConfirmed(burnCarrier);
+        assertTrue("the mint height must precede the burn height", depositHeight < burnHeight);
+
+        // 3. Pin the deposit BEFORE the release fires. The native lock holds the full mint (the native
+        //    pool->lock credit is applied when the deposit block confirms, independent of EVM lag), the
+        //    release is still W blocks away, and the deposit height has already EVM-executed by now
+        //    (depositHeight + 1 <= burnHeight, matured by setMain(burnHeight) under lag=2), so its 0x06
+        //    record is present. Capturing depositNano AFTER the release would read deposit-minus-burn.
+        long depositNano = lockBalanceNano();
+        assertTrue("the deposit must out-fund the burn", depositNano > BURN_NANO);
+        assertEquals("the deposit height must carry E's mint in EVM_META 0x06",
+                List.of(new BridgeDeposit(EVM_SENDER, depositNano)), evmMetaStore.getDeposits(depositHeight));
+
+        // 4. Maturation: drive to K+W. Under lag=2 the deferred burn EVM-executes at setMain(K+1) along
+        //    the way (recording 0x07 + receipt), and the native release fires at setMain(K+W).
+        driveToConfirmedHeight(burnHeight + delay);
+
+        EvmReceipt burnReceipt = evmMetaStore.getReceipt(burnTx.getHash()).orElseThrow();
+        assertEquals("the withdraw call must execute successfully under lag=2", 1, burnReceipt.status());
+        assertEquals("the burn scan must record (T, nano) at the burn height",
+                List.of(new BridgeWithdrawal(TARGET_1, BURN_NANO)), evmMetaStore.getWithdrawals(burnHeight));
+
+        // 5. Conservation EQUALITY of the whole cycle, identical to delta=1.
+        assertEquals("T must receive exactly the burned nano",
+                XAmount.of(BURN_NANO), addressStore.getBalanceByAddress(TARGET_1.toArray()));
+        assertEquals("the lock must hold deposit minus burn",
+                XAmount.of(depositNano - BURN_NANO),
+                addressStore.getBalanceByAddress(BridgeConstants.LOCK_ADDRESS_20.toArray()));
+        assertEquals("the release journal must record what was released",
+                List.of(new BridgeWithdrawal(TARGET_1, BURN_NANO)),
+                evmMetaStore.getReleases(burnHeight + delay));
+        assertEquals("the burned wei stays on the contract (audit balance)",
+                BURN_WEI, evmBalance(BridgeContract.ADDRESS));
+        assertEquals("E must hold minted minus burned minus gas (gasPrice 1)",
+                BigInteger.valueOf(depositNano).multiply(BridgeConstants.WEI_PER_NANO)
+                        .subtract(BURN_WEI).subtract(BigInteger.valueOf(burnReceipt.gasUsed())),
+                evmBalance(EVM_SENDER));
+    }
+
+    @Test
     public void reorg_before_maturation_cancels_the_release() {
         seedChain();
         long delay = pinnedDevnetDelay();
