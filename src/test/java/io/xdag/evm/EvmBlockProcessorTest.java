@@ -1853,4 +1853,54 @@ public class EvmBlockProcessorTest {
         assertTrue("buffered present blob at lag 1 -> available",
                 processor.maturedPayloadAvailable(5L, 1L)); // matured = 5
     }
+
+    // -------------------------------------------------------------------------
+    // G2-T2: buffered missing-blob accessors + buffered-aware ingest gate
+    // -------------------------------------------------------------------------
+
+    @Test
+    public void buffered_missing_blob_is_enumerated_and_awaited() {
+        // A buffered (not-yet-matured) height whose ref's blob is absent from txStore must be
+        // enumerated by bufferedMissingBlobHashes AND accepted by the ingest gate isAwaitingBlob,
+        // so a proactively-fetched reply is stored (G2-T2). Use a phantom ref (never stored).
+        Bytes32 phantom = Bytes32.fromHexString("0x" + "ab".repeat(32));
+        metaStore.putMaturityEntry(3L, BLOCK_HASH_1, 1003L, List.of(phantom), List.of());
+
+        assertEquals("buffered missing blob enumerated", List.of(phantom),
+                processor.bufferedMissingBlobHashes());
+        assertEquals("ambiguous buffered ref also enumerated as a possible batch", List.of(phantom),
+                processor.bufferedMissingBatchHashes());
+        assertTrue("ingest gate awaits a buffered height's blob",
+                processor.isAwaitingBlob(Hash.wrap(phantom)));
+        assertTrue("ingest gate awaits it as a possible batch too",
+                processor.isAwaitingBatch(Hash.wrap(phantom)));
+    }
+
+    @Test
+    public void a_buffered_height_with_a_present_blob_has_nothing_missing() {
+        // The buffered ref's blob IS in txStore -> nothing missing, not awaited.
+        EvmTransaction present = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        metaStore.putMaturityEntry(3L, BLOCK_HASH_1, 1003L, List.of(ref(present)), List.of());
+        assertTrue("present blob -> not missing", processor.bufferedMissingBlobHashes().isEmpty());
+        assertFalse("present blob -> not awaited", processor.isAwaitingBlob(present.getHash()));
+    }
+
+    @Test
+    public void an_unreferenced_blob_is_not_awaited_by_any_buffered_or_pending_height() {
+        // A hash referenced by NO buffered/pending height must not be awaited (ingest-gate DoS guard).
+        Bytes32 unrelated = Bytes32.fromHexString("0x" + "cd".repeat(32));
+        assertFalse(processor.isAwaitingBlob(Hash.wrap(unrelated)));
+        assertFalse(processor.isAwaitingBatch(Hash.wrap(unrelated)));
+        assertTrue(processor.bufferedMissingBlobHashes().isEmpty());
+    }
+
+    @Test
+    public void a_ref_shared_by_two_buffered_heights_is_enumerated_once() {
+        // The `seen` dedup: the same missing ref referenced by two buffered heights appears once.
+        Bytes32 shared = Bytes32.fromHexString("0x" + "ab".repeat(32)); // never stored -> missing
+        metaStore.putMaturityEntry(3L, BLOCK_HASH_1, 1003L, List.of(shared), List.of());
+        metaStore.putMaturityEntry(4L, BLOCK_HASH_1, 1004L, List.of(shared), List.of());
+        assertEquals("shared missing ref enumerated exactly once", List.of(shared),
+                processor.bufferedMissingBlobHashes());
+    }
 }

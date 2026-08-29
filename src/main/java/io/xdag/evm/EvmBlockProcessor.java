@@ -45,6 +45,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
@@ -419,31 +420,66 @@ public class EvmBlockProcessor {
         }
     }
 
-    /** True if some deferred height's expansion still lacks this tx blob (or has it as an unknown ref). */
+    private void forEachBufferedExpansion(Consumer<Expansion> fn) {
+        for (long height : metaStore.maturityHeights()) {
+            metaStore.getMaturityEntry(height).ifPresent(e -> fn.accept(expandRefs(e.refs())));
+        }
+    }
+
+    /**
+     * Distinct tx hashes (and ambiguous refs) that BUFFERED (in-delta-window, not-yet-matured) heights
+     * lack, for proactive EVM_TX_REQUEST fetch inside the delta window (G2-T2). Mirrors {@link
+     * #pendingMissingBlobHashes()} over the maturity buffer. Ascending height, ref order, deduped
+     * within this buffered scan (a ref may also appear in {@link #pendingMissingBlobHashes()} — the
+     * retry tick unions the two).
+     */
+    public synchronized List<Bytes32> bufferedMissingBlobHashes() {
+        List<Bytes32> missing = new ArrayList<>();
+        Set<Bytes32> seen = new HashSet<>();
+        forEachBufferedExpansion(exp -> {
+            exp.missingTxBlobs().forEach(h -> { if (seen.add(h)) missing.add(h); });
+            exp.unknownRefs().forEach(h -> { if (seen.add(h)) missing.add(h); });
+        });
+        return missing;
+    }
+
+    /** Ambiguous (possibly-batch) refs a buffered height lacks, for proactive EVM_BATCH_REQUEST (G2-T2). */
+    public synchronized List<Bytes32> bufferedMissingBatchHashes() {
+        List<Bytes32> missing = new ArrayList<>();
+        Set<Bytes32> seen = new HashSet<>();
+        forEachBufferedExpansion(exp ->
+                exp.unknownRefs().forEach(h -> { if (seen.add(h)) missing.add(h); }));
+        return missing;
+    }
+
+    /**
+     * True if some pending (deferred) OR buffered (in-delta-window) height still lacks this tx blob
+     * (or has it as an unknown ref). The ingest gate (only store a solicited blob): broadened in
+     * G2-T2 to accept a buffered height's blob so a proactively-fetched reply is not dropped.
+     */
     public synchronized boolean isAwaitingBlob(Hash txHash) {
         Bytes32 target = Bytes32.wrap(txHash.getBytes());
+        return anyAwaitingExpansion(
+                exp -> exp.missingTxBlobs().contains(target) || exp.unknownRefs().contains(target));
+    }
+
+    /** True if some pending OR buffered height has this hash as an ambiguous (possibly-batch) ref. */
+    public synchronized boolean isAwaitingBatch(Hash batchHash) {
+        Bytes32 target = Bytes32.wrap(batchHash.getBytes());
+        return anyAwaitingExpansion(exp -> exp.unknownRefs().contains(target));
+    }
+
+    /** Tests {@code test} against the expansion of every pending then buffered height's refs. */
+    private boolean anyAwaitingExpansion(Predicate<Expansion> test) {
         for (long height : metaStore.pendingHeights()) {
-            EvmMetaStore.PendingBlock pending = metaStore.getPending(height).orElse(null);
-            if (pending == null) {
-                continue;
-            }
-            Expansion exp = expandRefs(pending.refs());
-            if (exp.missingTxBlobs().contains(target) || exp.unknownRefs().contains(target)) {
+            EvmMetaStore.PendingBlock p = metaStore.getPending(height).orElse(null);
+            if (p != null && test.test(expandRefs(p.refs()))) {
                 return true;
             }
         }
-        return false;
-    }
-
-    /** True if some deferred height has this hash as an ambiguous (possibly-batch) ref. */
-    public synchronized boolean isAwaitingBatch(Hash batchHash) {
-        Bytes32 target = Bytes32.wrap(batchHash.getBytes());
-        for (long height : metaStore.pendingHeights()) {
-            EvmMetaStore.PendingBlock pending = metaStore.getPending(height).orElse(null);
-            if (pending == null) {
-                continue;
-            }
-            if (expandRefs(pending.refs()).unknownRefs().contains(target)) {
+        for (long height : metaStore.maturityHeights()) {
+            EvmMetaStore.MaturityEntry e = metaStore.getMaturityEntry(height).orElse(null);
+            if (e != null && test.test(expandRefs(e.refs()))) {
                 return true;
             }
         }

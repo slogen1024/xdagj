@@ -23,6 +23,7 @@
  */
 package io.xdag.net;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -61,7 +62,7 @@ import org.mockito.ArgumentCaptor;
 
 /**
  * Tests for the EVM batch-fetch P2P routing added in batch D2:
- *   processEvmBatchRequest, processEvmBatchReply, and the retry tick (requestPendingEvmBlobs).
+ *   processEvmBatchRequest, processEvmBatchReply, and the retry tick (requestMissingEvmBlobs).
  * Construction pattern: mock Kernel returning a real EvmTxStore (in-memory) and a mock
  * EvmBlockProcessor; mock Channel carrying a mock MessageQueue; use reflection to bypass
  * handshake gate and invoke private handler methods directly.
@@ -233,7 +234,7 @@ public class XdagP2pHandlerEvmBatchTest {
     // -------------------------------------------------------------------------
 
     /**
-     * requestPendingEvmBlobs() must send EVM_TX_REQUEST for every hash in pendingMissingBlobHashes()
+     * requestMissingEvmBlobs() must send EVM_TX_REQUEST for every hash in pendingMissingBlobHashes()
      * and EVM_BATCH_REQUEST for every hash in pendingMissingBatchHashes(), using the same ref set
      * (an ambiguous ref X appears in both lists → both message types must be queued for X).
      */
@@ -253,9 +254,11 @@ public class XdagP2pHandlerEvmBatchTest {
 
         when(mockProcessor.pendingMissingBlobHashes()).thenReturn(blobHashes);
         when(mockProcessor.pendingMissingBatchHashes()).thenReturn(batchHashes);
+        when(mockProcessor.bufferedMissingBlobHashes()).thenReturn(new ArrayList<>());
+        when(mockProcessor.bufferedMissingBatchHashes()).thenReturn(new ArrayList<>());
 
         // Invoke the private retry method
-        Method tick = XdagP2pHandler.class.getDeclaredMethod("requestPendingEvmBlobs");
+        Method tick = XdagP2pHandler.class.getDeclaredMethod("requestMissingEvmBlobs");
         tick.setAccessible(true);
         tick.invoke(handler);
 
@@ -303,5 +306,43 @@ public class XdagP2pHandlerEvmBatchTest {
         invokePrivate("processEvmBatchRequest", EvmBatchRequestMessage.class, req);
 
         verify(mockMsgQueue, never()).sendMessage(any());
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 5: buffered refs are proactively fetched and backoff throttles repeats
+    // -------------------------------------------------------------------------
+
+    @Test
+    public void retry_tick_requests_buffered_refs_and_backs_off_on_repeat() throws Exception {
+        Bytes32 bufBlob = Bytes32.fromHexString("0x" + "77".repeat(32));
+        when(mockProcessor.pendingMissingBlobHashes()).thenReturn(new ArrayList<>());
+        when(mockProcessor.pendingMissingBatchHashes()).thenReturn(new ArrayList<>());
+        when(mockProcessor.bufferedMissingBlobHashes()).thenReturn(new ArrayList<>(List.of(bufBlob)));
+        when(mockProcessor.bufferedMissingBatchHashes()).thenReturn(new ArrayList<>());
+
+        Method tick = XdagP2pHandler.class.getDeclaredMethod("requestMissingEvmBlobs");
+        tick.setAccessible(true);
+
+        tick.invoke(handler); // tick 1: fresh -> due -> EVM_TX_REQUEST for the buffered ref
+        tick.invoke(handler); // tick 2: eligible at 2 -> due again
+
+        ArgumentCaptor<Message> captor = ArgumentCaptor.forClass(Message.class);
+        verify(mockMsgQueue, atLeastOnce()).sendMessage(captor.capture());
+        long txReqForBuf = captor.getAllValues().stream()
+                .filter(m -> m instanceof EvmTxRequestMessage)
+                .map(m -> (EvmTxRequestMessage) m)
+                .filter(m -> bufBlob.equals(m.getTxHash()))
+                .count();
+        assertTrue("buffered ref proactively fetched", txReqForBuf >= 1);
+
+        tick.invoke(handler); // tick 3: next eligible = 4 > 3 -> NOT due -> backoff throttles
+        ArgumentCaptor<Message> after = ArgumentCaptor.forClass(Message.class);
+        verify(mockMsgQueue, atLeastOnce()).sendMessage(after.capture());
+        long txReqForBufAfter = after.getAllValues().stream()
+                .filter(m -> m instanceof EvmTxRequestMessage)
+                .map(m -> (EvmTxRequestMessage) m)
+                .filter(m -> bufBlob.equals(m.getTxHash()))
+                .count();
+        assertEquals("backoff throttles the 3rd immediate tick", txReqForBuf, txReqForBufAfter);
     }
 }
