@@ -143,8 +143,8 @@ EVM now executes only δ−1-deep heights, so a reorg of depth < δ−1 rewrites
 | **G2-T1a** ✅ | **Relocate execution to depth δ via the maturity buffer.** `daSkip` stays `false`; missing blob still defers (BEHIND path may be stubbed as "defer" without the new verdict name). Reworks the G1-T2/T3 execution index; fixes the latent mainnet trap; makes EVM execute only δ-final heights. **First TDD plan.** DONE (merge `2506b6c4`). | HF |
 | **G2-T1b** ✅ | **Validator consumes `daSkip`.** Canonical skipped-delta checkpoint (§3.2) + the BEHIND verdict (§3.3). DONE (merge `c090dc2f`). | HF |
 | **G2-T1c** ✅ | **Miner sets `daSkip`.** Pack-time blob-availability decision for the matured height (§3.1). DONE (merge `75dfdaaa`). | HF |
-| **G2-T2** | **Proactive δ-window fetch + bounded (backoff) retry** — reframed by the delivered δ-lagged design; see §9. Fetch buffered (in-δ-window) heights' blobs before maturity; per-blob exponential backoff (never gives up). | node-local |
-| **G2-T3** | Bridge withdrawal release reconciliation under δ-lag + CRITICAL-skip downgrade (§2.5) + conservation re-verify + the `W ≥ δ−1` config invariant. | HF |
+| **G2-T2** ✅ | **Proactive δ-window fetch + bounded (backoff) retry** — reframed by the delivered δ-lagged design; see §9. Fetch buffered (in-δ-window) heights' blobs before maturity; per-blob exponential backoff (never gives up). DONE (merge `5d9cfbb1`). | node-local |
+| **G2-T3** | Bridge withdrawal release reconciliation under δ-lag — see §10. The mandatory `W ≥ δ−1` config invariant; §2.5 CRITICAL-skip reframe (freeze→re-sync, bounded); release-timing + conservation re-verify under δ-lag. **Last Gate-2 task.** | HF (config) |
 
 Dependency: **T1a → T1b → T1c** (execution must relocate before a skip bit means anything; the bit must be consumed before a miner should set it). T2 depends on T1a's maturity buffer (it fetches for buffered heights); T3 after T1a..c.
 
@@ -160,7 +160,9 @@ Dependency: **T1a → T1b → T1c** (execution must relocate before a skip bit m
 - **Reorg** (integration): reorg depth < δ−1 touches no EVM state; ≥ δ−1 replays deterministically incl. skip pattern.
 - **T2 proactive fetch** (unit): a buffered (not-yet-matured) height's missing blob is enumerated by the missing-hash accessors; `isAwaitingBlob`/`isAwaitingBatch` accept a buffered-height blob so its reply is ingested (not dropped as unsolicited).
 - **T2 backoff** (unit): a missing ref is re-requested at increasing-then-capped intervals and pruned on arrival; past the cap it keeps requesting at the max interval (never gives up).
-- **Conservation** (T3): deferred — re-verify deposit/withdrawal equality under δ-lagged mint/release.
+- **T3 config invariant** (unit): a scheduled bridge with `bridgeWithdrawalDelay < stateRootLag − 1` fails config load; `≥` passes (devnet 1/2, shared 16/16 both pass).
+- **T3 release timing** (integration, δ≥2): a burn at height K releases at K+W with the correct lock→target native balances, identical to δ=1.
+- **T3 conservation** (integration, δ≥2): δ-lagged deposit-mint + withdrawal-burn→release keeps the lock/target/supply conservation an EQUALITY, exactly as at δ=1.
 
 ---
 
@@ -197,3 +199,19 @@ Dependency: **T1a → T1b → T1c** (execution must relocate before a skip bit m
 - **Never gives up.** A committed-include height genuinely needs its blob (the block committed to executing it), so the backoff caps the *interval*, never the attempts. First-sight fetch paths (`processNewBlock`→`requestMissingEvmBlob`, broadcast relay) are unchanged; backoff governs only the periodic re-request.
 
 **Consensus impact: none.** Node-local fetch scheduling only — no block format, execution, root, or validator-decision change. This only lets a node fetch earlier so it defers/skips less. The miner's pack-time skip (T1c) and the validator's BEHIND/honor (T1b) are untouched.
+
+---
+
+## 10. G2-T3: bridge withdrawal release under δ-lag (amendment, 2026-08-29)
+
+**What δ-lag changed.** `executeList(K)` now runs at `setMain(K+δ−1)` (T1a), so withdrawal burns at height K land in EVM_META `0x07` δ−1 blocks later than pre-G2. `releaseMaturedWithdrawals(M)` (in `BlockchainImpl`) still reads burns at `M−W` (W = `bridgeWithdrawalDelay`) and moves nano from the lock address to native targets, journaling what it released to `0x08` for symmetric reorg reversal.
+
+**Component 1 — mandatory config invariant `bridgeWithdrawalDelay ≥ stateRootLag − 1` (consensus-critical).** The burn height `M−W` is executed by release time iff `K+δ−1 ≤ K+W` ⟺ `W ≥ δ−1`. Without it, δ-lag makes `hasUnexecutedHeightAtOrBelow(burnHeight)` *always* true → the CRITICAL-skip fires on every release → the bridge silently never releases. Add a fail-fast to `AbstractConfig.validateBridgeConfig` (which already runs only when the bridge is scheduled): read `evm.stateRootLag` and `evm.bridgeWithdrawalDelay` (defaults 16/16), throw if `W < δ−1`. Trivially satisfied by devnet (δ=1 → W≥0) and shared nets (16 ≥ 15). The in-`setMain` ordering also helps: `processConfirmedBlock` matures `M−δ+1` *before* `releaseMaturedWithdrawals(M)`, so even `W = δ−1` exactly works within a single `setMain`.
+
+**Component 2 — §2.5 CRITICAL-skip reframe (freeze → re-sync; message + docs, no behavior change).** With `W≥δ−1` and G2's DA enforcement (committed-skip checkpoints so it is never "unexecuted"; committed-include obliges the blob to be published; T2 proactively fetches in the δ window), no node is BEHIND at a release height on a healthy net → release is deterministic. The `hasUnexecutedHeightAtOrBelow(burnHeight)` skip now fires *only* on a genuine BEHIND — a bounded partition event (a node ≥W blocks behind on EVM), not the old unbounded DA stall. **Freeze-don't-spend stays** (never release burns you cannot verify); such a node converges by **re-sync** (re-sync replays `setMain`→`releaseMaturedWithdrawals` with fetched blobs, so all releases re-apply deterministically). The change is the log wording ("this node is blob-behind below the burn height and must re-sync to release these deterministically") + the doc reframe. We deliberately do NOT add release-catch-up-on-drain: it would journal a release at a *different* native height than a never-behind node, so a reorg mid-unwind could diverge across nodes — higher risk than the DA-bounded edge warrants.
+
+**Component 3 — verify release timing under δ-lag (integration test, no `releaseMaturedWithdrawals` code change).** A δ=2 integration test: a burn at height K releases at K+W with the correct lock→target native balances, identical to δ=1. Proves the ordering + `W≥δ−1` make the burn height executed by release time.
+
+**Component 4 — conservation re-verification (integration capstone).** A δ=2 end-to-end (δ-lagged deposit-mint + withdrawal-burn→release) keeps lock/target/supply conservation an EQUALITY, exactly as at δ=1 — the capstone proving the bridge is sound under the new timing.
+
+**Net:** one consensus-critical config check + one log/docs reframe + config/timing/conservation tests. `releaseMaturedWithdrawals`/`reverseReleasedWithdrawals` bodies are otherwise unchanged (their all-or-nothing + journaled-reversal invariants already hold under δ-lag). After this, **Gate 2 is complete.**
