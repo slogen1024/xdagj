@@ -140,13 +140,13 @@ EVM now executes only δ−1-deep heights, so a reorg of depth < δ−1 rewrites
 
 | Task | Scope | Consensus? |
 |--|--|--|
-| **G2-T1a** | **Relocate execution to depth δ via the maturity buffer.** `daSkip` stays `false`; missing blob still defers (BEHIND path may be stubbed as "defer" without the new verdict name). Reworks the G1-T2/T3 execution index; fixes the latent mainnet trap; makes EVM execute only δ-final heights. **First TDD plan.** | HF |
-| **G2-T1b** | **Validator consumes `daSkip`.** Canonical skipped-delta checkpoint (§3.2) + the BEHIND verdict (§3.3). | HF |
-| **G2-T1c** | **Miner sets `daSkip`.** Pack-time blob-availability decision for the matured height (§3.1). | HF |
-| **G2-T2** | P2P retry / bounded fetch-window hardening (existing task; backoff/caps). | node-local |
+| **G2-T1a** ✅ | **Relocate execution to depth δ via the maturity buffer.** `daSkip` stays `false`; missing blob still defers (BEHIND path may be stubbed as "defer" without the new verdict name). Reworks the G1-T2/T3 execution index; fixes the latent mainnet trap; makes EVM execute only δ-final heights. **First TDD plan.** DONE (merge `2506b6c4`). | HF |
+| **G2-T1b** ✅ | **Validator consumes `daSkip`.** Canonical skipped-delta checkpoint (§3.2) + the BEHIND verdict (§3.3). DONE (merge `c090dc2f`). | HF |
+| **G2-T1c** ✅ | **Miner sets `daSkip`.** Pack-time blob-availability decision for the matured height (§3.1). DONE (merge `75dfdaaa`). | HF |
+| **G2-T2** | **Proactive δ-window fetch + bounded (backoff) retry** — reframed by the delivered δ-lagged design; see §9. Fetch buffered (in-δ-window) heights' blobs before maturity; per-blob exponential backoff (never gives up). | node-local |
 | **G2-T3** | Bridge withdrawal release reconciliation under δ-lag + CRITICAL-skip downgrade (§2.5) + conservation re-verify + the `W ≥ δ−1` config invariant. | HF |
 
-Dependency: **T1a → T1b → T1c** (execution must relocate before a skip bit means anything; the bit must be consumed before a miner should set it). T2 parallel; T3 after T1a..c.
+Dependency: **T1a → T1b → T1c** (execution must relocate before a skip bit means anything; the bit must be consumed before a miner should set it). T2 depends on T1a's maturity buffer (it fetches for buffered heights); T3 after T1a..c.
 
 ---
 
@@ -158,6 +158,8 @@ Dependency: **T1a → T1b → T1c** (execution must relocate before a skip bit m
 - **T1b skip** (integration): a committed-skip height folds `SKIP_SENTINEL`; a node-with-blob and a node-without both reach identical roots for that height; nonces untouched; a deposit at a skipped height still mints; reorg re-reads the committed skip deterministically.
 - **T1b verify** (pure): MATCH/MISMATCH/BEHIND/ABSENT truth table.
 - **Reorg** (integration): reorg depth < δ−1 touches no EVM state; ≥ δ−1 replays deterministically incl. skip pattern.
+- **T2 proactive fetch** (unit): a buffered (not-yet-matured) height's missing blob is enumerated by the missing-hash accessors; `isAwaitingBlob`/`isAwaitingBatch` accept a buffered-height blob so its reply is ingested (not dropped as unsolicited).
+- **T2 backoff** (unit): a missing ref is re-requested at increasing-then-capped intervals and pruned on arrival; past the cap it keeps requesting at the max interval (never gives up).
 - **Conservation** (T3): deferred — re-verify deposit/withdrawal equality under δ-lagged mint/release.
 
 ---
@@ -176,3 +178,22 @@ Dependency: **T1a → T1b → T1c** (execution must relocate before a skip bit m
 - Exact buffer storage (reuse EVM_META 0x03 pending vs. a sibling prefix) — a plan-level choice for T1a.
 - `SKIP_SENTINEL` byte value and its position relative to deposit mint — pinned in T1b's plan (§3.2 fixes the ordering: sentinel folds before deposits).
 - Bridge release timing, CRITICAL-skip downgrade, `W ≥ δ−1` enforcement — G2-T3.
+
+---
+
+## 9. G2-T2: proactive δ-window fetch + bounded retry (amendment, 2026-08-29)
+
+**Reframing.** The original tasklist framed G2-T2 as *"harden the 15s retry; on timeout → the enforcement branch."* The delivered δ-lagged design (T1a–c) moved enforcement to the **miner's pack-time `daSkip` decision** — so "timeout → skip" is no longer G2-T2's job. What remains is making the δ window a genuine *fetch* window and bounding the retry cadence.
+
+**Problem (current `requestPendingEvmBlobs`).** The per-peer 15s retry re-requests blobs only for **pending** (already-matured-and-deferred) heights — never for **buffered** heights still inside the δ window. So a node missing a blob doesn't fetch during the window; it waits until maturity, defers (BEHIND), *then* fetches — later than it should. And the retry is unbounded (every 15s, every missing blob, to the peer).
+
+**Component 1 — proactive δ-window fetch** (node-local; `EvmMetaStore` + `EvmBlockProcessor`):
+- `EvmMetaStore.maturityHeights()` — enumerate the maturity-buffer (`0x09`) heights ascending (mirrors `pendingHeights()`).
+- Extend `EvmBlockProcessor`'s "awaiting" traversal to cover **pending ∪ buffered** heights. The missing-blob/batch accessors used by the retry tick, *and* the `isAwaitingBlob`/`isAwaitingBatch` ingest gate, all consult both sets.
+- **Required coupling:** a proactively-requested buffered blob must also pass the ingest gate, else the reply is dropped as unsolicited (the disk-DoS guard). Extending `isAwaiting*` to buffered heights is therefore mandatory, not optional. No new DoS surface: the blob is referenced by a confirmed block already in the buffer. (A height is never in both stores — buffer→pending is a move, so union + dedup-by-hash is safe.)
+
+**Component 2 — bounded retry** (node-local; `XdagP2pHandler`):
+- Per-peer, per-blob **exponential backoff**: each handler tracks, per missing ref, an attempt count + next-eligible tick; on each 15s tick it re-requests a ref only when its backoff interval has elapsed; the interval doubles per attempt up to a max cap (≈16 ticks ≈ 4 min). Entries are pruned when the ref is no longer missing (blob arrived, or its height left the buffer/pending). State is touched only by the single-threaded scheduler task → no locking.
+- **Never gives up.** A committed-include height genuinely needs its blob (the block committed to executing it), so the backoff caps the *interval*, never the attempts. First-sight fetch paths (`processNewBlock`→`requestMissingEvmBlob`, broadcast relay) are unchanged; backoff governs only the periodic re-request.
+
+**Consensus impact: none.** Node-local fetch scheduling only — no block format, execution, root, or validator-decision change. This only lets a node fetch earlier so it defers/skips less. The miner's pack-time skip (T1c) and the validator's BEHIND/honor (T1b) are untouched.
