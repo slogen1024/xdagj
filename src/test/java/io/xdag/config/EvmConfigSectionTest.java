@@ -255,6 +255,28 @@ public class EvmConfigSectionTest {
     }
 
     @Test
+    public void bridge_withdrawal_delay_must_satisfy_state_root_lag_invariant() {
+        // W < lag-1: under delta-lagged execution the burn height is never executed by release time,
+        // so every release would CRITICAL-skip. Must fail fast at load.
+        Config bad = ConfigFactory.parseString("evm.enabled = true\nevm.activationHeight = 0\n"
+                + "evm.bridgeActivationHeight = 5\n"
+                + "evm.bridgeRecoveryAddress = \"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\"\n"
+                + "evm.stateRootLag = 4\nevm.bridgeWithdrawalDelay = 2");
+        IllegalStateException ex = assertThrows(IllegalStateException.class,
+                () -> AbstractConfig.validateBridgeConfig(bad));
+        assertTrue("message must name the invariant",
+                ex.getMessage().contains("must be >= evm.stateRootLag - 1"));
+
+        // Boundary W == lag-1 is valid: processConfirmedBlock matures M-lag+1 BEFORE releaseMaturedWithdrawals(M),
+        // so the burn height is executed within the same setMain. Must NOT throw.
+        Config boundary = ConfigFactory.parseString("evm.enabled = true\nevm.activationHeight = 0\n"
+                + "evm.bridgeActivationHeight = 5\n"
+                + "evm.bridgeRecoveryAddress = \"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\"\n"
+                + "evm.stateRootLag = 4\nevm.bridgeWithdrawalDelay = 3");
+        AbstractConfig.validateBridgeConfig(boundary); // no exception
+    }
+
+    @Test
     public void evm_alloc_rejects_duplicate_zero_negative_and_oversized() {
         assertThrows("duplicate address", IllegalArgumentException.class, () -> AbstractConfig.parseEvmAlloc(
                 ConfigFactory.parseString("evm.alloc=[{address=\"" + A1 + "\",balance=\"1\"},"

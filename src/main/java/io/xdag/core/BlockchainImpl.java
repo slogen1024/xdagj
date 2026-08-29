@@ -1469,10 +1469,16 @@ public class BlockchainImpl implements Blockchain {
             return; // no burns can exist before the bridge itself
         }
         if (evmProcessor.hasUnexecutedHeightAtOrBelow(burnHeight)) {
-            // DA lag (I4 defer): this node cannot know the burn set yet. Deterministic only when
-            // every node has the blobs — shared-net use is gated on the §13.3-2 DA hard-gate.
-            log.error("CRITICAL: bridge release at height {} skipped - EVM still stalled at or below "
-                    + "burn height {}; withdrawals there will NOT release on this node", mainNumber, burnHeight);
+            // Genuine BEHIND (a bounded partition, not the old unbounded DA stall): with the config
+            // invariant W >= stateRootLag-1 and G2 DA enforcement, a healthy node is never here.
+            // Freeze-don't-spend: never release a burn set this node cannot verify. Convergence is by
+            // re-sync (which replays setMain -> releaseMaturedWithdrawals deterministically once the
+            // blobs arrive), NOT by catch-up-on-drain (that would journal a release at a different
+            // native height than a never-behind node and could diverge under a mid-unwind reorg).
+            log.error("CRITICAL: bridge release at height {} withheld - this node is blob-behind at or "
+                    + "below burn height {} and cannot verify the burn set; funds are FROZEN (never "
+                    + "released without the blobs). Re-sync to fetch the missing payloads; the releases "
+                    + "re-apply deterministically once the blobs arrive.", mainNumber, burnHeight);
             return;
         }
         List<BridgeWithdrawal> burns = metaStore.getWithdrawals(burnHeight);

@@ -357,6 +357,20 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
             throw new IllegalStateException("evm.bridgeWithdrawalDelay must be >= 1, got "
                     + config.getLong("evm.bridgeWithdrawalDelay"));
         }
+        // Delta-lagged EVM execution (evm.stateRootLag) defers a withdrawal burn at height K to
+        // setMain(K + stateRootLag - 1). releaseMaturedWithdrawals(M) reads burns at M - withdrawalDelay,
+        // so the burn height is executed by release time iff withdrawalDelay >= stateRootLag - 1. Below
+        // that, hasUnexecutedHeightAtOrBelow(burnHeight) is always true and the release CRITICAL-skips
+        // on every height -- the bridge silently never releases. Consensus-critical: fail fast at load.
+        long lag = config.hasPath("evm.stateRootLag") ? config.getLong("evm.stateRootLag") : 16L;
+        long withdrawalDelay = config.hasPath("evm.bridgeWithdrawalDelay")
+                ? config.getLong("evm.bridgeWithdrawalDelay") : 16L;
+        if (withdrawalDelay < lag - 1) {
+            throw new IllegalStateException("evm.bridgeWithdrawalDelay (" + withdrawalDelay
+                    + ") must be >= evm.stateRootLag - 1 (" + (lag - 1) + "): under delta-lagged EVM "
+                    + "execution a burn at height K is not executed until setMain(K + stateRootLag - 1), "
+                    + "so a shorter withdrawal delay would defer every release indefinitely.");
+        }
         // A bridge scheduled before the EVM itself would deterministically drop every deposit
         // confirmed in [bridgeActivation, evmActivation) — funds stranded at the lock address.
         // Absent evm.activationHeight resolves to 0 (the evmActivationHeight field default), so
