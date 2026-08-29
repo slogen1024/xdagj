@@ -26,7 +26,9 @@ package io.xdag.net;
 import io.xdag.core.*;
 import io.xdag.crypto.core.CryptoProvider;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -129,6 +131,8 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
     private ScheduledFuture<?> getNodes = null;
     private ScheduledFuture<?> pingPong = null;
     private ScheduledFuture<?> evmBlobRetry = null;
+    private final BlobRetryBackoff evmBlobBackoff = new BlobRetryBackoff();
+    private int evmBlobRetryTick = 0;
 
     private byte[] secret = CryptoProvider.nextBytes(InitMessage.SECRET_LENGTH);
     private long timestamp = System.currentTimeMillis();
@@ -376,9 +380,9 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
             pingPong = exec.scheduleAtFixedRate(() -> msgQueue.sendMessage(new PingMessage()),
                     channel.isInbound() ? 1 : 0, 1, TimeUnit.MINUTES);
 
-            // Periodic per-peer EVM housekeeping (I4): re-request any blob a deferred height still lacks
-            // so a stalled height self-heals. No-op when EVM is disabled or nothing is pending.
-            evmBlobRetry = exec.scheduleAtFixedRate(this::requestPendingEvmBlobs,
+            // Periodic per-peer EVM housekeeping (G2-T2): re-request any blob a pending or buffered
+            // height still lacks, throttled by BlobRetryBackoff. No-op when EVM is disabled or nothing missing.
+            evmBlobRetry = exec.scheduleAtFixedRate(this::requestMissingEvmBlobs,
                     EVM_BLOB_RETRY_SECONDS, EVM_BLOB_RETRY_SECONDS, TimeUnit.SECONDS);
         } else {
             msgQueue.disconnect(ReasonCode.HANDSHAKE_EXISTS);
@@ -419,27 +423,39 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
     }
 
     /**
-     * I4 convergence: re-request from this peer every blob that a deferred (pending) EVM height still
-     * lacks, so a stalled height self-heals — a dropped {@link EvmTxRequestMessage}, a reply that
-     * arrived before the block was deferred, or a peer that connected after the defer. Runs on the
-     * shared scheduler once per {@link #EVM_BLOB_RETRY_SECONDS}. No-op when EVM is disabled
-     * ({@code evmBlockProcessor == null}) or nothing is pending. Any failure is swallowed so a single
-     * bad tick cannot cancel the periodic task.
+     * Periodic per-peer EVM blob fetch (G2-T2): re-request every blob that a PENDING (deferred,
+     * matured) OR BUFFERED (in-delta-window, not-yet-matured) height still lacks, throttled per-ref
+     * by {@link BlobRetryBackoff} (exponential interval, capped, pruned on arrival, never gives up).
+     * Proactively fetching buffered heights inside the delta window lets them arrive before maturity,
+     * so the node defers/skips less. Runs on the shared 15s scheduler. No-op when EVM is disabled or
+     * nothing is missing. Any failure is swallowed so a bad tick cannot cancel the periodic task.
      */
-    private void requestPendingEvmBlobs() {
+    private void requestMissingEvmBlobs() {
         EvmBlockProcessor evmProcessor = kernel.getEvmBlockProcessor();
         if (evmProcessor == null) {
             return;
         }
         try {
-            for (Bytes32 ref : evmProcessor.pendingMissingBlobHashes()) {
-                msgQueue.sendMessage(new EvmTxRequestMessage(ref));
+            int tick = ++evmBlobRetryTick;
+            Set<Bytes32> blobs = new LinkedHashSet<>(evmProcessor.pendingMissingBlobHashes());
+            blobs.addAll(evmProcessor.bufferedMissingBlobHashes());
+            Set<Bytes32> batches = new LinkedHashSet<>(evmProcessor.pendingMissingBatchHashes());
+            batches.addAll(evmProcessor.bufferedMissingBatchHashes());
+            Set<Bytes32> union = new LinkedHashSet<>(blobs);
+            union.addAll(batches);
+            Set<Bytes32> due = evmBlobBackoff.selectDue(union, tick);
+            for (Bytes32 ref : blobs) {
+                if (due.contains(ref)) {
+                    msgQueue.sendMessage(new EvmTxRequestMessage(ref));
+                }
             }
-            for (Bytes32 ref : evmProcessor.pendingMissingBatchHashes()) {
-                msgQueue.sendMessage(new EvmBatchRequestMessage(ref));
+            for (Bytes32 ref : batches) {
+                if (due.contains(ref)) {
+                    msgQueue.sendMessage(new EvmBatchRequestMessage(ref));
+                }
             }
         } catch (RuntimeException e) {
-            log.debug("requestPendingEvmBlobs failed for node {}: {}", channel.getRemoteAddress(), e.toString());
+            log.debug("requestMissingEvmBlobs failed for node {}: {}", channel.getRemoteAddress(), e.toString());
         }
     }
 
@@ -480,7 +496,7 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
      * Stores a batch body only when (a) it is within the P2P size cap and (b) its keccak matches a
      * commitment some deferred height is actually awaiting (the sole ingest gate — unsolicited
      * bodies never touch the disk), then resumes deferred execution. Member blobs the body reveals
-     * as missing are fetched by the next retry tick via pendingMissingBlobHashes().
+     * as missing are fetched by the next retry tick via requestMissingEvmBlobs().
      */
     private void processEvmBatchReply(EvmBatchReplyMessage msg) {
         EvmTxStore evmTxStore = kernel.getEvmTxStore();
