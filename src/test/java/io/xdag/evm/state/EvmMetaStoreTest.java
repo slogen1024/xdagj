@@ -381,6 +381,16 @@ public class EvmMetaStoreTest {
     }
 
     @Test
+    public void maturity_heights_are_enumerated_ascending() {
+        assertEquals(List.of(), store.maturityHeights());
+        Bytes32 hash = Bytes32.fromHexString("0x" + "01".repeat(32));
+        store.putMaturityEntry(5L, hash, 500L, List.of(), List.of());
+        store.putMaturityEntry(2L, hash, 200L, List.of(), List.of());
+        store.putMaturityEntry(9L, hash, 900L, List.of(), List.of());
+        assertEquals(List.of(2L, 5L, 9L), store.maturityHeights());
+    }
+
+    @Test
     public void bridge_record_families_are_independent_at_a_shared_height() {
         // 0x06 (deposits), 0x07 (burns) and 0x08 (releases) legitimately coexist at one height —
         // e.g. a release height that also carries new deposits and burns. Same-height writes must

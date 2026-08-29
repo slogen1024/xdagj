@@ -321,6 +321,16 @@ public class EvmMetaStore {
         return heights;
     }
 
+    /** Buffered (in-delta-window, not-yet-matured) main heights, ascending (G2-T2 proactive fetch). */
+    public List<Long> maturityHeights() {
+        List<Long> heights = new ArrayList<>();
+        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_MATURITY})) {
+            heights.add(heightFromKey(key));
+        }
+        heights.sort(Long::compareTo);
+        return heights;
+    }
+
     public Optional<PendingBlock> getPending(long height) {
         byte[] raw = store.get(pendingKey(height));
         if (raw == null) {
