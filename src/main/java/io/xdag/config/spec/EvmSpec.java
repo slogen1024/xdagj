@@ -53,6 +53,12 @@ public interface EvmSpec {
     /** Height at which EIP-3529 precise gas refunds activate; Long.MAX_VALUE = not scheduled. */
     long getEvmEip3529ActivationHeight();
 
+    /**
+     * Height at which the net EVM fee is credited to the miner reward pool (ADR-016 / G3-T1) instead
+     * of burned. MAX_VALUE = not scheduled (fee stays burned; native accounting byte-identical).
+     */
+    long getEvmFeeRewardActivationHeight();
+
     /** Height at which the miner starts embedding EVM state-root anchors; Long.MAX_VALUE = not scheduled. */
     long getEvmStateRootActivationHeight();
 
