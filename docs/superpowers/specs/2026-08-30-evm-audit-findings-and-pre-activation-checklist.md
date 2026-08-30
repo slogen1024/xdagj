@@ -14,6 +14,12 @@
 
 **Lower / polish (non-blocking):** corrupt on-disk EVM_META throws fail-fast → node-local liveness halt (document a re-sync/wipe-EVM_STATE recovery path); over-budget batch members dropped-not-retried + decode loop runs past budget (bound the decode loop, define a retry/GC story); RPC block-tag `ArithmeticException` mis-mapped to `-32603` + ERROR log-spam (map to `-32602`); optional per-message inbound rate-limit and HTTP `Host`-header allow-list (mitigated today by the loopback bind default).
 
+**A1 residual (informational, pre-existing, unreachable):** even after the A1 conversion guard, `acceptAmount`→`XAmount.add`'s `Math.addExact(block.amount, evmFee)` is a theoretical throw site if a *credited* fee plus the block amount exceeded `Long.MAX`. Identical exposure existed before A1 and is unreachable for any `bitLength()≤62` fee against realistic block amounts (a fee large enough to overflow the add would have `bitLength()>62` and already be skipped). Not a regression; noted for the audit trail.
+
+## Post-note: A1 + A3 shipped (2026-08-30)
+
+A1's overflow guard and A3's reversal diagnostic were implemented + reviewed + merged this session (`fix(evm): guard EVM fee-credit overflow + bridge-reversal shortfall diagnostic (audit A1/A3)`). A2 was left unchanged (unreachable-by-construction). The remaining checklist items (K1 async-drain, A4 supply/conservation + `evm.alloc` cross-check, external audit track, shared-net gas params, EVM_META recovery-path doc) are still open and gate any activation.
+
 ## A4 resolution options (pick before scheduling `feeRewardActivationHeight`)
 
 The core question: **is EVM wei a claim on native XDAG (1:1 lock-backed), or an independent balance?** Options:
