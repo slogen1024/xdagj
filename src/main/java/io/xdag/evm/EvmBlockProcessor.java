@@ -330,7 +330,8 @@ public class EvmBlockProcessor {
      * stalled heights in ascending order for as long as each one's blobs are all present, stopping
      * at the first still-incomplete height so ordering is never violated.
      */
-    public synchronized void onBlobsAvailable() {
+    public synchronized List<DrainedHeight> onBlobsAvailable() {
+        List<DrainedHeight> drained = new ArrayList<>();
         for (long height : metaStore.pendingHeights()) {
             EvmMetaStore.PendingBlock pending = metaStore.getPending(height).orElse(null);
             if (pending == null) {
@@ -338,11 +339,14 @@ public class EvmBlockProcessor {
             }
             Expansion exp = expandRefs(pending.refs());
             if (!exp.complete()) {
-                return; // the lowest incomplete height blocks everything above it
+                break; // the lowest incomplete height blocks everything above it
             }
-            executeAndCheckpoint(exp.flat(), height, pending.timestampSeconds(), pending.blockHash());
+            java.math.BigInteger feeWei =
+                    executeAndCheckpoint(exp.flat(), height, pending.timestampSeconds(), pending.blockHash());
             metaStore.removePending(height);
+            drained.add(new DrainedHeight(height, feeWei));
         }
+        return drained;
     }
 
     /** Dual-lookup expansion of raw 0x0F refs (spec §7). */
@@ -706,6 +710,10 @@ public class EvmBlockProcessor {
                 .flatMap(metaStore::getHeightRecord)
                 .map(EvmMetaStore.HeightRecord::stateRoot)
                 .orElse(genesisRoot());
+    }
+
+    /** A height drained by {@link #onBlobsAvailable()} and the net EVM fee its execution settled. */
+    public record DrainedHeight(long height, java.math.BigInteger netFeeWei) {
     }
 
     /** The world root plus the txs that actually executed (survived the per-block gas budget). */
