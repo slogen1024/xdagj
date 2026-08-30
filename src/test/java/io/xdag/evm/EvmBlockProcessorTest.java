@@ -301,6 +301,31 @@ public class EvmBlockProcessorTest {
     }
 
     @Test
+    public void process_main_block_sums_net_fees_across_txs_in_wei() {
+        // G3-T1 Test A: two txs in one main-block height; the returned BigInteger must equal f1+f2 in
+        // wei, proving that processMainBlock accumulates each tx's (gasUsed * gasPrice) contribution
+        // rather than reporting only the first or the last settled fee.
+        Wei gasPrice = Wei.of(1_000L);
+        long gasLimit = 200_000L;
+        EvmTransaction tx0 = EvmTransaction.unsigned(0L, gasPrice, gasLimit, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);
+        EvmTransaction tx1 = EvmTransaction.unsigned(1L, gasPrice, gasLimit, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);
+        txStore.put(tx0);
+        txStore.put(tx1);
+
+        BigInteger netFee = processor.processMainBlock(List.of(ref(tx0), ref(tx1)), 1L, 1001L, BLOCK_HASH_1);
+
+        long g0 = metaStore.getReceipt(tx0.getHash()).orElseThrow().gasUsed();
+        long g1 = metaStore.getReceipt(tx1.getHash()).orElseThrow().gasUsed();
+        assertEquals("tx0 must succeed", 1, metaStore.getReceipt(tx0.getHash()).orElseThrow().status());
+        assertEquals("tx1 must succeed", 1, metaStore.getReceipt(tx1.getHash()).orElseThrow().status());
+        BigInteger expected = BigInteger.valueOf(g0).add(BigInteger.valueOf(g1))
+                .multiply(gasPrice.getAsBigInteger());
+        assertEquals("returned fee is the wei sum of both txs", expected, netFee);
+    }
+
+    @Test
     public void process_main_block_returns_zero_net_fee_for_a_validation_failure() {
         // Wrong chain id -> validationFailure BEFORE any debit -> zero net fee, even though a status-0
         // receipt is recorded.
