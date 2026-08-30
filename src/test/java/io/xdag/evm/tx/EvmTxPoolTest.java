@@ -612,6 +612,97 @@ public class EvmTxPoolTest {
         assertEquals(addrA, batch.get(1).getSender());
     }
 
+    // ---- fairness / contiguity / no-self-eviction proofs (G3-T3 step 2) ----
+
+    /**
+     * Funds {@code k} and queues nonces [0, n) at {@code price}. The account must afford all n txs; the
+     * fixture funds Wei.fromEth(1) which covers many 21000-gas txs at these prices.
+     */
+    private void queueChain(KeyPair k, int n, Wei price) {
+        fund(Address.extract(k.getPublicKey()), Wei.fromEth(1), 0L);
+        for (long nonce = 0; nonce < n; nonce++) {
+            assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(k, nonce, price).getRawRlp()));
+        }
+    }
+
+    @Test
+    public void equal_price_eviction_targets_the_most_loaded_sender_tail() {
+        Wei price = Wei.of(2_000_000_000L);
+        // (MAX_POOL_SIZE - 3) one-entry senders + one 3-entry sender, all at the same price. The peers
+        // are inserted FIRST so the 3-entry sender is LAST in bySender iteration order: only the
+        // load-DESC tiebreak (not first-inserted-wins) can then select it as the victim — drop that
+        // tiebreak and a first-inserted peer would be evicted instead, failing the assertion below.
+        fillPoolDistinctSenders(EvmTxPool.MAX_POOL_SIZE - 3, price);
+        KeyPair loaded = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(777_000)));
+        queueChain(loaded, 3, price);
+        assertEquals(EvmTxPool.MAX_POOL_SIZE, pool.size());
+
+        // A fresh same-price sender: at equal price the victim is the MOST-loaded sender's tail (nonce 2),
+        // not any 1-entry peer.
+        KeyPair fresh = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(999_999)));
+        fund(Address.extract(fresh.getPublicKey()), Wei.fromEth(1), 0L);
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(fresh, 0, price).getRawRlp()));
+
+        assertTrue("the loaded sender's tail (nonce 2) was evicted",
+                pool.get(tx(loaded, 2, price).getHash()).isEmpty());
+        // ...and its lower nonces survive, contiguous.
+        assertTrue("nonce 0 survives", pool.get(tx(loaded, 0, price).getHash()).isPresent());
+        assertTrue("nonce 1 survives", pool.get(tx(loaded, 1, price).getHash()).isPresent());
+        assertEquals(EvmTxPool.MAX_POOL_SIZE, pool.size());
+    }
+
+    @Test
+    public void evicting_a_tail_keeps_the_chain_contiguous_and_selectable() {
+        Wei price = Wei.of(2_000_000_000L);
+        // The loaded sender is inserted FIRST so selectBatch (gas-budget + MAX_BATCH_TXS limited, so it
+        // returns only a prefix of a 4096-entry pool) picks its run early enough that its surviving txs
+        // are actually selected. Which sender is the victim is pinned by the sibling fairness test; here
+        // we only need loaded to be the victim, which the load-DESC tiebreak guarantees regardless of order.
+        KeyPair loaded = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(777_000)));
+        queueChain(loaded, 3, price);
+        fillPoolDistinctSenders(EvmTxPool.MAX_POOL_SIZE - 3, price);
+
+        KeyPair fresh = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(999_999)));
+        fund(Address.extract(fresh.getPublicKey()), Wei.fromEth(1), 0L);
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(fresh, 0, price).getRawRlp()));
+
+        // The loaded sender now holds exactly nonces [0, 1]; selectBatch (which stops a sender at the first
+        // nonce gap) must still return both — proving no middle nonce was evicted.
+        long loadedSelected = pool.selectBatch(BLOCK_GAS_LIMIT).stream()
+                .filter(t -> t.getSender().equals(Address.extract(loaded.getPublicKey())))
+                .count();
+        assertEquals("both surviving nonces of the loaded sender are selectable (contiguous)",
+                2L, loadedSelected);
+    }
+
+    @Test
+    public void a_sender_extending_its_chain_evicts_a_peer_not_itself() {
+        // self holds the CHEAPEST tails in the pool (at minGasPrice); peers sit strictly above it. So on
+        // price alone self's own tail is the globally most-evictable entry — ONLY the self-exclusion
+        // guard stops it from being chosen. Drop that guard and self's nonce-1 tail is evicted here
+        // (orphaning its chain), failing the assertions below.
+        Wei selfLow = MIN_GAS_PRICE;                  // cheapest tails in the pool
+        Wei peerMid = Wei.of(2_000_000_000L);
+        Wei selfHigh = Wei.of(5_000_000_000L);
+        KeyPair self = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(777_000)));
+        queueChain(self, 2, selfLow);
+        java.util.List<KeyPair> peers = fillPoolDistinctSenders(EvmTxPool.MAX_POOL_SIZE - 2, peerMid);
+        assertEquals(EvmTxPool.MAX_POOL_SIZE, pool.size());
+
+        // self adds nonce 2 (within its 16-window) at a high price that outbids a peer. WITH self-exclusion
+        // a PEER tail is evicted and self's chain stays contiguous; WITHOUT it self's own cheapest tail
+        // (nonce 1) would be the victim.
+        EvmTransaction selfNext = tx(self, 2, selfHigh);
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(selfNext.getRawRlp()));
+
+        assertTrue("self nonce 0 untouched", pool.get(tx(self, 0, selfLow).getHash()).isPresent());
+        assertTrue("self nonce 1 NOT self-evicted", pool.get(tx(self, 1, selfLow).getHash()).isPresent());
+        assertTrue("self nonce 2 added", pool.get(selfNext.getHash()).isPresent());
+        assertTrue("a peer tail was evicted instead",
+                pool.get(tx(peers.get(0), 0, peerMid).getHash()).isEmpty());
+        assertEquals(EvmTxPool.MAX_POOL_SIZE, pool.size());
+    }
+
     @Test
     public void type2_below_min_gas_price_is_underpriced() {
         // A pool floored at 100 wei judges the EFFECTIVE price (min(1, 1000) = 1 wei < 100), not the
