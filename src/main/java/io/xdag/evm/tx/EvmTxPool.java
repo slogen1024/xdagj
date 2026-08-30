@@ -188,11 +188,17 @@ public class EvmTxPool {
             byHash.remove(existing.tx().getHash());
             replaced = true;
         } else if (byHash.size() >= MAX_POOL_SIZE) {
-            // A new entry would grow the pool past its cap.
-            if (queue.isEmpty()) {
-                bySender.remove(sender);
+            // Pool full (G3-T3): fair eviction. Evict the least-deserving OTHER sender's tail to admit a
+            // strictly-more-deserving newcomer, else reject. Tails only (a mid-nonce eviction would
+            // orphan the chain); the incoming sender is excluded so it never orphans its own tail.
+            Victim victim = selectEvictionVictim(sender);
+            if (victim == null || !strictlyBetter(tx, queue.size(), victim)) {
+                if (queue.isEmpty()) {
+                    bySender.remove(sender);
+                }
+                return AddResult.POOL_FULL;
             }
-            return AddResult.POOL_FULL;
+            removeInternal(victim.entry().tx().getHash()); // drop the victim tail + clean up its sender
         }
 
         PoolEntry entry = new PoolEntry(tx, sender, clockSeconds.getAsLong());
@@ -330,5 +336,54 @@ public class EvmTxPool {
             byHash.remove(it.next().getValue().tx().getHash());
             it.remove();
         }
+    }
+
+    private record Victim(PoolEntry entry, int load) {
+    }
+
+    /**
+     * The most-evictable tail among senders OTHER than {@code incomingSender}: lowest effective gas
+     * price first, then the most-loaded sender, then the oldest. Only a sender's tail (highest nonce)
+     * is a candidate, so evicting it never leaves a nonce gap. Returns null if no other sender holds an
+     * entry (unreachable at a full pool; defensive).
+     */
+    private Victim selectEvictionVictim(Address incomingSender) {
+        Victim worst = null;
+        for (Map.Entry<Address, NavigableMap<Long, PoolEntry>> e : bySender.entrySet()) {
+            if (e.getKey().equals(incomingSender) || e.getValue().isEmpty()) {
+                continue;
+            }
+            Victim candidate = new Victim(e.getValue().lastEntry().getValue(), e.getValue().size());
+            if (worst == null || moreEvictable(candidate, worst)) {
+                worst = candidate;
+            }
+        }
+        return worst;
+    }
+
+    /** True if {@code a} should be evicted before {@code b}: cheaper, else more-loaded, else older. */
+    private static boolean moreEvictable(Victim a, Victim b) {
+        int cmp = a.entry().tx().getEffectiveGasPrice().compareTo(b.entry().tx().getEffectiveGasPrice());
+        if (cmp != 0) {
+            return cmp < 0;
+        }
+        if (a.load() != b.load()) {
+            return a.load() > b.load();
+        }
+        return a.entry().addedAtSeconds() < b.entry().addedAtSeconds();
+    }
+
+    /**
+     * Whether the incoming tx (from a sender currently holding {@code incomingLoad} entries) outranks
+     * the eviction victim: a strictly higher effective gas price, or an equal price from a
+     * strictly-less-loaded sender. Age is deliberately excluded so a newcomer never wins by novelty
+     * alone (prevents thrash on a balanced pool).
+     */
+    private boolean strictlyBetter(EvmTransaction tx, int incomingLoad, Victim victim) {
+        int cmp = tx.getEffectiveGasPrice().compareTo(victim.entry().tx().getEffectiveGasPrice());
+        if (cmp != 0) {
+            return cmp > 0;
+        }
+        return incomingLoad < victim.load();
     }
 }

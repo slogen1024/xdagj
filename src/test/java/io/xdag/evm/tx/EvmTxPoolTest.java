@@ -91,6 +91,18 @@ public class EvmTxPoolTest {
                 Wei.of(1), Bytes.EMPTY, List.of(), CHAIN_ID).sign(signer, algo);
     }
 
+    /** Fills the pool with {@code count} distinct 1-entry senders at {@code price}; returns their keys. */
+    private java.util.List<KeyPair> fillPoolDistinctSenders(int count, Wei price) {
+        java.util.List<KeyPair> keys = new java.util.ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            KeyPair k = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(10_000 + i)));
+            fund(Address.extract(k.getPublicKey()), Wei.fromEth(1), 0L);
+            assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(k, 0, price).getRawRlp()));
+            keys.add(k);
+        }
+        return keys;
+    }
+
     @Test
     public void valid_tx_is_added_and_blob_persisted() {
         EvmTransaction t = tx(key, 0, Wei.of(2_000_000_000L));
@@ -215,20 +227,70 @@ public class EvmTxPoolTest {
     }
 
     @Test
-    public void pool_rejects_when_full_but_accepts_after_expiry_frees_a_slot() {
-        // Fill the pool to capacity with distinct senders, then a fresh sender is rejected...
-        for (int i = 0; i < EvmTxPool.MAX_POOL_SIZE; i++) {
-            KeyPair k = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(1000 + i)));
-            fund(Address.extract(k.getPublicKey()), Wei.fromEth(1), 0L);
-            assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(k, 0, Wei.of(2_000_000_000L)).getRawRlp()));
-        }
-        KeyPair overflowKey = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(999_999)));
-        fund(Address.extract(overflowKey.getPublicKey()), Wei.fromEth(1), 0L);
-        assertEquals(EvmTxPool.AddResult.POOL_FULL, pool.add(tx(overflowKey, 0, Wei.of(2_000_000_000L)).getRawRlp()));
+    public void expiry_frees_a_slot_for_an_underpriced_sender_that_cannot_evict() {
+        Wei price = Wei.of(2_000_000_000L);
+        fillPoolDistinctSenders(EvmTxPool.MAX_POOL_SIZE, price);
 
-        // ...but once the existing entries expire, add() opportunistically evicts and admits it.
+        // A cheaper newcomer (>= minGasPrice but below the pool) cannot outbid and cannot displace by
+        // fairness (fairness only breaks EQUAL-price ties), so it is rejected while the pool is full...
+        KeyPair cheap = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(999_999)));
+        fund(Address.extract(cheap.getPublicKey()), Wei.fromEth(1), 0L);
+        assertEquals(EvmTxPool.AddResult.POOL_FULL,
+                pool.add(tx(cheap, 0, MIN_GAS_PRICE).getRawRlp()));
+
+        // ...but once the existing entries expire, opportunistic eviction frees the whole pool and it is admitted.
         clock[0] += 3601L;
-        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(overflowKey, 0, Wei.of(2_000_000_000L)).getRawRlp()));
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(cheap, 0, MIN_GAS_PRICE).getRawRlp()));
+    }
+
+    @Test
+    public void full_pool_admits_a_fresh_same_price_sender_by_evicting_a_peer() {
+        Wei price = Wei.of(2_000_000_000L);
+        java.util.List<KeyPair> filled = fillPoolDistinctSenders(EvmTxPool.MAX_POOL_SIZE, price);
+        assertEquals(EvmTxPool.MAX_POOL_SIZE, pool.size());
+
+        // A brand-new sender (load 0) at the SAME price is strictly less-loaded than any 1-entry peer,
+        // so it is admitted by evicting a peer tail — it can never be starved out of a full pool.
+        KeyPair fresh = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(999_999)));
+        fund(Address.extract(fresh.getPublicKey()), Wei.fromEth(1), 0L);
+        EvmTransaction freshTx = tx(fresh, 0, price);
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(freshTx.getRawRlp()));
+
+        assertTrue("the fresh sender's tx is now pooled", pool.get(freshTx.getHash()).isPresent());
+        assertEquals("one-in-one-out keeps the cap exact", EvmTxPool.MAX_POOL_SIZE, pool.size());
+        // The oldest peer (first inserted; all share the same clock, so insertion order breaks the age tie)
+        // is the victim.
+        assertTrue("the evicted victim is the first-inserted peer",
+                pool.get(tx(filled.get(0), 0, price).getHash()).isEmpty());
+    }
+
+    @Test
+    public void a_higher_fee_newcomer_evicts_a_lower_fee_tail() {
+        Wei low = Wei.of(2_000_000_000L);
+        java.util.List<KeyPair> filled = fillPoolDistinctSenders(EvmTxPool.MAX_POOL_SIZE, low);
+
+        // A higher fee outranks the cheapest tail regardless of load -> admitted, a low-fee tail evicted.
+        KeyPair rich = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(999_999)));
+        fund(Address.extract(rich.getPublicKey()), Wei.fromEth(1), 0L);
+        EvmTransaction richTx = tx(rich, 0, Wei.of(3_000_000_000L));
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(richTx.getRawRlp()));
+        assertTrue(pool.get(richTx.getHash()).isPresent());
+        assertEquals(EvmTxPool.MAX_POOL_SIZE, pool.size());
+        assertTrue("a low-fee tail was evicted",
+                pool.get(tx(filled.get(0), 0, low).getHash()).isEmpty());
+    }
+
+    @Test
+    public void a_cheaper_newcomer_is_rejected_when_full() {
+        Wei price = Wei.of(2_000_000_000L);
+        fillPoolDistinctSenders(EvmTxPool.MAX_POOL_SIZE, price);
+
+        // Below the pool's going rate and not less-loaded than any victim's equal-price peer (there are
+        // none at its price) -> it cannot displace anyone -> POOL_FULL, nothing evicted.
+        KeyPair cheap = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(999_999)));
+        fund(Address.extract(cheap.getPublicKey()), Wei.fromEth(1), 0L);
+        assertEquals(EvmTxPool.AddResult.POOL_FULL, pool.add(tx(cheap, 0, MIN_GAS_PRICE).getRawRlp()));
+        assertEquals("nothing was evicted", EvmTxPool.MAX_POOL_SIZE, pool.size());
     }
 
     @Test
@@ -548,6 +610,97 @@ public class EvmTxPoolTest {
                         + "even though the type-2 fee cap (50 gwei) is far larger",
                 addrB, batch.get(0).getSender());
         assertEquals(addrA, batch.get(1).getSender());
+    }
+
+    // ---- fairness / contiguity / no-self-eviction proofs (G3-T3 step 2) ----
+
+    /**
+     * Funds {@code k} and queues nonces [0, n) at {@code price}. The account must afford all n txs; the
+     * fixture funds Wei.fromEth(1) which covers many 21000-gas txs at these prices.
+     */
+    private void queueChain(KeyPair k, int n, Wei price) {
+        fund(Address.extract(k.getPublicKey()), Wei.fromEth(1), 0L);
+        for (long nonce = 0; nonce < n; nonce++) {
+            assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(k, nonce, price).getRawRlp()));
+        }
+    }
+
+    @Test
+    public void equal_price_eviction_targets_the_most_loaded_sender_tail() {
+        Wei price = Wei.of(2_000_000_000L);
+        // (MAX_POOL_SIZE - 3) one-entry senders + one 3-entry sender, all at the same price. The peers
+        // are inserted FIRST so the 3-entry sender is LAST in bySender iteration order: only the
+        // load-DESC tiebreak (not first-inserted-wins) can then select it as the victim — drop that
+        // tiebreak and a first-inserted peer would be evicted instead, failing the assertion below.
+        fillPoolDistinctSenders(EvmTxPool.MAX_POOL_SIZE - 3, price);
+        KeyPair loaded = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(777_000)));
+        queueChain(loaded, 3, price);
+        assertEquals(EvmTxPool.MAX_POOL_SIZE, pool.size());
+
+        // A fresh same-price sender: at equal price the victim is the MOST-loaded sender's tail (nonce 2),
+        // not any 1-entry peer.
+        KeyPair fresh = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(999_999)));
+        fund(Address.extract(fresh.getPublicKey()), Wei.fromEth(1), 0L);
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(fresh, 0, price).getRawRlp()));
+
+        assertTrue("the loaded sender's tail (nonce 2) was evicted",
+                pool.get(tx(loaded, 2, price).getHash()).isEmpty());
+        // ...and its lower nonces survive, contiguous.
+        assertTrue("nonce 0 survives", pool.get(tx(loaded, 0, price).getHash()).isPresent());
+        assertTrue("nonce 1 survives", pool.get(tx(loaded, 1, price).getHash()).isPresent());
+        assertEquals(EvmTxPool.MAX_POOL_SIZE, pool.size());
+    }
+
+    @Test
+    public void evicting_a_tail_keeps_the_chain_contiguous_and_selectable() {
+        Wei price = Wei.of(2_000_000_000L);
+        // The loaded sender is inserted FIRST so selectBatch (gas-budget + MAX_BATCH_TXS limited, so it
+        // returns only a prefix of a 4096-entry pool) picks its run early enough that its surviving txs
+        // are actually selected. Which sender is the victim is pinned by the sibling fairness test; here
+        // we only need loaded to be the victim, which the load-DESC tiebreak guarantees regardless of order.
+        KeyPair loaded = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(777_000)));
+        queueChain(loaded, 3, price);
+        fillPoolDistinctSenders(EvmTxPool.MAX_POOL_SIZE - 3, price);
+
+        KeyPair fresh = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(999_999)));
+        fund(Address.extract(fresh.getPublicKey()), Wei.fromEth(1), 0L);
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(tx(fresh, 0, price).getRawRlp()));
+
+        // The loaded sender now holds exactly nonces [0, 1]; selectBatch (which stops a sender at the first
+        // nonce gap) must still return both — proving no middle nonce was evicted.
+        long loadedSelected = pool.selectBatch(BLOCK_GAS_LIMIT).stream()
+                .filter(t -> t.getSender().equals(Address.extract(loaded.getPublicKey())))
+                .count();
+        assertEquals("both surviving nonces of the loaded sender are selectable (contiguous)",
+                2L, loadedSelected);
+    }
+
+    @Test
+    public void a_sender_extending_its_chain_evicts_a_peer_not_itself() {
+        // self holds the CHEAPEST tails in the pool (at minGasPrice); peers sit strictly above it. So on
+        // price alone self's own tail is the globally most-evictable entry — ONLY the self-exclusion
+        // guard stops it from being chosen. Drop that guard and self's nonce-1 tail is evicted here
+        // (orphaning its chain), failing the assertions below.
+        Wei selfLow = MIN_GAS_PRICE;                  // cheapest tails in the pool
+        Wei peerMid = Wei.of(2_000_000_000L);
+        Wei selfHigh = Wei.of(5_000_000_000L);
+        KeyPair self = algo.createKeyPair(algo.createPrivateKey(BigInteger.valueOf(777_000)));
+        queueChain(self, 2, selfLow);
+        java.util.List<KeyPair> peers = fillPoolDistinctSenders(EvmTxPool.MAX_POOL_SIZE - 2, peerMid);
+        assertEquals(EvmTxPool.MAX_POOL_SIZE, pool.size());
+
+        // self adds nonce 2 (within its 16-window) at a high price that outbids a peer. WITH self-exclusion
+        // a PEER tail is evicted and self's chain stays contiguous; WITHOUT it self's own cheapest tail
+        // (nonce 1) would be the victim.
+        EvmTransaction selfNext = tx(self, 2, selfHigh);
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(selfNext.getRawRlp()));
+
+        assertTrue("self nonce 0 untouched", pool.get(tx(self, 0, selfLow).getHash()).isPresent());
+        assertTrue("self nonce 1 NOT self-evicted", pool.get(tx(self, 1, selfLow).getHash()).isPresent());
+        assertTrue("self nonce 2 added", pool.get(selfNext.getHash()).isPresent());
+        assertTrue("a peer tail was evicted instead",
+                pool.get(tx(peers.get(0), 0, peerMid).getHash()).isEmpty());
+        assertEquals(EvmTxPool.MAX_POOL_SIZE, pool.size());
     }
 
     @Test
