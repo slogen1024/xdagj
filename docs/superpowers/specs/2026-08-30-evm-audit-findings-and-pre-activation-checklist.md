@@ -18,7 +18,7 @@
 
 ## Post-note: A1 + A3 shipped (2026-08-30)
 
-A1's overflow guard and A3's reversal diagnostic were implemented + reviewed + merged this session (`fix(evm): guard EVM fee-credit overflow + bridge-reversal shortfall diagnostic (audit A1/A3)`). A2 was left unchanged (unreachable-by-construction). The remaining checklist items (K1 async-drain, A4 supply/conservation + `evm.alloc` cross-check, external audit track, shared-net gas params, EVM_META recovery-path doc) are still open and gate any activation.
+A1's overflow guard and A3's reversal diagnostic were implemented + reviewed + merged this session (`fix(evm): guard EVM fee-credit overflow + bridge-reversal shortfall diagnostic (audit A1/A3)`). A2 was left unchanged (unreachable-by-construction). **K1 (async-drain fee-credit convergence) is now ALSO done** (merge b8c72862): both the sync and async paths credit the payload block M via a shared `creditEvmFee`, so a blob-behind node converges — the fork is closed. The remaining checklist items (**A4** supply/conservation + `evm.alloc` cross-check, external audit track, shared-net gas params, EVM_META recovery-path doc) are still open and gate any activation.
 
 ## A4 resolution options (pick before scheduling `feeRewardActivationHeight`)
 
@@ -32,7 +32,7 @@ Either way, `validateBridgeConfig` should gain the `evm.alloc`-vs-scheduled-brid
 ## Pre-activation checklist (gate before flipping any `evm.*ActivationHeight` off `MAX_VALUE` on testnet/mainnet)
 
 - [ ] **A1** overflow guard shipped (this session's hardening task).
-- [ ] **K1** async-drain fee crediting routed through `BlockchainImpl` + credited by height (or fee-routing kept coupled to δ=1).
+- [x] **K1** async-drain fee crediting routed through `BlockchainImpl.onEvmBlobsAvailable` + credited to the payload block M — **DONE (merge b8c72862)**; design `docs/superpowers/specs/2026-08-30-k1-async-drain-fee-credit-design.md`. Both sync + async credit the identical block M via a shared `creditEvmFee`, closing the fork.
 - [ ] **A4** supply/conservation model decided + `evm.alloc`-vs-bridge/fee config cross-check added; `getSupply()`/conservation tests updated accordingly.
 - [ ] External **security audit + bug bounty + testnet shakedown** (the "external track").
 - [ ] Shared-net `minGasPrice` / `blockGasLimit` reviewed as the consensus values (devnet's `minGasPrice=1` makes gas ~free there by design).
