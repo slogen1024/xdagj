@@ -647,13 +647,14 @@ public class EvmConsensusIntegrationTest {
     }
 
     // -----------------------------------------------------------------------------------------
-    // G3-T1 Test D: delta=2 — fee credits the confirming block K+1 that executed, not K
+    // G3-T1 Test D: delta=2 — fee credits the PAYLOAD block K (the matured height), not K+1
     // -----------------------------------------------------------------------------------------
 
     @Test
     public void under_lag_2_the_evm_fee_credits_the_block_that_executed_the_payload() throws Exception {
         // Under lag=2, setMain(K) buffers the carrier's payload (height K) without executing it.
-        // setMain(K+1) matures K and executes it, returning the fee; that fee is credited to block K+1.
+        // setMain(K+1) matures K and executes it, returning the fee; that fee is credited to block K
+        // (the payload block), not K+1 — so the credit unwinds with the execution and both paths agree.
         tearDown();
         buildFixture(new DevnetConfig() {
             @Override
@@ -738,16 +739,16 @@ public class EvmConsensusIntegrationTest {
                         .divide(BigInteger.valueOf(1_000_000_000L)).longValueExact();
                 assertTrue("meaningful fee", expectedNano > 0);
 
-                // The fee must be credited to block K+1 (the one that triggered execution), not K.
+                // K1: the fee credits the PAYLOAD block K (the height whose txs executed), not the
+                // confirming block K+1 — so the credit unwinds with the execution and both paths agree.
+                Block blockK = blockchain.getBlockByHash(carrier.getHashLow(), false);
+                assertEquals("under lag=2 the fee credits the payload block K",
+                        XAmount.of(expectedNano), blockK.getInfo().getFee());
+
                 Block blockKplus1 = blockchain.getBlockByHeight(k + 1);
                 assertNotNull("block K+1 must exist and be confirmed", blockKplus1);
-                assertEquals("under lag=2 the fee credits the confirming block K+1",
-                        XAmount.of(expectedNano), blockKplus1.getInfo().getFee());
-
-                // Block K (the carrier) must NOT be credited the EVM fee.
-                Block blockK = blockchain.getBlockByHash(carrier.getHashLow(), false);
-                assertEquals("block K (carrier) is NOT credited under lag=2",
-                        XAmount.ZERO, blockK.getInfo().getFee());
+                assertEquals("block K+1 (the confirming block) is NOT credited under lag=2",
+                        XAmount.ZERO, blockKplus1.getInfo().getFee());
                 return;
             }
         }
