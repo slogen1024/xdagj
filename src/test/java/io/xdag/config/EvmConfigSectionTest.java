@@ -123,6 +123,13 @@ public class EvmConfigSectionTest {
     }
 
     @Test
+    public void fee_reward_activation_height_per_network() {
+        assertEquals(0L, new DevnetConfig().getEvmSpec().getEvmFeeRewardActivationHeight());
+        assertEquals(Long.MAX_VALUE, new TestnetConfig().getEvmSpec().getEvmFeeRewardActivationHeight());
+        assertEquals(Long.MAX_VALUE, new MainnetConfig().getEvmSpec().getEvmFeeRewardActivationHeight());
+    }
+
+    @Test
     public void state_root_anchoring_knobs_are_scaffolded_per_network() {
         assertEquals(0L, new DevnetConfig().getEvmSpec().getEvmStateRootActivationHeight());
         assertEquals(1L, new DevnetConfig().getEvmSpec().getEvmStateRootLag());

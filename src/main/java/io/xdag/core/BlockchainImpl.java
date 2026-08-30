@@ -1421,9 +1421,26 @@ public class BlockchainImpl implements Blockchain {
                 // node lacking the blob and one holding it converge on the same skipped root.
                 EvmStateAnchor confirmedAnchor = block.getEvmStateAnchor();
                 boolean daSkip = confirmedAnchor != null && confirmedAnchor.daSkip();
-                evmProcessor.processConfirmedBlock(evmRefs, mainNumber, timestampSeconds,
-                        Bytes32.wrap(block.getInfo().getHash()), deposits,
+                java.math.BigInteger evmFeeWei = evmProcessor.processConfirmedBlock(evmRefs, mainNumber,
+                        timestampSeconds, Bytes32.wrap(block.getInfo().getHash()), deposits,
                         kernel.getConfig().getEvmSpec().getEvmStateRootLag(), daSkip);
+                // G3-T1 (ADR-016): route the matured height's net EVM fee to the miner reward pool by
+                // folding it into THIS confirming block's amount + fee (PoolAwardManager distributes the
+                // amount; unSetMain reverses the fee via block.getFee()). wei->nano floors; sub-nano dust
+                // is burned. Gated on mainNumber so pre-activation native accounting is byte-identical.
+                // v1 credits only this synchronous path; the async blob-drain path is a documented
+                // mainnet-activation blocker (spec §3.6).
+                if (mainNumber >= kernel.getConfig().getEvmSpec().getEvmFeeRewardActivationHeight()
+                        && evmFeeWei.signum() > 0) {
+                    long evmFeeNano = evmFeeWei
+                            .divide(io.xdag.evm.bridge.BridgeConstants.WEI_PER_NANO).longValueExact();
+                    if (evmFeeNano > 0L) {
+                        XAmount evmFee = XAmount.of(evmFeeNano);
+                        acceptAmount(block, evmFee);
+                        block.getInfo().setFee(block.getInfo().getFee().add(evmFee));
+                        blockStore.saveBlockInfo(block.getInfo());
+                    }
+                }
             }
             // Spec §3.2 ordering: native accounting, then EVM execution, then matured releases.
             // Deliberately OUTSIDE the refs/deposits guard — a release height needs neither.

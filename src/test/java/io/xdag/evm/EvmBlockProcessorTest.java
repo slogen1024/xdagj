@@ -284,6 +284,62 @@ public class EvmBlockProcessorTest {
     }
 
     @Test
+    public void process_main_block_returns_the_net_fee_actually_settled() {
+        // A successful deploy: the returned net fee equals gasUsed * gasPrice (the wei the sender lost).
+        Wei gasPrice = Wei.of(1_000L);
+        long gasLimit = 200_000L;
+        EvmTransaction deploy = EvmTransaction.unsigned(0L, gasPrice, gasLimit, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);
+        txStore.put(deploy);
+
+        BigInteger netFee = processor.processMainBlock(List.of(ref(deploy)), 1L, 1001L, BLOCK_HASH_1);
+
+        long gasUsed = metaStore.getReceipt(deploy.getHash()).orElseThrow().gasUsed();
+        assertTrue("the deploy must use less than its limit so the refund path runs", gasUsed < gasLimit);
+        assertEquals("returned net fee == gasUsed * gasPrice",
+                BigInteger.valueOf(gasUsed).multiply(gasPrice.getAsBigInteger()), netFee);
+    }
+
+    @Test
+    public void process_main_block_sums_net_fees_across_txs_in_wei() {
+        // G3-T1 Test A: two txs in one main-block height; the returned BigInteger must equal f1+f2 in
+        // wei, proving that processMainBlock accumulates each tx's (gasUsed * gasPrice) contribution
+        // rather than reporting only the first or the last settled fee.
+        Wei gasPrice = Wei.of(1_000L);
+        long gasLimit = 200_000L;
+        EvmTransaction tx0 = EvmTransaction.unsigned(0L, gasPrice, gasLimit, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);
+        EvmTransaction tx1 = EvmTransaction.unsigned(1L, gasPrice, gasLimit, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);
+        txStore.put(tx0);
+        txStore.put(tx1);
+
+        BigInteger netFee = processor.processMainBlock(List.of(ref(tx0), ref(tx1)), 1L, 1001L, BLOCK_HASH_1);
+
+        long g0 = metaStore.getReceipt(tx0.getHash()).orElseThrow().gasUsed();
+        long g1 = metaStore.getReceipt(tx1.getHash()).orElseThrow().gasUsed();
+        assertEquals("tx0 must succeed", 1, metaStore.getReceipt(tx0.getHash()).orElseThrow().status());
+        assertEquals("tx1 must succeed", 1, metaStore.getReceipt(tx1.getHash()).orElseThrow().status());
+        BigInteger expected = BigInteger.valueOf(g0).add(BigInteger.valueOf(g1))
+                .multiply(gasPrice.getAsBigInteger());
+        assertEquals("returned fee is the wei sum of both txs", expected, netFee);
+    }
+
+    @Test
+    public void process_main_block_returns_zero_net_fee_for_a_validation_failure() {
+        // Wrong chain id -> validationFailure BEFORE any debit -> zero net fee, even though a status-0
+        // receipt is recorded.
+        Wei gasPrice = Wei.of(1_000L);
+        EvmTransaction wrongChain = EvmTransaction.unsigned(0L, gasPrice, 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID.add(BigInteger.ONE)).sign(key, algo);
+        txStore.put(wrongChain);
+
+        BigInteger netFee = processor.processMainBlock(List.of(ref(wrongChain)), 1L, 1001L, BLOCK_HASH_1);
+
+        assertEquals("a pre-debit validation failure settles no fee", BigInteger.ZERO, netFee);
+    }
+
+    @Test
     public void genesis_misconfig_changes_the_root_even_when_the_account_is_untouched() {
         // Phase 2, chain origin: two nodes disagree on account X's genesis balance, but the executed
         // tx never touches X. Phase 1 alone missed this (X's delta never appears in any height). Folding
@@ -1388,7 +1444,8 @@ public class EvmBlockProcessorTest {
         activeTxs.put(activeCall);
         BigInteger balanceBeforeActiveCall =
                 new RocksDbWorldUpdater(activeState).getAccount(sender).getBalance().getAsBigInteger();
-        activeProc.processMainBlock(List.of(ref(activeCall)), 2L, 1002L, BLOCK_HASH_2);
+        BigInteger activeCallNetFee =
+                activeProc.processMainBlock(List.of(ref(activeCall)), 2L, 1002L, BLOCK_HASH_2);
         EvmReceipt activeCallReceipt = activeMeta.getReceipt(activeCall.getHash()).orElseThrow();
         assertEquals("active call must succeed", 1, activeCallReceipt.status());
         long netGasUsed = activeCallReceipt.gasUsed();
@@ -1448,6 +1505,11 @@ public class EvmBlockProcessorTest {
         // above while violating these two independent anchors.
         assertEquals("active run: sender cost must equal netGasUsed * gasPrice",
                 BigInteger.valueOf(netGasUsed).multiply(GAS_PRICE), activeCost);
+        // G3-T1: the surfaced net fee must equal the wei actually removed from the sender ON THE REFUND
+        // PATH (netGasUsed < grossGasUsed here) — pins that the fee is upfront-minus-refund-applied, not
+        // a re-derivation, and that the refund subtraction is not dropped.
+        assertEquals("active run: surfaced net fee == wei actually removed from the sender",
+                activeCost, activeCallNetFee);
         assertEquals("gated run: sender cost must equal grossGasUsed * gasPrice",
                 BigInteger.valueOf(grossGasUsed).multiply(GAS_PRICE), gatedCost);
     }

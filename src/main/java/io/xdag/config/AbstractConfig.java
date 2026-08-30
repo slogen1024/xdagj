@@ -167,6 +167,7 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected long evmType2ActivationHeight = Long.MAX_VALUE;
     protected long evmBridgeActivationHeight = Long.MAX_VALUE;
     protected long evmEip3529ActivationHeight = Long.MAX_VALUE;
+    protected long evmFeeRewardActivationHeight = Long.MAX_VALUE;
     protected long evmStateRootActivationHeight = Long.MAX_VALUE;
     protected long evmStateRootLag = 16;
     protected boolean evmStateRootHardReject = false;
@@ -233,6 +234,11 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     @Override
     public long getEvmEip3529ActivationHeight() {
         return evmEip3529ActivationHeight;
+    }
+
+    @Override
+    public long getEvmFeeRewardActivationHeight() {
+        return evmFeeRewardActivationHeight;
     }
 
     @Override
@@ -504,6 +510,8 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
                 ? config.getLong("evm.bridgeActivationHeight") : evmBridgeActivationHeight;
         evmEip3529ActivationHeight = config.hasPath("evm.eip3529ActivationHeight")
                 ? config.getLong("evm.eip3529ActivationHeight") : evmEip3529ActivationHeight;
+        evmFeeRewardActivationHeight = config.hasPath("evm.feeRewardActivationHeight")
+                ? config.getLong("evm.feeRewardActivationHeight") : evmFeeRewardActivationHeight;
         evmStateRootActivationHeight = config.hasPath("evm.stateRootActivationHeight")
                 ? config.getLong("evm.stateRootActivationHeight") : evmStateRootActivationHeight;
         evmStateRootLag = config.hasPath("evm.stateRootLag")

@@ -194,9 +194,9 @@ public class EvmBlockProcessor {
     }
 
     /** Deposit-less entry: a confirmed main block that carries only EVM tx refs. */
-    public synchronized void processMainBlock(List<Bytes32> txRefs, long height, long timestampSeconds,
+    public synchronized BigInteger processMainBlock(List<Bytes32> txRefs, long height, long timestampSeconds,
                                               Bytes32 blockHash) {
-        processMainBlock(txRefs, height, timestampSeconds, blockHash, List.of());
+        return processMainBlock(txRefs, height, timestampSeconds, blockHash, List.of());
     }
 
     /**
@@ -212,7 +212,7 @@ public class EvmBlockProcessor {
      * persisted to EVM_META 0x06 BEFORE any defer, so a stalled height still mints them when it
      * later drains (spec §2.2).
      */
-    public synchronized void processMainBlock(List<Bytes32> txRefs, long height, long timestampSeconds,
+    public synchronized BigInteger processMainBlock(List<Bytes32> txRefs, long height, long timestampSeconds,
                                               Bytes32 blockHash, List<BridgeDeposit> deposits) {
         List<Bytes32> refs = txRefs == null ? List.of() : txRefs;
         boolean hasRefs = !refs.isEmpty();
@@ -226,7 +226,7 @@ public class EvmBlockProcessor {
         // (harmless today: production skips carry no refs; do NOT route marked+refs heights here).
         boolean skipMarked = metaStore.isSkipped(height);
         if (!hasRefs && !hasDeposits && !skipMarked) {
-            return;
+            return BigInteger.ZERO;
         }
         if (height < activationHeight) {
             // Before the EVM hard fork nothing here has consensus meaning (spec §3.1). The caller
@@ -234,7 +234,7 @@ public class EvmBlockProcessor {
             // scheduled before the EVM itself — a nonsensical config; ignoring is deterministic.
             log.warn("Ignoring EVM payload ({} ref(s), {} deposit(s)) in pre-activation main block "
                     + "at height {} (activates at {})", refs.size(), depositCount, height, activationHeight);
-            return;
+            return BigInteger.ZERO;
         }
         if (hasDeposits) {
             // Write-once per height, BEFORE any defer: a stalled height must still mint its
@@ -246,9 +246,9 @@ public class EvmBlockProcessor {
             metaStore.putPending(height, blockHash, timestampSeconds, refs);
             log.warn("Deferring EVM execution of main block at height {} ({} ref(s), {} deposit(s)) "
                     + "until blobs arrive", height, refs.size(), depositCount);
-            return;
+            return BigInteger.ZERO;
         }
-        executeAndCheckpoint(exp.flat(), height, timestampSeconds, blockHash);
+        return executeAndCheckpoint(exp.flat(), height, timestampSeconds, blockHash);
     }
 
     /**
@@ -274,7 +274,7 @@ public class EvmBlockProcessor {
      * which gates whether EVM executes at all — distinct from the state-root <i>anchor</i> activation
      * ({@code evm.stateRootActivationHeight}) that gates anchor verification in {@code BlockchainImpl.setMain}.
      */
-    public synchronized void processConfirmedBlock(List<Bytes32> refs, long confirmedHeight,
+    public synchronized BigInteger processConfirmedBlock(List<Bytes32> refs, long confirmedHeight,
             long timestampSeconds, Bytes32 blockHash, List<BridgeDeposit> deposits, long lag,
             boolean daSkip) {
         List<Bytes32> safeRefs = refs == null ? List.of() : refs;
@@ -283,26 +283,29 @@ public class EvmBlockProcessor {
         if (confirmedHeight < activationHeight) {
             // Pre-activation: identical to the old direct call (processMainBlock warns + returns).
             if (hasPayload) {
-                processMainBlock(safeRefs, confirmedHeight, timestampSeconds, blockHash, safeDeposits);
+                return processMainBlock(safeRefs, confirmedHeight, timestampSeconds, blockHash, safeDeposits);
             }
-            return;
+            return BigInteger.ZERO;
         }
         if (hasPayload) {
             metaStore.putMaturityEntry(confirmedHeight, blockHash, timestampSeconds, safeRefs, safeDeposits);
         }
         long matured = maturedEvmHeight(confirmedHeight, lag);
         if (matured < activationHeight) {
-            return; // still filling the initial lag-1 window (or the matured height is below genesis)
+            return BigInteger.ZERO; // still filling the initial lag-1 window (or below genesis)
         }
-        metaStore.getMaturityEntry(matured).ifPresent(entry -> {
-            metaStore.removeMaturityEntry(matured);
-            if (daSkip) {
-                skipMaturedHeight(matured, entry);
-            } else {
-                processMainBlock(entry.refs(), matured, entry.timestampSeconds(), entry.blockHash(),
-                        entry.deposits());
-            }
-        });
+        Optional<EvmMetaStore.MaturityEntry> entryOpt = metaStore.getMaturityEntry(matured);
+        if (entryOpt.isEmpty()) {
+            return BigInteger.ZERO;
+        }
+        EvmMetaStore.MaturityEntry entry = entryOpt.get();
+        metaStore.removeMaturityEntry(matured);
+        if (daSkip) {
+            skipMaturedHeight(matured, entry);
+            return BigInteger.ZERO; // a skipped height executes no txs -> no fee
+        }
+        return processMainBlock(entry.refs(), matured, entry.timestampSeconds(), entry.blockHash(),
+                entry.deposits());
     }
 
     /**
@@ -493,7 +496,7 @@ public class EvmBlockProcessor {
      * {@link Expansion#complete()} before invoking this method. A height with deposits checkpoints
      * even when it has no executable candidates.
      */
-    private void executeAndCheckpoint(List<Bytes32> flatRefs, long height, long timestampSeconds,
+    private BigInteger executeAndCheckpoint(List<Bytes32> flatRefs, long height, long timestampSeconds,
                                       Bytes32 blockHash) {
         seedGenesisIfAbsent(); // fund the genesis accounts before the first tx reads their balance
         seedBridgeContractIfAbsent(); // and (when scheduled) the bridge contract before any tx calls it
@@ -526,13 +529,13 @@ public class EvmBlockProcessor {
         boolean hasDeposits = !metaStore.getDeposits(height).isEmpty();
         boolean skipped = metaStore.isSkipped(height);
         if (candidates.isEmpty() && !hasDeposits && !skipped) {
-            return;
+            return BigInteger.ZERO;
         }
         List<Hash> toExecute = skipped ? List.of() : candidates;
         ExecutionOutcome outcome = executeList(toExecute, height, timestampSeconds, latestRoot());
         if (outcome.executed().isEmpty() && !hasDeposits && !skipped) {
             // Everything was over-budget — no state changed, no checkpoint.
-            return;
+            return BigInteger.ZERO;
         }
         metaStore.putHeightRecord(height, outcome.root(), blockHash, outcome.executed().size(),
                 timestampSeconds);
@@ -548,6 +551,7 @@ public class EvmBlockProcessor {
         }
         log.info("EVM main block {}: executed {} tx(s), root {}", height, outcome.executed().size(),
                 outcome.root());
+        return outcome.netFeeWei();
     }
 
     /**
@@ -705,7 +709,11 @@ public class EvmBlockProcessor {
     }
 
     /** The world root plus the txs that actually executed (survived the per-block gas budget). */
-    private record ExecutionOutcome(Bytes32 root, List<Hash> executed) {
+    private record ExecutionOutcome(Bytes32 root, List<Hash> executed, BigInteger netFeeWei) {
+    }
+
+    /** One tx's receipt plus the wei actually removed from the sender (0 when no debit occurred). */
+    private record TxOutcome(EvmReceipt receipt, BigInteger netFeeWei) {
     }
 
     /**
@@ -735,6 +743,7 @@ public class EvmBlockProcessor {
         List<Hash> executed = new ArrayList<>(txHashes.size());
         LogsBloomFilter.Builder bloomBuilder = LogsBloomFilter.builder();
         List<BridgeWithdrawal> burns = new ArrayList<>();
+        BigInteger netFeeWei = BigInteger.ZERO;
         long gasBudget = blockGasLimit;
         if (metaStore.isSkipped(height)) {
             // Committed-skip (ADR-015 / G2-T1b): no txs execute. Deposits already minted above; fold a
@@ -758,7 +767,9 @@ public class EvmBlockProcessor {
                 if (txGasLimit > 0) {
                     gasBudget -= txGasLimit;
                 }
-                EvmReceipt receipt = executeOne(root, blob, height, timestampSeconds);
+                TxOutcome exec = executeOne(root, blob, height, timestampSeconds);
+                EvmReceipt receipt = exec.receipt();
+                netFeeWei = netFeeWei.add(exec.netFeeWei());
                 metaStore.putReceipt(txHash, receipt);
                 receipt.logs().forEach(bloomBuilder::insertLog);
                 collectBridgeBurns(receipt.logs(), burns, height);
@@ -791,7 +802,7 @@ public class EvmBlockProcessor {
         }
         Bytes32 chainedRoot =
                 org.hyperledger.besu.crypto.Hash.keccak256(Bytes.concatenate(digest.toArray(new Bytes[0])));
-        return new ExecutionOutcome(chainedRoot, executed);
+        return new ExecutionOutcome(chainedRoot, executed, netFeeWei);
     }
 
     /**
@@ -851,7 +862,7 @@ public class EvmBlockProcessor {
      * with zero gas and no state change — the tx stays part of consensus history but burns nothing
      * (validation failures charge no gas by policy).
      */
-    private EvmReceipt executeOne(RocksDbWorldUpdater root, Bytes rawRlp, long height,
+    private TxOutcome executeOne(RocksDbWorldUpdater root, Bytes rawRlp, long height,
                                   long timestampSeconds) {
         EvmTransaction tx;
         try {
@@ -925,13 +936,15 @@ public class EvmBlockProcessor {
         // or a CALL to a contract) needs at least one gas unit and fails out-of-gas at zero.
         long messageGas = tx.getGasLimit() - intrinsicGas;
 
+        // Affordability was checked above, so this debit cannot underflow; the net fee we surface is
+        // the wei actually removed from the sender = upfront debit minus the refund actually applied.
+        BigInteger upfrontGasFee = effectiveGasPrice.multiply(BigInteger.valueOf(tx.getGasLimit()));
         // Defense in depth (C1): the upfront gas debit, execution, AND the refund all run inside this
         // guard, so no balance-arithmetic or interpreter error can escape into setMain and abort native
         // consensus — any unexpected failure degrades to a status-0 receipt. The debit and refund are
         // provably non-underflowing (the affordability check above; the refund is additive), so the
         // reachable paths (success, revert, out-of-gas) behave exactly as before.
         try {
-            BigInteger upfrontGasFee = effectiveGasPrice.multiply(BigInteger.valueOf(tx.getGasLimit()));
             adjustBalance(root, sender, upfrontGasFee.negate()); // upfront gas debit, charged even on revert/OOG
             long rawStorageRefund = 0L;
             EvmReceipt receipt;
@@ -979,14 +992,17 @@ public class EvmBlockProcessor {
             // netGasUsed * effectiveGasPrice.
             BigInteger gasFeeRefund =
                     effectiveGasPrice.multiply(BigInteger.valueOf(tx.getGasLimit() - netGasUsed));
+            BigInteger refundApplied = BigInteger.ZERO;
             if (gasFeeRefund.signum() > 0) {
                 adjustBalance(root, sender, gasFeeRefund);
+                refundApplied = gasFeeRefund;
             }
-            return receipt;
+            return new TxOutcome(receipt, upfrontGasFee.subtract(refundApplied));
         } catch (RuntimeException e) {
             log.error("EVM execution threw for a tx at height {}; recording a failed receipt to "
                     + "protect native consensus", height, e);
-            return failedReceipt(intrinsicGas);
+            // The upfront debit already ran and no refund was applied -> the full upfront fee settled.
+            return new TxOutcome(failedReceipt(intrinsicGas), upfrontGasFee);
         }
     }
 
@@ -1023,9 +1039,9 @@ public class EvmBlockProcessor {
         account.setBalance(Wei.of(updated));
     }
 
-    private EvmReceipt validationFailure(String reason, String detail) {
+    private TxOutcome validationFailure(String reason, String detail) {
         log.warn("EVM tx validation failed ({}): {}", reason, detail);
-        return new EvmReceipt(0, 0L, Optional.empty(), List.of());
+        return new TxOutcome(new EvmReceipt(0, 0L, Optional.empty(), List.of()), BigInteger.ZERO);
     }
 
     private static EvmReceipt receiptOf(XdagExecutionResult result, long intrinsicGas) {
