@@ -1965,4 +1965,26 @@ public class EvmBlockProcessorTest {
         assertEquals("shared missing ref enumerated exactly once", List.of(shared),
                 processor.bufferedMissingBlobHashes());
     }
+
+    @Test
+    public void on_blobs_available_returns_the_drained_height_and_its_net_fee() {
+        Wei gasPrice = Wei.of(1_000L);
+        long gasLimit = 200_000L;
+        EvmTransaction deploy = EvmTransaction.unsigned(0L, gasPrice, gasLimit, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);
+        Bytes32 ref = ref(deploy);
+        // Defer height 1: its blob is NOT in the store yet, so processMainBlock queues it as pending.
+        processor.processMainBlock(List.of(ref), 1L, 1001L, BLOCK_HASH_1);
+        assertTrue("height must be deferred (no receipt yet)", metaStore.getReceipt(deploy.getHash()).isEmpty());
+        assertTrue("returns nothing while the blob is still missing", processor.onBlobsAvailable().isEmpty());
+
+        // Now the blob arrives: draining executes it and reports (height, netFeeWei).
+        txStore.put(deploy);
+        java.util.List<EvmBlockProcessor.DrainedHeight> drained = processor.onBlobsAvailable();
+        assertEquals(1, drained.size());
+        assertEquals("drained height is the payload height", 1L, drained.get(0).height());
+        long gasUsed = metaStore.getReceipt(deploy.getHash()).orElseThrow().gasUsed();
+        assertEquals("net fee is gasUsed * gasPrice",
+                BigInteger.valueOf(gasUsed).multiply(gasPrice.getAsBigInteger()), drained.get(0).netFeeWei());
+    }
 }

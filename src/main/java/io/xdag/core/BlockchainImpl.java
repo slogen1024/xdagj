@@ -1424,29 +1424,21 @@ public class BlockchainImpl implements Blockchain {
                 java.math.BigInteger evmFeeWei = evmProcessor.processConfirmedBlock(evmRefs, mainNumber,
                         timestampSeconds, Bytes32.wrap(block.getInfo().getHash()), deposits,
                         kernel.getConfig().getEvmSpec().getEvmStateRootLag(), daSkip);
-                // G3-T1 (ADR-016): route the matured height's net EVM fee to the miner reward pool by
-                // folding it into THIS confirming block's amount + fee (PoolAwardManager distributes the
-                // amount; unSetMain reverses the fee via block.getFee()). wei->nano floors; sub-nano dust
-                // is burned. Gated on mainNumber so pre-activation native accounting is byte-identical.
-                // v1 credits only this synchronous path; the async blob-drain path is a documented
-                // mainnet-activation blocker (spec §3.6).
-                if (mainNumber >= kernel.getConfig().getEvmSpec().getEvmFeeRewardActivationHeight()
-                        && evmFeeWei.signum() > 0) {
-                    java.math.BigInteger evmFeeNano =
-                            evmFeeWei.divide(io.xdag.evm.bridge.BridgeConstants.WEI_PER_NANO); // floor; dust burned
-                    // A1 defense-in-depth (mirrors collectBridgeBurns' 2^62 skip): a fee whose nano
-                    // magnitude exceeds the native-supply ceiling cannot legitimately exist. Skip the
-                    // credit deterministically (fee stays burned, exactly as pre-activation) rather than
-                    // letting longValueExact() throw into a half-applied setMain and corrupt native consensus.
-                    if (evmFeeNano.bitLength() > 62) {
-                        log.error("CRITICAL: EVM fee credit {} nano at height {} exceeds the native-supply "
-                                + "ceiling; skipping the credit (fee burned)", evmFeeNano, mainNumber);
-                    } else if (evmFeeNano.signum() > 0) {
-                        XAmount evmFee = XAmount.of(evmFeeNano.longValueExact());
-                        acceptAmount(block, evmFee);
-                        block.getInfo().setFee(block.getInfo().getFee().add(evmFee));
-                        blockStore.saveBlockInfo(block.getInfo());
-                    }
+                // K1/G3-T1 (ADR-016 / spec §3.6): route the matured height's net EVM fee to the reward
+                // pool by crediting the PAYLOAD block M (the matured height's own block) — not the
+                // confirming block — so the credit unwinds with the execution and the async drain
+                // (onEvmBlobsAvailable) credits the identical block. At delta=1, M == mainNumber (the
+                // in-scope block), byte-identical to G3-T1.
+                if (evmFeeWei.signum() > 0) {
+                    long maturedHeight = mainNumber
+                            - kernel.getConfig().getEvmSpec().getEvmStateRootLag() + 1;
+                    // M = mainNumber - lag + 1 <= nmain, and setMain confirms heights in ascending order,
+                    // so getBlockByHeight(M) returns the freshly-confirmed canonical block. A null here is
+                    // only reachable if lag approached the snapshot-prune window (~128) — a nonsensical
+                    // config; creditEvmFee then deterministically no-ops (fee burned) on every node, so it
+                    // is not a fork risk. (stateRootLag must stay well below the snapshot window.)
+                    Block feeBlock = maturedHeight == mainNumber ? block : getBlockByHeight(maturedHeight);
+                    creditEvmFee(feeBlock, maturedHeight, evmFeeWei);
                 }
             }
             // Spec §3.2 ordering: native accounting, then EVM execution, then matured releases.
@@ -2622,6 +2614,53 @@ public class BlockchainImpl implements Blockchain {
         }
         if ((block.getInfo().flags & BI_OURS) != 0) {
             xdagStats.setBalance(amount.add(xdagStats.getBalance()));
+        }
+    }
+
+    /**
+     * K1/G3-T1: credit a matured EVM height's net fee (wei) to that height's OWN block ({@code block},
+     * at {@code height}), folding it into the block's amount (PoolAwardManager distributes) + fee
+     * (unSetMain reverses). wei->nano floors; sub-nano dust is burned. Gated on {@code height} so
+     * pre-activation is byte-identical. The A1 overflow guard skips a fee whose nano magnitude exceeds
+     * the native-supply ceiling rather than letting longValueExact() throw into a half-applied caller.
+     * Used by BOTH the synchronous setMain path and the async onEvmBlobsAvailable drain, so a
+     * blob-behind node and a never-behind node converge on the same block amount.
+     */
+    private void creditEvmFee(Block block, long height, java.math.BigInteger feeWei) {
+        if (block == null || feeWei.signum() <= 0
+                || height < kernel.getConfig().getEvmSpec().getEvmFeeRewardActivationHeight()) {
+            return;
+        }
+        java.math.BigInteger nano = feeWei.divide(io.xdag.evm.bridge.BridgeConstants.WEI_PER_NANO);
+        if (nano.bitLength() > 62) {
+            log.error("CRITICAL: EVM fee credit {} nano at height {} exceeds the native-supply ceiling; "
+                    + "skipping the credit (fee burned)", nano, height);
+            return;
+        }
+        if (nano.signum() <= 0) {
+            return;
+        }
+        XAmount evmFee = XAmount.of(nano.longValueExact());
+        acceptAmount(block, evmFee);
+        block.getInfo().setFee(block.getInfo().getFee().add(evmFee));
+        blockStore.saveBlockInfo(block.getInfo());
+    }
+
+    /**
+     * K1: the native-accounting entry point for the async blob-drain. Runs under the Blockchain monitor
+     * (so it never races setMain/unWindMain and respects the Blockchain->EvmProcessor lock order),
+     * drains the deferred heights, and credits each height's net fee to its OWN block via the same
+     * {@link #creditEvmFee} the synchronous setMain path uses — so a blob-behind node converges on the
+     * identical block amounts.
+     */
+    @Override
+    public synchronized void onEvmBlobsAvailable() {
+        EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
+        if (evmProcessor == null) {
+            return;
+        }
+        for (EvmBlockProcessor.DrainedHeight drained : evmProcessor.onBlobsAvailable()) {
+            creditEvmFee(getBlockByHeight(drained.height()), drained.height(), drained.netFeeWei());
         }
     }
 

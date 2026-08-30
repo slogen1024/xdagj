@@ -40,6 +40,9 @@ public interface Blockchain {
     // Try to connect a new block to the blockchain
     ImportResult tryToConnect(Block block);
 
+    // Resume deferred EVM execution when blobs arrive, crediting each drained height's fee to its block
+    void onEvmBlobsAvailable();
+
     // Create a new block with given parameters
     Block createNewBlock(
             Map<Address, ECKeyPair> pairs,
