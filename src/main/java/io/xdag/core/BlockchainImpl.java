@@ -1432,10 +1432,17 @@ public class BlockchainImpl implements Blockchain {
                 // mainnet-activation blocker (spec §3.6).
                 if (mainNumber >= kernel.getConfig().getEvmSpec().getEvmFeeRewardActivationHeight()
                         && evmFeeWei.signum() > 0) {
-                    long evmFeeNano = evmFeeWei
-                            .divide(io.xdag.evm.bridge.BridgeConstants.WEI_PER_NANO).longValueExact();
-                    if (evmFeeNano > 0L) {
-                        XAmount evmFee = XAmount.of(evmFeeNano);
+                    java.math.BigInteger evmFeeNano =
+                            evmFeeWei.divide(io.xdag.evm.bridge.BridgeConstants.WEI_PER_NANO); // floor; dust burned
+                    // A1 defense-in-depth (mirrors collectBridgeBurns' 2^62 skip): a fee whose nano
+                    // magnitude exceeds the native-supply ceiling cannot legitimately exist. Skip the
+                    // credit deterministically (fee stays burned, exactly as pre-activation) rather than
+                    // letting longValueExact() throw into a half-applied setMain and corrupt native consensus.
+                    if (evmFeeNano.bitLength() > 62) {
+                        log.error("CRITICAL: EVM fee credit {} nano at height {} exceeds the native-supply "
+                                + "ceiling; skipping the credit (fee burned)", evmFeeNano, mainNumber);
+                    } else if (evmFeeNano.signum() > 0) {
+                        XAmount evmFee = XAmount.of(evmFeeNano.longValueExact());
                         acceptAmount(block, evmFee);
                         block.getInfo().setFee(block.getInfo().getFee().add(evmFee));
                         blockStore.saveBlockInfo(block.getInfo());
@@ -1554,8 +1561,19 @@ public class BlockchainImpl implements Blockchain {
         for (BridgeWithdrawal release : released.reversed()) {
             XAmount amount = XAmount.of(release.amountNano());
             byte[] targetKey = release.nativeTarget20().toArray();
-            addressStore.updateBalance(targetKey,
-                    addressStore.getBalanceByAddress(targetKey).subtract(amount));
+            XAmount targetBalance = addressStore.getBalanceByAddress(targetKey);
+            if (targetBalance.lessThan(amount)) {
+                // A3: unreachable under correct operation — the top-down unWindMain re-credits the target
+                // (unApplyBlock) for every higher-height spend BEFORE reversing this release, so the
+                // target always holds the released amount here. If it ever fires, the reversal invariant
+                // is already broken; fail LOUD (the subtract below throws) rather than swallowing, which
+                // would credit the lock without debiting the target (a conservation break). This log
+                // makes the (otherwise cryptic) failure diagnosable for an operator re-sync.
+                log.error("CRITICAL: bridge release reversal at unwound height {} finds target {} short "
+                        + "({} < {}); reversal invariant violated — the unwind will halt for re-sync",
+                        unwoundHeight, release.nativeTarget20().toHexString(), targetBalance, amount);
+            }
+            addressStore.updateBalance(targetKey, targetBalance.subtract(amount));
             addressStore.updateBalance(lockKey,
                     addressStore.getBalanceByAddress(lockKey).add(amount));
         }

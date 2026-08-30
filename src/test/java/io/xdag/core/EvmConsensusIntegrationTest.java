@@ -909,4 +909,63 @@ public class EvmConsensusIntegrationTest {
                 BigInteger.valueOf(creditedNano).multiply(divisor)
                         .add(BigInteger.valueOf(dustWei)));
     }
+
+    // -----------------------------------------------------------------------------------------
+    // A1 guard: overflowing fee is skipped, not credited, and setMain survives
+    // -----------------------------------------------------------------------------------------
+
+    @Test
+    public void an_overflowing_fee_is_skipped_not_credited_and_setMain_survives() {
+        BlockchainImpl blockchain = new BlockchainImpl(kernel);
+        ECKeyPair poolKey = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
+        SECP256K1 algo = new SECP256K1();
+        KeyPair evmKey = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
+        // gasPrice so large that gasUsed * gasPrice / 1e9 exceeds Long.MAX (nano): the credit conversion
+        // would throw ArithmeticException into setMain without the overflow guard.
+        Wei gasPrice = Wei.of(new BigInteger("200000000000000000000000")); // 2e23 wei
+        EvmTransaction deployTx = EvmTransaction.unsigned(0L, gasPrice, 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, BigInteger.valueOf(0xCAFE)).sign(evmKey, algo);
+        evmTxStore.put(deployTx);
+        Bytes32 evmRef = Bytes32.wrap(deployTx.getHash().getBytes());
+
+        RocksDbWorldUpdater funding = new RocksDbWorldUpdater(evmStateSource);
+        funding.createAccount(deployTx.getSender(), 0L,
+                Wei.of(new BigInteger("50000000000000000000000000000"))); // 5e28 wei — affords the gas
+        funding.commit();
+
+        long generateTime = 1600616700000L;
+        Block addressBlock = generateAddressBlock(config, poolKey, generateTime);
+        assertSame(IMPORTED_BEST, blockchain.tryToConnect(addressBlock));
+        List<io.xdag.core.Address> pending = new ArrayList<>();
+        Bytes32 ref = addressBlock.getHashLow();
+        Block carrier = null;
+        for (int i = 1; i <= 12; i++) {
+            generateTime += 64000L;
+            pending.clear();
+            pending.add(new io.xdag.core.Address(ref, XDAG_FIELD_OUT, false));
+            long xdagTime = XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime));
+            Block extraBlock;
+            if (i == 3) {
+                extraBlock = new Block(config, xdagTime, null, pending, true, null, null, -1,
+                        XAmount.ZERO, null, evmRef);
+                extraBlock.signOut(poolKey);
+                extraBlock.setNonce(HashUtils.sha256(Bytes.wrap(new byte[]{0x12, 0x34})));
+                carrier = extraBlock;
+            } else {
+                extraBlock = generateExtraBlock(config, poolKey, xdagTime, pending);
+            }
+            assertSame(IMPORTED_BEST, blockchain.tryToConnect(extraBlock));
+            ref = extraBlock.getHashLow();
+        }
+
+        // setMain must NOT have aborted on the overflowing fee: the carrier confirmed as main...
+        Block storedCarrier = blockchain.getBlockByHash(carrier.getHashLow(), false);
+        assertTrue("carrier confirmed — setMain survived the overflowing fee",
+                storedCarrier.getInfo().getHeight() > 0);
+        // ...and the overflowing fee was skipped (not credited): a bare carrier's fee stays ZERO.
+        assertEquals("the overflowing fee is skipped, not credited",
+                XAmount.ZERO, storedCarrier.getInfo().getFee());
+        // (sanity) the deploy executed and settled the huge fee on the EVM side.
+        assertEquals(1, evmMetaStore.getReceipt(deployTx.getHash()).orElseThrow().status());
+    }
 }
