@@ -77,6 +77,7 @@ public class XdagP2pHandlerEvmBatchTest {
 
     private EvmTxStore evmTxStore;
     private EvmBlockProcessor mockProcessor;
+    private Blockchain mockChain;
     private MessageQueue mockMsgQueue;
     private XdagP2pHandler handler;
 
@@ -111,7 +112,8 @@ public class XdagP2pHandlerEvmBatchTest {
         // Mock Kernel
         Kernel mockKernel = mock(Kernel.class);
         when(mockKernel.getConfig()).thenReturn(mockConfig);
-        when(mockKernel.getBlockchain()).thenReturn(mock(Blockchain.class));
+        mockChain = mock(Blockchain.class);
+        when(mockKernel.getBlockchain()).thenReturn(mockChain);
         when(mockKernel.getChannelMgr()).thenReturn(mock(ChannelManager.class));
         when(mockKernel.getNodeMgr()).thenReturn(mock(io.xdag.net.node.NodeManager.class));
         when(mockKernel.getClient()).thenReturn(mock(PeerClient.class));
@@ -190,7 +192,9 @@ public class XdagP2pHandlerEvmBatchTest {
         invokePrivate("processEvmBatchReply", EvmBatchReplyMessage.class, reply);
 
         assertTrue("Batch body must be stored when awaited", evmTxStore.containsBatch(batchHash));
-        verify(mockProcessor).onBlobsAvailable();
+        // K1: the drain is now driven via the blockchain (which credits the payload block), not the
+        // processor directly.
+        verify(mockChain).onEvmBlobsAvailable();
     }
 
     /**
@@ -207,7 +211,7 @@ public class XdagP2pHandlerEvmBatchTest {
         invokePrivate("processEvmBatchReply", EvmBatchReplyMessage.class, reply);
 
         assertFalse("Batch body must NOT be stored when not awaited", evmTxStore.containsBatch(batchHash));
-        verify(mockProcessor, never()).onBlobsAvailable();
+        verify(mockChain, never()).onEvmBlobsAvailable();
     }
 
     /**
@@ -226,7 +230,7 @@ public class XdagP2pHandlerEvmBatchTest {
         invokePrivate("processEvmBatchReply", EvmBatchReplyMessage.class, reply);
 
         assertFalse("Oversized batch body must NOT be stored", evmTxStore.containsBatch(fakeHash));
-        verify(mockProcessor, never()).onBlobsAvailable();
+        verify(mockChain, never()).onEvmBlobsAvailable();
     }
 
     // -------------------------------------------------------------------------

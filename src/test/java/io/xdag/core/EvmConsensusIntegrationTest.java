@@ -912,6 +912,228 @@ public class EvmConsensusIntegrationTest {
     }
 
     // -----------------------------------------------------------------------------------------
+    // K1 step 3: async blob-drain credits the payload block after a deferred blob arrives
+    // -----------------------------------------------------------------------------------------
+
+    @Test
+    public void async_drain_credits_the_payload_block_after_a_deferred_blob_arrives() {
+        BlockchainImpl blockchain = new BlockchainImpl(kernel);
+        ECKeyPair poolKey = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
+        SECP256K1 algo = new SECP256K1();
+        KeyPair evmKey = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
+        Wei gasPrice = Wei.of(1_000_000_000_000L); // 1000 nano per gas unit
+        EvmTransaction deployTx = EvmTransaction.unsigned(0L, gasPrice, 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, BigInteger.valueOf(0xCAFE)).sign(evmKey, algo);
+        // NOTE: the blob is deliberately NOT put into evmTxStore yet — the carrier's payload defers.
+        Bytes32 evmRef = Bytes32.wrap(deployTx.getHash().getBytes());
+
+        RocksDbWorldUpdater funding = new RocksDbWorldUpdater(evmStateSource);
+        funding.createAccount(deployTx.getSender(), 0L, Wei.fromEth(1));
+        funding.commit();
+
+        long generateTime = 1600616700000L;
+        Block addressBlock = generateAddressBlock(config, poolKey, generateTime);
+        assertSame(IMPORTED_BEST, blockchain.tryToConnect(addressBlock));
+        List<io.xdag.core.Address> pending = new ArrayList<>();
+        Bytes32 ref = addressBlock.getHashLow();
+        Block carrier = null;
+        for (int i = 1; i <= 12; i++) {
+            generateTime += 64000L;
+            pending.clear();
+            pending.add(new io.xdag.core.Address(ref, XDAG_FIELD_OUT, false));
+            long xdagTime = XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime));
+            Block extraBlock;
+            if (i == 3) {
+                extraBlock = new Block(config, xdagTime, null, pending, true, null, null, -1,
+                        XAmount.ZERO, null, evmRef);
+                extraBlock.signOut(poolKey);
+                extraBlock.setNonce(HashUtils.sha256(Bytes.wrap(new byte[]{0x12, 0x34})));
+                carrier = extraBlock;
+            } else {
+                extraBlock = generateExtraBlock(config, poolKey, xdagTime, pending);
+            }
+            assertSame(IMPORTED_BEST, blockchain.tryToConnect(extraBlock));
+            ref = extraBlock.getHashLow();
+        }
+
+        // The carrier confirmed but its payload is DEFERRED (blob missing), so it is not yet credited.
+        Block carrierBefore = blockchain.getBlockByHash(carrier.getHashLow(), false);
+        long m = carrierBefore.getInfo().getHeight();
+        assertTrue("carrier confirmed", m > 0);
+        assertTrue("payload deferred — not executed yet", evmMetaStore.getReceipt(deployTx.getHash()).isEmpty());
+        assertEquals("no credit while deferred", XAmount.ZERO, carrierBefore.getInfo().getFee());
+
+        // The blob arrives -> the async drain executes the payload and credits its OWN block M.
+        evmTxStore.put(deployTx);
+        blockchain.onEvmBlobsAvailable();
+
+        assertEquals("the deferred payload executed on drain",
+                1, evmMetaStore.getReceipt(deployTx.getHash()).orElseThrow().status());
+        long gasUsed = evmMetaStore.getReceipt(deployTx.getHash()).orElseThrow().gasUsed();
+        long expectedNano = BigInteger.valueOf(gasUsed).multiply(gasPrice.getAsBigInteger())
+                .divide(BigInteger.valueOf(1_000_000_000L)).longValueExact();
+        assertTrue("meaningful fee", expectedNano > 0);
+        Block carrierAfter = blockchain.getBlockByHeight(m);
+        assertEquals("the async drain credited the payload block M with the same fee the sync path would",
+                XAmount.of(expectedNano), carrierAfter.getInfo().getFee());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // K1 step 3: reorg reversal — unSetMain reverses an async fee credit
+    // -----------------------------------------------------------------------------------------
+
+    @Test
+    public void unsetmain_reverses_an_async_fee_credit() {
+        BlockchainImpl blockchain = new BlockchainImpl(kernel);
+        ECKeyPair poolKey = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
+        SECP256K1 algo = new SECP256K1();
+        KeyPair evmKey = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
+        Wei gasPrice = Wei.of(1_000_000_000_000L);
+        EvmTransaction deployTx = EvmTransaction.unsigned(0L, gasPrice, 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, BigInteger.valueOf(0xCAFE)).sign(evmKey, algo);
+        Bytes32 evmRef = Bytes32.wrap(deployTx.getHash().getBytes());
+        RocksDbWorldUpdater funding = new RocksDbWorldUpdater(evmStateSource);
+        funding.createAccount(deployTx.getSender(), 0L, Wei.fromEth(1));
+        funding.commit();
+
+        long generateTime = 1600616700000L;
+        Block addressBlock = generateAddressBlock(config, poolKey, generateTime);
+        assertSame(IMPORTED_BEST, blockchain.tryToConnect(addressBlock));
+        List<io.xdag.core.Address> pending = new ArrayList<>();
+        Bytes32 ref = addressBlock.getHashLow();
+        Block carrier = null;
+        for (int i = 1; i <= 12; i++) {
+            generateTime += 64000L;
+            pending.clear();
+            pending.add(new io.xdag.core.Address(ref, XDAG_FIELD_OUT, false));
+            long xdagTime = XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime));
+            Block extraBlock;
+            if (i == 3) {
+                extraBlock = new Block(config, xdagTime, null, pending, true, null, null, -1,
+                        XAmount.ZERO, null, evmRef);
+                extraBlock.signOut(poolKey);
+                extraBlock.setNonce(HashUtils.sha256(Bytes.wrap(new byte[]{0x12, 0x34})));
+                carrier = extraBlock;
+            } else {
+                extraBlock = generateExtraBlock(config, poolKey, xdagTime, pending);
+            }
+            assertSame(IMPORTED_BEST, blockchain.tryToConnect(extraBlock));
+            ref = extraBlock.getHashLow();
+        }
+        long m = blockchain.getBlockByHash(carrier.getHashLow(), false).getInfo().getHeight();
+
+        evmTxStore.put(deployTx);
+        blockchain.onEvmBlobsAvailable(); // async-credit block M
+
+        Block credited = blockchain.getBlockByHeight(m);
+        assertTrue("async credit landed", credited.getInfo().getFee().greaterThan(XAmount.ZERO));
+
+        blockchain.unSetMain(credited);
+        assertEquals("unSetMain reverses the async-credited fee to zero",
+                XAmount.ZERO, blockchain.getBlockByHeight(m).getInfo().getFee());
+    }
+
+    @Test
+    public void async_drain_credits_the_past_payload_block_under_lag_2() throws Exception {
+        // The scenario K1 exists for: at lag=2 a blob-behind node defers the PAST payload height K
+        // (setMain(K+1) matures K but the blob is missing), then drains it later and must credit block
+        // K (strictly behind the top), not the confirming block K+1 — converging with a never-behind node.
+        tearDown();
+        buildFixture(new DevnetConfig() {
+            @Override
+            public long getEvmStateRootLag() {
+                return 2L;
+            }
+        });
+        assertEquals(2L, kernel.getConfig().getEvmSpec().getEvmStateRootLag());
+
+        BlockchainImpl blockchain = new BlockchainImpl(kernel);
+        ECKeyPair poolKey = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
+        SECP256K1 algo = new SECP256K1();
+        KeyPair evmKey = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
+        Wei gasPrice = Wei.of(1_000_000_000_000L);
+        EvmTransaction deployTx = EvmTransaction.unsigned(0L, gasPrice, 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, BigInteger.valueOf(0xCAFE)).sign(evmKey, algo);
+        // Blob WITHHELD: the payload defers at maturity instead of executing synchronously.
+        Bytes32 evmRef = Bytes32.wrap(deployTx.getHash().getBytes());
+        RocksDbWorldUpdater funding = new RocksDbWorldUpdater(evmStateSource);
+        funding.createAccount(deployTx.getSender(), 0L, Wei.fromEth(1));
+        funding.commit();
+
+        long generateTime = 1600616700000L;
+        Block addressBlock = generateAddressBlock(config, poolKey, generateTime);
+        assertSame(IMPORTED_BEST, blockchain.tryToConnect(addressBlock));
+        Bytes32 ref = addressBlock.getHashLow();
+        Block carrier = null;
+        long k = -1L;
+        for (int i = 1; i <= 20; i++) {
+            generateTime += 64000L;
+            List<io.xdag.core.Address> pending = new ArrayList<>();
+            pending.add(new io.xdag.core.Address(ref, XDAG_FIELD_OUT, false));
+            long xdagTime = XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime));
+            Block extraBlock;
+            if (i == 3) {
+                extraBlock = new Block(config, xdagTime, null, pending, true, null, null, -1,
+                        XAmount.ZERO, null, evmRef);
+                extraBlock.signOut(poolKey);
+                extraBlock.setNonce(HashUtils.sha256(Bytes.wrap(new byte[]{0x12, 0x34})));
+                carrier = extraBlock;
+            } else {
+                extraBlock = generateExtraBlock(config, poolKey, xdagTime, pending);
+            }
+            assertSame(IMPORTED_BEST, blockchain.tryToConnect(extraBlock));
+            ref = extraBlock.getHashLow();
+            if (carrier == null) {
+                continue;
+            }
+            long confirmedHeight = blockchain.getBlockByHash(carrier.getHashLow(), false).getInfo().getHeight();
+            if (confirmedHeight <= 0) {
+                continue;
+            }
+            if (k < 0) {
+                k = confirmedHeight;
+                // Drive one more main confirmation so setMain(K+1) matures K — but the blob is missing,
+                // so K DEFERS to the pending queue (not executed, not credited).
+                long targetNmain = blockchain.getXdagStats().nmain + 1;
+                do {
+                    generateTime += 64000L;
+                    List<io.xdag.core.Address> nextPending = new ArrayList<>();
+                    nextPending.add(new io.xdag.core.Address(ref, XDAG_FIELD_OUT, false));
+                    long nextXdagTime = XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime));
+                    Block next = generateExtraBlock(config, poolKey, nextXdagTime, nextPending);
+                    assertSame(IMPORTED_BEST, blockchain.tryToConnect(next));
+                    ref = next.getHashLow();
+                } while (blockchain.getXdagStats().nmain < targetNmain);
+
+                assertTrue("K must be deferred (blob missing), not executed",
+                        evmMetaStore.getReceipt(deployTx.getHash()).isEmpty());
+                assertEquals("payload block K not yet credited", XAmount.ZERO,
+                        blockchain.getBlockByHash(carrier.getHashLow(), false).getInfo().getFee());
+                assertEquals("confirming block K+1 not credited", XAmount.ZERO,
+                        blockchain.getBlockByHeight(k + 1).getInfo().getFee());
+
+                // The blob arrives -> the async drain executes the PAST payload height K and credits block K.
+                evmTxStore.put(deployTx);
+                blockchain.onEvmBlobsAvailable();
+
+                assertEquals("the deferred payload executed on drain", 1,
+                        evmMetaStore.getReceipt(deployTx.getHash()).orElseThrow().status());
+                long gasUsed = evmMetaStore.getReceipt(deployTx.getHash()).orElseThrow().gasUsed();
+                long expectedNano = BigInteger.valueOf(gasUsed).multiply(gasPrice.getAsBigInteger())
+                        .divide(BigInteger.valueOf(1_000_000_000L)).longValueExact();
+                assertTrue("meaningful fee", expectedNano > 0);
+                assertEquals("the async drain credits the PAST payload block K (not the confirming K+1)",
+                        XAmount.of(expectedNano),
+                        blockchain.getBlockByHash(carrier.getHashLow(), false).getInfo().getFee());
+                assertEquals("confirming block K+1 remains NOT credited", XAmount.ZERO,
+                        blockchain.getBlockByHeight(k + 1).getInfo().getFee());
+                return;
+            }
+        }
+        throw new AssertionError("carrier EVM height K never confirmed within the drive window");
+    }
+
+    // -----------------------------------------------------------------------------------------
     // A1 guard: overflowing fee is skipped, not credited, and setMain survives
     // -----------------------------------------------------------------------------------------
 

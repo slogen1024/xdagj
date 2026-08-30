@@ -515,7 +515,7 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
         }
         if (evmProcessor.isAwaitingBatch(batchHash)) {
             evmTxStore.putBatch(body);
-            evmProcessor.onBlobsAvailable();
+            chain.onEvmBlobsAvailable();
         }
     }
 
@@ -546,7 +546,7 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
             }
             if (evmProcessor.isAwaitingBlob(txHash)) {
                 evmTxStore.putRaw(txHash, rawRlp);
-                evmProcessor.onBlobsAvailable();
+                chain.onEvmBlobsAvailable();
             }
         }
         // Mempool path: offer for future inclusion (its own validation + size cap apply).

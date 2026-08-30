@@ -2646,6 +2646,24 @@ public class BlockchainImpl implements Blockchain {
         blockStore.saveBlockInfo(block.getInfo());
     }
 
+    /**
+     * K1: the native-accounting entry point for the async blob-drain. Runs under the Blockchain monitor
+     * (so it never races setMain/unWindMain and respects the Blockchain->EvmProcessor lock order),
+     * drains the deferred heights, and credits each height's net fee to its OWN block via the same
+     * {@link #creditEvmFee} the synchronous setMain path uses — so a blob-behind node converges on the
+     * identical block amounts.
+     */
+    @Override
+    public synchronized void onEvmBlobsAvailable() {
+        EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
+        if (evmProcessor == null) {
+            return;
+        }
+        for (EvmBlockProcessor.DrainedHeight drained : evmProcessor.onBlobsAvailable()) {
+            creditEvmFee(getBlockByHeight(drained.height()), drained.height(), drained.netFeeWei());
+        }
+    }
+
     // TODO: Accept amount to block which in snapshot
     private void acceptAmount(Block block, XAmount amount) {
         XAmount oldAmount = block.getInfo().getAmount();
