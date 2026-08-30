@@ -465,4 +465,58 @@ public class EvmConsensusIntegrationTest {
     private static long senderBalance(WorldUpdater world) {
         return world.getAccount(SENDER).getBalance().getAsBigInteger().longValueExact();
     }
+
+    @Test
+    public void confirming_block_is_credited_the_floored_evm_fee() {
+        BlockchainImpl blockchain = new BlockchainImpl(kernel);
+        ECKeyPair poolKey = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
+
+        SECP256K1 algo = new SECP256K1();
+        KeyPair evmKey = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
+        // gasPrice chosen so gasUsed * gasPrice clears many nano (devnet fee routing is active at height 0).
+        Wei gasPrice = Wei.of(1_000_000_000_000L); // 1000 nano per gas unit
+        EvmTransaction deployTx = EvmTransaction.unsigned(0L, gasPrice, 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, BigInteger.valueOf(0xCAFE)).sign(evmKey, algo);
+        evmTxStore.put(deployTx);
+        Bytes32 evmRef = Bytes32.wrap(deployTx.getHash().getBytes());
+
+        RocksDbWorldUpdater funding = new RocksDbWorldUpdater(evmStateSource);
+        funding.createAccount(deployTx.getSender(), 0L, Wei.fromEth(1));
+        funding.commit();
+
+        long generateTime = 1600616700000L;
+        Block addressBlock = generateAddressBlock(config, poolKey, generateTime);
+        assertSame(IMPORTED_BEST, blockchain.tryToConnect(addressBlock));
+        List<io.xdag.core.Address> pending = new ArrayList<>();
+        Bytes32 ref = addressBlock.getHashLow();
+        Block carrier = null;
+        for (int i = 1; i <= 12; i++) {
+            generateTime += 64000L;
+            pending.clear();
+            pending.add(new io.xdag.core.Address(ref, XDAG_FIELD_OUT, false));
+            long xdagTime = XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime));
+            Block extraBlock;
+            if (i == 3) {
+                extraBlock = new Block(config, xdagTime, null, pending, true, null, null, -1,
+                        XAmount.ZERO, null, evmRef);
+                extraBlock.signOut(poolKey);
+                extraBlock.setNonce(HashUtils.sha256(Bytes.wrap(new byte[]{0x12, 0x34})));
+                carrier = extraBlock;
+            } else {
+                extraBlock = generateExtraBlock(config, poolKey, xdagTime, pending);
+            }
+            assertSame(IMPORTED_BEST, blockchain.tryToConnect(extraBlock));
+            ref = extraBlock.getHashLow();
+        }
+
+        Block storedCarrier = blockchain.getBlockByHash(carrier.getHashLow(), false);
+        assertTrue("carrier must have confirmed as main", storedCarrier.getInfo().getHeight() > 0);
+        long gasUsed = evmMetaStore.getReceipt(deployTx.getHash()).orElseThrow().gasUsed();
+        long expectedNano = BigInteger.valueOf(gasUsed).multiply(gasPrice.getAsBigInteger())
+                .divide(BigInteger.valueOf(1_000_000_000L)).longValueExact();
+        assertTrue("test must credit a non-zero nano fee to be meaningful", expectedNano > 0);
+        // A bare main-candidate carrier collects no native tx fee, so info.fee is exactly the EVM fee.
+        assertEquals("confirming block's fee == floor(gasUsed*gasPrice / 1e9) nano",
+                XAmount.of(expectedNano), storedCarrier.getInfo().getFee());
+    }
 }
