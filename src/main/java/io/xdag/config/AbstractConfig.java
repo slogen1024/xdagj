@@ -339,8 +339,27 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
      * fund.address precedent). Static so the rule is unit-testable without a full config load.
      */
     static void validateBridgeConfig(com.typesafe.config.Config config) {
-        boolean scheduled = config.hasPath("evm.bridgeActivationHeight")
+        // A4 (spec 2026-08-31): fee-routing sources the net EVM fee from the deposit lock
+        // (transfer-from-lock model), which exists only when the bridge is scheduled. This runs BEFORE
+        // the bridge-scheduled early-return so a fee-scheduled-but-bridgeless config is caught. Vacuous
+        // when fee-routing is unscheduled (feeRewardActivationHeight == MAX, the field default).
+        boolean feeRouting = config.hasPath("evm.feeRewardActivationHeight")
+                && config.getLong("evm.feeRewardActivationHeight") != Long.MAX_VALUE;
+        boolean bridgeScheduled = config.hasPath("evm.bridgeActivationHeight")
                 && config.getLong("evm.bridgeActivationHeight") != Long.MAX_VALUE;
+        if (feeRouting && !bridgeScheduled) {
+            throw new IllegalStateException("evm.feeRewardActivationHeight is scheduled but "
+                    + "evm.bridgeActivationHeight is not: net EVM fees are sourced from the deposit lock, "
+                    + "so fee-routing requires a scheduled bridge. Schedule the bridge, or set "
+                    + "evm.feeRewardActivationHeight = " + Long.MAX_VALUE + " to disable fee-routing.");
+        }
+        if (feeRouting && config.hasPath("evm.alloc") && !config.getConfigList("evm.alloc").isEmpty()) {
+            log.warn("evm.feeRewardActivationHeight is scheduled with a non-empty evm.alloc: alloc wei is "
+                    + "currently UNBACKED, so the fee credit mints native XDAG (inflation) until the "
+                    + "transfer-from-lock model lands (A4). Acceptable only on a throwaway network.");
+        }
+
+        boolean scheduled = bridgeScheduled;
         if (!scheduled) {
             return;
         }

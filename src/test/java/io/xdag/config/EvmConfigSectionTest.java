@@ -262,6 +262,26 @@ public class EvmConfigSectionTest {
     }
 
     @Test
+    public void fee_routing_requires_a_scheduled_bridge() {
+        // fee-routing scheduled but the bridge unscheduled -> fatal: there is no deposit lock to source
+        // the net EVM fee from (the transfer-from-lock model, spec 2026-08-31).
+        Config bad = ConfigFactory.parseString("evm.enabled = true\nevm.activationHeight = 0\n"
+                + "evm.feeRewardActivationHeight = 100\n"
+                + "evm.bridgeActivationHeight = 9223372036854775807"); // bridge unscheduled (MAX)
+        IllegalStateException ex = assertThrows(IllegalStateException.class,
+                () -> AbstractConfig.validateBridgeConfig(bad));
+        assertTrue("message must name the fee->bridge requirement",
+                ex.getMessage().contains("fee-routing requires a scheduled bridge"));
+
+        // fee-routing scheduled WITH a scheduled bridge (+ recovery address + evm.enabled) -> no throw.
+        Config ok = ConfigFactory.parseString("evm.enabled = true\nevm.activationHeight = 0\n"
+                + "evm.feeRewardActivationHeight = 100\n"
+                + "evm.bridgeActivationHeight = 5\n"
+                + "evm.bridgeRecoveryAddress = \"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\"");
+        AbstractConfig.validateBridgeConfig(ok); // no exception
+    }
+
+    @Test
     public void bridge_withdrawal_delay_must_satisfy_state_root_lag_invariant() {
         // W < lag-1: under delta-lagged execution the burn height is never executed by release time,
         // so every release would CRITICAL-skip. Must fail fast at load.
