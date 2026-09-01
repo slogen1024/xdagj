@@ -229,6 +229,16 @@ public class Kernel {
             // Likewise the bridge contract code (no-op unless the bridge is scheduled), so eth_getCode
             // and pool-side calls see it before the first bridge-height main block.
             evmBlockProcessor.seedBridgeContractIfAbsent();
+            // A4 transfer-from-lock: the genesis alloc is a "genesis deposit" — credit the lock
+            // with its native equivalent exactly once per chain lifetime (ADDRESS-CF marker), so
+            // every EVM wei is lock-backed and fee credits transfer from the lock, never minting.
+            long seededNano = io.xdag.evm.bridge.GenesisLockSeeder.seedIfAbsent(
+                    addressStore, config.getEvmSpec());
+            if (seededNano > 0) {
+                log.info("Seeded the bridge lock with {} nano — genesis-deposit backing for {} "
+                        + "evm.alloc entr(ies).", seededNano,
+                        config.getEvmSpec().getEvmGenesisAlloc().size());
+            }
             log.info("EVM services init (chain id {}).", evmChainId);
             if (config.getEvmSpec().getEvmBridgeActivationHeight() != Long.MAX_VALUE) {
                 log.info("XDAG<->EVM bridge deposits active from height {}: lock address {} (native form {})",
@@ -237,9 +247,8 @@ public class Kernel {
                         io.xdag.crypto.encoding.Base58.encodeCheck(
                                 io.xdag.evm.bridge.BridgeConstants.LOCK_ADDRESS_20));
                 if (!config.getEvmSpec().getEvmGenesisAlloc().isEmpty()) {
-                    log.warn("evm.alloc has {} entr(ies) on a bridge-scheduled network: genesis-allocated wei has NO "
-                            + "native backing and withdrawing it would drain depositors' locked funds (spec §4). "
-                            + "Acceptable only on a throwaway devnet.",
+                    log.info("evm.alloc has {} entr(ies): lock-backed as a genesis deposit "
+                            + "(A4 transfer-from-lock) and counted in getSupply.",
                             config.getEvmSpec().getEvmGenesisAlloc().size());
                 }
             }
