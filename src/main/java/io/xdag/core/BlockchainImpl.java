@@ -2472,7 +2472,19 @@ public class BlockchainImpl implements Blockchain {
             long nanoDiffAmount = diff.toXAmount().toLong();
             res = res.plus(long2UnsignedLong(fork_height - 1).times(long2UnsignedLong(nanoDiffAmount)));
         }
-        return XAmount.ofXAmount(res.longValue());
+        XAmount supply = XAmount.ofXAmount(res.longValue());
+        // A4 transfer-from-lock: the genesis alloc is premined native seeded into the deposit lock
+        // at chain start (a "genesis deposit"), so an accurate closed-form supply includes it.
+        // Config-derived and bridge-gated: zero change for any net without a scheduled bridge or
+        // with an empty alloc (testnet/mainnet today).
+        // NOTE: allocTotalNano returns nano directly; add after ofXAmount (which converts from the
+        // C-style fixed-point format used by res) to avoid a unit mismatch.
+        if (kernel.getConfig().getEvmSpec().getEvmBridgeActivationHeight() != Long.MAX_VALUE
+                && !kernel.getConfig().getEvmSpec().getEvmGenesisAlloc().isEmpty()) {
+            supply = supply.add(XAmount.of(io.xdag.evm.bridge.GenesisLockSeeder.allocTotalNano(
+                    kernel.getConfig().getEvmSpec().getEvmGenesisAlloc())));
+        }
+        return supply;
     }
 
     @Override

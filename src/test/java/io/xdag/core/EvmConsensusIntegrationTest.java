@@ -60,6 +60,7 @@ import io.xdag.evm.state.InMemoryKVSource;
 import io.xdag.evm.state.RocksDbWorldUpdater;
 import io.xdag.evm.tx.EvmTransaction;
 import io.xdag.evm.tx.EvmTxStore;
+import io.xdag.core.XUnit;
 import io.xdag.utils.XdagTime;
 import java.math.BigInteger;
 import java.util.ArrayList;
@@ -1418,5 +1419,33 @@ public class EvmConsensusIntegrationTest {
                 XAmount.ZERO, storedCarrier.getInfo().getFee());
         assertEquals("credit side reversed too (amount)",
                 XAmount.ZERO, storedCarrier.getInfo().getAmount());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // A4 Test D: getSupply counts the alloc premine ONLY on a bridge-scheduled net
+    // -----------------------------------------------------------------------------------------
+
+    @Test
+    public void get_supply_counts_the_alloc_premine_only_when_the_bridge_is_scheduled() throws Exception {
+        // Devnet fixture (bridge scheduled, 1e24-wei alloc): premine counted.
+        BlockchainImpl blockchain = new BlockchainImpl(kernel);
+        assertEquals("1001024.0", blockchain.getSupply(1).toDecimal(1, XUnit.XDAG).toString());
+
+        // Same config shape with the bridge unscheduled: the alloc never seeds the lock and the
+        // supply formula is byte-identical to pre-A4 (shared-net safety).
+        tearDown();
+        buildFixture(new DevnetConfig() {
+            @Override
+            public long getEvmBridgeActivationHeight() {
+                return Long.MAX_VALUE;
+            }
+
+            @Override
+            public long getEvmFeeRewardActivationHeight() {
+                return Long.MAX_VALUE; // keep the pair coherent (fee-routing needs the bridge)
+            }
+        });
+        BlockchainImpl unbridged = new BlockchainImpl(kernel);
+        assertEquals("1024.0", unbridged.getSupply(1).toDecimal(1, XUnit.XDAG).toString());
     }
 }
