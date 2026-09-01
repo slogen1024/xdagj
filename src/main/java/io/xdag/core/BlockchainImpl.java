@@ -1030,6 +1030,9 @@ public class BlockchainImpl implements Blockchain {
                     // Reverse this height's bridge releases while its 0x08 journal is still
                     // readable — the trailing rollbackTo below sweeps EVM_META past the fork point.
                     reverseReleasedWithdrawals(unwoundHeight);
+                    // A4: re-credit the lock for this height's journaled fee debit while its 0x0B
+                    // journal is still readable (rollbackTo sweeps EVM_META past the fork point).
+                    reverseEvmFeeDebit(unwoundHeight);
                     unSetMain(tmp);
                     // Fix: Need to update block info in database like height 210729
                     blockStore.saveBlockInfo(tmp.getInfo());
@@ -1571,6 +1574,33 @@ public class BlockchainImpl implements Blockchain {
         }
         metaStore.deleteReleases(unwoundHeight);
         log.info("Reversed {} bridge release(s) of unwound height {}", released.size(), unwoundHeight);
+    }
+
+    /**
+     * Reverses the bridge-lock debit a now-unwound height's EVM fee credit performed (A4
+     * transfer-from-lock): reads + deletes its 0x0B journal and re-credits the lock. The credit
+     * side (the block's amount and fee) is reversed by unSetMain; together the transfer fully
+     * unwinds. Runs inside the unWindMain loop BEFORE the trailing rollbackTo sweeps EVM_META past
+     * the fork point. Package-private for testability (reverseReleasedWithdrawals precedent).
+     */
+    void reverseEvmFeeDebit(long unwoundHeight) {
+        if (kernel == null) {
+            return;
+        }
+        EvmMetaStore metaStore = kernel.getEvmMetaStore();
+        if (metaStore == null) {
+            return;
+        }
+        long feeNano = metaStore.getFeeDebit(unwoundHeight);
+        if (feeNano == 0) {
+            return;
+        }
+        byte[] lockKey = BridgeConstants.LOCK_ADDRESS_20.toArray();
+        addressStore.updateBalance(lockKey,
+                addressStore.getBalanceByAddress(lockKey).add(XAmount.of(feeNano)));
+        metaStore.deleteFeeDebit(unwoundHeight);
+        log.info("Reversed the {} nano EVM fee lock-debit of unwound height {}",
+                feeNano, unwoundHeight);
     }
 
     /**
