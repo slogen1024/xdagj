@@ -1,6 +1,6 @@
 # A4: Fee-Routing Supply Conservation — Design (fail-safe now, model deferred)
 
-**Status:** approved 2026-08-31 · consensus-relevant (supply) · resolves the audit A4 pre-activation blocker's *immediate* risk; the full model change is deferred
+**Status:** approved 2026-08-31 · consensus-relevant (supply) · fail-safe shipped 2026-08-31; **full transfer-from-lock model IMPLEMENTED 2026-09-01** (plan `docs/superpowers/plans/2026-09-01-a4-full-transfer-from-lock.md`)
 **Relates to:** G3-T1 (net fee → reward pool), ADR-016, the 2026-08-30 audit (finding A4).
 
 ## 1. Problem
@@ -39,11 +39,11 @@ Added at config load (`AbstractConfig`), running **before** `validateBridgeConfi
 
 - **Now (this task):** the fatal + warn checks in `AbstractConfig` (place the fatal in `validateBridgeConfig` before its early-return, or a sibling `validateFeeRewardConfig` invoked from the same load point); a unit test in `EvmConfigSectionTest` (fee-scheduled + bridge-unscheduled throws; fee-scheduled + bridge-scheduled + alloc passes; the shared-net/devnet confs load). This spec + the pre-activation checklist updated to mark A4's fail-safe done and the model chosen.
 - **Deferred (activation-prep, before scheduling fee-routing on a real net):**
-  1. `creditEvmFee` debits the lock address by the credited nano (transfer, not mint); reorg reversal of the debit paired with the existing fee reversal.
-  2. `seedGenesisIfAbsent` seeds the lock with the alloc's native equivalent (genesis deposit); reorg-safe re-seed on `rollbackTo` (mirror the existing genesis-marker discipline).
-  3. `getSupply` adds the genesis-alloc total.
-  4. Conservation tests: total native constant across deposit / gas-fee / withdrawal / genesis-alloc; `getSupply` == actual native; bridge `lock == redeemable-EVM` under fee-routing.
-  5. Re-scope the config guard: once alloc is lock-backed, downgrade the alloc warn (backed alloc is fine).
+  1. `creditEvmFee` debits the lock address by the credited nano (transfer, not mint); reorg reversal of the debit paired with the existing fee reversal. — **DONE 2026-09-01**
+  2. `seedGenesisIfAbsent` seeds the lock with the alloc's native equivalent (genesis deposit); reorg-safe re-seed on `rollbackTo` (mirror the existing genesis-marker discipline). — **DONE 2026-09-01**
+  3. `getSupply` adds the genesis-alloc total. — **DONE 2026-09-01**
+  4. Conservation tests: total native constant across deposit / gas-fee / withdrawal / genesis-alloc; `getSupply` == actual native; bridge `lock == redeemable-EVM` under fee-routing. — **DONE 2026-09-01**
+  5. Re-scope the config guard: once alloc is lock-backed, downgrade the alloc warn (backed alloc is fine). — **DONE 2026-09-01**
 
 ## 5. Non-goals
 
