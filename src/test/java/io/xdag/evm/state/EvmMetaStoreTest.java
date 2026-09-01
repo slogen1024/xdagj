@@ -391,6 +391,55 @@ public class EvmMetaStoreTest {
     }
 
     @Test
+    public void fee_debit_journal_roundtrip_and_sweep() {
+        // Absent -> 0 (no journal, nothing to reverse).
+        assertEquals(0L, store.getFeeDebit(7L));
+
+        store.putFeeDebit(7L, 123_456L);
+        assertEquals(123_456L, store.getFeeDebit(7L));
+
+        // Consumed by the unwind reversal: delete -> absent again.
+        store.deleteFeeDebit(7L);
+        assertEquals(0L, store.getFeeDebit(7L));
+
+        // removeAbove sweeps records past the fork point but keeps those at or below it.
+        store.putFeeDebit(5L, 11L);
+        store.putFeeDebit(9L, 22L);
+        store.removeAbove(5L);
+        assertEquals("at the fork point survives", 11L, store.getFeeDebit(5L));
+        assertEquals("past the fork point swept", 0L, store.getFeeDebit(9L));
+    }
+
+    @Test
+    public void fee_debit_journal_rejects_non_positive_amounts() {
+        assertThrows(IllegalArgumentException.class, () -> store.putFeeDebit(1L, 0L));
+        assertThrows(IllegalArgumentException.class, () -> store.putFeeDebit(1L, -5L));
+    }
+
+    @Test
+    public void fee_debit_record_with_sign_bit_set_fails_fast_on_read() {
+        // A raw 0x0B record whose value field has the sign bit set decodes to a negative long; the
+        // reader must fail fast like the other corrupt-record readers, instead of silently returning
+        // a negative nano amount that would corrupt the unwind-reversal arithmetic in unSetMain.
+        InMemoryKVSource kv = new InMemoryKVSource();
+        EvmMetaStore meta = new EvmMetaStore(kv);
+        byte[] value = new byte[8];
+        value[0] = (byte) 0x80; // sign bit set -> getLong(0) yields a negative value
+        kv.put(feeDebitKeyForTest(3L), value);
+        assertThrows(IllegalStateException.class, () -> meta.getFeeDebit(3L));
+    }
+
+    /** Mirrors EvmMetaStore's private feeDebitKey layout (0x0B | height 8-byte BE) for the corrupt-value test. */
+    private static byte[] feeDebitKeyForTest(long height) {
+        byte[] key = new byte[9];
+        key[0] = 0x0B;
+        for (int i = 0; i < 8; i++) {
+            key[1 + i] = (byte) (height >>> (56 - 8 * i));
+        }
+        return key;
+    }
+
+    @Test
     public void bridge_record_families_are_independent_at_a_shared_height() {
         // 0x06 (deposits), 0x07 (burns) and 0x08 (releases) legitimately coexist at one height —
         // e.g. a release height that also carries new deposits and burns. Same-height writes must
