@@ -60,6 +60,7 @@ import io.xdag.evm.state.InMemoryKVSource;
 import io.xdag.evm.state.RocksDbWorldUpdater;
 import io.xdag.evm.tx.EvmTransaction;
 import io.xdag.evm.tx.EvmTxStore;
+import io.xdag.core.XUnit;
 import io.xdag.utils.XdagTime;
 import java.math.BigInteger;
 import java.util.ArrayList;
@@ -167,6 +168,9 @@ public class EvmConsensusIntegrationTest {
         kernel.setEvmMetaStore(evmMetaStore);
         kernel.setEvmBlockProcessor(
                 new EvmBlockProcessor(EvmConfig.devnet(), evmStateSource, evmTxStore, evmMetaStore));
+        // A4: mirror Kernel.startComponents — the genesis alloc backs the lock (genesis deposit),
+        // so fee-credit tests exercise the real transfer-from-lock path against a funded lock.
+        io.xdag.evm.bridge.GenesisLockSeeder.seedIfAbsent(addressStore, cfg.getEvmSpec());
     }
 
     @After
@@ -763,6 +767,8 @@ public class EvmConsensusIntegrationTest {
     public void unSetMain_reverses_the_evm_fee_credit() {
         BlockchainImpl blockchain = new BlockchainImpl(kernel);
         ECKeyPair poolKey = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
+        byte[] lockKey = io.xdag.evm.bridge.BridgeConstants.LOCK_ADDRESS_20.toArray();
+        XAmount lockBefore = kernel.getAddressStore().getBalanceByAddress(lockKey);
 
         SECP256K1 algo = new SECP256K1();
         KeyPair evmKey = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
@@ -820,11 +826,16 @@ public class EvmConsensusIntegrationTest {
         // distributable amount (for a bare carrier the whole amount reverses to ZERO). Asserting the
         // amount (not only the fee field) catches a bug where setFee(ZERO) runs but the amount reversal
         // is skipped — leaving the credit spendable by PoolAwardManager after a reorg.
+        long creditedHeight = storedCarrier.getInfo().getHeight();
+        // mirror the unWindMain pair: debit reversal, then credit reversal
+        blockchain.reverseEvmFeeDebit(creditedHeight);
         blockchain.unSetMain(storedCarrier);
         assertEquals("unSetMain zeroes the fee field",
                 XAmount.ZERO, storedCarrier.getInfo().getFee());
         assertEquals("unSetMain reverses the fee credit from the distributable amount too",
                 XAmount.ZERO, storedCarrier.getInfo().getAmount());
+        assertEquals("lock restored (transfer fully unwound)",
+                lockBefore, kernel.getAddressStore().getBalanceByAddress(lockKey));
     }
 
     // -----------------------------------------------------------------------------------------
@@ -834,6 +845,8 @@ public class EvmConsensusIntegrationTest {
     @Test
     public void evm_wei_destroyed_equals_nano_credited_scaled_plus_dust() {
         BlockchainImpl blockchain = new BlockchainImpl(kernel);
+        byte[] lockKey = io.xdag.evm.bridge.BridgeConstants.LOCK_ADDRESS_20.toArray();
+        XAmount lockBefore = kernel.getAddressStore().getBalanceByAddress(lockKey);
         ECKeyPair poolKey = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
 
         SECP256K1 algo = new SECP256K1();
@@ -909,6 +922,12 @@ public class EvmConsensusIntegrationTest {
                 netFeeWei,
                 BigInteger.valueOf(creditedNano).multiply(divisor)
                         .add(BigInteger.valueOf(dustWei)));
+
+        // A4: the credit is a transfer — the lock lost exactly the credited nano, so
+        // (wei destroyed) == (native moved out of the lock) * 1e9 + dust, and NOTHING was minted.
+        assertEquals("lock debited by exactly the credited nano (transfer, not mint)",
+                lockBefore.subtract(XAmount.of(creditedNano)),
+                kernel.getAddressStore().getBalanceByAddress(lockKey));
     }
 
     // -----------------------------------------------------------------------------------------
@@ -918,6 +937,8 @@ public class EvmConsensusIntegrationTest {
     @Test
     public void async_drain_credits_the_payload_block_after_a_deferred_blob_arrives() {
         BlockchainImpl blockchain = new BlockchainImpl(kernel);
+        byte[] lockKey = io.xdag.evm.bridge.BridgeConstants.LOCK_ADDRESS_20.toArray();
+        XAmount lockBefore = kernel.getAddressStore().getBalanceByAddress(lockKey);
         ECKeyPair poolKey = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
         SECP256K1 algo = new SECP256K1();
         KeyPair evmKey = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
@@ -976,6 +997,9 @@ public class EvmConsensusIntegrationTest {
         Block carrierAfter = blockchain.getBlockByHeight(m);
         assertEquals("the async drain credited the payload block M with the same fee the sync path would",
                 XAmount.of(expectedNano), carrierAfter.getInfo().getFee());
+        assertEquals("async drain debits the lock exactly like the sync path",
+                lockBefore.subtract(XAmount.of(expectedNano)),
+                kernel.getAddressStore().getBalanceByAddress(lockKey));
     }
 
     // -----------------------------------------------------------------------------------------
@@ -986,6 +1010,8 @@ public class EvmConsensusIntegrationTest {
     public void unsetmain_reverses_an_async_fee_credit() {
         BlockchainImpl blockchain = new BlockchainImpl(kernel);
         ECKeyPair poolKey = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
+        byte[] lockKey = io.xdag.evm.bridge.BridgeConstants.LOCK_ADDRESS_20.toArray();
+        XAmount lockBefore = kernel.getAddressStore().getBalanceByAddress(lockKey);
         SECP256K1 algo = new SECP256K1();
         KeyPair evmKey = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
         Wei gasPrice = Wei.of(1_000_000_000_000L);
@@ -1028,9 +1054,13 @@ public class EvmConsensusIntegrationTest {
         Block credited = blockchain.getBlockByHeight(m);
         assertTrue("async credit landed", credited.getInfo().getFee().greaterThan(XAmount.ZERO));
 
+        // mirror the unWindMain pair: debit reversal, then credit reversal
+        blockchain.reverseEvmFeeDebit(m);
         blockchain.unSetMain(credited);
         assertEquals("unSetMain reverses the async-credited fee to zero",
                 XAmount.ZERO, blockchain.getBlockByHeight(m).getInfo().getFee());
+        assertEquals("lock restored (transfer fully unwound)",
+                lockBefore, kernel.getAddressStore().getBalanceByAddress(lockKey));
     }
 
     @Test
@@ -1190,5 +1220,245 @@ public class EvmConsensusIntegrationTest {
                 XAmount.ZERO, storedCarrier.getInfo().getFee());
         // (sanity) the deploy executed and settled the huge fee on the EVM side.
         assertEquals(1, evmMetaStore.getReceipt(deployTx.getHash()).orElseThrow().status());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // A4 Test A: the fee credit is a TRANSFER from the lock, not a mint
+    // -----------------------------------------------------------------------------------------
+
+    @Test
+    public void fee_credit_debits_the_lock_by_exactly_the_credited_nano() {
+        BlockchainImpl blockchain = new BlockchainImpl(kernel);
+        ECKeyPair poolKey = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
+        byte[] lockKey = io.xdag.evm.bridge.BridgeConstants.LOCK_ADDRESS_20.toArray();
+        XAmount lockBefore = kernel.getAddressStore().getBalanceByAddress(lockKey);
+        assertTrue("fixture must have seeded the lock (genesis deposit)",
+                lockBefore.greaterThan(XAmount.ZERO));
+
+        SECP256K1 algo = new SECP256K1();
+        KeyPair evmKey = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
+        Wei gasPrice = Wei.of(1_000_000_000_000L); // 1000 nano per gas unit
+        EvmTransaction deployTx = EvmTransaction.unsigned(0L, gasPrice, 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, BigInteger.valueOf(0xCAFE)).sign(evmKey, algo);
+        evmTxStore.put(deployTx);
+        Bytes32 evmRef = Bytes32.wrap(deployTx.getHash().getBytes());
+
+        RocksDbWorldUpdater funding = new RocksDbWorldUpdater(evmStateSource);
+        funding.createAccount(deployTx.getSender(), 0L, Wei.fromEth(1));
+        funding.commit();
+
+        long generateTime = 1600616700000L;
+        Block addressBlock = generateAddressBlock(config, poolKey, generateTime);
+        assertSame(IMPORTED_BEST, blockchain.tryToConnect(addressBlock));
+        List<io.xdag.core.Address> pending = new ArrayList<>();
+        Bytes32 ref = addressBlock.getHashLow();
+        Block carrier = null;
+        for (int i = 1; i <= 12; i++) {
+            generateTime += 64000L;
+            pending.clear();
+            pending.add(new io.xdag.core.Address(ref, XDAG_FIELD_OUT, false));
+            long xdagTime = XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime));
+            Block extraBlock;
+            if (i == 3) {
+                extraBlock = new Block(config, xdagTime, null, pending, true, null, null, -1,
+                        XAmount.ZERO, null, evmRef);
+                extraBlock.signOut(poolKey);
+                extraBlock.setNonce(HashUtils.sha256(Bytes.wrap(new byte[]{0x12, 0x34})));
+                carrier = extraBlock;
+            } else {
+                extraBlock = generateExtraBlock(config, poolKey, xdagTime, pending);
+            }
+            assertSame(IMPORTED_BEST, blockchain.tryToConnect(extraBlock));
+            ref = extraBlock.getHashLow();
+        }
+
+        Block storedCarrier = blockchain.getBlockByHash(carrier.getHashLow(), false);
+        assertTrue("carrier must have confirmed as main", storedCarrier.getInfo().getHeight() > 0);
+        long gasUsed = evmMetaStore.getReceipt(deployTx.getHash()).orElseThrow().gasUsed();
+        long expectedNano = BigInteger.valueOf(gasUsed).multiply(gasPrice.getAsBigInteger())
+                .divide(BigInteger.valueOf(1_000_000_000L)).longValueExact();
+        assertTrue("test needs a non-zero fee", expectedNano > 0);
+        assertEquals("fee credited to the carrier",
+                XAmount.of(expectedNano), storedCarrier.getInfo().getFee());
+
+        // Transfer, not mint: the lock lost exactly what the carrier gained.
+        XAmount lockAfter = kernel.getAddressStore().getBalanceByAddress(lockKey);
+        assertEquals("lock debited by exactly the credited nano",
+                lockBefore.subtract(XAmount.of(expectedNano)), lockAfter);
+        // And the debit is journaled for the unwind reversal.
+        assertEquals("0x0B journal records the debit at the credited height", expectedNano,
+                evmMetaStore.getFeeDebit(storedCarrier.getInfo().getHeight()));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // A4 Test B: a short lock deterministically skips the WHOLE credit (no debit, no credit)
+    // -----------------------------------------------------------------------------------------
+
+    @Test
+    public void a_short_lock_skips_the_fee_credit_entirely() throws Exception {
+        // Rebuild with an EMPTY alloc: the bridge stays scheduled but nothing seeds the lock,
+        // so the lock cannot cover any fee. (This is the broken-invariant shape the skip guards.)
+        tearDown();
+        buildFixture(new DevnetConfig() {
+            @Override
+            public java.util.List<io.xdag.evm.GenesisAllocEntry> getEvmGenesisAlloc() {
+                return java.util.List.of();
+            }
+        });
+
+        BlockchainImpl blockchain = new BlockchainImpl(kernel);
+        ECKeyPair poolKey = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
+        byte[] lockKey = io.xdag.evm.bridge.BridgeConstants.LOCK_ADDRESS_20.toArray();
+        assertEquals("empty alloc -> unfunded lock",
+                XAmount.ZERO, kernel.getAddressStore().getBalanceByAddress(lockKey));
+
+        SECP256K1 algo = new SECP256K1();
+        KeyPair evmKey = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
+        Wei gasPrice = Wei.of(1_000_000_000_000L);
+        EvmTransaction deployTx = EvmTransaction.unsigned(0L, gasPrice, 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, BigInteger.valueOf(0xCAFE)).sign(evmKey, algo);
+        evmTxStore.put(deployTx);
+        Bytes32 evmRef = Bytes32.wrap(deployTx.getHash().getBytes());
+
+        RocksDbWorldUpdater funding = new RocksDbWorldUpdater(evmStateSource);
+        funding.createAccount(deployTx.getSender(), 0L, Wei.fromEth(1));
+        funding.commit();
+
+        long generateTime = 1600616700000L;
+        Block addressBlock = generateAddressBlock(config, poolKey, generateTime);
+        assertSame(IMPORTED_BEST, blockchain.tryToConnect(addressBlock));
+        List<io.xdag.core.Address> pending = new ArrayList<>();
+        Bytes32 ref = addressBlock.getHashLow();
+        Block carrier = null;
+        for (int i = 1; i <= 12; i++) {
+            generateTime += 64000L;
+            pending.clear();
+            pending.add(new io.xdag.core.Address(ref, XDAG_FIELD_OUT, false));
+            long xdagTime = XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime));
+            Block extraBlock;
+            if (i == 3) {
+                extraBlock = new Block(config, xdagTime, null, pending, true, null, null, -1,
+                        XAmount.ZERO, null, evmRef);
+                extraBlock.signOut(poolKey);
+                extraBlock.setNonce(HashUtils.sha256(Bytes.wrap(new byte[]{0x12, 0x34})));
+                carrier = extraBlock;
+            } else {
+                extraBlock = generateExtraBlock(config, poolKey, xdagTime, pending);
+            }
+            assertSame(IMPORTED_BEST, blockchain.tryToConnect(extraBlock));
+            ref = extraBlock.getHashLow();
+        }
+
+        Block storedCarrier = blockchain.getBlockByHash(carrier.getHashLow(), false);
+        assertTrue("carrier must have confirmed as main", storedCarrier.getInfo().getHeight() > 0);
+        // Execution itself is unaffected — only the credit is skipped.
+        assertEquals("deploy must still execute", 1,
+                evmMetaStore.getReceipt(deployTx.getHash()).orElseThrow().status());
+        assertEquals("credit skipped: no fee on the carrier",
+                XAmount.ZERO, storedCarrier.getInfo().getFee());
+        assertEquals("no debit: lock untouched",
+                XAmount.ZERO, kernel.getAddressStore().getBalanceByAddress(lockKey));
+        assertEquals("no journal entry", 0L,
+                evmMetaStore.getFeeDebit(storedCarrier.getInfo().getHeight()));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // A4 Test C: unwinding the credited height re-credits the lock (reverse-what-you-did)
+    // -----------------------------------------------------------------------------------------
+
+    @Test
+    public void unwinding_the_credited_height_recredits_the_lock() {
+        BlockchainImpl blockchain = new BlockchainImpl(kernel);
+        ECKeyPair poolKey = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
+        byte[] lockKey = io.xdag.evm.bridge.BridgeConstants.LOCK_ADDRESS_20.toArray();
+        XAmount lockBefore = kernel.getAddressStore().getBalanceByAddress(lockKey);
+
+        SECP256K1 algo = new SECP256K1();
+        KeyPair evmKey = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
+        Wei gasPrice = Wei.of(1_000_000_000_000L);
+        EvmTransaction deployTx = EvmTransaction.unsigned(0L, gasPrice, 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, BigInteger.valueOf(0xCAFE)).sign(evmKey, algo);
+        evmTxStore.put(deployTx);
+        Bytes32 evmRef = Bytes32.wrap(deployTx.getHash().getBytes());
+
+        RocksDbWorldUpdater funding = new RocksDbWorldUpdater(evmStateSource);
+        funding.createAccount(deployTx.getSender(), 0L, Wei.fromEth(1));
+        funding.commit();
+
+        long generateTime = 1600616700000L;
+        Block addressBlock = generateAddressBlock(config, poolKey, generateTime);
+        assertSame(IMPORTED_BEST, blockchain.tryToConnect(addressBlock));
+        List<io.xdag.core.Address> pending = new ArrayList<>();
+        Bytes32 ref = addressBlock.getHashLow();
+        Block carrier = null;
+        for (int i = 1; i <= 12; i++) {
+            generateTime += 64000L;
+            pending.clear();
+            pending.add(new io.xdag.core.Address(ref, XDAG_FIELD_OUT, false));
+            long xdagTime = XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime));
+            Block extraBlock;
+            if (i == 3) {
+                extraBlock = new Block(config, xdagTime, null, pending, true, null, null, -1,
+                        XAmount.ZERO, null, evmRef);
+                extraBlock.signOut(poolKey);
+                extraBlock.setNonce(HashUtils.sha256(Bytes.wrap(new byte[]{0x12, 0x34})));
+                carrier = extraBlock;
+            } else {
+                extraBlock = generateExtraBlock(config, poolKey, xdagTime, pending);
+            }
+            assertSame(IMPORTED_BEST, blockchain.tryToConnect(extraBlock));
+            ref = extraBlock.getHashLow();
+        }
+
+        Block storedCarrier = blockchain.getBlockByHash(carrier.getHashLow(), false);
+        long creditedHeight = storedCarrier.getInfo().getHeight();
+        assertTrue("carrier must have confirmed as main", creditedHeight > 0);
+        long feeNano = evmMetaStore.getFeeDebit(creditedHeight);
+        assertTrue("a debit must have been journaled", feeNano > 0);
+        assertEquals("lock is debited before the unwind",
+                lockBefore.subtract(XAmount.of(feeNano)),
+                kernel.getAddressStore().getBalanceByAddress(lockKey));
+
+        // Drive the exact unWindMain per-height sequence for the credited height: the debit
+        // reversal runs BEFORE unSetMain (as in the unwind loop), then unSetMain reverses the
+        // credit side (amount + fee). Package-private access mirrors reverseReleasedWithdrawals.
+        blockchain.reverseEvmFeeDebit(creditedHeight);
+        blockchain.unSetMain(storedCarrier);
+
+        assertEquals("lock restored to its pre-credit balance",
+                lockBefore, kernel.getAddressStore().getBalanceByAddress(lockKey));
+        assertEquals("journal consumed", 0L, evmMetaStore.getFeeDebit(creditedHeight));
+        assertEquals("credit side reversed too (fee)",
+                XAmount.ZERO, storedCarrier.getInfo().getFee());
+        assertEquals("credit side reversed too (amount)",
+                XAmount.ZERO, storedCarrier.getInfo().getAmount());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // A4 Test D: getSupply counts the alloc premine ONLY on a bridge-scheduled net
+    // -----------------------------------------------------------------------------------------
+
+    @Test
+    public void get_supply_counts_the_alloc_premine_only_when_the_bridge_is_scheduled() throws Exception {
+        // Devnet fixture (bridge scheduled, 1e24-wei alloc): premine counted.
+        BlockchainImpl blockchain = new BlockchainImpl(kernel);
+        assertEquals("1001024.0", blockchain.getSupply(1).toDecimal(1, XUnit.XDAG).toString());
+
+        // Same config shape with the bridge unscheduled: the alloc never seeds the lock and the
+        // supply formula is byte-identical to pre-A4 (shared-net safety).
+        tearDown();
+        buildFixture(new DevnetConfig() {
+            @Override
+            public long getEvmBridgeActivationHeight() {
+                return Long.MAX_VALUE;
+            }
+
+            @Override
+            public long getEvmFeeRewardActivationHeight() {
+                return Long.MAX_VALUE; // keep the pair coherent (fee-routing needs the bridge)
+            }
+        });
+        BlockchainImpl unbridged = new BlockchainImpl(kernel);
+        assertEquals("1024.0", unbridged.getSupply(1).toDecimal(1, XUnit.XDAG).toString());
     }
 }

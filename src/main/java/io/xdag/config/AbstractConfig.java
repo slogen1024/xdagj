@@ -354,9 +354,9 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
                     + "evm.feeRewardActivationHeight = " + Long.MAX_VALUE + " to disable fee-routing.");
         }
         if (feeRouting && config.hasPath("evm.alloc") && !config.getConfigList("evm.alloc").isEmpty()) {
-            log.warn("evm.feeRewardActivationHeight is scheduled with a non-empty evm.alloc: alloc wei is "
-                    + "currently UNBACKED, so the fee credit mints native XDAG (inflation) until the "
-                    + "transfer-from-lock model lands (A4). Acceptable only on a throwaway network.");
+            log.info("evm.feeRewardActivationHeight is scheduled with a non-empty evm.alloc: alloc wei "
+                    + "is lock-backed (genesis deposit, A4 transfer-from-lock), so fee credits transfer "
+                    + "from the lock without minting.");
         }
 
         boolean scheduled = bridgeScheduled;
@@ -407,6 +407,35 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
             throw new IllegalStateException("evm.bridgeActivationHeight (" + bridgeActivation
                     + ") must not precede evm.activationHeight (" + evmActivation
                     + "): deposits confirmed before the EVM activates would be dropped.");
+        }
+
+        // A4-full (transfer-from-lock): on a bridged net every alloc entry becomes a lock-backed
+        // "genesis deposit". Each balance must convert to nano exactly (1 nano = 1e9 wei) or the
+        // lock seed cannot equal the redeemable wei, and the total must fit the native XAmount
+        // long (the A1 ceiling), or the seed itself would overflow.
+        if (config.hasPath("evm.alloc")) {
+            BigInteger weiPerNano = BigInteger.valueOf(1_000_000_000L);
+            BigInteger totalWei = BigInteger.ZERO;
+            for (com.typesafe.config.Config entry : config.getConfigList("evm.alloc")) {
+                BigInteger balance;
+                try {
+                    balance = new BigInteger(entry.getString("balance"));
+                } catch (NumberFormatException e) {
+                    throw new IllegalStateException("evm.alloc balance is not a valid integer: \""
+                            + entry.getString("balance") + "\" — use a decimal wei string (e.g. \"1000000000\")", e);
+                }
+                if (balance.mod(weiPerNano).signum() != 0) {
+                    throw new IllegalStateException("evm.alloc balance " + entry.getString("balance")
+                            + " is not a whole number of nano (1 nano = 1e9 wei): on a "
+                            + "bridge-scheduled network alloc wei is seeded into the deposit lock "
+                            + "1:1 and must convert exactly.");
+                }
+                totalWei = totalWei.add(balance);
+            }
+            if (totalWei.divide(weiPerNano).bitLength() > 62) {
+                throw new IllegalStateException("evm.alloc total " + totalWei + " wei exceeds the "
+                        + "native supply ceiling once seeded into the deposit lock as nano.");
+            }
         }
     }
 

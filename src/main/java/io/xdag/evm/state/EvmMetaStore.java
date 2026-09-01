@@ -49,6 +49,7 @@ import org.hyperledger.besu.datatypes.Hash;
  *   0x08 | mainHeight(8 BE) -> native releases at release height: same entry shape as 0x07
  *   0x09 | mainHeight(8 BE) -> maturity buffer (G2-T1a): blockHash(32) | timestamp(8 BE) | refCount(4 BE) | refs(32 each) | deposits(28 each)
  *   0x0A | mainHeight(8 BE) -> committed-skip marker (G2-T1b): a 1-byte presence flag (value {0x01})
+ *   0x0B | mainHeight(8 BE) -> fee-debit journal (A4): nano debited from the bridge lock (8 BE)
  * </pre>
  *
  * Height records are the reorg checkpoints: {@link #removeAbove(long)} truncates everything past a
@@ -88,6 +89,13 @@ public class EvmMetaStore {
      * the SKIP_SENTINEL identically. Swept by removeAbove on reorg.
      */
     private static final byte PREFIX_SKIP = 0x0A;
+    /**
+     * Fee-debit journal (A4 transfer-from-lock): 0x0B | height(8 BE) -> feeNano(8 BE). The native
+     * nano ACTUALLY debited from the bridge lock when height M's net EVM fee was credited to block M.
+     * Written by BlockchainImpl.creditEvmFee; consumed (read + deleted) by the unwind reversal
+     * (reverse-what-you-did bookkeeping, 0x08 precedent); removeAbove-swept for hygiene.
+     */
+    private static final byte PREFIX_FEE_DEBIT = 0x0B;
     private static final int HEIGHT_RECORD_LENGTH = 32 + 32 + 4 + 8;
     private static final int PENDING_HEADER_LENGTH = 32 + 8; // blockHash(32) | timestampSeconds(8)
     private static final int LOCATION_RECORD_LENGTH = 8 + 4; // height(8 BE) | index(4 BE)
@@ -294,6 +302,12 @@ public class EvmMetaStore {
         return key;
     }
 
+    private static byte[] feeDebitKey(long height) {
+        byte[] key = heightKey(height);
+        key[0] = PREFIX_FEE_DEBIT;
+        return key;
+    }
+
     private static byte[] bloomKey(long height) {
         byte[] key = heightKey(height);
         key[0] = PREFIX_LOG_BLOOM;
@@ -453,10 +467,10 @@ public class EvmMetaStore {
 
     /**
      * Deletes every height record, tx list, per-tx receipt, reverse-index entry, pending record,
-     * logs bloom, deposits, withdrawals, releases, maturity buffer, and skip markers strictly above
-     * {@code height} (reorg truncation). Receipts and reverse-index entries must go too, otherwise a
-     * reorged-out tx keeps advertising a stale success/contract-address through {@link #getReceipt}
-     * or a stale (height, index) through {@link #findTxLocation}.
+     * logs bloom, deposits, withdrawals, releases, maturity buffer, skip markers, and fee-debit
+     * journal entries strictly above {@code height} (reorg truncation). Receipts and reverse-index
+     * entries must go too, otherwise a reorged-out tx keeps advertising a stale success/contract-address
+     * through {@link #getReceipt} or a stale (height, index) through {@link #findTxLocation}.
      */
     public void removeAbove(long height) {
         for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_TX_LIST})) {
@@ -504,6 +518,11 @@ public class EvmMetaStore {
             }
         }
         for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_SKIP})) {
+            if (heightFromKey(key) > height) {
+                store.delete(key);
+            }
+        }
+        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_FEE_DEBIT})) {
             if (heightFromKey(key) > height) {
                 store.delete(key);
             }
@@ -672,5 +691,45 @@ public class EvmMetaStore {
     /** Deletes the release journal for {@code height} (consumed by the unwind reversal). */
     public void deleteReleases(long height) {
         store.delete(releasesKey(height));
+    }
+
+    /**
+     * Journals the nano ACTUALLY debited from the bridge lock for {@code height}'s EVM fee credit
+     * (A4 transfer-from-lock). Written by creditEvmFee when it debits; consumed by the unwind
+     * reversal. At most one credit per height (K1 convergence invariant), so put-once.
+     */
+    public void putFeeDebit(long height, long feeNano) {
+        if (feeNano <= 0) {
+            throw new IllegalArgumentException(
+                    "non-positive fee debit " + feeNano + " at height " + height);
+        }
+        byte[] value = new byte[8];
+        for (int i = 0; i < 8; i++) {
+            value[i] = (byte) (feeNano >>> (56 - 8 * i));
+        }
+        store.put(feeDebitKey(height), value);
+    }
+
+    /** The journaled lock debit at {@code height}; 0 when none was recorded (or already reversed). */
+    public long getFeeDebit(long height) {
+        byte[] raw = store.get(feeDebitKey(height));
+        if (raw == null) {
+            return 0L;
+        }
+        if (raw.length != 8) {
+            throw new IllegalStateException("corrupt EVM_META fee-debit record at height " + height
+                    + ": " + raw.length + " bytes");
+        }
+        long nano = Bytes.wrap(raw).getLong(0);
+        if (nano <= 0) {
+            throw new IllegalStateException("corrupt EVM_META fee-debit record at height " + height
+                    + ": non-positive amount " + nano);
+        }
+        return nano;
+    }
+
+    /** Deletes the fee-debit journal for {@code height} (consumed by the unwind reversal). */
+    public void deleteFeeDebit(long height) {
+        store.delete(feeDebitKey(height));
     }
 }

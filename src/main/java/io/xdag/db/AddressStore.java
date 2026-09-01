@@ -36,6 +36,11 @@ public interface AddressStore extends XdagLifecycle {
     byte CURRENT_TRANSACTION_QUANTITY = (byte) 0x40;
     byte EXECUTED_NONCE_NUM = (byte) 0x50;
 
+    /** A4 (transfer-from-lock): 1-byte marker set once the genesis alloc's native equivalent has
+     * been seeded into the bridge lock. Lives in the ADDRESS CF so it travels with (and dies with)
+     * the balances it guards — an EVM_STATE wipe must NOT re-trigger the native seed. */
+    byte EVM_GENESIS_LOCK_SEED = (byte) 0x60;
+
     void reset();
 
     XAmount getBalanceByAddress(byte[] Address);
@@ -71,4 +76,8 @@ public interface AddressStore extends XdagLifecycle {
     UInt64 getExecutedNonceNum(byte[] address);
 
     void updateExcutedNonceNum(byte[] address,boolean addOrSubstract);
+
+    boolean isEvmGenesisLockSeeded();
+
+    void markEvmGenesisLockSeeded();
 }

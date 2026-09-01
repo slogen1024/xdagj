@@ -1844,11 +1844,14 @@ public class BlockchainTest {
     @Test
     public void testGetSupply() {
         BlockchainImpl blockchain = new BlockchainImpl(kernel);
-        assertEquals("1024.0", blockchain.getSupply(1).toDecimal(1, XUnit.XDAG).toString());
-        assertEquals("2048.0", blockchain.getSupply(2).toDecimal(1, XUnit.XDAG).toString());
-        assertEquals("3072.0", blockchain.getSupply(3).toDecimal(1, XUnit.XDAG).toString());
+        // Devnet schedules the bridge with a 1e24-wei genesis alloc: under A4 transfer-from-lock
+        // that alloc is premined native seeded into the deposit lock (1,000,000 XDAG), and an
+        // accurate closed-form supply includes it.
+        assertEquals("1001024.0", blockchain.getSupply(1).toDecimal(1, XUnit.XDAG).toString());
+        assertEquals("1002048.0", blockchain.getSupply(2).toDecimal(1, XUnit.XDAG).toString());
+        assertEquals("1003072.0", blockchain.getSupply(3).toDecimal(1, XUnit.XDAG).toString());
         XAmount apolloSypply = blockchain.getSupply(config.getApolloForkHeight());
-        assertEquals(String.valueOf(config.getApolloForkHeight() * 1024 - (1024 - 128)),
+        assertEquals(String.valueOf(config.getApolloForkHeight() * 1024 - (1024 - 128) + 1_000_000L),
                 apolloSypply.toDecimal(0, XUnit.XDAG).toString());
     }
 
