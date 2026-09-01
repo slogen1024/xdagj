@@ -845,6 +845,8 @@ public class EvmConsensusIntegrationTest {
     @Test
     public void evm_wei_destroyed_equals_nano_credited_scaled_plus_dust() {
         BlockchainImpl blockchain = new BlockchainImpl(kernel);
+        byte[] lockKey = io.xdag.evm.bridge.BridgeConstants.LOCK_ADDRESS_20.toArray();
+        XAmount lockBefore = kernel.getAddressStore().getBalanceByAddress(lockKey);
         ECKeyPair poolKey = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
 
         SECP256K1 algo = new SECP256K1();
@@ -920,6 +922,12 @@ public class EvmConsensusIntegrationTest {
                 netFeeWei,
                 BigInteger.valueOf(creditedNano).multiply(divisor)
                         .add(BigInteger.valueOf(dustWei)));
+
+        // A4: the credit is a transfer — the lock lost exactly the credited nano, so
+        // (wei destroyed) == (native moved out of the lock) * 1e9 + dust, and NOTHING was minted.
+        assertEquals("lock debited by exactly the credited nano (transfer, not mint)",
+                lockBefore.subtract(XAmount.of(creditedNano)),
+                kernel.getAddressStore().getBalanceByAddress(lockKey));
     }
 
     // -----------------------------------------------------------------------------------------
@@ -929,6 +937,8 @@ public class EvmConsensusIntegrationTest {
     @Test
     public void async_drain_credits_the_payload_block_after_a_deferred_blob_arrives() {
         BlockchainImpl blockchain = new BlockchainImpl(kernel);
+        byte[] lockKey = io.xdag.evm.bridge.BridgeConstants.LOCK_ADDRESS_20.toArray();
+        XAmount lockBefore = kernel.getAddressStore().getBalanceByAddress(lockKey);
         ECKeyPair poolKey = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
         SECP256K1 algo = new SECP256K1();
         KeyPair evmKey = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
@@ -987,6 +997,9 @@ public class EvmConsensusIntegrationTest {
         Block carrierAfter = blockchain.getBlockByHeight(m);
         assertEquals("the async drain credited the payload block M with the same fee the sync path would",
                 XAmount.of(expectedNano), carrierAfter.getInfo().getFee());
+        assertEquals("async drain debits the lock exactly like the sync path",
+                lockBefore.subtract(XAmount.of(expectedNano)),
+                kernel.getAddressStore().getBalanceByAddress(lockKey));
     }
 
     // -----------------------------------------------------------------------------------------
