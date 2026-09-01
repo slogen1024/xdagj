@@ -304,6 +304,44 @@ public class EvmConfigSectionTest {
     }
 
     @Test
+    public void evm_alloc_on_a_bridged_net_must_be_whole_nano_and_fit_the_native_ceiling() {
+        String base = "evm.enabled = true\nevm.activationHeight = 0\n"
+                + "evm.bridgeActivationHeight = 5\n"
+                + "evm.bridgeRecoveryAddress = \"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\"\n";
+
+        // Not a whole number of nano (1 nano = 1e9 wei): the lock seed could not equal the
+        // redeemable wei -> fail fast.
+        Config dust = ConfigFactory.parseString(base
+                + "evm.alloc = [{address = \"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\", "
+                + "balance = \"1000000001\"}]");
+        IllegalStateException ex = assertThrows(IllegalStateException.class,
+                () -> AbstractConfig.validateBridgeConfig(dust));
+        assertTrue("message must name the whole-nano requirement",
+                ex.getMessage().contains("whole number of nano"));
+
+        // Total above the native XAmount ceiling (2^62 nano) -> fail fast.
+        Config huge = ConfigFactory.parseString(base
+                + "evm.alloc = [{address = \"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\", "
+                + "balance = \"9000000000000000000000000000\"}]"); // 9e27 wei = 9e18 nano > 2^62
+        IllegalStateException ex2 = assertThrows(IllegalStateException.class,
+                () -> AbstractConfig.validateBridgeConfig(huge));
+        assertTrue("message must name the supply ceiling",
+                ex2.getMessage().contains("native supply ceiling"));
+
+        // Whole-nano and under the ceiling -> passes.
+        Config ok = ConfigFactory.parseString(base
+                + "evm.alloc = [{address = \"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\", "
+                + "balance = \"1000000000000000000000000\"}]"); // devnet's 1e24 wei
+        AbstractConfig.validateBridgeConfig(ok); // no exception
+
+        // Bridge UNSCHEDULED: dust alloc is allowed (never seeded, never redeemable).
+        Config unbridged = ConfigFactory.parseString("evm.enabled = true\nevm.activationHeight = 0\n"
+                + "evm.alloc = [{address = \"0x7e5f4552091a69125d5dfcb7b8c2659029395bdf\", "
+                + "balance = \"1000000001\"}]");
+        AbstractConfig.validateBridgeConfig(unbridged); // no exception
+    }
+
+    @Test
     public void evm_alloc_rejects_duplicate_zero_negative_and_oversized() {
         assertThrows("duplicate address", IllegalArgumentException.class, () -> AbstractConfig.parseEvmAlloc(
                 ConfigFactory.parseString("evm.alloc=[{address=\"" + A1 + "\",balance=\"1\"},"
