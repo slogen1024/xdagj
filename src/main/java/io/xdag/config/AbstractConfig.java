@@ -417,7 +417,13 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
             BigInteger weiPerNano = BigInteger.valueOf(1_000_000_000L);
             BigInteger totalWei = BigInteger.ZERO;
             for (com.typesafe.config.Config entry : config.getConfigList("evm.alloc")) {
-                BigInteger balance = new BigInteger(entry.getString("balance"));
+                BigInteger balance;
+                try {
+                    balance = new BigInteger(entry.getString("balance"));
+                } catch (NumberFormatException e) {
+                    throw new IllegalStateException("evm.alloc balance is not a valid integer: \""
+                            + entry.getString("balance") + "\" — use a decimal wei string (e.g. \"1000000000\")", e);
+                }
                 if (balance.mod(weiPerNano).signum() != 0) {
                     throw new IllegalStateException("evm.alloc balance " + entry.getString("balance")
                             + " is not a whole number of nano (1 nano = 1e9 wei): on a "

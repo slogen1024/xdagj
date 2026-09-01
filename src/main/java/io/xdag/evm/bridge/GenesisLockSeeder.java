@@ -45,8 +45,8 @@ public final class GenesisLockSeeder {
     /**
      * Sum of the alloc entries' wei converted to nano — exact, or throws. Sub-nano dust would make
      * the lock seed smaller than the redeemable wei (a conservation break), so it is rejected here
-     * as the runtime backstop; the config-load whole-nano fail-fast (a later A4 task) is the
-     * operator-facing guard.
+     * as the runtime backstop; the per-entry whole-nano fail-fast in
+     * AbstractConfig.validateBridgeConfig is the operator-facing guard.
      */
     public static long allocTotalNano(List<GenesisAllocEntry> alloc) {
         BigInteger totalWei = BigInteger.ZERO;
