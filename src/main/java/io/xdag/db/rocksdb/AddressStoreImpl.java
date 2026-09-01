@@ -197,4 +197,14 @@ public class AddressStoreImpl implements AddressStore {
         }
         addressSource.put(key,now.toBytes().toArray());
     }
+
+    @Override
+    public boolean isEvmGenesisLockSeeded() {
+        return addressSource.get(new byte[]{EVM_GENESIS_LOCK_SEED}) != null;
+    }
+
+    @Override
+    public void markEvmGenesisLockSeeded() {
+        addressSource.put(new byte[]{EVM_GENESIS_LOCK_SEED}, new byte[]{1});
+    }
 }
