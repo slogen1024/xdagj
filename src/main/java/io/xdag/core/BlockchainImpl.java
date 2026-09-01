@@ -2618,20 +2618,23 @@ public class BlockchainImpl implements Blockchain {
     }
 
     /**
-     * K1/G3-T1: credit a matured EVM height's net fee (wei) to that height's OWN block ({@code block},
-     * at {@code height}), folding it into the block's amount (PoolAwardManager distributes) + fee
-     * (unSetMain reverses). wei->nano floors; sub-nano dust is burned. Gated on {@code height} so
-     * pre-activation is byte-identical. The A1 overflow guard skips a fee whose nano magnitude exceeds
-     * the native-supply ceiling rather than letting longValueExact() throw into a half-applied caller.
-     * Used by BOTH the synchronous setMain path and the async onEvmBlobsAvailable drain, so a
-     * blob-behind node and a never-behind node converge on the same block amount.
+     * K1/G3-T1/A4: credit a matured EVM height's net fee (wei) to that height's OWN block
+     * ({@code block}, at {@code height}) as a TRANSFER FROM THE BRIDGE LOCK (A4 transfer-from-lock,
+     * design 2026-08-31): the payer's wei is a claim on locked native, so the fee is native they
+     * already own moving to the miner — the lock is debited by the credited nano (journaled in
+     * EVM_META 0x0B for the unwind reversal) and the block's amount + fee gain it. Total native
+     * unchanged; getSupply stays exact; the bridge invariant lock == redeemable-EVM drops equally
+     * on both sides. wei->nano floors; sub-nano dust is burned. Gated on {@code height} so
+     * pre-activation is byte-identical. The A1 overflow guard and the lock-shortfall guard both
+     * deterministically skip the WHOLE credit (fee burned) rather than half-applying. Used by BOTH
+     * the synchronous setMain path and the async onEvmBlobsAvailable drain.
      */
     private void creditEvmFee(Block block, long height, java.math.BigInteger feeWei) {
         if (block == null || feeWei.signum() <= 0
                 || height < kernel.getConfig().getEvmSpec().getEvmFeeRewardActivationHeight()) {
             return;
         }
-        java.math.BigInteger nano = feeWei.divide(io.xdag.evm.bridge.BridgeConstants.WEI_PER_NANO);
+        java.math.BigInteger nano = feeWei.divide(BridgeConstants.WEI_PER_NANO);
         if (nano.bitLength() > 62) {
             log.error("CRITICAL: EVM fee credit {} nano at height {} exceeds the native-supply ceiling; "
                     + "skipping the credit (fee burned)", nano, height);
@@ -2640,7 +2643,24 @@ public class BlockchainImpl implements Blockchain {
         if (nano.signum() <= 0) {
             return;
         }
-        XAmount evmFee = XAmount.of(nano.longValueExact());
+        EvmMetaStore metaStore = kernel.getEvmMetaStore();
+        if (metaStore == null) {
+            return; // EVM wiring absent (test-only shape): no journal store, no transfer bookkeeping
+        }
+        long feeNano = nano.longValueExact();
+        XAmount evmFee = XAmount.of(feeNano);
+        // A4: a short lock means the every-wei-is-lock-backed invariant is broken. Deterministic
+        // skip-ALL (no debit, no credit) keeps every node identical — the lock balance is consensus
+        // state — and never mints unbacked native (releaseMaturedWithdrawals skip-all precedent).
+        byte[] lockKey = BridgeConstants.LOCK_ADDRESS_20.toArray();
+        XAmount lockBalance = addressStore.getBalanceByAddress(lockKey);
+        if (lockBalance.lessThan(evmFee)) {
+            log.error("CRITICAL: bridge lock balance {} cannot cover the {} EVM fee credit at height "
+                    + "{}; skipping the credit entirely (fee burned)", lockBalance, evmFee, height);
+            return;
+        }
+        addressStore.updateBalance(lockKey, lockBalance.subtract(evmFee));
+        metaStore.putFeeDebit(height, feeNano);
         acceptAmount(block, evmFee);
         block.getInfo().setFee(block.getInfo().getFee().add(evmFee));
         blockStore.saveBlockInfo(block.getInfo());
