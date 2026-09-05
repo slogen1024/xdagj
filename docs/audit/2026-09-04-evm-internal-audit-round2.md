@@ -65,19 +65,21 @@
 
 ## 2. P2P / 交易承载（High / Medium）
 
-### P1. 批次体（batch body）经 `EVM_TX_REPLY` 注入到 tx 键空间，"毒化"不可逆，受害节点根链分叉
+### P1. ✅ 已修复（2026-09-05：按内容分类 — `EvmTxStore.decodeBatchBody` 为唯一分类器，P2P 两个 reply 入口统一走 `ingestConsensusBytes`，`expandRefs` 纵深防御）— 批次体（batch body）经 `EVM_TX_REPLY` 注入到 tx 键空间，"毒化"不可逆，受害节点根链分叉
 `src/main/java/io/xdag/net/XdagP2pHandler.java:529-552`，`src/main/java/io/xdag/evm/EvmBlockProcessor.java:366-386, 467-476`
 * Severity: **High** · **devnet 上 live**（`batchActivationHeight=0`），共享网 latent
 * 描述：一个 0x0F ref R 在 0x00（tx）和 0x01（batch）两个键空间都没有内容时为"unknown"。`ingestEvmTxBlob` 对**任何** keccak 命中 `isAwaitingBlob` 的字节直接 `putRaw(txHash, rawRlp)` 进 0x00，而 `isAwaitingBlob` 故意包含 `unknownRefs`。`expandRefs` 按"哪个 store 有"分类：先 `getBatch`（0x01，读时做类型检查），否则 `contains`（0x00，无检查）→ 视为单笔 legacy tx。因此 R 的解释取决于**哪条消息**送来了字节，而不是字节本身。注释"32 字节不可能同时是 keccak(tx) 和 keccak(batch body)"成立但无关：攻击者送的就是真实批次体 B。
 * 失效场景：诚实矿工打包 R=keccak(B)。恶意对等体在诚实 batch reply 到达前发 `EvmTxReplyMessage(B)`（未请求的 reply 也被接受）→ 受害者 `putRaw(R,B)`。此后 `expandRefs` 认为 R 是完整的单笔 tx，`isAwaitingBatch(R)` 变 false，诚实 batch reply 被丢弃——毒化粘滞；`rollbackTo` 回放同一毒 blob，永久。执行时 B 解码失败 → `validationFailure("undecodable blob")` 状态 0 收据折入根链，而诚实节点执行了成员 → 主网 hard-reject 停机 / warn-only 下原生 amount、bridge burn 分歧。已毒化的诚实节点还会用 `EvmTxRequest(R)` 的回复把毒继续传播。成本：每个受害者一条消息。
-* 建议：分类必须只依赖字节内容——ingest 时先解析：能解析为合法批次体（1..MAX_BATCH_TXS 个 32 字节项）的进 0x01，否则进 0x00（batch reply 同样镜像处理）；或在 `expandRefs` 中当 0x01 缺失而 0x00 内容可解析为批次体时按批次处理。补测试：unknown ref 先收 `EvmTxReplyMessage(batchBody)` 再收 `EvmBatchReplyMessage(batchBody)`，断言结果与相反顺序一致。
+* **修复与验证（2026-09-05）**：`EvmTxStore.decodeBatchBody/isBatchBody`（RLP 列表、1..MAX_BATCH_TXS 个 32 字节项；签名交易永不可能解析为批次体，两键空间按内容不相交）；`XdagP2pHandler.ingestConsensusBytes`：批次形字节仅在 `isAwaitingBatch` 时进 0x01，其它字节仅在 `isAwaitingBlob` 时进 0x00（不可解码字节仍可满足引用，保留"垃圾引用得到确定性失败收据"的活性语义）；`expandRefs` 对 0x00 中批次形字节按批次展开（可自愈修复前被毒化的存储）。测试 `XdagP2pHandlerEvmBatchTest`：批次体经 tx-reply 到达 → 存为批次且成员可展开；tx blob 经 batch-reply 到达 → 存为 tx；垃圾字节仍存为 tx blob。
+* 建议（原文）：分类必须只依赖字节内容——ingest 时先解析：能解析为合法批次体（1..MAX_BATCH_TXS 个 32 字节项）的进 0x01，否则进 0x00（batch reply 同样镜像处理）；或在 `expandRefs` 中当 0x01 缺失而 0x00 内容可解析为批次体时按批次处理。补测试：unknown ref 先收 `EvmTxReplyMessage(batchBody)` 再收 `EvmBatchReplyMessage(batchBody)`，断言结果与相反顺序一致。
 
-### P2. RPC 可接纳超过 `evm.maxP2pTxBytes` 的交易并被打包，但对等体永远拒收该 blob → 全网 EVM 停滞 + 锚点分裂
+### P2. ✅ 已修复（2026-09-05：`EvmTxPool.add` 新增 `TOO_LARGE`，Kernel 传入 `evm.maxP2pTxBytes`，RPC 映射 -32602 "transaction too large"）— RPC 可接纳超过 `evm.maxP2pTxBytes` 的交易并被打包，但对等体永远拒收该 blob → 全网 EVM 停滞 + 锚点分裂
 `src/main/java/io/xdag/evm/tx/EvmTxPool.java:104-209`（无大小检查），`src/main/java/io/xdag/rpc/server/handler/EthRequestHandler.java:198-237`，`src/main/java/io/xdag/net/XdagP2pHandler.java:533-535`
 * Severity: **High**（前提：能向出块节点的 RPC 提交交易；诚实用户的大 calldata 交易也会触发）
 * 描述：128 KiB 上限只在 P2P **接收**侧强制（ingest/batch reply）。`EvmTxPool.add` 和 `sendRawTransaction` 都不限大小（P2P 处注释"pool 自身有 size cap"不属实），HTTP 聚合器允许 1 MB，150 KB calldata 的 intrinsic gas ≈ 2.4M 远低于 30M。`processEvmTxRequest` 会把存储的任何 blob 发出去，但每个对等体都在 ingest 处丢弃，`BlobRetryBackoff` 永不放弃。
 * 失效场景：向矿工 O 的 RPC 提交一笔有效的 150 KB 交易，O 在高度 H 打包并持有 blob。当 O 挖到成熟 H 的块 N=H+δ−1 时 `maturedPayloadAvailable=true → daSkip=false`；其它所有节点永远 defer H（`onBlobsAvailable` 在第一个不完整高度停止），后续高度全部排队，桥释放进入 CRITICAL 冻结；其它矿工锚定的是过期 floor 根，O 判为 MISMATCH 而 hard-reject 自停。无自动恢复（需全网改 `evm.maxP2pTxBytes`）。
-* 建议：在 `EvmTxPool.add` 加 `rawRlp.size() <= evmMaxP2pTxBytes`（新增 `AddResult.TOO_LARGE`），`selectBatch/selectEvmBatch` 拒绝超限 blob 作纵深防御；`maturedPayloadAvailable` 也应要求每个成员 blob ≤ cap。
+* **修复与验证（2026-09-05）**：`EvmTxPool` 新增 8 参构造（`maxTxBytes`，7 参默认 131072），`add` 在解码前拒绝超限 blob；Kernel 传 `getEvmMaxP2pTxBytes()` 使准入与 P2P ingest 共用同一上限；`EthRequestHandler` 映射 `TOO_LARGE → invalidParams`。测试 `EvmTxPoolTest`（自定义上限与默认上限）、`EthRequestHandlerTest.eth_sendRawTransaction_oversized_tx_errors_with_invalid_params`。
+* 建议（原文）：在 `EvmTxPool.add` 加 `rawRlp.size() <= evmMaxP2pTxBytes`（新增 `AddResult.TOO_LARGE`），`selectBatch/selectEvmBatch` 拒绝超限 blob 作纵深防御；`maturedPayloadAvailable` 也应要求每个成员 blob ≤ cap。
 
 ### P3. 校验失败收据永久消耗 tx hash：任何矿工可零成本"烧掉"任何待处理交易
 `src/main/java/io/xdag/evm/EvmBlockProcessor.java:1050-1053, 781, 515-519`；`src/main/java/io/xdag/core/BlockchainImpl.java:1896-1907`

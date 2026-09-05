@@ -69,3 +69,22 @@ undone and re-decided by the replacement block. Decisions:
 - **Native side** (`unWindMain`, before the EVM sweep): for each re-opened height, reverse its 0x0B
   fee debit (lock re-credit) AND un-credit block h's amount/fee (it stays main, so `unSetMain` will
   not do it). Pending heights above target are swept; deposits/burns/skip markers are re-derived.
+
+---
+
+# Addendum — P1/P2 fix (2026-09-05)
+
+## P1 (batch body injected as a tx blob)
+`ingestEvmTxBlob` stored ANY awaited bytes into the tx keyspace (0x00) and `expandRefs` classified a
+ref by which keyspace held it, so the real batch body delivered inside `EVM_TX_REPLY` became an
+"undecodable single tx" (sticky, replayed, root-forking). Fix: classification by content —
+`EvmTxStore.decodeBatchBody/isBatchBody` is THE classifier; both P2P reply paths go through
+`XdagP2pHandler.ingestConsensusBytes` (batch-shaped → 0x01 iff awaited as a batch; anything else →
+0x00 iff awaited as a blob; undecodable bytes still satisfy a ref so a garbage-referencing miner gets a
+deterministic failed receipt instead of a stall); `expandRefs` also reads batch-shaped bytes in 0x00
+as the batch they are (defense in depth, self-heals a pre-fix poisoned store).
+
+## P2 (no admission size cap)
+`EvmTxPool.add` rejects `rawRlp.size() > maxTxBytes` with `AddResult.TOO_LARGE` (RPC → -32602
+"transaction too large"); Kernel passes `evm.maxP2pTxBytes` so admission and P2P ingest share one bound;
+the 7-arg constructor keeps the 128 KiB default.

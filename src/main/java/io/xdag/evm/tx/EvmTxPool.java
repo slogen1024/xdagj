@@ -62,8 +62,13 @@ public class EvmTxPool {
     public enum AddResult {
         ADDED, REPLACED, DUPLICATE, INVALID_ENCODING, WRONG_CHAIN_ID, INVALID_SIGNATURE,
         GAS_LIMIT_TOO_HIGH, INTRINSIC_GAS_TOO_LOW, UNDERPRICED, NONCE_MISMATCH, INSUFFICIENT_BALANCE,
-        POOL_FULL
+        POOL_FULL,
+        /** Raw blob exceeds the P2P blob cap: no peer would ever accept it (audit round 2, P2). */
+        TOO_LARGE
     }
+
+    /** Default admission size cap: the {@code evm.maxP2pTxBytes} default (128 KiB). */
+    public static final int DEFAULT_MAX_TX_BYTES = 131_072;
 
     /** Hard cap on distinct pending txs; a P2P-exposed pool must bound its memory (spec §6 DoS). */
     public static final int MAX_POOL_SIZE = 4096;
@@ -84,6 +89,13 @@ public class EvmTxPool {
     private final Wei minGasPrice;
     private final long ttlSeconds;
     private final LongSupplier clockSeconds;
+    /**
+     * Admission size cap on the raw signed blob (audit round 2, P2). The 128 KiB P2P cap was enforced
+     * only on the RECEIVING side, so a larger tx admitted over RPC and packed by a miner could never be
+     * fetched by any peer -- every ingest dropped the blob forever and the EVM stalled network-wide.
+     * Admission and P2P ingest now share the same bound (Kernel passes evm.maxP2pTxBytes).
+     */
+    private final int maxTxBytes;
 
     /** txHash -> entry; insertion order preserved for deterministic same-price tiebreaks. */
     private final Map<Hash, PoolEntry> byHash = new LinkedHashMap<>();
@@ -92,6 +104,16 @@ public class EvmTxPool {
 
     public EvmTxPool(EvmTxStore txStore, KVSource<byte[], byte[]> evmStateStore, BigInteger chainId,
                      long blockGasLimit, Wei minGasPrice, long ttlSeconds, LongSupplier clockSeconds) {
+        this(txStore, evmStateStore, chainId, blockGasLimit, minGasPrice, ttlSeconds, clockSeconds,
+                DEFAULT_MAX_TX_BYTES);
+    }
+
+    public EvmTxPool(EvmTxStore txStore, KVSource<byte[], byte[]> evmStateStore, BigInteger chainId,
+                     long blockGasLimit, Wei minGasPrice, long ttlSeconds, LongSupplier clockSeconds,
+                     int maxTxBytes) {
+        if (maxTxBytes < 1) {
+            throw new IllegalArgumentException("maxTxBytes must be >= 1 (got " + maxTxBytes + ")");
+        }
         this.txStore = txStore;
         this.evmStateStore = evmStateStore;
         this.chainId = chainId;
@@ -99,11 +121,15 @@ public class EvmTxPool {
         this.minGasPrice = minGasPrice;
         this.ttlSeconds = ttlSeconds;
         this.clockSeconds = clockSeconds;
+        this.maxTxBytes = maxTxBytes;
     }
 
     public synchronized AddResult add(Bytes rawRlp) {
         // Opportunistic eviction keeps the size cap honest without a background timer.
         evictExpired();
+        if (rawRlp.size() > maxTxBytes) {
+            return AddResult.TOO_LARGE; // P2: never admit a blob peers would refuse to accept
+        }
         EvmTransaction tx;
         try {
             tx = EvmTransaction.decode(rawRlp);

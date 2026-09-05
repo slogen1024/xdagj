@@ -218,7 +218,8 @@ public class Kernel {
                     config.getEvmSpec().getEvmBlockGasLimit(),
                     org.hyperledger.besu.datatypes.Wei.of(config.getEvmSpec().getEvmMinGasPrice()),
                     config.getEvmSpec().getEvmTxPoolTtlSeconds(),
-                    () -> System.currentTimeMillis() / 1000);
+                    () -> System.currentTimeMillis() / 1000,
+                    config.getEvmSpec().getEvmMaxP2pTxBytes()); // P2: admission cap == P2P ingest cap
             evmBlockProcessor = new io.xdag.evm.EvmBlockProcessor(evmConfig, evmStateSource,
                     evmTxStore, evmMetaStore, config.getEvmSpec().getEvmActivationHeight(),
                     config.getEvmSpec().getEvmGenesisAlloc(),

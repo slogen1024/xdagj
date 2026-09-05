@@ -387,6 +387,12 @@ public class EvmBlockProcessor {
         for (Bytes32 ref : txRefs) {
             Hash asHash = Hash.wrap(ref);
             Optional<List<Bytes32>> batch = txStore.getBatch(asHash);
+            if (batch.isEmpty()) {
+                // Audit round 2, P1 (defense in depth): classification is by content. Bytes stored under
+                // this ref in the tx keyspace that parse as a batch body ARE that batch (a signed tx can
+                // never parse as one), whatever path put them there.
+                batch = txStore.get(asHash).flatMap(EvmTxStore::decodeBatchBody);
+            }
             if (batch.isPresent()) {
                 for (Bytes32 member : batch.get()) {
                     flat.add(member);
