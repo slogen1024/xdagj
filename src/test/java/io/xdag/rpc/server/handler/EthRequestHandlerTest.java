@@ -181,6 +181,23 @@ public class EthRequestHandlerTest {
     }
 
     @Test
+    public void eth_sendRawTransaction_oversized_tx_errors_with_invalid_params() {
+        // Audit round 2, P2: RPC admission must reject a blob peers could never accept.
+        InMemoryKVSource stateStore = new InMemoryKVSource();
+        EvmTxPool pool = new EvmTxPool(new EvmTxStore(new InMemoryKVSource()), stateStore,
+                BigInteger.valueOf(0xCAFE), 30_000_000L, Wei.ONE, 3600L, () -> 1000L, 400);
+        EthRequestHandler h = writeHandler(stateStore, pool, new ArrayList<>());
+        SECP256K1 algo = new SECP256K1();
+        KeyPair key = algo.createKeyPair(algo.createPrivateKey(BigInteger.ONE));
+        EvmTransaction big = EvmTransaction.unsigned(0L, Wei.ONE, 200_000L, Optional.empty(),
+                Wei.ZERO, Bytes.wrap(new byte[500]), BigInteger.valueOf(0xCAFE)).sign(key, algo);
+        JsonRpcException e = assertThrows(JsonRpcException.class,
+                () -> h.handle(request("eth_sendRawTransaction", big.getRawRlp().toHexString())));
+        assertTrue("must surface as an invalid-params error, got: " + e.getMessage(),
+                e.getMessage().toLowerCase().contains("large"));
+    }
+
+    @Test
     public void eth_sendRawTransaction_wrong_chain_id_errors() {
         InMemoryKVSource stateStore = new InMemoryKVSource();
         EvmTxPool pool = poolFor(stateStore);

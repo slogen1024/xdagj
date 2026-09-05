@@ -137,18 +137,37 @@ public class EvmTxStore {
         if (raw.isEmpty()) {
             return Optional.empty();
         }
+        Optional<List<Bytes32>> hashes = decodeBatchBody(raw.get());
+        if (hashes.isEmpty()) {
+            log.warn("Batch {} body is not a valid batch body (1..{} 32-byte items); treating as miss",
+                    batchHash, MAX_BATCH_TXS);
+        }
+        return hashes;
+    }
+
+    /**
+     * Decodes {@code body} as a batch body: an RLP list of 1..{@link #MAX_BATCH_TXS} 32-byte tx hashes.
+     * Anything else (malformed RLP, wrong item width, empty, over-sized) is empty. This is THE
+     * classifier for content-addressed consensus bytes (audit round 2, P1): a body is a batch iff it
+     * parses as one, regardless of which P2P message delivered it. A signed tx can never parse as a
+     * batch body -- its RLP list carries a 20-byte/empty {@code to} and short scalars -- so the two
+     * keyspaces are disjoint by content.
+     */
+    public static Optional<List<Bytes32>> decodeBatchBody(Bytes body) {
         try {
-            RLPInput in = RLP.input(raw.get());
+            RLPInput in = RLP.input(body);
             List<Bytes32> hashes = in.readList(RLPInput::readBytes32);
             if (hashes.isEmpty() || hashes.size() > MAX_BATCH_TXS) {
-                log.warn("Batch {} has {} entries (allowed 1..{}); treating as miss",
-                        batchHash, hashes.size(), MAX_BATCH_TXS);
                 return Optional.empty();
             }
             return Optional.of(hashes);
         } catch (RuntimeException e) {
-            log.warn("Batch {} body is malformed ({}); treating as miss", batchHash, e.getMessage());
             return Optional.empty();
         }
+    }
+
+    /** True iff {@code body} parses as a batch body (see {@link #decodeBatchBody}). */
+    public static boolean isBatchBody(Bytes body) {
+        return decodeBatchBody(body).isPresent();
     }
 }

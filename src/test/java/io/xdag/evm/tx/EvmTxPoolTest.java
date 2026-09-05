@@ -79,6 +79,41 @@ public class EvmTxPoolTest {
         world.commit();
     }
 
+    private EvmTransaction txWithCalldata(KeyPair signer, long nonce, int calldataBytes) {
+        Bytes data = Bytes.wrap(new byte[calldataBytes]); // zero bytes: 4 gas each
+        return EvmTransaction.unsigned(nonce, MIN_GAS_PRICE, 21_000L + 16L * calldataBytes + 50_000L,
+                Optional.of(Address.fromHexString("0x2222222222222222222222222222222222222222")),
+                Wei.of(1), data, CHAIN_ID).sign(signer, algo);
+    }
+
+    @Test
+    public void a_tx_larger_than_the_p2p_blob_cap_is_rejected_as_TOO_LARGE() {
+        // Audit round 2, P2: the 128 KiB cap was enforced only on the P2P RECEIVING side. A tx admitted
+        // over RPC and packed by a miner could never be fetched by any peer (every ingest dropped the
+        // blob forever), stalling the EVM network-wide. Admission must enforce the same cap.
+        EvmTxPool capped = new EvmTxPool(txStore, stateSource, CHAIN_ID, BLOCK_GAS_LIMIT, MIN_GAS_PRICE,
+                3600L, () -> clock[0], 600);
+        EvmTransaction small = txWithCalldata(key, 0, 100);
+        assertTrue(small.getRawRlp().size() <= 600);
+        assertEquals(EvmTxPool.AddResult.ADDED, capped.add(small.getRawRlp()));
+
+        EvmTransaction big = txWithCalldata(otherKey, 0, 700);
+        assertTrue(big.getRawRlp().size() > 600);
+        assertEquals(EvmTxPool.AddResult.TOO_LARGE, capped.add(big.getRawRlp()));
+        assertTrue("a rejected oversized tx is not stored", txStore.get(big.getHash()).isEmpty());
+    }
+
+    @Test
+    public void the_default_cap_matches_the_p2p_blob_cap() {
+        // Default (7-arg) pool: 131072 bytes, the evm.maxP2pTxBytes default.
+        EvmTransaction justOver = txWithCalldata(key, 0, 131_072);
+        assertTrue(justOver.getRawRlp().size() > 131_072);
+        assertEquals(EvmTxPool.AddResult.TOO_LARGE, pool.add(justOver.getRawRlp()));
+        EvmTransaction under = txWithCalldata(otherKey, 0, 100_000);
+        assertTrue(under.getRawRlp().size() <= 131_072);
+        assertEquals(EvmTxPool.AddResult.ADDED, pool.add(under.getRawRlp()));
+    }
+
     private EvmTransaction tx(KeyPair signer, long nonce, Wei gasPrice) {
         return EvmTransaction.unsigned(nonce, gasPrice, 21_000L,
                 Optional.of(Address.fromHexString("0x2222222222222222222222222222222222222222")),

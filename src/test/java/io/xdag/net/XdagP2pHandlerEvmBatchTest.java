@@ -42,6 +42,12 @@ import io.xdag.core.Blockchain;
 import io.xdag.evm.EvmBlockProcessor;
 import io.xdag.evm.state.InMemoryKVSource;
 import io.xdag.evm.tx.EvmTxStore;
+import org.hyperledger.besu.crypto.SECP256K1;
+import org.hyperledger.besu.crypto.KeyPair;
+import java.util.Optional;
+import io.xdag.net.message.p2p.EvmTxReplyMessage;
+import io.xdag.evm.tx.EvmTransaction;
+import io.xdag.evm.tx.EvmTxPool;
 import io.xdag.net.message.Message;
 import io.xdag.net.message.MessageQueue;
 import io.xdag.net.message.p2p.EvmBatchReplyMessage;
@@ -72,6 +78,7 @@ public class XdagP2pHandlerEvmBatchTest {
     // Fixed batch body: RLP list of one tx hash (0xaa * 32)
     private static final Bytes32 TX_HASH_A = Bytes32.fromHexString("0x" + "aa".repeat(32));
     private static final Bytes32 TX_HASH_B = Bytes32.fromHexString("0x" + "bb".repeat(32));
+    private Kernel mockKernel;
 
     private static final int MAX_P2P_BYTES = 131_072;
 
@@ -110,7 +117,7 @@ public class XdagP2pHandlerEvmBatchTest {
         when(mockConfig.getNodeSpec()).thenReturn(mockNodeSpec);
 
         // Mock Kernel
-        Kernel mockKernel = mock(Kernel.class);
+        mockKernel = mock(Kernel.class);
         when(mockKernel.getConfig()).thenReturn(mockConfig);
         mockChain = mock(Blockchain.class);
         when(mockKernel.getBlockchain()).thenReturn(mockChain);
@@ -231,6 +238,76 @@ public class XdagP2pHandlerEvmBatchTest {
 
         assertFalse("Oversized batch body must NOT be stored", evmTxStore.containsBatch(fakeHash));
         verify(mockChain, never()).onEvmBlobsAvailable();
+    }
+
+    // -------------------------------------------------------------------------
+    // Audit round 2, P1: classification by CONTENT, not by delivery message type
+    // -------------------------------------------------------------------------
+
+    private EvmTxPool realPool() {
+        return new EvmTxPool(evmTxStore, new InMemoryKVSource(), java.math.BigInteger.valueOf(0xCAFE),
+                30_000_000L, org.hyperledger.besu.datatypes.Wei.ONE, 3600L, () -> 1000L);
+    }
+
+    /**
+     * An unknown 0x0F ref is awaited both as a tx blob and as a batch commitment. A peer that sends the
+     * real batch body inside an EVM_TX_REPLY must not get it stored in the tx keyspace (where expandRefs
+     * would read it as an undecodable single tx and every later honest batch reply would be dropped).
+     */
+    @Test
+    public void a_batch_body_delivered_as_a_tx_reply_is_stored_as_a_batch() throws Exception {
+        when(mockKernel.getEvmTxPool()).thenReturn(realPool());
+        Bytes body = EvmTxStore.encodeBatch(List.of(TX_HASH_A, TX_HASH_B));
+        Hash hash = Hash.hash(body);
+        when(mockProcessor.isAwaitingBlob(hash)).thenReturn(true);
+        when(mockProcessor.isAwaitingBatch(hash)).thenReturn(true);
+
+        invokePrivate("processEvmTxReply", EvmTxReplyMessage.class, new EvmTxReplyMessage(body));
+
+        assertFalse("a batch-shaped body must never land in the tx keyspace", evmTxStore.contains(hash));
+        assertTrue("it is stored as the batch it is", evmTxStore.containsBatch(hash));
+        assertEquals(List.of(TX_HASH_A, TX_HASH_B), evmTxStore.getBatch(hash).orElseThrow());
+        verify(mockChain).onEvmBlobsAvailable();
+    }
+
+    /** Mirror image: a tx-shaped blob inside an EVM_BATCH_REPLY lands in the tx keyspace. */
+    @Test
+    public void a_tx_blob_delivered_as_a_batch_reply_is_stored_as_a_tx_blob() throws Exception {
+        when(mockKernel.getEvmTxPool()).thenReturn(realPool());
+        SECP256K1 algo = new SECP256K1();
+        KeyPair key = algo.createKeyPair(algo.createPrivateKey(java.math.BigInteger.ONE));
+        EvmTransaction tx = EvmTransaction.unsigned(0L, org.hyperledger.besu.datatypes.Wei.ONE, 21_000L,
+                Optional.of(org.hyperledger.besu.datatypes.Address.ZERO), org.hyperledger.besu.datatypes.Wei.ZERO,
+                Bytes.EMPTY, java.math.BigInteger.valueOf(0xCAFE)).sign(key, algo);
+        Bytes body = tx.getRawRlp();
+        Hash hash = tx.getHash();
+        when(mockProcessor.isAwaitingBlob(hash)).thenReturn(true);
+        when(mockProcessor.isAwaitingBatch(hash)).thenReturn(true);
+
+        invokePrivate("processEvmBatchReply", EvmBatchReplyMessage.class, new EvmBatchReplyMessage(body));
+
+        assertTrue("a tx-shaped blob is a tx blob whatever message carried it", evmTxStore.contains(hash));
+        assertFalse(evmTxStore.containsBatch(hash));
+        verify(mockChain).onEvmBlobsAvailable();
+    }
+
+    /**
+     * Bytes that are neither a batch body nor a decodable tx still satisfy an awaited ref as a tx blob:
+     * a miner that references garbage and serves it gets a deterministic failed receipt on every node
+     * (liveness), rather than stalling the height forever.
+     */
+    @Test
+    public void undecodable_bytes_still_satisfy_an_awaited_ref_as_a_tx_blob() throws Exception {
+        when(mockKernel.getEvmTxPool()).thenReturn(realPool());
+        Bytes garbage = Bytes.fromHexString("0xdeadbeefdeadbeef");
+        Hash hash = Hash.hash(garbage);
+        when(mockProcessor.isAwaitingBlob(hash)).thenReturn(true);
+        when(mockProcessor.isAwaitingBatch(hash)).thenReturn(true);
+
+        invokePrivate("processEvmTxReply", EvmTxReplyMessage.class, new EvmTxReplyMessage(garbage));
+
+        assertTrue(evmTxStore.contains(hash));
+        assertFalse(evmTxStore.containsBatch(hash));
     }
 
     // -------------------------------------------------------------------------

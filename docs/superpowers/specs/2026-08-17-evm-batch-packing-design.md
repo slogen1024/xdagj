@@ -165,3 +165,17 @@
 - EIP-2718/1559（路线图缺陷 1，下一个子项目）；
 - DA 强制 / 停摆超时跳过（§13.3 硬门槛，主网前另行处理）；
 - 方案 C（批次体上链为专用载荷块）作为 v2 演进方向记录，不在本期。
+
+---
+
+## Erratum (2026-09-05, audit round 2 P1/P2)
+
+- **Dual lookup is now content-based.** As delivered, `expandRefs` classified a 0x0F ref by WHICH
+  keyspace held its bytes, and the P2P tx-reply path stored any awaited bytes into the tx keyspace.
+  The real batch body delivered inside `EVM_TX_REPLY` therefore became an "undecodable single tx" —
+  a sticky, replayed, root-forking poison costing one message per victim. Fixed: a body is a batch iff
+  it parses as one (`EvmTxStore.decodeBatchBody`: RLP list of 1..MAX_BATCH_TXS 32-byte items; a signed
+  tx can never parse as such), applied at both P2P reply entry points (`XdagP2pHandler.ingestConsensusBytes`)
+  and defensively in `expandRefs`.
+- **Admission size cap.** `EvmTxPool.add` rejects blobs above `evm.maxP2pTxBytes` (`TOO_LARGE`), so a
+  miner can never pack a tx its peers would refuse to ingest.

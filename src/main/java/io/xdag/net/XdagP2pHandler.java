@@ -493,63 +493,69 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
     }
 
     /**
-     * Stores a batch body only when (a) it is within the P2P size cap and (b) its keccak matches a
-     * commitment some deferred height is actually awaiting (the sole ingest gate — unsolicited
-     * bodies never touch the disk), then resumes deferred execution. Member blobs the body reveals
-     * as missing are fetched by the next retry tick via requestMissingEvmBlobs().
+     * Consensus-side ingest of content-addressed bytes from EVM_TX_REPLY / EVM_TX_BROADCAST /
+     * EVM_BATCH_REPLY. Classification is by CONTENT, never by the message type that carried the bytes
+     * (audit round 2, P1): an unknown 0x0F ref is awaited both as a tx blob and as a batch commitment,
+     * and if the real batch body arrived inside a tx reply it used to be stored in the tx keyspace,
+     * where expandRefs read it as an undecodable single tx -- a sticky, replayed, root-forking poison
+     * costing one message per victim. Now a body that parses as a batch body goes to the batch
+     * keyspace iff some deferred height awaits that commitment; any other bytes go to the tx keyspace
+     * iff some deferred height awaits that blob (undecodable bytes included: a miner that references
+     * garbage and serves it gets a deterministic failed receipt everywhere instead of stalling the
+     * height). Only awaited hashes ever touch the disk (unsolicited junk never does).
+     *
+     * @return true if the bytes were stored (and deferred execution was resumed)
      */
-    private void processEvmBatchReply(EvmBatchReplyMessage msg) {
+    private boolean ingestConsensusBytes(Bytes bytes) {
         EvmTxStore evmTxStore = kernel.getEvmTxStore();
         EvmBlockProcessor evmProcessor = kernel.getEvmBlockProcessor();
-        Bytes body = msg.getBatchBody();
         if (evmTxStore == null || evmProcessor == null
-                || body.size() > config.getEvmSpec().getEvmMaxP2pTxBytes()) {
-            return;
+                || bytes.size() > config.getEvmSpec().getEvmMaxP2pTxBytes()) {
+            return false;
         }
-        Hash batchHash;
+        Hash hash;
         // defensive: Hash.hash is not declared to throw, but guard any future change
         try {
-            batchHash = Hash.hash(body);
+            hash = Hash.hash(bytes);
         } catch (RuntimeException e) {
-            return;
+            return false;
         }
-        if (evmProcessor.isAwaitingBatch(batchHash)) {
-            evmTxStore.putBatch(body);
+        if (EvmTxStore.isBatchBody(bytes)) {
+            if (evmProcessor.isAwaitingBatch(hash)) {
+                evmTxStore.putBatch(bytes);
+                chain.onEvmBlobsAvailable();
+                return true;
+            }
+            return false;
+        }
+        if (evmProcessor.isAwaitingBlob(hash)) {
+            evmTxStore.putRaw(hash, bytes);
             chain.onEvmBlobsAvailable();
+            return true;
         }
+        return false;
+    }
+
+    private void processEvmBatchReply(EvmBatchReplyMessage msg) {
+        ingestConsensusBytes(msg.getBatchBody());
     }
 
     /**
-     * Feeds a gossiped blob to both the consensus store (to satisfy a referenced-but-missing ref,
-     * then resume deferred execution) and the mempool (for future block inclusion). Only blobs the
-     * processor is actually awaiting are persisted, so unsolicited junk cannot fill the disk.
+     * Feeds a gossiped blob to both the consensus store (content-classified: see
+     * {@link #ingestConsensusBytes}) and the mempool (for future block inclusion).
      *
      * @return true if the blob was newly accepted into the mempool (drives broadcast relay)
      */
     private boolean ingestEvmTxBlob(org.apache.tuweni.bytes.Bytes rawRlp) {
         EvmTxPool evmTxPool = kernel.getEvmTxPool();
         EvmTxStore evmTxStore = kernel.getEvmTxStore();
-        EvmBlockProcessor evmProcessor = kernel.getEvmBlockProcessor();
         if (evmTxPool == null || evmTxStore == null
                 || rawRlp.size() > config.getEvmSpec().getEvmMaxP2pTxBytes()) {
             return false;
         }
-        // Consensus path: if a deferred main block is waiting for exactly this blob, store it and
-        // resume execution in height order (I4 convergence).
-        if (evmProcessor != null) {
-            Hash txHash;
-            // defensive: Hash.hash is not declared to throw, but guard any future change
-            try {
-                txHash = Hash.hash(rawRlp);
-            } catch (RuntimeException e) {
-                return false;
-            }
-            if (evmProcessor.isAwaitingBlob(txHash)) {
-                evmTxStore.putRaw(txHash, rawRlp);
-                chain.onEvmBlobsAvailable();
-            }
-        }
-        // Mempool path: offer for future inclusion (its own validation + size cap apply).
+        ingestConsensusBytes(rawRlp);
+        // Mempool path: offer for future inclusion (its own validation + size cap apply). A batch body
+        // is not a transaction and is rejected there as INVALID_ENCODING.
         return evmTxPool.add(rawRlp) == EvmTxPool.AddResult.ADDED;
     }
 

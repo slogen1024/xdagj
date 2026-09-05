@@ -232,6 +232,7 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
             case NONCE_MISMATCH -> throw JsonRpcException.invalidParams("nonce mismatch");
             case INSUFFICIENT_BALANCE -> throw JsonRpcException.invalidParams("insufficient balance for value");
             case POOL_FULL -> throw JsonRpcException.invalidParams("transaction pool is full");
+            case TOO_LARGE -> throw JsonRpcException.invalidParams("transaction too large");
         }
         throw JsonRpcException.internalError("unreachable add result");
     }
