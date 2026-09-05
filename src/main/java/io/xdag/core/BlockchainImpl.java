@@ -1182,12 +1182,19 @@ public class BlockchainImpl implements Blockchain {
             }
             rollTxList.clear();
 
-            // EVM reorg: one rollback for the whole unwind (spec §7.4), replaying up to the last
-            // main height that stays canonical.
+            // EVM reorg: one rollback for the whole unwind (spec §7.4). Under delta-lagged execution
+            // the unwound blocks DECIDED the matured heights (lowestUnwound - lag, lowestUnwound - 1],
+            // which stay canonical natively: undo their fee credits here (their 0x0B journals are still
+            // readable), then let the processor un-execute and re-buffer them so the replacement chain
+            // re-decides them (audit round 2, C1). At lag=1 this is the legacy rollbackTo(lowest - 1).
             if (lowestUnwoundMainHeight > 0) {
                 EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
                 if (evmProcessor != null) {
-                    evmProcessor.rollbackTo(lowestUnwoundMainHeight - 1);
+                    long lag = kernel.getConfig().getEvmSpec().getEvmStateRootLag();
+                    for (long h = lowestUnwoundMainHeight - 1; h > lowestUnwoundMainHeight - lag && h > 0; h--) {
+                        reverseEvmFeeCreditOfReopenedHeight(h);
+                    }
+                    evmProcessor.rollbackForReorg(lowestUnwoundMainHeight, lag);
                 }
             }
         }
@@ -1726,6 +1733,33 @@ public class BlockchainImpl implements Blockchain {
      * unwinds. Runs inside the unWindMain loop BEFORE the trailing rollbackTo sweeps EVM_META past
      * the fork point. Package-private for testability (reverseReleasedWithdrawals precedent).
      */
+    /**
+     * C1: a re-opened height stays a main block, so unSetMain will not undo its EVM fee credit. Reverse
+     * the lock debit (0x0B journal) AND un-credit the block's amount/fee, mirroring creditEvmFee.
+     */
+    void reverseEvmFeeCreditOfReopenedHeight(long height) {
+        if (kernel == null || kernel.getEvmMetaStore() == null) {
+            return;
+        }
+        long feeNano = kernel.getEvmMetaStore().getFeeDebit(height);
+        if (feeNano == 0) {
+            return;
+        }
+        reverseEvmFeeDebit(height);
+        Block block = getBlockByHeight(height);
+        if (block == null) {
+            log.error("CRITICAL: re-opened main height {} has no canonical block to un-credit its {} nano "
+                    + "EVM fee from", height, feeNano);
+            return;
+        }
+        XAmount evmFee = XAmount.of(feeNano);
+        acceptAmount(block, XAmount.ZERO.subtract(evmFee));
+        block.getInfo().setFee(block.getInfo().getFee().subtract(evmFee));
+        blockStore.saveBlockInfo(block.getInfo());
+        log.info("Un-credited the {} nano EVM fee of re-opened height {} (its deciding block was unwound)",
+                feeNano, height);
+    }
+
     void reverseEvmFeeDebit(long unwoundHeight) {
         if (kernel == null) {
             return;

@@ -13,7 +13,13 @@
 > **block-N commits `root(N−δ−1)`** (`BlockchainImpl.anchoredEvmHeight`), the miner derives N from its
 > chain position (`predictNextMainHeight`, not `nmain+1`), and a verifiably divergent anchor is rejected
 > at import (`tryToConnect`), not only frozen in `setMain`. Every `root(N−δ)` below reads `root(N−δ−1)`.
-> The §Reorg claim that daSkip decisions are re-read from replayed blocks is also false (audit C1, open).
+> The §Reorg claim that daSkip decisions are re-read from replayed blocks was false as delivered (audit C1):
+> the maturity entry was consumed at maturation and `rollbackTo(lowestUnwound−1)` kept the orphaned block's
+> decision. Fixed 2026-09-05: matured entries are ARCHIVED (EVM_META 0x0C), `unWindMain` rolls the EVM back to
+> `lowestUnwound − δ`, reverses the fee credits of the re-opened heights, and `rollbackForReorg` restores their
+> archived entries so the replacement chain re-decides them. Also fixed (C2): a committed skip arriving while an
+> earlier height is blob-deferred now queues behind it (`putPending` with empty refs) instead of checkpointing
+> ahead of it.
 
 ---
 
@@ -126,7 +132,7 @@ BEHIND is what disarms the latent trap: a blob-lagging node no longer mistakes "
 
 ### 3.4 Reorg
 
-EVM now executes only δ−1-deep heights, so a reorg of depth < δ−1 rewrites only native blocks whose matured EVM heights were never executed → **no EVM rollback needed**. A reorg ≥ δ−1 deep (should be practically impossible on a healthy chain; δ=16) still triggers the existing D9 wipe-and-replay via `unWindMain`/`rollbackTo`; the maturity buffer is rebuilt from the canonical chain during replay. `removeAbove(h)` continues to drop checkpoints/receipts/pending/buffer entries above the unwound height. The `daSkip` decisions are re-read from the replayed canonical blocks (they are block-committed, not node-local), so replay reproduces the same skip/execute pattern deterministically.
+EVM now executes only δ−1-deep heights, so a reorg of depth < δ−1 rewrites only native blocks whose matured EVM heights were never executed → **no EVM rollback needed**. A reorg ≥ δ−1 deep (should be practically impossible on a healthy chain; δ=16) still triggers the existing D9 wipe-and-replay via `unWindMain`/`rollbackTo`; the maturity buffer is rebuilt from the canonical chain during replay. `removeAbove(h)` continues to drop checkpoints/receipts/pending/buffer entries above the unwound height. The `daSkip` decisions of heights whose deciding block was unwound are re-taken by the replacement chain: `unWindMain` rolls the EVM back to `lowestUnwound − δ` (not `lowestUnwound − 1`), un-credits their fees, and `EvmBlockProcessor.rollbackForReorg` restores their archived maturity entries (0x0C → 0x09) so `processConfirmedBlock` matures them again under the new blocks' bits (corrected 2026-09-05, audit C1; the original text assumed replay re-read the bits from blocks, which it never did).
 
 ### 3.5 Bridge co-movement (release reconcile deferred to T3)
 

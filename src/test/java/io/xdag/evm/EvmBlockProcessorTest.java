@@ -669,6 +669,130 @@ public class EvmBlockProcessorTest {
         assertEquals(directRoot2, metaB.getHeightRecord(2L).orElseThrow().stateRoot());
     }
 
+    /** A second node over its own stores, funding the same genesis sender so roots are comparable. */
+    private static EvmBlockProcessor freshNode(EvmTxStore txs, EvmMetaStore meta, InMemoryKVSource state,
+                                               Address sender) {
+        EvmBlockProcessor proc = new EvmBlockProcessor(EvmConfig.devnet(), state, txs, meta, 0L,
+                List.of(new GenesisAllocEntry(sender, Wei.fromEth(1))));
+        proc.seedGenesisIfAbsent();
+        return proc;
+    }
+
+    @Test
+    public void a_skipped_height_waits_behind_a_blob_deferred_height() {
+        // Audit round 2, C2 (lag=2): height 1 carries d1, height 2 carries d2. Block 3 commits daSkip
+        // for height 2. Node B lacks d1's blob when height 1 matures, so height 1 is pending; the skip
+        // of height 2 must NOT checkpoint ahead of it (that chained root(2) from root(0) and later
+        // root(1) from root(2)). It must queue behind height 1 and drain in order.
+        EvmTransaction d1 = EvmTransaction.unsigned(0L, Wei.of(1), 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);
+        EvmTransaction d2 = EvmTransaction.unsigned(1L, Wei.of(1), 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);
+        long lag = 2L;
+
+        // Node A: has both blobs; never stalls.
+        txStore.put(d1);
+        txStore.put(d2);
+        processor.processConfirmedBlock(List.of(ref(d1)), 1L, 1001L, BLOCK_HASH_1, List.of(), lag, false);
+        processor.processConfirmedBlock(List.of(ref(d2)), 2L, 1002L, BLOCK_HASH_2, List.of(), lag, false);
+        processor.processConfirmedBlock(List.of(), 3L, 1003L, BLOCK_HASH_3, List.of(), lag, true);
+        Bytes32 rootA1 = metaStore.getHeightRecord(1L).orElseThrow().stateRoot();
+        Bytes32 rootA2 = metaStore.getHeightRecord(2L).orElseThrow().stateRoot();
+        assertTrue("A executed d1", metaStore.getReceipt(d1.getHash()).isPresent());
+        assertTrue("A skipped d2", metaStore.getReceipt(d2.getHash()).isEmpty());
+
+        // Node B: d1 withheld until after block 3.
+        InMemoryKVSource stateB = new InMemoryKVSource();
+        EvmTxStore txB = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore metaB = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor procB = freshNode(txB, metaB, stateB, sender);
+        txB.put(d2);
+        procB.processConfirmedBlock(List.of(ref(d1)), 1L, 1001L, BLOCK_HASH_1, List.of(), lag, false);
+        procB.processConfirmedBlock(List.of(ref(d2)), 2L, 1002L, BLOCK_HASH_2, List.of(), lag, false);
+        assertEquals("height 1 is blob-deferred on B", List.of(1L), metaB.pendingHeights());
+        procB.processConfirmedBlock(List.of(), 3L, 1003L, BLOCK_HASH_3, List.of(), lag, true);
+
+        assertTrue("the skip must not checkpoint ahead of the deferred height",
+                metaB.getHeightRecord(2L).isEmpty());
+        assertTrue("height 2 is skip-marked", metaB.isSkipped(2L));
+        assertEquals("height 2 queues behind height 1", List.of(1L, 2L), metaB.pendingHeights());
+
+        txB.put(d1);
+        procB.onBlobsAvailable();
+
+        assertTrue("both drained", metaB.pendingHeights().isEmpty());
+        assertEquals(rootA1, metaB.getHeightRecord(1L).orElseThrow().stateRoot());
+        assertEquals(rootA2, metaB.getHeightRecord(2L).orElseThrow().stateRoot());
+        assertTrue(metaB.getReceipt(d2.getHash()).isEmpty());
+    }
+
+    @Test
+    public void a_shallow_reorg_reopens_the_matured_height_for_the_replacement_block() {
+        // Audit round 2, C1 (lag=2): block 3 decides height 2 (daSkip=true -> skipped). When block 3 is
+        // unwound by a 1-deep reorg, height 2's outcome must be undone and re-decided by the replacement
+        // block 3' (daSkip=false -> executed). Pre-fix, rollbackTo(2) kept the skip and the replacement's
+        // bit was ignored, so nodes that saw block 3 diverged forever from nodes that did not.
+        EvmTransaction d1 = EvmTransaction.unsigned(0L, Wei.of(1), 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);
+        EvmTransaction d2 = EvmTransaction.unsigned(1L, Wei.of(1), 200_000L, Optional.empty(),
+                Wei.ZERO, INIT_CODE, CHAIN_ID).sign(key, algo);
+        long lag = 2L;
+        txStore.put(d1);
+        txStore.put(d2);
+        processor.processConfirmedBlock(List.of(ref(d1)), 1L, 1001L, BLOCK_HASH_1, List.of(), lag, false);
+        processor.processConfirmedBlock(List.of(ref(d2)), 2L, 1002L, BLOCK_HASH_2, List.of(), lag, false);
+        processor.processConfirmedBlock(List.of(), 3L, 1003L, BLOCK_HASH_3, List.of(), lag, true);
+        assertTrue("height 2 was skipped by block 3", metaStore.isSkipped(2L));
+        assertTrue(metaStore.getHeightRecord(2L).isPresent());
+        assertTrue(metaStore.getReceipt(d2.getHash()).isEmpty());
+        assertTrue("matured entries leave the live buffer", metaStore.getMaturityEntry(2L).isEmpty());
+
+        // Reorg: block 3 is unwound (lowest unwound main height = 3).
+        processor.rollbackForReorg(3L, lag);
+
+        assertTrue("height 1 (decided by canonical block 2) stays executed", metaStore.getHeightRecord(1L).isPresent());
+        assertTrue(metaStore.getReceipt(d1.getHash()).isPresent());
+        assertTrue("height 2's outcome is undone", metaStore.getHeightRecord(2L).isEmpty());
+        assertFalse("its skip marker is gone", metaStore.isSkipped(2L));
+        EvmMetaStore.MaturityEntry reopened = metaStore.getMaturityEntry(2L).orElseThrow();
+        assertEquals("height 2 is buffered again with its original payload", List.of(ref(d2)), reopened.refs());
+        assertEquals(BLOCK_HASH_2, reopened.blockHash());
+
+        // The replacement block 3' commits daSkip=false -> height 2 executes.
+        processor.processConfirmedBlock(List.of(), 3L, 1003L, BLOCK_HASH_3, List.of(), lag, false);
+        assertEquals(1, (int) metaStore.getReceipt(d2.getHash()).orElseThrow().status());
+
+        // Same roots as a node that only ever saw the replacement chain.
+        InMemoryKVSource stateC = new InMemoryKVSource();
+        EvmTxStore txC = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore metaC = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor procC = freshNode(txC, metaC, stateC, sender);
+        txC.put(d1);
+        txC.put(d2);
+        procC.processConfirmedBlock(List.of(ref(d1)), 1L, 1001L, BLOCK_HASH_1, List.of(), lag, false);
+        procC.processConfirmedBlock(List.of(ref(d2)), 2L, 1002L, BLOCK_HASH_2, List.of(), lag, false);
+        procC.processConfirmedBlock(List.of(), 3L, 1003L, BLOCK_HASH_3, List.of(), lag, false);
+        assertEquals(metaC.getHeightRecord(1L).orElseThrow().stateRoot(), metaStore.getHeightRecord(1L).orElseThrow().stateRoot());
+        assertEquals(metaC.getHeightRecord(2L).orElseThrow().stateRoot(), metaStore.getHeightRecord(2L).orElseThrow().stateRoot());
+        assertEquals(procC.chainedRootAt(2L), processor.chainedRootAt(2L));
+    }
+
+    @Test
+    public void at_lag_one_the_reorg_rollback_is_the_legacy_rollbackTo() {
+        EvmTransaction d1 = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        EvmTransaction d2 = storedTx(1, Optional.empty(), INIT_CODE, 200_000L);
+        processor.processConfirmedBlock(List.of(ref(d1)), 1L, 1001L, BLOCK_HASH_1, List.of(), 1L, false);
+        processor.processConfirmedBlock(List.of(ref(d2)), 2L, 1002L, BLOCK_HASH_2, List.of(), 1L, false);
+        assertTrue(metaStore.getHeightRecord(2L).isPresent());
+
+        processor.rollbackForReorg(2L, 1L); // == rollbackTo(1): the unwound block decided only itself
+
+        assertTrue(metaStore.getHeightRecord(1L).isPresent());
+        assertTrue(metaStore.getHeightRecord(2L).isEmpty());
+        assertEquals("nothing is re-opened at lag 1", List.of(), metaStore.maturityHeights());
+        assertTrue(metaStore.getReceipt(d2.getHash()).isEmpty());
+    }
+
     @Test
     public void rollback_discards_pending_heights_above_the_fork() {
         EvmTransaction executed = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);

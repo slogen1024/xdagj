@@ -50,6 +50,8 @@ import org.hyperledger.besu.datatypes.Hash;
  *   0x09 | mainHeight(8 BE) -> maturity buffer (G2-T1a): blockHash(32) | timestamp(8 BE) | refCount(4 BE) | refs(32 each) | deposits(28 each)
  *   0x0A | mainHeight(8 BE) -> committed-skip marker (G2-T1b): a 1-byte presence flag (value {0x01})
  *   0x0B | mainHeight(8 BE) -> fee-debit journal (A4): nano debited from the bridge lock (8 BE)
+ *   0x0C | mainHeight(8 BE) -> matured-entry archive (C1): the 0x09 record of a height AFTER it matured,
+ *                              kept so a shallow reorg can re-open the height (same layout as 0x09)
  * </pre>
  *
  * Height records are the reorg checkpoints: {@link #removeAbove(long)} truncates everything past a
@@ -96,6 +98,15 @@ public class EvmMetaStore {
      * (reverse-what-you-did bookkeeping, 0x08 precedent); removeAbove-swept for hygiene.
      */
     private static final byte PREFIX_FEE_DEBIT = 0x0B;
+    /**
+     * Matured-entry archive (audit round 2, C1): 0x0C | height(8 BE) -> the exact 0x09 record of a
+     * height once it has matured. Under delta-lagged execution height M is DECIDED (execute vs skip) by
+     * block M+delta-1; if that block is unwound by a reorg shallower than delta, M's outcome must be
+     * undone and its inputs re-buffered so the replacement block re-decides it. Restored into 0x09 by
+     * {@code EvmBlockProcessor.rollbackForReorg}; pruned by {@link #removeArchivedAtOrBelow}; swept
+     * above the NATIVE boundary of {@link #removeAbove(long, long)}.
+     */
+    private static final byte PREFIX_MATURITY_ARCHIVE = 0x0C;
     private static final int HEIGHT_RECORD_LENGTH = 32 + 32 + 4 + 8;
     private static final int PENDING_HEADER_LENGTH = 32 + 8; // blockHash(32) | timestampSeconds(8)
     private static final int LOCATION_RECORD_LENGTH = 8 + 4; // height(8 BE) | index(4 BE)
@@ -295,6 +306,15 @@ public class EvmMetaStore {
         key[0] = PREFIX_MATURITY;
         return key;
     }
+    private static byte[] archiveKey(long height) {
+        byte[] key = new byte[9];
+        key[0] = PREFIX_MATURITY_ARCHIVE;
+        for (int i = 0; i < 8; i++) {
+            key[1 + i] = (byte) (height >>> (56 - 8 * i));
+        }
+        return key;
+    }
+
 
     private static byte[] skipKey(long height) {
         byte[] key = heightKey(height);
@@ -406,7 +426,52 @@ public class EvmMetaStore {
 
     /** The buffered execution inputs at {@code height}, or empty if none is buffered. */
     public Optional<MaturityEntry> getMaturityEntry(long height) {
+        return decodeMaturityEntry(height, store.get(maturityKey(height)));
+    }
+
+    /** The archived (already matured) execution inputs at {@code height}, or empty (C1). */
+    public Optional<MaturityEntry> getArchivedMaturityEntry(long height) {
+        return decodeMaturityEntry(height, store.get(archiveKey(height)));
+    }
+
+    /**
+     * Moves {@code height}'s live buffer record (0x09) to the archive (0x0C) once the height has
+     * matured. Returns false when nothing was buffered (a payload-free height).
+     */
+    public boolean archiveMaturityEntry(long height) {
         byte[] raw = store.get(maturityKey(height));
+        if (raw == null) {
+            return false;
+        }
+        store.put(archiveKey(height), raw);
+        store.delete(maturityKey(height));
+        return true;
+    }
+
+    /**
+     * Re-opens {@code height}: moves its archived record back into the live buffer (0x09) so the next
+     * confirming block matures -- and decides -- it again. Returns false when no archive exists.
+     */
+    public boolean restoreMaturityEntry(long height) {
+        byte[] raw = store.get(archiveKey(height));
+        if (raw == null) {
+            return false;
+        }
+        store.put(maturityKey(height), raw);
+        store.delete(archiveKey(height));
+        return true;
+    }
+
+    /** Prunes archived entries at heights {@code <= height} (older than any re-openable reorg). */
+    public void removeArchivedAtOrBelow(long height) {
+        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_MATURITY_ARCHIVE})) {
+            if (heightFromKey(key) <= height) {
+                store.delete(key);
+            }
+        }
+    }
+
+    private static Optional<MaturityEntry> decodeMaturityEntry(long height, byte[] raw) {
         if (raw == null) {
             return Optional.empty();
         }
@@ -472,9 +537,28 @@ public class EvmMetaStore {
      * entries must go too, otherwise a reorged-out tx keeps advertising a stale success/contract-address
      * through {@link #getReceipt} or a stale (height, index) through {@link #findTxLocation}.
      */
+    /** Legacy single-boundary sweep: both boundaries equal (exact pre-C1 behavior; lag-1 shape). */
     public void removeAbove(long height) {
+        removeAbove(height, height);
+    }
+
+    /**
+     * Reorg truncation with two boundaries (audit round 2, C1). EXECUTION artifacts -- height records,
+     * tx lists (+receipts, locations), pending queue, blooms, deposits, burns, skip markers -- are
+     * derived from executing a height and are swept above {@code executionBoundary}; they are
+     * re-derived when the height is re-matured. NATIVE-height journals -- releases (0x08), fee debits
+     * (0x0B), the live maturity buffer (0x09) and its archive (0x0C) -- record facts tied to a main
+     * block that may still be canonical, and are swept only above {@code nativeBoundary} (the lowest
+     * unwound main height minus one). With delta-lagged execution unWindMain passes
+     * {@code executionBoundary = lowestUnwound - delta} and {@code nativeBoundary = lowestUnwound - 1},
+     * re-opening the heights in between; at delta=1 the two coincide. Releases at re-opened heights
+     * stem from burns at or below the execution boundary (config invariant W >= delta-1) and stay
+     * valid; fee debits at re-opened heights are reversed and deleted by BlockchainImpl before this
+     * sweep, so a leftover would be a visible bug rather than a silently dropped journal.
+     */
+    public void removeAbove(long executionBoundary, long nativeBoundary) {
         for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_TX_LIST})) {
-            if (heightFromKey(key) > height) {
+            if (heightFromKey(key) > executionBoundary) {
                 for (Hash txHash : getTxList(heightFromKey(key))) {
                     store.delete(receiptKey(txHash));
                     store.delete(locationKey(txHash));
@@ -482,49 +566,20 @@ public class EvmMetaStore {
                 store.delete(key);
             }
         }
-        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_HEIGHT})) {
-            if (heightFromKey(key) > height) {
-                store.delete(key);
+        for (byte prefix : new byte[]{PREFIX_HEIGHT, PREFIX_PENDING, PREFIX_LOG_BLOOM, PREFIX_DEPOSITS,
+                PREFIX_WITHDRAWALS, PREFIX_SKIP}) {
+            for (byte[] key : store.prefixKeyLookup(new byte[]{prefix})) {
+                if (heightFromKey(key) > executionBoundary) {
+                    store.delete(key);
+                }
             }
         }
-        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_PENDING})) {
-            if (heightFromKey(key) > height) {
-                store.delete(key);
-            }
-        }
-        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_LOG_BLOOM})) {
-            if (heightFromKey(key) > height) {
-                store.delete(key);
-            }
-        }
-        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_DEPOSITS})) {
-            if (heightFromKey(key) > height) {
-                store.delete(key);
-            }
-        }
-        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_WITHDRAWALS})) {
-            if (heightFromKey(key) > height) {
-                store.delete(key);
-            }
-        }
-        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_RELEASES})) {
-            if (heightFromKey(key) > height) {
-                store.delete(key);
-            }
-        }
-        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_MATURITY})) {
-            if (heightFromKey(key) > height) {
-                store.delete(key);
-            }
-        }
-        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_SKIP})) {
-            if (heightFromKey(key) > height) {
-                store.delete(key);
-            }
-        }
-        for (byte[] key : store.prefixKeyLookup(new byte[]{PREFIX_FEE_DEBIT})) {
-            if (heightFromKey(key) > height) {
-                store.delete(key);
+        for (byte prefix : new byte[]{PREFIX_RELEASES, PREFIX_FEE_DEBIT, PREFIX_MATURITY,
+                PREFIX_MATURITY_ARCHIVE}) {
+            for (byte[] key : store.prefixKeyLookup(new byte[]{prefix})) {
+                if (heightFromKey(key) > nativeBoundary) {
+                    store.delete(key);
+                }
             }
         }
     }
