@@ -478,6 +478,14 @@ public class BlockchainImpl implements Blockchain {
                 return ImportResult.INVALID_BLOCK;
             }
 
+            // Audit round 2, C4: a verifiably divergent EVM state-root anchor is INVALID at import, so
+            // the block is never stored and never becomes a pretop (EVM-gated; see the helper). Placed
+            // before any side effect on linked blocks (orphan removal / tx history below).
+            ImportResult anchorReject = rejectDivergentAnchorAtImport(block);
+            if (anchorReject != null) {
+                return anchorReject;
+            }
+
             int id = 0;
             // Remove links
             for (Address ref : all) {
@@ -1004,6 +1012,135 @@ public class BlockchainImpl implements Blockchain {
     }
 
     /**
+     * The height at which a main-candidate block that links {@code pretopHashLow} will be CONFIRMED:
+     * {@code nmain} + (the still-unconfirmed BI_MAIN_CHAIN candidates on the max-difficulty path from
+     * the pretop down to the newest BI_MAIN block) + 1. This mirrors {@link #checkNewMain}'s walk,
+     * which is what assigns heights (one per candidate, lowest first), so the prediction is a function
+     * of chain POSITION and is invariant to when confirmations happen to run. {@code nmain + 1} is NOT
+     * that height: checkNewMain confirms a candidate only once another candidate sits above it, so the
+     * pretop is always unconfirmed at template time and -- because tryToConnect runs checkNewMain
+     * before the top update -- usually its predecessor too. Audit round 2, finding C3.
+     */
+    public synchronized long predictNextMainHeight(Bytes32 pretopHashLow) {
+        return xdagStats.nmain + unconfirmedCandidatesBelow(pretopHashLow) + 1;
+    }
+
+    /**
+     * The still-unconfirmed BI_MAIN_CHAIN candidates on the max-difficulty path from {@code
+     * pretopHashLow} (inclusive) down to the newest BI_MAIN block -- exactly the blocks
+     * {@link #checkNewMain} will confirm, in order, before anything above the pretop.
+     */
+    private long unconfirmedCandidatesBelow(Bytes32 pretopHashLow) {
+        long unconfirmed = 0;
+        if (pretopHashLow != null) {
+            for (Block block = getBlockByHash(pretopHashLow, false);
+                 block != null && ((block.getInfo().flags & BI_MAIN) == 0);
+                 block = getMaxDiffLink(getBlockByHash(block.getHashLow(), true), true)) {
+                if ((block.getInfo().flags & BI_MAIN_CHAIN) != 0) {
+                    unconfirmed++;
+                }
+            }
+        }
+        return unconfirmed;
+    }
+
+    /**
+     * The link a main candidate extends: among its block links from an EARLIER epoch, the one carrying
+     * the most difficulty (the same argmax {@link #calculateBlockDiff} stores as the max-diff link).
+     * Null when the block has no such link.
+     */
+    private Block mainChainLinkOf(Block block) {
+        Block best = null;
+        BigInteger bestDiff = null;
+        long epoch = XdagTime.getEpoch(block.getTimestamp());
+        for (Address ref : block.getLinks()) {
+            if (ref.isAddress) {
+                continue;
+            }
+            Block refBlock = getBlockByHash(ref.getAddress(), false);
+            if (refBlock == null || XdagTime.getEpoch(refBlock.getTimestamp()) >= epoch) {
+                continue;
+            }
+            BigInteger diff = refBlock.getInfo().getDifficulty();
+            if (diff == null) {
+                diff = BigInteger.ZERO;
+            }
+            if (best == null || diff.compareTo(bestDiff) > 0) {
+                best = refBlock;
+                bestDiff = diff;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Audit round 2, C4: import-time state-root anchor verdict. setMain's hard-reject is a fail-stop:
+     * it refuses to advance but leaves the offending block in the DAG with BI_MAIN_CHAIN, so honest
+     * miners keep building on it and the network is parked forever. Verifying at import lets a node
+     * refuse a verifiably divergent main candidate BEFORE it is stored or can become a pretop.
+     *
+     * <p>Applies to blocks that carry an anchor, or that carry a nonce (a mined main candidate) without
+     * one. The verdict is computed at the height the block would be confirmed (its chain position). The
+     * check runs only when that position is known and settled: the block must extend a main-chain
+     * block (side-chain forks are deferred to setMain) and at most one candidate below it may still be
+     * unconfirmed -- on a hard-reject network the node first settles what it can (local bookkeeping the
+     * check-main tick would do moments later). BEHIND (blob-deferred) and ABSENT never reject.
+     *
+     * @return the INVALID_BLOCK result to return from tryToConnect, or null to continue importing
+     */
+    private ImportResult rejectDivergentAnchorAtImport(Block block) {
+        EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
+        if (evmProcessor == null) {
+            return null;
+        }
+        EvmStateAnchor anchor = block.getEvmStateAnchor();
+        if (anchor == null && block.getNonce() == null) {
+            return null; // wallet / link blocks: never anchored, never main candidates
+        }
+        io.xdag.config.spec.EvmSpec evmSpec = kernel.getConfig().getEvmSpec();
+        boolean hardReject = evmSpec.isEvmStateRootHardReject();
+        Block pretop = mainChainLinkOf(block);
+        Bytes32 pretopHash = null;
+        if (pretop != null) {
+            if ((pretop.getInfo().flags & (BI_MAIN_CHAIN | BI_MAIN)) == 0) {
+                return null; // extends a side chain: its position depends on a reorg -- setMain decides
+            }
+            pretopHash = pretop.getHashLow();
+        }
+        long unconfirmed = unconfirmedCandidatesBelow(pretopHash);
+        if (unconfirmed > 1 && hardReject) {
+            settleMainChainConfirmations();
+            unconfirmed = unconfirmedCandidatesBelow(pretopHash);
+        }
+        if (unconfirmed > 1) {
+            return null; // not settled for this position (e.g. still syncing): setMain re-verifies
+        }
+        long height = xdagStats.nmain + unconfirmed + 1;
+        long lag = evmSpec.getEvmStateRootLag();
+        AnchorVerdict verdict = verifyStateRootAnchor(anchor, height,
+                evmSpec.getEvmStateRootActivationHeight(), lag,
+                evmProcessor::chainedRootAt, evmProcessor::hasUnexecutedHeightAtOrBelow);
+        if (verdict != AnchorVerdict.MISMATCH) {
+            return null;
+        }
+        long anchoredHeight = anchoredEvmHeight(height, lag);
+        Bytes32 expectedRoot = anchoredHeight >= 0 ? evmProcessor.chainedRootAt(anchoredHeight) : null;
+        if (!hardReject) {
+            log.warn("EVM state-root anchor mismatch at import for block {} (would confirm at height {}) - "
+                    + "accepting (warn-only). committed={}, this node's root as-of {} = {}",
+                    block.getHashLow(), height, anchor, anchoredHeight, expectedRoot);
+            return null;
+        }
+        log.error("EVM state-root anchor mismatch at import for block {} (would confirm at height {}) - "
+                + "rejecting (hard-reject). committed={}, this node's root as-of {} = {}",
+                block.getHashLow(), height, anchor, anchoredHeight, expectedRoot);
+        ImportResult result = ImportResult.INVALID_BLOCK;
+        result.setHashlow(block.getHashLow());
+        result.setErrorInfo("EVM state-root anchor mismatch (would confirm at height " + height + ")");
+        return result;
+    }
+
+    /**
      * Rollback to specified block
      */
     public void unWindMain(Block block) {
@@ -1365,12 +1502,18 @@ public class BlockchainImpl implements Blockchain {
                         evmSpec.getEvmStateRootActivationHeight(), evmSpec.getEvmStateRootLag(),
                         evmProcessor::chainedRootAt, evmProcessor::hasUnexecutedHeightAtOrBelow);
                 if (verdict == AnchorVerdict.MISMATCH) {
-                    long anchorHeight = mainNumber - evmSpec.getEvmStateRootLag();
+                    long anchorHeight = anchoredEvmHeight(mainNumber, evmSpec.getEvmStateRootLag());
                     Bytes32 expectedRoot = evmProcessor.chainedRootAt(anchorHeight);
                     if (evmSpec.isEvmStateRootHardReject()) {
+                        // Last resort (C4): verifiable mismatches are already INVALID at import, so a
+                        // block only reaches this point if it was accepted while this node was BEHIND
+                        // or unsettled. Freezing here keeps native state consistent; recovery = re-sync.
                         log.error("CRITICAL: EVM state-root anchor mismatch at height {} - refusing to "
                                 + "advance the main chain (hard-reject). committed={}, this node's root "
-                                + "as-of {} = {}", mainNumber, blockAnchor, anchorHeight, expectedRoot);
+                                + "as-of {} = {}. The block passed import while this node could not "
+                                + "verify it (behind/unsettled); if the network accepted it, re-sync "
+                                + "this node's EVM state.", mainNumber, blockAnchor, anchorHeight,
+                                expectedRoot);
                         return;
                     }
                     log.warn("EVM state-root anchor mismatch at height {} - proceeding (warn-only). "
@@ -1382,7 +1525,7 @@ public class BlockchainImpl implements Blockchain {
                     // onBlobsAvailable and re-verifies on the next block. This closes the G1 latent trap.
                     log.info("EVM state-root anchor at height {} not yet verifiable (node behind on EVM "
                             + "execution at height {}); proceeding without hard-reject", mainNumber,
-                            mainNumber - evmSpec.getEvmStateRootLag());
+                            anchoredEvmHeight(mainNumber, evmSpec.getEvmStateRootLag()));
                 }
             }
             log.debug("mainNumber = {},hash = {}", mainNumber, Hex.toHexString(block.getInfo().getHash()));
@@ -1697,13 +1840,29 @@ public class BlockchainImpl implements Blockchain {
     }
 
     /**
+     * The EVM height whose chained root a main block confirmed at {@code height} commits:
+     * {@code height - lag - 1}. This is the newest EVM height an honest miner has NECESSARILY executed
+     * when it templates block N: N-1 is its still-unconfirmed pretop (checkNewMain confirms a candidate
+     * only once another candidate sits above it, i.e. once N itself connects), so the newest confirmed
+     * height at template time is N-2, and confirming N-2 executed the matured height
+     * (N-2) - lag + 1 = N - lag - 1 (delta-lagged execution, Gate 2). Anchoring root(N - lag) -- the
+     * pre-fix rule -- was unsatisfiable: that root is produced by confirming N-1, which happens only
+     * when N connects. Shared by the miner ({@link #computeStateRootAnchor}), the setMain validator and
+     * the import-time validator so all three agree by construction. Audit round 2, finding C3.
+     */
+    static long anchoredEvmHeight(long height, long lag) {
+        return height - lag - 1;
+    }
+
+    /**
      * The state-root anchor to embed in the next main block, or {@code null} when anchoring is not
-     * yet active or there is no lagged height to anchor. Static and pure for testability -- {@code
+     * yet active or there is no anchorable height. Static and pure for testability -- {@code
      * rootAt} supplies the chained root as of a height (in production, {@code EvmBlockProcessor::
-     * chainedRootAt}). The {@code daSkip} bit is the miner's committed skip decision for the height
-     * this block will mature ({@code nextHeight - lag + 1}), computed by the caller from
-     * {@code EvmBlockProcessor.maturedPayloadAvailable}. The lag must be >= 1: a lag of 0 would
-     * anchor root(H), which is not yet executed when H is mined.
+     * chainedRootAt}). {@code nextHeight} MUST be the height at which the block will be confirmed,
+     * i.e. its main-chain position ({@link #predictNextMainHeight}), not {@code nmain + 1}. The anchored
+     * height is {@link #anchoredEvmHeight}. The {@code daSkip} bit is the miner's committed skip
+     * decision for the height this block will mature ({@code nextHeight - lag + 1}), computed by the
+     * caller from {@code EvmBlockProcessor.maturedPayloadAvailable}. The lag must be >= 1.
      */
     static EvmStateAnchor computeStateRootAnchor(long nextHeight, long activationHeight, long lag,
             java.util.function.LongFunction<Bytes32> rootAt, boolean daSkip) {
@@ -1713,7 +1872,7 @@ public class BlockchainImpl implements Blockchain {
         if (nextHeight < activationHeight) {
             return null;
         }
-        long anchorHeight = nextHeight - lag;
+        long anchorHeight = anchoredEvmHeight(nextHeight, lag);
         if (anchorHeight < 0) {
             return null;
         }
@@ -1739,8 +1898,9 @@ public class BlockchainImpl implements Blockchain {
     /**
      * Validates a main block's state-root anchor. Mirrors {@link #computeStateRootAnchor}'s guards so
      * an honest miner and this validator agree: below {@code activationHeight} or when {@code
-     * height - lag < 0} anchoring is inactive (ABSENT). Otherwise an anchor is REQUIRED and must
-     * commit BOTH the exact lag height {@code height - lag} AND the chained root as of that height
+     * height - lag - 1 < 0} anchoring is inactive (ABSENT). Otherwise an anchor is REQUIRED and must
+     * commit BOTH the exact anchored height {@link #anchoredEvmHeight} ({@code height - lag - 1}) AND
+     * the chained root as of that height
      * (via {@code rootAt}, in production {@code EvmBlockProcessor::chainedRootAt}). Pure/static for
      * testability. {@code lag} is assumed >= 1 (config-enforced; see computeStateRootAnchor).
      *
@@ -1760,7 +1920,7 @@ public class BlockchainImpl implements Blockchain {
         if (height < activationHeight) {
             return AnchorVerdict.ABSENT;
         }
-        long expectedHeight = height - lag;
+        long expectedHeight = anchoredEvmHeight(height, lag);
         if (expectedHeight < 0) {
             return AnchorVerdict.ABSENT;
         }
@@ -1774,6 +1934,52 @@ public class BlockchainImpl implements Blockchain {
         }
         Bytes expectedLow = EvmStateAnchor.rootLowOf(rootAt.apply(expectedHeight));
         return anchor.rootLow().equals(expectedLow) ? AnchorVerdict.MATCH : AnchorVerdict.MISMATCH;
+    }
+
+    /**
+     * Miner side of the state-root anchor (G1-T2, fixed per audit round 2 C3). Returns the anchor a
+     * main-candidate block linking {@code pretopHashLow} must carry, or {@code null} when EVM is off or
+     * anchoring is inactive for that height. Steps: (1) settle every confirmation this node can already
+     * make, so the anchored root exists locally (tryToConnect runs checkNewMain BEFORE it updates the
+     * top, so right after a block connects the height below the pretop is normally still unconfirmed
+     * until the periodic check-main tick); (2) predict this block's confirm height from its chain
+     * position; (3) decide daSkip for the height this block will mature ({@code nextHeight - lag + 1});
+     * (4) anchor {@code root(nextHeight - lag - 1)} -- see {@link #anchoredEvmHeight}.
+     * A miner that is blob-BEHIND anchors a stale root and its block is a MISMATCH on up-to-date nodes
+     * (rejected at import, C4) -- a behind node must not extend the chain.
+     */
+    public EvmStateAnchor prepareStateRootAnchor(Bytes32 pretopHashLow) {
+        EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
+        if (evmProcessor == null) {
+            return null;
+        }
+        settleMainChainConfirmations();
+        long nextHeight = predictNextMainHeight(pretopHashLow);
+        io.xdag.config.spec.EvmSpec evmSpec = kernel.getConfig().getEvmSpec();
+        long lag = evmSpec.getEvmStateRootLag();
+        // G2-T1c: commit a skip for the height this block will mature iff its buffered EVM payload is
+        // not locally available. At lag=1 the matured height is this not-yet-confirmed block, which is
+        // never buffered, so daSkip stays false. A stale/racy daSkip cannot fork: it only affects
+        // root(nextHeight - lag + 1), which later blocks' anchors commit and every node verifies.
+        boolean daSkip = !evmProcessor.maturedPayloadAvailable(nextHeight, lag);
+        return computeStateRootAnchor(nextHeight, evmSpec.getEvmStateRootActivationHeight(), lag,
+                evmProcessor::chainedRootAt, daSkip);
+    }
+
+    /**
+     * Runs {@link #checkNewMain} until it stops confirming (bounded). Confirmation is pure local
+     * bookkeeping over blocks already accepted, so doing it now instead of at the next check-main tick
+     * changes nothing but timing. Only called on EVM-enabled nodes (from prepareStateRootAnchor and the
+     * import-time anchor check), so EVM-off behavior is byte-identical.
+     */
+    void settleMainChainConfirmations() {
+        for (int i = 0; i < 64; i++) {
+            long before = xdagStats.nmain;
+            checkNewMain();
+            if (xdagStats.nmain == before) {
+                return;
+            }
+        }
     }
 
     public Block createMainBlock() {
@@ -1802,32 +2008,13 @@ public class BlockchainImpl implements Blockchain {
         refs.add(coinbase);
         res++;
 
-        // Predict this block's height as nmain+1; the confirmed height may differ after a reorg, but
-        // the executor's dual-lookup (EvmBlockProcessor.expandRefs) is content-addressed — it accepts
-        // both ref forms at any height — so a boundary mis-prediction is liveness-safe.
-        long nextHeight = xdagStats.nmain + 1;
         // Compute the state-root anchor before the orphan/evmTxRef budget is spent so its one field
-        // slot is reserved (the anchor occupies a field like evmTxRef does).
-        // Best-effort snapshot: nmain and chainedRootAt are read outside the blockchain monitor, so a
-        // concurrent setMain/rollbackTo could make this anchor stale or off-by-one. Liveness-safe like
-        // the evmTxRef above -- the candidate's anchor is re-validated against this node's own
-        // post-setMain root at import time (G1-T3), so a stale anchor yields a discarded candidate,
-        // never a fork.
-        EvmStateAnchor stateRootAnchor = null;
-        EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
-        if (evmProcessor != null) {
-            io.xdag.config.spec.EvmSpec evmSpec = kernel.getConfig().getEvmSpec();
-            long lag = evmSpec.getEvmStateRootLag();
-            // G2-T1c: commit a skip for the height this block will mature (nextHeight - lag + 1) iff its
-            // buffered EVM payload is not locally available. At lag=1 the matured height is this
-            // not-yet-confirmed block, which is never buffered, so daSkip stays false (devnet unchanged).
-            // Best-effort like the root above: a stale/racy daSkip cannot fork -- it only affects
-            // root(nextHeight - lag + 1), which the NEXT block's anchor commits and every node re-derives
-            // and verifies at import, so a divergent winning daSkip yields a discarded candidate, not a split.
-            boolean daSkip = !evmProcessor.maturedPayloadAvailable(nextHeight, lag);
-            stateRootAnchor = computeStateRootAnchor(nextHeight, evmSpec.getEvmStateRootActivationHeight(),
-                    lag, evmProcessor::chainedRootAt, daSkip);
-        }
+        // slot is reserved (the anchor occupies a field like evmTxRef does). The height is this block's
+        // main-chain POSITION (predictNextMainHeight), not nmain+1 -- see prepareStateRootAnchor (C3).
+        // The type-2 gate below still keys off nmain+1 deliberately: it is a node-local UX filter, and
+        // consensus re-checks the activation height at execution (EvmBlockProcessor.executeOne).
+        long nextHeight = xdagStats.nmain + 1;
+        EvmStateAnchor stateRootAnchor = prepareStateRootAnchor(pretopHash);
         if (stateRootAnchor != null) {
             res++; // reserve the anchor's field slot
         }

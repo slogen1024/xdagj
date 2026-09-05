@@ -46,7 +46,7 @@ Mapping to the task list: ADR-013 = G1-D1, ADR-014 = G1-D2, ADR-015 = G2-D1, ADR
 
 | | |
 |--|--|
-| **Decision (accepted)** | Block H anchors `root(H−δ)` (a **lagged**, already-final root) where δ = the new `evm.stateRootLag` parameter; a block whose anchored root mismatches the verifier's recomputed root is **hard-rejected on mainnet**, **warn-only on testnet** during a shakedown window |
+| **Decision (accepted)** | Block H anchors `root(H−δ−1)` (**corrected 2026-09-05**, audit C3: originally `root(H−δ)`, which an honest miner cannot know at template time because H−1 is confirmed only when H connects; a **lagged**, already-final root) where δ = the new `evm.stateRootLag` parameter; a block whose anchored root mismatches the verifier's recomputed root is **hard-rejected on mainnet**, **warn-only on testnet** during a shakedown window |
 | **Status** | **Accepted** — hard fork |
 | **Depends on** | ADR-013 (defines *what* root) |
 | **Context** | The load-bearing problem: EVM executes at `setMain`, i.e. **after** a main block is confirmed (ADR-004 / §12.1). So when block H is mined/packed, H's post-execution root **does not exist yet**. "Commit this block's own root" is impossible under XDAG's execution timing. |

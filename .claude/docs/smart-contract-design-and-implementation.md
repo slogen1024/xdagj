@@ -346,7 +346,7 @@ return digest        // child 永远返回 Bytes32.ZERO——只有 root 摘要
 3. **Phase 2**（ebc97ac3 + 7829e906）：
    - **origin = `genesisRoot()`**（`EvmBlockProcessor.java:312`）= keccak(排序后的 `addr(20)‖balance(32)`…)——创世配置错的节点从第 0 步就分叉（此前 alloc 错误在账户被触碰前不可见）；空 alloc = keccak(空) 固定常数。
    - **height 折入**每级根（跨高度错位可检）。
-   - **跨节点比对**：原计划把 (height,root) 锚进原生区块字段（PoW 承诺、进 DAG 不可抹），曾被 §1.1 的 4-bit 码位耗尽堵死、退而用 **P2P gossip 0x1E**（只检测不硬拒）。**G1-T1..T4 已落地字段锚定并退役 gossip**：G1-T1 用块格式修订（版本字节 + 0x0A 重解）腾出承诺位 → `EvmStateAnchor` 把 `root(H−δ)` 锚进主块（PoW 承诺）→ `setMain` 用 `chainedRootAt(H−δ)` 重算比对、分歧**硬拒**（mainnet；testnet 先告警）→ G1-T4 删除 0x1E gossip（§7.3 已退役）。承诺从"链下、靠诚实节点、只检测"升级为"PoW 承诺、共识硬拒"。
+   - **跨节点比对**：原计划把 (height,root) 锚进原生区块字段（PoW 承诺、进 DAG 不可抹），曾被 §1.1 的 4-bit 码位耗尽堵死、退而用 **P2P gossip 0x1E**（只检测不硬拒）。**G1-T1..T4 已落地字段锚定并退役 gossip**：G1-T1 用块格式修订（版本字节 + 0x0A 重解）腾出承诺位 → `EvmStateAnchor` 把 `root(H−δ−1)`（2026-09-05 修正）锚进主块（PoW 承诺）→ 导入期 `tryToConnect` 与 `setMain` 用 `chainedRootAt(H−δ−1)` 重算比对、分歧**硬拒**（导入期直接拒收，不入 DAG）（mainnet；testnet 先告警）→ G1-T4 删除 0x1E gossip（§7.3 已退役）。承诺从"链下、靠诚实节点、只检测"升级为"PoW 承诺、共识硬拒"。
 
 ### 6.4 `EvmMetaStore` — 检查点、收据、重放脚本、反向索引
 
@@ -436,7 +436,7 @@ MetaMask(chainId 51966) ──eth_sendRawTransaction──► EthRequestHandler
             → USDT runtime code 落 EVM_STATE(0x01 codeHash 寻址) → 退未用 gas，净费燃烧
             → 收据(status=1, contractAddress, logs) 入 EVM_META 0x01
             → chainedRoot = keccak(prev‖height‖(tx,status,gas)‖stateDelta) 入检查点
-       └ chainedRoot 锚进主块 EvmStateAnchor (root(H−δ), PoW 承诺) → setMain 用 chainedRootAt 重算硬拒分歧
+       └ chainedRoot 锚进主块 EvmStateAnchor (root(H−δ−1)，2026-09-05 修正，PoW 承诺) → setMain 用 chainedRootAt 重算硬拒分歧
   └ 15s tick: requestPendingEvmBlobs（I4 缺 blob 补拉；状态根 gossip 已于 G1-T4 退役）
 MetaMask 轮询:
   └ eth_getTransactionReceipt: findTxLocation O(1) → 收据 + 合约地址
@@ -554,7 +554,7 @@ MetaMask 轮询:
 
 ### 13.3 主网启用（`evm.enabled=true` 于共享网络）前的硬门槛
 
-1. ~~**PoW 承诺的状态根**~~ **✅ 已实现（G1-T1..T4，2026-08-25/26）**：块格式修订（版本字节 + 0x0A 重解）把 `(height, root(H−δ))` 锚回原生区块 `EvmStateAnchor`，`setMain` 用 `chainedRootAt(H−δ)` 重算硬拒分歧（`evm.stateRootHardReject`：mainnet true/testnet 告警），0x1E gossip 已退役。绝对状态根（MPT/SMT + eth_getProof）留作主网后独立 fork。
+1. ~~**PoW 承诺的状态根**~~ **✅ 已实现（G1-T1..T4，2026-08-25/26）**：块格式修订（版本字节 + 0x0A 重解）把 `(height, root(H−δ−1))`（2026-09-05 审计 C3 修正：原 root(H−δ) 对诚实矿工不可满足——H−1 要等 H 连上才确认）锚回原生区块 `EvmStateAnchor`，`setMain` 用 `chainedRootAt(H−δ)` 重算硬拒分歧（`evm.stateRootHardReject`：mainnet true/testnet 告警），0x1E gossip 已退役。绝对状态根（MPT/SMT + eth_getProof）留作主网后独立 fork。
 2. **DA 强制**：导入期载荷可用性检查，或共识层带超时跳过标记——消除"blob 永不可得"的停摆。
 3. 费用路由（燃烧→coinbase）、mempool per-sender 配额；~~EIP-3529 精确退款~~ **已实现（2026-08-22，门控于 `evm.eip3529ActivationHeight`，G3-T2）**；chainId 注册与激活高度见 §13.1 缺陷 4。
 

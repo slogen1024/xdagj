@@ -25,14 +25,15 @@ package io.xdag.core;
 
 import static io.xdag.BlockBuilder.generateAddressBlock;
 import static io.xdag.core.ImportResult.IMPORTED_BEST;
+import static io.xdag.core.ImportResult.INVALID_BLOCK;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUT;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 import io.xdag.Kernel;
-import io.xdag.core.BlockchainImpl.AnchorVerdict;
 import io.xdag.Wallet;
 import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
@@ -70,26 +71,29 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.mockito.Mockito;
 
-public class StateRootAnchorRejectTest {
+/**
+ * Audit round 2, finding C4: a main candidate whose state-root anchor is verifiably wrong must be
+ * rejected AT IMPORT (never stored, never a pretop) on a hard-reject network, so one crafted block
+ * cannot park the whole network in setMain's freeze. A node that cannot verify yet (BEHIND) accepts.
+ */
+public class StateRootAnchorImportRejectTest {
 
     @Rule
     public TemporaryFolder root = new TemporaryFolder();
 
-    // DevnetConfig with hard-reject forced on (devnet conf ships false). AbstractConfig implements
-    // EvmSpec and getEvmSpec() returns `this`, so overriding this single method is enough.
     private final Config config = new DevnetConfig() {
         @Override
         public boolean isEvmStateRootHardReject() {
             return true;
         }
     };
-
     private Wallet wallet;
     private Kernel kernel;
     private RocksdbFactory dbFactory;
     private EvmMetaStore evmMetaStore;
     private BlockchainImpl blockchain;
     private ECKeyPair poolKey;
+    private long generateTime = 1600616700000L;
 
     @Before
     public void setUp() throws Exception {
@@ -148,9 +152,13 @@ public class StateRootAnchorRejectTest {
         dbFactory.close();
     }
 
-    /** A main-candidate block linking {@code pretop}, anchored exactly as createMainBlock anchors. */
-    private Block minedBlock(Bytes32 pretop, long xdagTime, int seed) {
-        EvmStateAnchor anchor = blockchain.prepareStateRootAnchor(pretop);
+    private long nextEpochTime() {
+        generateTime += 64000L;
+        return XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime));
+    }
+
+    /** A main candidate linking {@code pretop} carrying {@code anchor} (null = anchorless). */
+    private Block candidate(Bytes32 pretop, long xdagTime, EvmStateAnchor anchor, int seed) {
         List<Address> pending = new ArrayList<>();
         pending.add(new Address(pretop, XDAG_FIELD_OUT, false));
         Block b = new Block(config, xdagTime, null, pending, true, null, null, -1, XAmount.ZERO, null, null,
@@ -160,79 +168,90 @@ public class StateRootAnchorRejectTest {
         return b;
     }
 
-    /** Address block + {@code count} correctly anchored main candidates at past epochs; returns the top. */
+    /** Address block + {@code count} honestly anchored candidates; returns the top. */
     private Bytes32 buildAnchoredChain(int count) {
-        long generateTime = 1600616700000L;
         Block addressBlock = generateAddressBlock(config, poolKey, generateTime);
         assertSame(IMPORTED_BEST, blockchain.tryToConnect(addressBlock));
         Bytes32 pretop = addressBlock.getHashLow();
         for (int i = 1; i <= count; i++) {
-            generateTime += 64000L;
-            long xdagTime = XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime));
-            Block b = minedBlock(pretop, xdagTime, i);
+            long xdagTime = nextEpochTime();
+            Block b = candidate(pretop, xdagTime, blockchain.prepareStateRootAnchor(pretop), i);
             assertSame(IMPORTED_BEST, blockchain.tryToConnect(b));
             pretop = b.getHashLow();
         }
-        blockchain.settleMainChainConfirmations();
         return pretop;
     }
 
-    @Test
-    public void setMain_stalls_on_a_divergent_anchor() {
-        buildAnchoredChain(5);
-        long nmainBefore = blockchain.getXdagStats().nmain;
-        assertTrue("fixture must have confirmed heights so the next one is anchorable", nmainBefore >= 2);
-        long expectedHeight = BlockchainImpl.anchoredEvmHeight(nmainBefore + 1,
-                config.getEvmSpec().getEvmStateRootLag());
-
-        // This node's real root as-of the expected height:
-        Bytes32 realRoot = Bytes32.fromHexString("0x" + "aa".repeat(32));
-        evmMetaStore.putHeightRecord(expectedHeight, realRoot, Bytes32.ZERO, 0, 1L);
-
-        // A main block whose anchor commits the RIGHT height but a WRONG root.
+    private EvmStateAnchor wrongRootAnchor(EvmStateAnchor honest) {
+        assertNotNull("fixture must be at an anchorable height", honest);
         Bytes wrongLow = Bytes.repeat((byte) 0xFF, EvmStateAnchor.ROOT_LOW_LENGTH);
-        EvmStateAnchor bad = new EvmStateAnchor(expectedHeight, wrongLow, false);
-        Block block = new Block(config, XdagTime.getMainTime(), null, null, true, null, null, -1,
-                XAmount.ZERO, null, null, bad);
-        // Materialize info.hash so a MISSING check would advance nmain (a real regression), instead
-        // of NPE-ing on the log.debug(Hex.toHexString(hash)) line for an unrelated reason.
-        block.getHash();
-
-        blockchain.setMain(block);
-
-        assertEquals("hard-reject must not advance the main chain",
-                nmainBefore, blockchain.getXdagStats().nmain);
+        return new EvmStateAnchor(honest.height(), wrongLow, honest.daSkip());
     }
 
     @Test
-    public void a_freshly_mined_anchor_passes_validation_on_the_same_node() {
-        // A block mined via createMainBlock (G1-T2) must validate MATCH against this node's own
-        // verifyStateRootAnchor (G1-T3) at the height it will be CONFIRMED (its chain position, C3),
-        // and must pass its own import-time anchor check (C4). This pins miner<->validator agreement.
-        buildAnchoredChain(5);
-        Bytes32 pretop = blockchain.getPreTopMainBlockForLink(XdagTime.getMainTime());
-        long nextHeight = blockchain.predictNextMainHeight(pretop);
-        long lag = config.getEvmSpec().getEvmStateRootLag();
-        long anchoredHeight = BlockchainImpl.anchoredEvmHeight(nextHeight, lag);
-        assertTrue(anchoredHeight >= 0);
-        // Make the anchored root distinctive so the root comparison is meaningful (not genesis==genesis).
-        Bytes32 realRoot = Bytes32.fromHexString("0x" + "bb".repeat(32));
-        evmMetaStore.putHeightRecord(anchoredHeight, realRoot, Bytes32.ZERO, 0, 1L);
+    public void wrong_root_anchor_is_rejected_at_import_and_a_sibling_continues_the_chain() {
+        Bytes32 pretop = buildAnchoredChain(5);
+        long nmainBefore = blockchain.getXdagStats().nmain;
+        long xdagTime = nextEpochTime();
 
-        Block mined = blockchain.createMainBlock();
-        EvmStateAnchor anchor = mined.getEvmStateAnchor();
-        assertNotNull("createMainBlock must attach an anchor on active devnet", anchor);
-        assertEquals("anchor must commit the root as of nextHeight - lag - 1", anchoredHeight, anchor.height());
-        assertEquals(EvmStateAnchor.rootLowOf(realRoot), anchor.rootLow());
+        Block bad = candidate(pretop, xdagTime, wrongRootAnchor(blockchain.prepareStateRootAnchor(pretop)), 100);
+        assertSame("a verifiably divergent anchor must be INVALID at import",
+                INVALID_BLOCK, blockchain.tryToConnect(bad));
+        assertNull("a rejected block must not be stored", blockchain.getBlockByHash(bad.getHashLow(), false));
 
-        AnchorVerdict verdict = BlockchainImpl.verifyStateRootAnchor(anchor, nextHeight,
-                config.getEvmSpec().getEvmStateRootActivationHeight(), lag,
-                kernel.getEvmBlockProcessor()::chainedRootAt, deferredHeight -> false);
-        assertEquals("a freshly mined anchor must validate MATCH on its own node",
-                AnchorVerdict.MATCH, verdict);
+        // An honest sibling for the same epoch takes the slot and the chain keeps confirming.
+        Block good = candidate(pretop, xdagTime, blockchain.prepareStateRootAnchor(pretop), 101);
+        assertSame(IMPORTED_BEST, blockchain.tryToConnect(good));
+        Bytes32 top = good.getHashLow();
+        for (int i = 0; i < 3; i++) {
+            Block b = candidate(top, nextEpochTime(), blockchain.prepareStateRootAnchor(top), 200 + i);
+            assertSame(IMPORTED_BEST, blockchain.tryToConnect(b));
+            top = b.getHashLow();
+        }
+        blockchain.settleMainChainConfirmations();
+        assertTrue("the chain must have advanced past the rejected block's slot",
+                blockchain.getXdagStats().nmain > nmainBefore + 1);
+        assertTrue("the honest sibling must be confirmed as main",
+                blockchain.getBlockByHash(good.getHashLow(), false).getInfo().getHeight() > 0);
+    }
 
-        // (Import acceptance of an honestly anchored candidate is pinned in StateRootAnchorImportRejectTest:
-        // createMainBlock stamps the END of the current epoch, which tryToConnect's timestamp check
-        // rejects as "in the future" when connected immediately in a test.)
+    @Test
+    public void anchorless_mined_candidate_is_rejected_at_import_once_anchoring_is_active() {
+        Bytes32 pretop = buildAnchoredChain(5);
+        Block bare = candidate(pretop, nextEpochTime(), null, 100);
+        assertSame(INVALID_BLOCK, blockchain.tryToConnect(bare));
+        assertNull(blockchain.getBlockByHash(bare.getHashLow(), false));
+    }
+
+    @Test
+    public void wrong_height_anchor_is_rejected_at_import() {
+        Bytes32 pretop = buildAnchoredChain(5);
+        EvmStateAnchor honest = blockchain.prepareStateRootAnchor(pretop);
+        // The pre-fix index (one higher) is exactly what an un-upgraded miner would commit.
+        EvmStateAnchor wrongHeight = new EvmStateAnchor(honest.height() + 1, honest.rootLow(), honest.daSkip());
+        Block bad = candidate(pretop, nextEpochTime(), wrongHeight, 100);
+        assertSame(INVALID_BLOCK, blockchain.tryToConnect(bad));
+    }
+
+    @Test
+    public void a_node_that_is_behind_on_evm_execution_accepts_and_defers() {
+        Bytes32 pretop = buildAnchoredChain(5);
+        EvmStateAnchor honest = blockchain.prepareStateRootAnchor(pretop);
+        // Simulate a blob-deferred (pending) height at/below the anchored height: this node cannot
+        // verify the root yet -> BEHIND -> accept (setMain re-verifies later), never INVALID.
+        evmMetaStore.putPending(honest.height(), Bytes32.ZERO, 1L, List.of(Bytes32.ZERO));
+        Block unverifiable = candidate(pretop, nextEpochTime(), wrongRootAnchor(honest), 100);
+        ImportResult result = blockchain.tryToConnect(unverifiable);
+        assertTrue("BEHIND must not reject at import, got " + result,
+                result == IMPORTED_BEST || result == ImportResult.IMPORTED_NOT_BEST);
+        assertNotNull(blockchain.getBlockByHash(unverifiable.getHashLow(), false));
+    }
+
+    @Test
+    public void honest_anchor_still_imports() {
+        Bytes32 pretop = buildAnchoredChain(5);
+        Block good = candidate(pretop, nextEpochTime(), blockchain.prepareStateRootAnchor(pretop), 100);
+        assertSame(IMPORTED_BEST, blockchain.tryToConnect(good));
+        assertEquals(IMPORTED_BEST, ImportResult.IMPORTED_BEST);
     }
 }
