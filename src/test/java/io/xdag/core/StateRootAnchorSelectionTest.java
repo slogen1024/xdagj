@@ -44,15 +44,30 @@ public class StateRootAnchorSelectionTest {
     @Test
     public void returns_null_when_the_lagged_height_is_negative() {
         assertNull(BlockchainImpl.computeStateRootAnchor(0L, 0L, 2L, h -> ROOT, false));
+        // H=1, lag=1 -> 1-1-1 = -1: nothing an honest miner could have executed yet.
+        assertNull(BlockchainImpl.computeStateRootAnchor(1L, 0L, 1L, h -> ROOT, false));
+    }
+
+    @Test
+    public void anchors_the_genesis_root_for_the_first_anchorable_height() {
+        // H=2, lag=1 -> anchors height 0 (genesis origin root).
+        EvmStateAnchor anchor = BlockchainImpl.computeStateRootAnchor(2L, 0L, 1L, h -> {
+            assertEquals(0L, h);
+            return ROOT;
+        }, false);
+        assertEquals(0L, anchor.height());
     }
 
     @Test
     public void anchors_the_lagged_root_when_active() {
+        // Block N commits root(N - lag - 1): the newest EVM height an honest miner has necessarily
+        // executed when templating N (N-1 is the still-unconfirmed pretop; confirming N-2 executed
+        // (N-2) - lag + 1 = N - lag - 1). H=10, lag=1 -> 8.
         EvmStateAnchor anchor = BlockchainImpl.computeStateRootAnchor(10L, 0L, 1L, h -> {
-            assertEquals("must read the root as of H-lag", 9L, h);
+            assertEquals("must read the root as of H-lag-1", 8L, h);
             return ROOT;
         }, false);
-        assertEquals(9L, anchor.height());
+        assertEquals(8L, anchor.height());
         assertEquals(EvmStateAnchor.rootLowOf(ROOT), anchor.rootLow());
         assertFalse("daSkip defaults to false (include)", anchor.daSkip());
     }

@@ -6,6 +6,15 @@
 **Supersedes/bounds:** D10 stall-and-defer (as the *enforcement* mechanism); precondition for the bridge CRITICAL-skip downgrade (§2.5)
 **Hard fork:** yes — bundled into the shared `evm.stateRootActivationHeight` activation with Gate 1
 
+> **Erratum (2026-09-05, audit round 2 C3/C4 — see `docs/superpowers/plans/2026-09-05-evm-anchor-c3-c4-fix.md`).**
+> The premise "mining block-N happens just after `setMain(N−1)` ran" is false: `checkNewMain` confirms a
+> candidate only once another candidate sits above it, so at template time N−1 (the pretop) is still
+> unconfirmed and the newest executed EVM height is `E(N−2) = N−δ−1`. The anchor index is therefore
+> **block-N commits `root(N−δ−1)`** (`BlockchainImpl.anchoredEvmHeight`), the miner derives N from its
+> chain position (`predictNextMainHeight`, not `nmain+1`), and a verifiably divergent anchor is rejected
+> at import (`tryToConnect`), not only frozen in `setMain`. Every `root(N−δ)` below reads `root(N−δ−1)`.
+> The §Reorg claim that daSkip decisions are re-read from replayed blocks is also false (audit C1, open).
+
 ---
 
 ## 0. Problem & one-line shape
@@ -20,7 +29,7 @@
 
 Two facts in the delivered code are individually correct but jointly force this design:
 
-1. **The anchor is δ-lagged** (ADR-014, delivered): block-N commits `root(N − δ)`.
+1. **The anchor is δ-lagged** (ADR-014, delivered): block-N commits `root(N − δ − 1)` (corrected 2026-09-05; the original text said `root(N − δ)`, see erratum).
 2. **EVM execution is immediate** (delivered): `setMain(N)` executes height N the moment N confirms.
 
 A *skip* cannot be divergence-free under immediate execution. If a fast node (has the blob) executes height K while a slow node (lacks it) skips K, their chained roots fork forever. Divergence-freedom **requires** that no node executes K until the network's committed decision for K is visible to all — i.e. the skip decision must itself be PoW-committed and δ-lagged. Hence execution must move to finality depth.
@@ -29,7 +38,7 @@ A *skip* cannot be divergence-free under immediate execution. If a fast node (ha
 
 Consequences of `E(M) = M − δ + 1`:
 - `setMain(N)` executes/skips the **matured height `N − δ + 1`**.
-- Block-N commits `root(N − δ) = root(maturedHeight − 1)` — unchanged from G1; the anchor verify still compares against `chainedRootAt(N − δ)`.
+- Block-N commits `root(N − δ − 1) = root(maturedHeight − 2)` (corrected 2026-09-05); the anchor verify compares against `chainedRootAt(N − δ − 1)`.
 - Block-N's `daSkip` bit governs the matured height `N − δ + 1` (the height `setMain(N)` acts on).
 - EVM only ever executes heights that are **δ − 1 confirmations deep** ⇒ any reorg shallower than δ−1 never touches EVM state (a real bonus; D9's EVM replay becomes safety-only near-dead-code).
 - **δ = 1 degenerates to today's behavior** (`E(N) = N`, immediate, skip inert). Real DA enforcement needs **δ ≥ 2**; shared nets use δ = 16. Devnet keeps `stateRootLag = 1` for existing G1 tests, so G2 execution/skip integration tests construct a config with **δ ≥ 2** explicitly (the pure verifiers already take δ as a parameter; the processor gains one — see §4).
@@ -72,7 +81,7 @@ This is the existing EVM_META pending queue generalized from "only stalled heigh
 ### 2.3 What does NOT change
 
 - Block binary format, `EvmStateAnchor` codec, `blockFormatVersion` — all delivered by G1-T1.
-- The anchor index "block-N commits `root(N−δ)`" and `chainedRootAt` semantics (G1-T2).
+- The anchor index (now "block-N commits `root(N−δ−1)`", corrected 2026-09-05) and `chainedRootAt` semantics (G1-T2).
 - Native consensus / PoW / main-chain selection — EVM execution point moves but native `setMain` mutation order, `nmain++`, rewards, reorg `unWindMain` structure are untouched.
 - P2P message codes (tx 0x1B–0x1D, batch 0x1F–0x20). **No new P2P** — the miner's include/skip decision is local (does it have the blob at pack-time), committed in the block; validators read the committed bit. Blob fetch reuses existing gossip/retry.
 
@@ -104,7 +113,7 @@ folded through the same `executeList` root-chaining machinery (§6.2 of the desi
 
 ### 3.3 Reworked anchor verify — the BEHIND verdict (T1b)
 
-`setMain(N)` matures `K = N−δ+1` first, then verifies block-N's anchor (commits `root(N−δ)`). New third outcome:
+`setMain(N)` verifies block-N's anchor (commits `root(N−δ−1)`, corrected 2026-09-05; the import-time check in `tryToConnect` already rejected verifiable mismatches on hard-reject nets), then matures `K = N−δ+1`. New third outcome:
 
 | Verdict | Condition | Action |
 |--|--|--|

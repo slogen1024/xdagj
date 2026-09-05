@@ -437,18 +437,19 @@ public class MainBlockEvmPackingTest {
                 new EvmBlockProcessor(EvmConfig.devnet(), evmStateSource, evmTxStore, evmMetaStore));
 
         BlockchainImpl lag2Chain = new BlockchainImpl(lag2Kernel);
-        // nmain=1 → nextHeight=2 → anchorHeight=2-2=0 (non-null) → maturedEvmHeight=1
-        lag2Chain.getXdagStats().nmain = 1;
+        // No pretop on this harness, so nextHeight = nmain+1. nmain=2 → nextHeight=3 →
+        // anchorHeight = 3-2-1 = 0 (non-null, C3 index) → maturedEvmHeight = 3-2+1 = 2.
+        lag2Chain.getXdagStats().nmain = 2;
 
         // Seed a checkpoint at h=0 so chainedRootAt(0) resolves (required for a non-null anchor).
         Bytes32 seeded = Bytes32.fromHexString("0x" + "11".repeat(32));
         evmMetaStore.putHeightRecord(0L, seeded, Bytes32.ZERO, 0, 1000L);
 
-        // ── Case A: matured height 1 has a ref whose blob is NOT in evmTxStore ──────────────────
+        // ── Case A: matured height 2 has a ref whose blob is NOT in evmTxStore ──────────────────
         // phantom is unknown to txStore → expandRefs → unknownRefs non-empty → complete()=false
         // → maturedPayloadAvailable=false → daSkip=true
         Bytes32 phantom = Bytes32.fromHexString("0x" + "ab".repeat(32));
-        evmMetaStore.putMaturityEntry(1L,
+        evmMetaStore.putMaturityEntry(2L,
                 Bytes32.fromHexString("0x" + "cc".repeat(32)), 1001L,
                 List.of(phantom), List.of());
         EvmStateAnchor skipAnchor = lag2Chain.createMainBlock().getEvmStateAnchor();
@@ -459,7 +460,7 @@ public class MainBlockEvmPackingTest {
         // pooledTx stores the tx blob via evmTxPool.add → evmTxStore; use its hash as the ref.
         EvmTransaction present = pooledTx(evmKey, 0);
         Bytes32 presentRef = Bytes32.wrap(present.getHash().getBytes());
-        evmMetaStore.putMaturityEntry(1L,
+        evmMetaStore.putMaturityEntry(2L,
                 Bytes32.fromHexString("0x" + "cc".repeat(32)), 1001L,
                 List.of(presentRef), List.of());
         EvmStateAnchor includeAnchor = lag2Chain.createMainBlock().getEvmStateAnchor();
@@ -470,10 +471,11 @@ public class MainBlockEvmPackingTest {
 
     @Test
     public void createMainBlock_attaches_the_state_root_anchor_when_active() {
-        // devnet: activation=0, lag=1 => the mined block carries an anchor of the chained root
-        // as-of H-1. Seed a run of checkpoints all with the SAME root so the assertion is robust to
-        // the exact next height on a fresh harness (the floor checkpoint <= any anchorHeight>=0 is
-        // still `seeded`), and assert on rootLow rather than a hardcoded height.
+        // devnet: activation=0, lag=1 => a block confirmed at H carries an anchor of the chained root
+        // as-of H-lag-1 (C3). A fresh harness has no pretop, so the predicted height is nmain+1; put
+        // nmain at 3 so the anchored height (4-1-1 = 2) exists. Seed a run of checkpoints all with the
+        // SAME root so the assertion is robust to the exact anchored height, and assert on rootLow.
+        blockchain.getXdagStats().nmain = 3;
         Bytes32 seeded = Bytes32.fromHexString("0x" + "11".repeat(32));
         for (long h = 0; h <= 4; h++) {
             evmMetaStore.putHeightRecord(h, seeded, Bytes32.ZERO, 0, 1000L);

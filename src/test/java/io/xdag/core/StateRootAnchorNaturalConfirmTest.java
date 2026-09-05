@@ -28,11 +28,11 @@ import static io.xdag.core.ImportResult.IMPORTED_BEST;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUT;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 import io.xdag.Kernel;
-import io.xdag.core.BlockchainImpl.AnchorVerdict;
 import io.xdag.Wallet;
 import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
@@ -70,20 +70,24 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.mockito.Mockito;
 
-public class StateRootAnchorRejectTest {
+/**
+ * Audit round 2, finding C3 regression: blocks anchored the way the miner anchors them (settle ->
+ * predict position -> root(N - lag - 1)) must confirm through the NATURAL tryToConnect -> checkNewMain
+ * path under hard-reject. Under the pre-fix rule (nmain+1, root(N - lag)) every such block was a
+ * MISMATCH and setMain froze the chain.
+ */
+public class StateRootAnchorNaturalConfirmTest {
 
     @Rule
     public TemporaryFolder root = new TemporaryFolder();
 
-    // DevnetConfig with hard-reject forced on (devnet conf ships false). AbstractConfig implements
-    // EvmSpec and getEvmSpec() returns `this`, so overriding this single method is enough.
+    // Devnet + hard-reject forced on, so a MISMATCH freezes nmain instead of merely logging.
     private final Config config = new DevnetConfig() {
         @Override
         public boolean isEvmStateRootHardReject() {
             return true;
         }
     };
-
     private Wallet wallet;
     private Kernel kernel;
     private RocksdbFactory dbFactory;
@@ -160,79 +164,49 @@ public class StateRootAnchorRejectTest {
         return b;
     }
 
-    /** Address block + {@code count} correctly anchored main candidates at past epochs; returns the top. */
-    private Bytes32 buildAnchoredChain(int count) {
+    @Test
+    public void miner_anchored_blocks_confirm_through_checkNewMain_under_hard_reject() {
         long generateTime = 1600616700000L;
         Block addressBlock = generateAddressBlock(config, poolKey, generateTime);
         assertSame(IMPORTED_BEST, blockchain.tryToConnect(addressBlock));
         Bytes32 pretop = addressBlock.getHashLow();
-        for (int i = 1; i <= count; i++) {
+
+        int blocks = 12;
+        List<Block> mined = new ArrayList<>();
+        for (int i = 1; i <= blocks; i++) {
             generateTime += 64000L;
             long xdagTime = XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime));
             Block b = minedBlock(pretop, xdagTime, i);
-            assertSame(IMPORTED_BEST, blockchain.tryToConnect(b));
+            assertSame("block " + i + " must import (an import-time MISMATCH would be INVALID_BLOCK)",
+                    IMPORTED_BEST, blockchain.tryToConnect(b));
+            mined.add(b);
             pretop = b.getHashLow();
         }
-        blockchain.settleMainChainConfirmations();
-        return pretop;
-    }
+        // Settle everything that can be confirmed: the top candidate stays unconfirmed by design.
+        blockchain.checkNewMain();
+        blockchain.checkNewMain();
 
-    @Test
-    public void setMain_stalls_on_a_divergent_anchor() {
-        buildAnchoredChain(5);
-        long nmainBefore = blockchain.getXdagStats().nmain;
-        assertTrue("fixture must have confirmed heights so the next one is anchorable", nmainBefore >= 2);
-        long expectedHeight = BlockchainImpl.anchoredEvmHeight(nmainBefore + 1,
-                config.getEvmSpec().getEvmStateRootLag());
+        long nmain = blockchain.getXdagStats().nmain;
+        assertTrue("hard-reject must not have frozen the chain: nmain=" + nmain, nmain >= blocks - 1);
 
-        // This node's real root as-of the expected height:
-        Bytes32 realRoot = Bytes32.fromHexString("0x" + "aa".repeat(32));
-        evmMetaStore.putHeightRecord(expectedHeight, realRoot, Bytes32.ZERO, 0, 1L);
-
-        // A main block whose anchor commits the RIGHT height but a WRONG root.
-        Bytes wrongLow = Bytes.repeat((byte) 0xFF, EvmStateAnchor.ROOT_LOW_LENGTH);
-        EvmStateAnchor bad = new EvmStateAnchor(expectedHeight, wrongLow, false);
-        Block block = new Block(config, XdagTime.getMainTime(), null, null, true, null, null, -1,
-                XAmount.ZERO, null, null, bad);
-        // Materialize info.hash so a MISSING check would advance nmain (a real regression), instead
-        // of NPE-ing on the log.debug(Hex.toHexString(hash)) line for an unrelated reason.
-        block.getHash();
-
-        blockchain.setMain(block);
-
-        assertEquals("hard-reject must not advance the main chain",
-                nmainBefore, blockchain.getXdagStats().nmain);
-    }
-
-    @Test
-    public void a_freshly_mined_anchor_passes_validation_on_the_same_node() {
-        // A block mined via createMainBlock (G1-T2) must validate MATCH against this node's own
-        // verifyStateRootAnchor (G1-T3) at the height it will be CONFIRMED (its chain position, C3),
-        // and must pass its own import-time anchor check (C4). This pins miner<->validator agreement.
-        buildAnchoredChain(5);
-        Bytes32 pretop = blockchain.getPreTopMainBlockForLink(XdagTime.getMainTime());
-        long nextHeight = blockchain.predictNextMainHeight(pretop);
         long lag = config.getEvmSpec().getEvmStateRootLag();
-        long anchoredHeight = BlockchainImpl.anchoredEvmHeight(nextHeight, lag);
-        assertTrue(anchoredHeight >= 0);
-        // Make the anchored root distinctive so the root comparison is meaningful (not genesis==genesis).
-        Bytes32 realRoot = Bytes32.fromHexString("0x" + "bb".repeat(32));
-        evmMetaStore.putHeightRecord(anchoredHeight, realRoot, Bytes32.ZERO, 0, 1L);
-
-        Block mined = blockchain.createMainBlock();
-        EvmStateAnchor anchor = mined.getEvmStateAnchor();
-        assertNotNull("createMainBlock must attach an anchor on active devnet", anchor);
-        assertEquals("anchor must commit the root as of nextHeight - lag - 1", anchoredHeight, anchor.height());
-        assertEquals(EvmStateAnchor.rootLowOf(realRoot), anchor.rootLow());
-
-        AnchorVerdict verdict = BlockchainImpl.verifyStateRootAnchor(anchor, nextHeight,
-                config.getEvmSpec().getEvmStateRootActivationHeight(), lag,
-                kernel.getEvmBlockProcessor()::chainedRootAt, deferredHeight -> false);
-        assertEquals("a freshly mined anchor must validate MATCH on its own node",
-                AnchorVerdict.MATCH, verdict);
-
-        // (Import acceptance of an honestly anchored candidate is pinned in StateRootAnchorImportRejectTest:
-        // createMainBlock stamps the END of the current epoch, which tryToConnect's timestamp check
-        // rejects as "in the future" when connected immediately in a test.)
+        int anchored = 0;
+        for (Block b : mined) {
+            Block stored = blockchain.getBlockByHash(b.getHashLow(), false);
+            long height = stored.getInfo().getHeight();
+            if (height == 0) {
+                continue; // the still-unconfirmed top
+            }
+            EvmStateAnchor anchor = b.getEvmStateAnchor();
+            if (height - lag - 1 < 0) {
+                assertNull("no anchorable height yet at confirmed height " + height, anchor);
+            } else {
+                assertNotNull("confirmed height " + height + " must carry an anchor", anchor);
+                assertEquals("anchor must commit root(height - lag - 1) for confirmed height " + height,
+                        height - lag - 1, anchor.height());
+                anchored++;
+            }
+        }
+        assertTrue("the scenario must exercise real anchors", anchored >= blocks - 3);
     }
 }
