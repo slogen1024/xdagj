@@ -41,3 +41,31 @@ Gate-2 design premise "mining N happens just after setMain(N−1)" is false.
 
 ## Docs to update
 DA-skip design (root index), ADR-014 line, audit brief §2/§5, Chinese design doc, audit round-2 report.
+
+---
+
+# Addendum — C1/C2 fix (2026-09-05)
+
+## C2 (skip path bypasses the pending-order gate)
+`skipMaturedHeight` checkpointed immediately from `latestRoot()`, so with an earlier blob-deferred
+height pending it chained ahead of it. Fix: when `pendingHeights()` is non-empty, persist the skip
+marker + deposits and `putPending(height, blockHash, ts, List.of())`; `onBlobsAvailable` drains it
+in order and `executeAndCheckpoint` folds the sentinel from the marker (same path replay uses).
+
+## C1 (shallow reorg pins the orphaned block's daSkip decision)
+Matured height M = N−δ+1 is decided by block N. If N is unwound (depth < δ), M's outcome must be
+undone and re-decided by the replacement block. Decisions:
+- **Archive, don't delete, the consumed maturity entry**: new EVM_META family `0x0C` (same layout as
+  `0x09`), written when M matures, pruned at `matured − historyWindow`.
+- **Two sweep boundaries** in `EvmMetaStore.removeAbove(executionBoundary, nativeBoundary)`:
+  execution artifacts (0x00–0x07, 0x0A, 0x0B) above `lowestUnwound − δ`; native-height journals
+  (0x08 releases, 0x09 maturity, 0x0C archive) above `lowestUnwound − 1`. Releases at re-opened
+  heights stem from burns ≤ target (config invariant W ≥ δ−1) and stay valid; releases of re-opened
+  burns land at ≥ lowestUnwound and were reversed by the walk.
+- **`EvmBlockProcessor.rollbackForReorg(lowestUnwound, lag)`**: `rollbackTo`-style wipe+replay to
+  `target = lowestUnwound − lag`, then restore the archived entries of `(target, lowestUnwound−1]`
+  into `0x09` so the new chain's blocks re-mature them under their own `daSkip`. At lag=1 this is
+  byte-identical to the previous `rollbackTo(lowestUnwound − 1)`.
+- **Native side** (`unWindMain`, before the EVM sweep): for each re-opened height, reverse its 0x0B
+  fee debit (lock re-credit) AND un-credit block h's amount/fee (it stays main, so `unSetMain` will
+  not do it). Pending heights above target are swept; deposits/burns/skip markers are re-derived.

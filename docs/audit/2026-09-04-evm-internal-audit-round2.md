@@ -18,19 +18,21 @@
 
 ## 1. 共识 / δ 延迟执行（High）
 
-### C1. 浅重组（深度 < δ）后，被孤立区块的 `daSkip` 决策被"钉死"，看过孤块的节点永久分叉
+### C1. ✅ 已修复（2026-09-05：成熟条目归档 0x0C + `rollbackForReorg` 回滚到 lowestUnwound−δ 并重开、`unWindMain` 反转重开高度手续费）— 浅重组（深度 < δ）后，被孤立区块的 `daSkip` 决策被"钉死"，看过孤块的节点永久分叉
 `src/main/java/io/xdag/evm/EvmBlockProcessor.java:293-306`，`src/main/java/io/xdag/core/BlockchainImpl.java:1053`
 * Severity: **High** · Category: consensus-divergence / reorg-asymmetry · 触发条件: `stateRootLag ≥ 2`（testnet/mainnet=16；devnet δ=1 免疫）
 * 描述：成熟高度 M=N−δ+1 在 `setMain(N)` 时按块 N 的 `daSkip` 位**一次性**执行或跳过，并 `removeMaturityEntry(M)`。当 N 被深度 d<δ 的重组回滚时，`unWindMain` 只调 `rollbackTo(lowestUnwound−1)`，M ≤ N−1 的检查点、0x0A skip 标记、0x07 burn、0x0B 手续费日志全部保留，且没有任何代码重建 M 的 0x09 maturity entry。替代块 N′ 到来时 `getMaturityEntry(M).isEmpty() → return ZERO`，N′ 的 `daSkip` 被忽略。设计文档 `2026-08-27-evm-da-skip-marker-design.md` 声称"重组后 daSkip 从规范链重读"——实际 `rollbackTo` 只从 EVM_META 自身回放，从不读区块。
 * 失效场景（δ=16 主网）：两个矿工争同一高度 N，A 缺 M 的 blob（daSkip=true），B 有（false）。先导入 N_A 的节点跳过 M（sentinel 根、无收据、无手续费、无 burn）；随后 N_B 胜出，这些节点回滚 N_A 但 M 保持"已跳过"；只见过 N_B 的节点则执行了 M。下一块锚定 root(M)：前者在主网 hard-reject 永久停机；warn-only 网络上则静默携带分歧的原生状态（lock 余额、块 M 的 amount、已释放的提现）。攻击者只需偶尔赢一个块并置 daSkip=true；诚实矿工间的 DA 差异也会自然触发。
-* 建议：让 M 的执行成为规范链的纯函数——`unWindMain` 时回滚到 `lowestUnwound − δ`，并从仍规范的区块重建 `[lowest−δ+1, lowest−1]` 的 maturity entries（refs + 门控后的 deposits），同时对这些高度执行 `reverseEvmFeeDebit`/`reverseReleasedWithdrawals`；或改为 maturity entry 按"自身高度"而非"被消费"删除。补 δ=2 测试：N(daSkip=true) → unwind → N′(daSkip=false)，断言 root(M) 等于新同步节点。
+* **修复与验证（2026-09-05）**：`EvmMetaStore` 新增 0x0C 归档族（成熟时 0x09→0x0C，保留 max(historyWindow,64) 个高度）与双边界 `removeAbove(exec, native)`（执行产物按 `lowestUnwound−δ` 清扫；0x08 释放日志、0x0B 手续费日志、0x09/0x0C 按 `lowestUnwound−1` 清扫）；`EvmBlockProcessor.rollbackForReorg(lowestUnwound, lag)` 回滚到 `lowestUnwound−δ` 后把 `(lowestUnwound−δ, lowestUnwound−1]` 的归档条目恢复为 0x09；`unWindMain` 在此之前对这些重开高度调用 `reverseEvmFeeCreditOfReopenedHeight`（lock 回补 + 区块 amount/fee 回退）。δ=1 时与旧 `rollbackTo(lowestUnwound−1)` 字节一致。测试：`EvmBlockProcessorTest.a_shallow_reorg_reopens_the_matured_height_for_the_replacement_block`（δ=2：块 3 daSkip=true 跳过高度 2 → 回滚块 3 → 替代块 3′ daSkip=false 执行高度 2，根与只见过替代链的节点一致）、`at_lag_one_the_reorg_rollback_is_the_legacy_rollbackTo`、`EvmMetaStoreTest` 归档/恢复/双边界清扫、`EvmReorgReopenIntegrationTest`（δ=2 真实链：unwind 决定块后高度 K 收据/记录消失、maturity entry 恢复、lock 与块 K 金额回退）。
+* 建议（原文）：让 M 的执行成为规范链的纯函数——`unWindMain` 时回滚到 `lowestUnwound − δ`，并从仍规范的区块重建 `[lowest−δ+1, lowest−1]` 的 maturity entries（refs + 门控后的 deposits），同时对这些高度执行 `reverseEvmFeeDebit`/`reverseReleasedWithdrawals`；或改为 maturity entry 按"自身高度"而非"被消费"删除。补 δ=2 测试：N(daSkip=true) → unwind → N′(daSkip=false)，断言 root(M) 等于新同步节点。
 
-### C2. `skipMaturedHeight` 绕过 pending 排序门，跳过高度先于更早的 blob 延迟高度做检查点，根链顺序被永久破坏
+### C2. ✅ 已修复（2026-09-05：有 pending 高度时 skip 以空 refs 入队，由 `onBlobsAvailable` 按序 drain）— `skipMaturedHeight` 绕过 pending 排序门，跳过高度先于更早的 blob 延迟高度做检查点，根链顺序被永久破坏
 `src/main/java/io/xdag/evm/EvmBlockProcessor.java:318-326` vs `:245`，`:539`，`:636`
 * Severity: **High** · Category: consensus-divergence / execution-ordering · 触发条件: δ ≥ 2 且存在一个 blob 延迟高度（正是 DA-skip 机制要容忍的状态）
 * 描述：include 路径在 `pendingHeights()` 非空时会 `putPending` 而不执行；skip 路径无此门，直接 `executeAndCheckpoint(List.of(), …)`，而 `executeAndCheckpoint → executeList(…, latestRoot())` 取"最高检查点"。于是 H−1 pending 时，H 从 root(H−2) 链上；H−1 稍后 drain 时又从 root(H) 链上，且此时 H 的存款已先于 H−1 的交易被 mint。
 * 失效场景：受害节点 V 缺 T 的 blob → `putPending(100)`；块 116 对 101 置 daSkip=true → V 立刻 checkpoint(101)=keccak(root(99)‖…)，网络其它节点为 keccak(root(100)‖…)。T 到达后 V 的 root(100) 也错。verdict 从 BEHIND 翻成 MISMATCH → 主网 hard-reject 永久停机。攻击者只需把 T 的 blob 只广播给部分节点，再等/挖一个 daSkip=true 的块。
-* 建议：`processConfirmedBlock` 中若 `daSkip && !pendingHeights().isEmpty()`，只持久化 skip 标记+deposits，并以空 refs `putPending(height, …)` 入队，由 `onBlobsAvailable` 按序 drain（`executeList` 已按标记折叠 sentinel）。补 lag=2 测试。
+* **修复与验证（2026-09-05）**：`skipMaturedHeight` 在 `pendingHeights()` 非空时写 skip 标记+deposits 后 `putPending(height, …, List.of())`，由 `onBlobsAvailable` 按序 drain，`executeAndCheckpoint` 按标记折叠 sentinel。测试 `EvmBlockProcessorTest.a_skipped_height_waits_behind_a_blob_deferred_height`（δ=2：B 节点高度 1 缺 blob、高度 2 被跳过 → 高度 2 不得先 checkpoint；blob 到达后两高度根与 A 节点一致）。
+* 建议（原文）：`processConfirmedBlock` 中若 `daSkip && !pendingHeights().isEmpty()`，只持久化 skip 标记+deposits，并以空 refs `putPending(height, …)` 入队，由 `onBlobsAvailable` 按序 drain（`executeList` 已按标记折叠 sentinel）。补 lag=2 测试。
 
 ### C3. ✅ 已修复（2026-09-05，分支 fix/evm-anchor-c3-c4）— 矿工用 `nmain+1` 预测本块高度，与 `checkNewMain` 的确认时机差 1，锚点高度恒比验证方期望少 1
 `src/main/java/io/xdag/core/BlockchainImpl.java:1808,1827-1829` vs `:1763-1768`，`:975-1000`

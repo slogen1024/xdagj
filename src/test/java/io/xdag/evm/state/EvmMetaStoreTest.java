@@ -275,6 +275,84 @@ public class EvmMetaStoreTest {
     }
 
     @Test
+    public void maturity_entry_archives_on_maturation_and_restores_on_reorg() {
+        // Audit round 2, C1: a matured height's inputs are archived (0x0C), not deleted, so a shallow
+        // reorg that unwinds the deciding block can re-open the height under the replacement block.
+        Bytes32 ref = Bytes32.fromHexString("0x" + "ab".repeat(32));
+        BridgeDeposit dep = new BridgeDeposit(Address.fromHexString("0x1111111111111111111111111111111111111111"), 5L);
+        store.putMaturityEntry(7L, Bytes32.fromHexString("0x" + "07".repeat(32)), 1007L, List.of(ref), List.of(dep));
+        EvmMetaStore.MaturityEntry entry = store.getMaturityEntry(7L).orElseThrow();
+
+        store.archiveMaturityEntry(7L);
+        assertTrue("archived entry leaves the live buffer", store.getMaturityEntry(7L).isEmpty());
+        assertEquals(entry, store.getArchivedMaturityEntry(7L).orElseThrow());
+        assertEquals(List.of(), store.maturityHeights());
+
+        assertTrue(store.restoreMaturityEntry(7L));
+        assertEquals(entry, store.getMaturityEntry(7L).orElseThrow());
+        assertTrue(store.getArchivedMaturityEntry(7L).isEmpty());
+        assertFalse("nothing left to restore", store.restoreMaturityEntry(7L));
+        assertFalse("archiving a missing entry is a no-op", store.archiveMaturityEntry(8L));
+    }
+
+    @Test
+    public void archived_entries_prune_at_or_below_a_height() {
+        for (long h = 1; h <= 4; h++) {
+            store.putMaturityEntry(h, Bytes32.ZERO, 1000L + h, List.of(), List.of());
+            store.archiveMaturityEntry(h);
+        }
+        store.removeArchivedAtOrBelow(2L);
+        assertTrue(store.getArchivedMaturityEntry(1L).isEmpty());
+        assertTrue(store.getArchivedMaturityEntry(2L).isEmpty());
+        assertTrue(store.getArchivedMaturityEntry(3L).isPresent());
+        assertTrue(store.getArchivedMaturityEntry(4L).isPresent());
+    }
+
+    @Test
+    public void two_boundary_removeAbove_keeps_native_journals_between_the_boundaries() {
+        // Execution artifacts (height records, skip markers, fee debits, pending...) are swept above
+        // the EXECUTION boundary; native-height journals (releases 0x08, maturity 0x09, archive 0x0C)
+        // only above the NATIVE boundary. unWindMain re-opens (execution, native] on a delta-lag reorg.
+        Bytes32 root = Bytes32.fromHexString("0x" + "cd".repeat(32));
+        BridgeWithdrawal rel = new BridgeWithdrawal(Bytes.fromHexString("0x2222222222222222222222222222222222222222"), 9L);
+        for (long h = 3; h <= 6; h++) {
+            store.putHeightRecord(h, root, Bytes32.ZERO, 0, 1000L + h);
+            store.putSkipMarker(h);
+            store.putFeeDebit(h, h);
+            store.putReleases(h, List.of(rel));
+            store.putMaturityEntry(h, Bytes32.ZERO, 1000L + h, List.of(), List.of());
+        }
+        store.archiveMaturityEntry(3L);
+        store.archiveMaturityEntry(4L);
+
+        store.removeAbove(2L, 4L);
+
+        for (long h = 3; h <= 6; h++) {
+            assertTrue("height record " + h + " swept", store.getHeightRecord(h).isEmpty());
+            assertFalse("skip marker " + h + " swept", store.isSkipped(h));
+        }
+        // Fee debits are native journals: BlockchainImpl reverses+deletes those of re-opened heights
+        // itself, so the sweep must not silently drop one it did not reverse.
+        assertEquals(3L, store.getFeeDebit(3L));
+        assertEquals(4L, store.getFeeDebit(4L));
+        assertEquals(0L, store.getFeeDebit(5L));
+        assertEquals(0L, store.getFeeDebit(6L));
+        assertEquals("release journal at 3 (canonical) kept", List.of(rel), store.getReleases(3L));
+        assertEquals("release journal at 4 (canonical) kept", List.of(rel), store.getReleases(4L));
+        assertEquals("release journal at 5 (unwound) swept", List.of(), store.getReleases(5L));
+        assertEquals("release journal at 6 (unwound) swept", List.of(), store.getReleases(6L));
+        assertTrue(store.getArchivedMaturityEntry(3L).isPresent());
+        assertTrue(store.getArchivedMaturityEntry(4L).isPresent());
+        assertEquals("buffered entries of unwound heights swept", List.of(), store.maturityHeights());
+
+        // The single-boundary form is the legacy shape: both boundaries equal.
+        store.removeAbove(3L);
+        assertTrue(store.getArchivedMaturityEntry(4L).isEmpty());
+        assertEquals(List.of(), store.getReleases(4L));
+        assertTrue(store.getArchivedMaturityEntry(3L).isPresent());
+    }
+
+    @Test
     public void withdrawal_records_round_trip_in_order_and_clear_by_removeAbove() {
         List<BridgeWithdrawal> ws = List.of(
                 new BridgeWithdrawal(Bytes.fromHexString("0x3109ff8cf0be958a428c12d86c0abf64f529f7db"), 5L),

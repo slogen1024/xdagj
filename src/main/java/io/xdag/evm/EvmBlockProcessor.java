@@ -100,6 +100,8 @@ public class EvmBlockProcessor {
     private final EvmStateJournal journal;
     /** How many recent heights of reverse journals to retain (C4 window). */
     private final int historyWindow;
+    /** Floor for the matured-entry archive retention (C1) when no history window is configured. */
+    private static final int MIN_ARCHIVE_RETENTION = 64;
     /** Optional late-bound observer for WebSocket subscriptions (C6); null when no WS server runs. */
     private volatile EvmSubscriptionSink subscriptionSink;
 
@@ -299,7 +301,11 @@ public class EvmBlockProcessor {
             return BigInteger.ZERO;
         }
         EvmMetaStore.MaturityEntry entry = entryOpt.get();
-        metaStore.removeMaturityEntry(matured);
+        // C1: archive (not delete) the matured inputs so a reorg that unwinds THIS deciding block can
+        // re-open the height for the replacement block's decision (rollbackForReorg). Prune archives
+        // older than any re-openable reorg.
+        metaStore.archiveMaturityEntry(matured);
+        metaStore.removeArchivedAtOrBelow(matured - archiveRetention());
         if (daSkip) {
             skipMaturedHeight(matured, entry);
             return BigInteger.ZERO; // a skipped height executes no txs -> no fee
@@ -320,6 +326,17 @@ public class EvmBlockProcessor {
             metaStore.putDeposits(height, entry.deposits()); // deposits mint on skip (native facts)
         }
         metaStore.putSkipMarker(height);
+        if (!metaStore.pendingHeights().isEmpty()) {
+            // Audit round 2, C2: an earlier height is still blob-deferred. Checkpointing now would chain
+            // this height from latestRoot() AHEAD of it (and mint this height's deposits before the
+            // earlier height's txs run). Queue it with empty refs instead -- the same ordering gate the
+            // include path applies -- so onBlobsAvailable drains it in height order and
+            // executeAndCheckpoint folds the SKIP_SENTINEL from the marker exactly as replay does.
+            metaStore.putPending(height, entry.blockHash(), entry.timestampSeconds(), List.of());
+            log.warn("Deferring committed-skip checkpoint of main block at height {} behind blob-deferred "
+                    + "height(s) {}", height, metaStore.pendingHeights());
+            return;
+        }
         // The buffered refs are ignored (List.of()): executeAndCheckpoint sees the skip marker and
         // folds SKIP_SENTINEL instead of executing.
         executeAndCheckpoint(List.of(), height, entry.timestampSeconds(), entry.blockHash());
@@ -588,7 +605,48 @@ public class EvmBlockProcessor {
      * differs from its checkpoint indicates nondeterminism or corruption and is logged loudly.
      */
     public synchronized void rollbackTo(long height) {
-        log.info("EVM rollback to main height {}", height);
+        rollbackTo(height, height);
+    }
+
+    /**
+     * Reorg entry point under delta-lagged execution (audit round 2, C1). Height M's outcome (execute
+     * or skip) is DECIDED by block M+lag-1. When main blocks {@code >= lowestUnwoundMainHeight} are
+     * unwound, every height they decided -- {@code (lowestUnwound - lag, lowestUnwound - 1]}, all still
+     * canonical natively -- must be un-executed and re-buffered so the replacement chain's blocks
+     * re-decide them under their own committed daSkip bits. Pre-fix, rolling back to
+     * {@code lowestUnwound - 1} left the orphaned block's decision pinned: nodes that had imported the
+     * orphan diverged forever from nodes that had not. At lag=1 this is exactly the legacy
+     * {@code rollbackTo(lowestUnwound - 1)}. The caller (BlockchainImpl.unWindMain) reverses the native
+     * fee credits of the re-opened heights BEFORE calling this (their 0x0B journals are then gone).
+     */
+    public synchronized void rollbackForReorg(long lowestUnwoundMainHeight, long lag) {
+        if (lag < 1) {
+            throw new IllegalArgumentException("evm.stateRootLag must be >= 1 (got " + lag + ")");
+        }
+        long nativeBoundary = lowestUnwoundMainHeight - 1;
+        long executionBoundary = lowestUnwoundMainHeight - lag;
+        long highestBefore = metaStore.highestHeight().orElse(-1L);
+        rollbackTo(executionBoundary, nativeBoundary);
+        for (long h = executionBoundary + 1; h <= nativeBoundary; h++) {
+            if (metaStore.restoreMaturityEntry(h)) {
+                log.info("EVM reorg re-opened matured height {} (decided by unwound block {}); the "
+                        + "replacement chain re-decides it", h, h + lag - 1);
+            } else if (highestBefore >= h && h + archiveRetention() <= highestBefore) {
+                log.error("CRITICAL: EVM reorg re-opened height {} but its matured-entry archive was "
+                        + "pruned (retention {} heights); if that height carried an EVM payload this node "
+                        + "cannot re-mature it and must re-sync", h, archiveRetention());
+            }
+        }
+    }
+
+    /** Archived matured entries are kept for this many heights: the deepest re-openable reorg. */
+    private long archiveRetention() {
+        return Math.max(historyWindow, MIN_ARCHIVE_RETENTION);
+    }
+
+    private void rollbackTo(long executionBoundary, long nativeBoundary) {
+        long height = executionBoundary;
+        log.info("EVM rollback to main height {} (native journals kept through {})", height, nativeBoundary);
         // C6: re-emit each reorged-out height's logs with removed=true, sourced from EVM_META BEFORE the
         // wipe below deletes them, so re-filtering reproduces exactly the delivered set. Read the sink
         // into a local first so a concurrent setSubscriptionSink(null) cannot NPE mid-method.
@@ -606,7 +664,7 @@ public class EvmBlockProcessor {
                 }
             }
         }
-        metaStore.removeAbove(height);
+        metaStore.removeAbove(executionBoundary, nativeBoundary);
         stateStore.reset();
         if (journal != null) {
             journal.clear(); // Option A: replay below repopulates the window from genesis
