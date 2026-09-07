@@ -313,7 +313,15 @@ public class Block implements Cloneable {
                     if (this.blockFormatVersion >= 1) {
                         // NOTE: every version >= 1 is treated as the v1 anchor layout; a future
                         // format version that redefines nibble 0x0A must branch on the exact version.
-                        this.evmStateAnchor = EvmStateAnchor.parse(field.getData());
+                        // Lenient (audit round 2 U2): a malformed payload is "no anchor", never a parse
+                        // failure -- legacy nodes ignore this field, so throwing here would make new
+                        // nodes drop blocks the rest of the network accepts. Past activation the
+                        // verdict logic rejects an anchorless main candidate as MISMATCH.
+                        this.evmStateAnchor = EvmStateAnchor.parseLenient(field.getData());
+                        if (this.evmStateAnchor == null) {
+                            log.debug("ignoring malformed EVM state-root anchor field in block {}",
+                                    this.info.getHash());
+                        }
                     }
                 }
                 case XDAG_FIELD_TRANSACTION_NONCE -> txNonceField = new TxAddress(field);

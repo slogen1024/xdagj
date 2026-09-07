@@ -25,6 +25,7 @@ package io.xdag.core;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.nio.ByteOrder;
@@ -111,5 +112,34 @@ public class EvmStateAnchorTest {
         MutableBytes bad = MutableBytes.create(32);
         bad.set(0, (byte) 0x02); // an unknown (reserved) flag bit
         EvmStateAnchor.parse(bad);
+    }
+
+    // Audit round 2 U2: Block.parse must treat a malformed 0x0A payload as "no anchor" (like a legacy
+    // node ignores the field) instead of throwing and dropping the whole block.
+
+    @Test
+    public void parseLenient_returns_null_for_unknown_flag_bits() {
+        MutableBytes bad = MutableBytes.create(32);
+        bad.set(0, (byte) 0x02);
+        assertNull(EvmStateAnchor.parseLenient(bad));
+    }
+
+    @Test
+    public void parseLenient_returns_null_for_a_negative_height() {
+        MutableBytes field = MutableBytes.create(32);
+        field.set(1, (byte) 0xFF);
+        assertNull(EvmStateAnchor.parseLenient(field));
+    }
+
+    @Test
+    public void parseLenient_returns_null_for_a_non_32_byte_field() {
+        assertNull(EvmStateAnchor.parseLenient(Bytes.repeat((byte) 0x00, 16)));
+        assertNull(EvmStateAnchor.parseLenient(null));
+    }
+
+    @Test
+    public void parseLenient_decodes_a_well_formed_field_exactly_like_parse() {
+        Bytes32 payload = new EvmStateAnchor(42L, ROOT_LOW, true).toBytes();
+        assertEquals(EvmStateAnchor.parse(payload), EvmStateAnchor.parseLenient(payload));
     }
 }

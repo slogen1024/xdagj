@@ -42,6 +42,12 @@ Either way, `validateBridgeConfig` should gain the `evm.alloc`-vs-scheduled-brid
   credit paths. **Caveat for the recovery/ops doc:** a snapshot-bootstrapped node must carry the
   ADDRESS-CF seed marker with the snapshotted balances (or shared nets must keep `evm.alloc` empty,
   the current plan) — otherwise a fresh boot over snapshot state would re-seed the lock.
+- [x] **Audit round 2 (2026-09-04) High items C1–C4 / P1–P2 / U1–U2 — ALL FIXED (2026-09-05/07)**; see
+  `docs/audit/2026-09-04-evm-internal-audit-round2.md`. U1/U2 were the only UNGATED items (bite with
+  `evm.enabled=false`): `amount2xdagNew` restored to the develop-identical legacy algorithm and marked
+  CONSENSUS-FROZEN; `Block.parse` reads a malformed 0x0A anchor payload as "no anchor" (lenient), so new
+  nodes never drop a block legacy nodes accept. Ship the EVM-off release carrying these BEFORE scheduling
+  any activation height.
 - [ ] External **security audit + bug bounty + testnet shakedown** (the "external track").
 - [ ] Shared-net `minGasPrice` / `blockGasLimit` reviewed as the consensus values (devnet's `minGasPrice=1` makes gas ~free there by design).
 - [ ] Documented node-recovery path for a corrupt EVM_META (re-sync / wipe EVM_STATE) so a single bad record can't wedge a node with no operator guidance.

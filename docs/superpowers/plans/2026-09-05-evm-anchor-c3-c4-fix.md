@@ -88,3 +88,30 @@ as the batch they are (defense in depth, self-heals a pre-fix poisoned store).
 `EvmTxPool.add` rejects `rawRlp.size() > maxTxBytes` with `AddResult.TOO_LARGE` (RPC → -32602
 "transaction too large"); Kernel passes `evm.maxP2pTxBytes` so admission and P2P ingest share one bound;
 the 7-arg constructor keeps the 128 KiB default.
+
+---
+
+# Addendum — U1/U2 fix (2026-09-07)
+
+Both items are UNGATED (they bite with `evm.enabled=false`), so they had to be closed before the EVM-off
+release that precedes any activation height.
+
+## U1 (amount conversion drifted from the deployed network)
+Commit `7987b414` rewrote `BasicUtils.amount2xdagNew` as an exact BigDecimal. That function feeds
+`XAmount.ofXAmount` on every consensus path (link amounts, stored balances, snapshot import, supply). The
+legacy algorithm (`new BigDecimal(first + temp / 2^32)` through a double) drops fraction bits once the
+integer part reaches 2^21 XDAG, so the two implementations disagree by ≥1 nano on large amounts and a
+mixed-version network splits on a near-full spend from a ≥2.1M XDAG balance. Decision: **the deployed
+behaviour is the consensus**; restore the legacy body verbatim, mark it CONSENSUS-FROZEN (any change is a
+height-gated hard fork), keep the exact variants only on the display-only `amount2xdag` overloads, and pin
+develop-computed outputs in `BasicUtilsTest` / `XAmountTest`.
+
+## U2 (strict anchor parse drops blocks legacy nodes accept)
+A block with transport byte 0 ≥ 1 reinterprets nibble 0x0A as `EvmStateAnchor`; `EvmStateAnchor.parse`
+threw on reserved flag bits / negative height, and NEW_BLOCK/SYNC_BLOCK construct the Block at decode
+time, so new nodes dropped a block develop nodes accept (and could never fetch it → stall behind the main
+block referencing it). Decision: **parse leniently, judge at verdict time** — `EvmStateAnchor.parseLenient`
+returns `null` for a malformed payload, `Block.parse` uses it (debug log only), the raw bytes/hash are
+untouched, and past activation `verifyStateRootAnchor(null, …)` already returns MISMATCH for a main
+candidate, so no consensus check is weakened. Tests: `EvmStateAnchorTest`, `BlockEvmStateRootTest`,
+`NewBlockMessageMalformedAnchorTest`.

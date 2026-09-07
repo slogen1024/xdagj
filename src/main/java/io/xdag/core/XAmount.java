@@ -104,7 +104,11 @@ public class XAmount implements Comparable<XAmount> {
     }
 
     /**
-     * Convert from C-style XDAG amount representation
+     * Convert from C-style XDAG amount representation (32.32 fixed point) to nano.
+     *
+     * <p>CONSENSUS-FROZEN (audit round 2 U1): used for every link amount, every stored balance and the
+     * supply. The rounding behaviour of {@link BasicUtils#amount2xdagNew(long)} is part of network
+     * consensus; changing it (even towards "more exact") is a hard fork.
      */
     public static XAmount ofXAmount(long n) {
         BigDecimal d = BasicUtils.amount2xdagNew(n);
@@ -112,7 +116,10 @@ public class XAmount implements Comparable<XAmount> {
     }
 
     /**
-     * Convert to C-style XDAG amount representation
+     * Convert to C-style XDAG amount representation (32.32 fixed point).
+     *
+     * <p>CONSENSUS-FROZEN, see {@link #ofXAmount(long)}: this is the inverse conversion every node uses
+     * when storing balances and encoding link amounts.
      */
     public UInt64 toXAmount() {
         return BasicUtils.xdag2amount(toDecimal(9, XUnit.XDAG).doubleValue());

@@ -159,4 +159,19 @@ public class XAmountTest {
 
     }
 
+
+    /**
+     * Audit round 2 U1: ofXAmount is the C-style (32.32 fixed point) -> nano conversion used for every
+     * link amount and every stored balance. It is CONSENSUS-FROZEN: these nano values are what a
+     * develop-branch node computes, and a node that computes anything else forks on large balances.
+     */
+    @Test
+    public void ofXAmount_is_consensus_frozen_to_the_legacy_conversion_for_large_amounts() {
+        assertEquals(XAmount.of(2097152604444440L), XAmount.ofXAmount((1L << 21 << 32) + 0x9ABCDEF1L));
+        assertEquals(XAmount.of(1073741824995555639L), XAmount.ofXAmount((1L << 30 << 32) + 0xFEDCBA98L));
+        assertEquals(XAmount.of(3000000071111111L), XAmount.ofXAmount((3_000_000L << 32) + 0x12345679L));
+        assertEquals(XAmount.of(10000000500000000L), XAmount.ofXAmount((10_000_000L << 32) + 0x7FFFFFFFL));
+        assertEquals(XAmount.of(2147483648000000000L), XAmount.ofXAmount(Long.MAX_VALUE));
+        assertEquals(XAmount.of(1000604444441L), XAmount.ofXAmount((1000L << 32) + 0x9ABCDEF1L));
+    }
 }

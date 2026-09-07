@@ -146,4 +146,51 @@ public class BlockEvmStateRootTest {
         assertNotNull(reparsed.getInfo().getRemark());
         assertNotNull(reparsed.getOutsig());
     }
+
+    /**
+     * Audit round 2 U2: a block whose transport byte 0 is >= 1 reinterprets nibble 0x0A as the anchor.
+     * A legacy (develop) node ignores that field whatever it holds, so a malformed payload must not
+     * make the new parser throw -- otherwise every block an old node accepts that carries such a
+     * field is dropped by new nodes (never fetchable, stalls behind the main block referencing it).
+     */
+    private Block versionedBlockWithMalformedAnchorSlot(byte flags, byte heightTopByte) {
+        Block block = new Block(config, now(), null, null, false, null, null, -1,
+                XAmount.ZERO, null);
+        block.signOut(key);
+
+        MutableBytes data = block.getXdagBlock().getData().mutableCopy();
+        data.set(0, (byte) 0x01);                          // transport byte 0 = format version 1
+        long typeWord = data.getLong(8, ByteOrder.LITTLE_ENDIAN);
+        typeWord |= 0x0AL << (5 * 4);                       // slot 5 nibble = 0x0A, unused in this block
+        data.set(8, Bytes.wrap(BytesUtils.longToBytes(typeWord, true)));
+        data.set(5 * 32, flags);                            // anchor flags byte
+        data.set(5 * 32 + 1, heightTopByte);                // top byte of the big-endian height
+        return new Block(new XdagBlock(data));
+    }
+
+    @Test
+    public void a_versioned_block_with_unknown_anchor_flags_parses_with_no_anchor() {
+        Block reparsed = versionedBlockWithMalformedAnchorSlot((byte) 0x02, (byte) 0x00);
+        assertEquals(1, reparsed.getBlockFormatVersion());
+        assertNull("malformed anchor payload is ignored, not fatal", reparsed.getEvmStateAnchor());
+        assertNotNull("the rest of the block still parses", reparsed.getOutsig());
+        assertNotNull(reparsed.getHash());
+    }
+
+    @Test
+    public void a_versioned_block_with_a_negative_anchor_height_parses_with_no_anchor() {
+        Block reparsed = versionedBlockWithMalformedAnchorSlot((byte) 0x00, (byte) 0xFF);
+        assertEquals(1, reparsed.getBlockFormatVersion());
+        assertNull(reparsed.getEvmStateAnchor());
+        assertNotNull(reparsed.getOutsig());
+    }
+
+    @Test
+    public void a_versioned_block_with_a_well_formed_anchor_slot_still_decodes_it() {
+        // flags=0x01 (DA skip), height top byte 0 => height 0: well-formed, must still be read
+        Block reparsed = versionedBlockWithMalformedAnchorSlot((byte) 0x01, (byte) 0x00);
+        assertNotNull(reparsed.getEvmStateAnchor());
+        assertTrue(reparsed.getEvmStateAnchor().daSkip());
+        assertEquals(0L, reparsed.getEvmStateAnchor().height());
+    }
 }
