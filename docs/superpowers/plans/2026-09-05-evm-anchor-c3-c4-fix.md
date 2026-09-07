@@ -137,3 +137,34 @@ precise — `applyBlock` recognises a rejected `XDAG_FIELD_IN` spend whose input
 still-pending EVM height with fee routing active, records `evmFeeDivergenceHeight` (first occurrence) and
 logs CRITICAL with re-sync guidance; `setMain` logs CRITICAL at deferral; the drain logs a late-credit WARN.
 No consensus change. Follow-up: surface `getEvmFeeDivergenceHeight()` via RPC/telnet status.
+
+---
+
+# Addendum — remaining round-2 items (2026-09-08)
+
+## E1/E2/E4/E5/B2 → one fork gate `evm.semanticsV2ActivationHeight` (196f8d3c)
+Every item changes receipts / roots, so all are consensus-gated. Decision: ONE gate for the whole
+"execution semantics v2" pack instead of five — none is meaningful alone, and shared nets have all gates
+at MAX anyway (devnet 0). Mechanics: `XdagEvmExecutor.ExecutionOptions(semanticsV2, gasPrice,
+blockHashLookup)` threaded per tx (LEGACY reproduces pre-fork byte-for-byte); v2 creation processor with
+EIP-170/3541 rules; `finishTransaction` deletes self-destructed + EIP-161 empty accounts on the tx-level
+updater before commit; `collect()` drops logs of failed frames; `RocksDbWorldUpdater(store, txOriginal)`
+selects the E5 original-storage climb; `EvmBlockProcessor` sets baseFee=0 and gates the burn scan.
+BLOCKHASH resolves via a Kernel-wired canonical lookup (replay-safe: heights ≤ target are canonical).
+
+## E6 → `EvmConsensusParams` pins (9366265c)
+Shared networks pin chainId / gas limit / minGasPrice / lag / withdrawal delay / recovery address /
+alloc emptiness / every fork height in code; `AbstractConfig` compares the EFFECTIVE loaded values and
+refuses to start on a mismatch (a consensus change is a release, never a setting). Sanity checks on all
+networks (lag ≥ 1, gasLimit > 0, chainId > 0, minGasPrice ≥ 0, delay ≥ 1). Devnet unpinned.
+
+## R1–R6 + E3 → executed-head RPC (bd1e8013)
+`Blockchain.getEvmExecutedHeight()` is THE head for eth_*; state between the highest checkpoint and it
+is live; ranges past it clamp; blocks past it are null. blockHash filter; pool-aware pending nonce;
+block-wide receipt coordinates; bisected estimateGas over a simulation that charges intrinsic gas;
+real blooms; block-context simulation with the fork options in force at the tagged height.
+
+## R7 → batches, revert data, real newHeads, WS query token (3027b066)
+`JsonRpcHandler.processOne` shared by HTTP/WS; code-3 reverts with `data`; `EvmSubscriptionSink.HeadInfo`
+built by `BlockchainImpl.buildEvmHeadInfo` and announced by `announceEvmHeads` (setMain + drain,
+bounded catch-up, reorg lowers the watermark); `AuthHandler` accepts `?token=`.
