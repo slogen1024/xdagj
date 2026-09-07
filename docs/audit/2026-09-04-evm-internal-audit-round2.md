@@ -10,7 +10,7 @@
 - **功能完整性**：EVM 执行、RocksDB 世界状态、EIP-2718 type-2、批次打包、双向桥、PoW 锚定的状态根 + δ 延迟执行 + DA-skip、EIP-3529、手续费入矿工奖励（transfer-from-lock）、交易池公平驱逐——**设计文档承诺的机制均已落地并有测试**。devnet（δ=1）可完整跑通部署/调用/桥接。
 - **但尚不能在 testnet/mainnet 激活**：本轮发现 **4 个共识级 High**（其中 3 个只在 δ≥2 即共享网配置下触发，1 个与 δ 无关）、**2 个 P2P High**（1 个在 devnet 上即为 live）、**2 个未受 `evm.enabled` 门控、EVM 关闭的滚动升级期就会生效的 High/Medium**。
 - **无远程可利用的鉴权绕过 / 注入 / 私钥泄露**（RPC/WS/P2P/配置/DB 面全部复核，见 §5）。
-- 主网/测试网配置仍为 `evm.enabled=false`、全部激活高度 `Long.MAX_VALUE`，**当前线上无 live 漏洞**（U1/U2 例外：它们不受该门控）。
+- 主网/测试网配置仍为 `evm.enabled=false`、全部激活高度 `Long.MAX_VALUE`，**当前线上无 live 漏洞**（U1/U2 曾是例外——不受该门控——已于 2026-09-07 修复）。
 
 严重度约定：High = 可导致诚实节点分叉/停机/资金不守恒；Medium = 需特定条件或影响集成方正确性；Low = 规范偏差/纵深防御。
 
@@ -92,7 +92,7 @@
 
 ## 3. 未受 `evm.enabled` 门控、EVM 关闭的滚动升级期即生效（High / Medium）
 
-### U1. `BasicUtils.amount2xdagNew` 从 double 改为精确 BigDecimal，改变了共识路径上的金额换算
+### U1. ✅ 已修复（2026-09-07：`amount2xdagNew` 恢复为与 develop 位级一致的遗留 double 算法并标注 CONSENSUS-FROZEN；精确版仅保留在展示路径 `amount2xdag`）— `BasicUtils.amount2xdagNew` 从 double 改为精确 BigDecimal，改变了共识路径上的金额换算
 `src/main/java/io/xdag/utils/BasicUtils.java:311-316`（commit `7987b414`，仅在 dev-evm，develop 上没有）
 * Severity: **High（latent，混合版本网络）** · Category: consensus semantic change in shared utility
 * 描述：旧实现 `new BigDecimal(first + tem)` 中 `first + tem` 是 double，`first ≥ 2^21`（≈209.7 万 XDAG）时丢失小数位；新实现精确。该函数经 `XAmount.ofXAmount` 用于**每个链接金额**（`Address.java:151`）、**每次余额读取**（`AddressStoreImpl.java:78,94`）、快照导入、`getSupply`。本人数值复现（每档 20000 个随机金额）：
@@ -106,14 +106,16 @@
   | 2^30 | 99.6% | 120 nano |
 
 * 失效场景：滚动升级期间（计划先带 EVM-off 发布）任何持仓 ≥ 2.1M XDAG 的地址（交易所、大矿池）做接近全额的转账：旧节点算出的余额低 1+ nano 而拒绝应用，新节点应用 → 余额及后续可花性在两群节点间永久分歧。无需攻击者。
-* 建议：恢复与旧版本位级一致的算法（精确版仅用于展示路径，或以分叉高度门控），加回归测试固定 `first ≥ 2^21` 的旧输出；把 `ofXAmount/toXAmount` 视为共识冻结。
+* **修复与验证（2026-09-07）**：`BasicUtils.amount2xdagNew` 恢复 `double tem = temp / 2^32; new BigDecimal(first + tem)` 原样实现（注释与 `@implNote` 标明 CONSENSUS-FROZEN：任何改动都是硬分叉，须按高度门控）；`XAmount.ofXAmount/toXAmount` javadoc 标为共识冻结；展示用 `amount2xdag(long/UInt64)` 保留精确版（无共识调用者）。回归测试以 develop 算法算出的值为准：`BasicUtilsTest.amount2xdagNew_is_consensus_frozen_to_the_legacy_double_algorithm`（2^21 / 2^30 档的 `toPlainString` 精确值，以及 2^21 以下两算法一致的样本）、`XAmountTest.ofXAmount_is_consensus_frozen_to_the_legacy_conversion_for_large_amounts`（2^21 档差 1 nano、2^30 档差 84 nano 的样本 + `Long.MAX_VALUE`）。修复前这两个测试在 dev-evm 上失败（`2097152604444441` vs 期望 `2097152604444440`），修复后通过。
+* 建议（原文）：恢复与旧版本位级一致的算法（精确版仅用于展示路径，或以分叉高度门控），加回归测试固定 `first ≥ 2^21` 的旧输出；把 `ofXAmount/toXAmount` 视为共识冻结。
 
-### U2. `Block.parse` 对 transport 头字节 0 ≥ 1 的块把 0x0A 字段当锚点解析并在畸形时抛异常，新节点拒收旧节点接受的块
+### U2. ✅ 已修复（2026-09-07：`Block.parse` 改用 `EvmStateAnchor.parseLenient`，畸形 0x0A 载荷 → "无锚"而非解析异常，与旧节点忽略该字段的行为一致）— `Block.parse` 对 transport 头字节 0 ≥ 1 的块把 0x0A 字段当锚点解析并在畸形时抛异常，新节点拒收旧节点接受的块
 `src/main/java/io/xdag/core/Block.java:297, 312-318`；`src/main/java/io/xdag/core/EvmStateAnchor.java:79-86`
 * Severity: **Medium-High（latent，混合版本网络）** · Category: cross-version split
 * 描述：`blockFormatVersion = transportHeader & 0xFF`；≥1 时 `EvmStateAnchor.parse` 对未知 flag 位/负高度抛 `IllegalArgumentException`。`NewBlockMessage`/`SyncBlockMessage` 构造时即 `new Block(xdagBlock)` 解析，异常被 `MessageFactory` 包成 `MessageException`，块被丢弃。master 对未知字段类型 `default -> {}` 忽略。两个版本导入时都不校验字段类型。transport 头被哈希（不可被中继篡改）但由出块者自由选择。
 * 失效场景：任何人广播一个自签 tx 块，transport 字节 0=0x01、含一个 flags=0x02 的 0x0A 字段。旧节点收入 DAG，旧矿工的主块引用它；新节点每次收到都抛异常，永远补不到该引用，卡在该主块之后（每次 BLOCK_REQUEST 同样失败）。
-* 建议：激活前对 0x0A 字段宽松解析（未知 flag/负高度 → 视为"无锚"，交给 `stateRootActivationHeight` 之后的 verdict 逻辑判 MISMATCH），或把版本字节重解释门控在 `isEvmEnabled()` + 激活高度上；加混合版本解析测试。
+* **修复与验证（2026-09-07）**：新增 `EvmStateAnchor.parseLenient(Bytes)`（尺寸错误 / 保留 flag 位 / 负高度 → `null`），`Block.parse` 在 v≥1 块上改用它并只打 debug 日志（避免被刷日志）；严格版 `parse` 保留给编码/测试。原始 512 字节与哈希不受影响（哈希在 `calcHash` 上算，存储用 `xdagBlock` 原始字节），因此新旧节点对同一块的接受性与哈希一致。激活后 `verifyStateRootAnchor(anchor=null)` 对主块候选返回 MISMATCH（hard-reject 网上 `INVALID_BLOCK`），与无锚主块处理完全相同，未放宽任何共识检查。测试：`EvmStateAnchorTest.parseLenient_*`（4 个）、`BlockEvmStateRootTest`（未知 flag / 负高度 → 无锚且签名等其它字段完好；同槽位合法载荷仍被解析）、新增 `NewBlockMessageMalformedAnchorTest`（`NEW_BLOCK`/`SYNC_BLOCK` 解码不再抛异常且哈希一致）。修复前 6 个用例以 `IllegalArgumentException: anchor flags has unknown bits set: 0x2` 失败。
+* 建议（原文）：激活前对 0x0A 字段宽松解析（未知 flag/负高度 → 视为"无锚"，交给 `stateRootActivationHeight` 之后的 verdict 逻辑判 MISMATCH），或把版本字节重解释门控在 `isEvmEnabled()` + 激活高度上；加混合版本解析测试。
 
 ---
 
@@ -188,7 +190,7 @@ Besu-EVM Shanghai（PUSH0）、预编译 0x01–0x09、EIP-155/2/2718/1559(type-
 
 ### 7.6 分网络结论
 - **devnet（单运营者，δ=1）**：功能完整可用；已知偏差 E1–E3、R2–R4、P1（live）。
-- **testnet 激活**：**未就绪**。前置：修复 C1–C4、P1–P2、U1–U2（U1/U2 必须在**排期任何高度之前**随 EVM-off 版本发布到所有节点）；决定 E1/E2/E4（激活后再改是硬分叉）；把共识参数固化到网络配置（E6）；注册 chainId 51965/51964；发布桥 ABI + remark 编码器并给释放一条可见交易记录；R1–R4、批量 RPC、revert `data`；EVM_META/0x60 标记恢复与快照引导 runbook；外部审计一轮。
+- **testnet 激活**：**未就绪**。前置：~~修复 C1–C4、P1–P2、U1–U2~~（全部已修复，2026-09-05/07；U1/U2 修复后的版本与 develop 位级兼容，仍建议随 EVM-off 版本先发布到所有节点再排期任何高度）；决定 E1/E2/E4（激活后再改是硬分叉）；把共识参数固化到网络配置（E6）；注册 chainId 51965/51964；发布桥 ABI + remark 编码器并给释放一条可见交易记录；R1–R4、批量 RPC、revert `data`；EVM_META/0x60 标记恢复与快照引导 runbook；外部审计一轮。
 - **mainnet 激活**：以上全部 + 外部审计修复验证标签 + 赏金 + 真实 δ=16 多节点 testnet 浸泡（钱包/浏览器 UX 需按 17 分钟收据/32 分钟出金设计）+ 浏览器/索引器所需 RPC + 链式 delta 根（无证明/轻客户端）与固定费率市场的产品决策 + 7.5 的覆盖补齐。
 
 ---
@@ -207,6 +209,6 @@ Besu-EVM Shanghai（PUSH0）、预编译 0x01–0x09、EIP-155/2/2718/1559(type-
 - RandomX 改动仅加 per-slot monitor，不影响输入/输出；握手改动仅加边界检查；消息长度字段为 ≤28 位 VLQ 且有 `require` 边界，无"接受但损坏"路径。
 
 ## 9. 建议的修复优先级
-1. **激活前必须**：C3（锚点高度）→ C4（hard-reject 替换路径）→ C1/C2（δ-lag 重组与排序）→ P1（内容分类）→ P2（池大小上限）→ U1/U2（门控/回退，随 EVM-off 版本先发）。
+1. **激活前必须**：C3（锚点高度）→ C4（hard-reject 替换路径）→ C1/C2（δ-lag 重组与排序）→ P1（内容分类）→ P2（池大小上限）→ U1/U2（回退为共识冻结算法 / 宽松解析，随 EVM-off 版本先发）。**以上 8 项均已修复（2026-09-07）。**
 2. **激活前应当**（否则日后为硬分叉）：E1 SELFDESTRUCT、E2 BASEFEE/GASPRICE/BLOCKHASH、E4 EIP-170/3541、E6 参数固化。
 3. **集成质量**：R1–R4、E3、P3、B1、批量 RPC、revert data、桥工具与文档。

@@ -306,14 +306,20 @@ public class BasicUtils {
      * @param xdag Internal amount
      * @return XDAG amount as BigDecimal
      * @throws XdagOverFlowException if input is negative
+     * @implNote Consensus path: feeds {@link io.xdag.core.XAmount#ofXAmount(long)} for every link amount,
+     *           stored balance, snapshot balance and the supply computation. Bit-for-bit frozen.
      */
     public static BigDecimal amount2xdagNew(long xdag) {
         if(xdag < 0) throw new XdagOverFlowException();
         long first = xdag >> 32;
         long temp = xdag - (first << 32);
-        // temp / 2^32 terminates within 32 decimal places, so this is an exact representation;
-        // building it from integer parts avoids the precision loss of a double intermediate sum.
-        return BigDecimal.valueOf(first).add(BigDecimal.valueOf(temp).divide(POW_2_32, 32, RoundingMode.HALF_UP));
+        // CONSENSUS-FROZEN (audit round 2 U1): this is the exact legacy algorithm every deployed node
+        // runs. The double intermediate sum drops fraction bits once first >= 2^21 XDAG, so an "exact"
+        // BigDecimal rewrite yields different nano amounts for large balances and splits a mixed-version
+        // network on a near-full spend (old nodes reject, new nodes apply). Any change here is a hard
+        // fork and must be height-gated; the exact variants (amount2xdag) are display-only.
+        double tem = temp / Math.pow(2, 32);
+        return new BigDecimal(first + tem);
     }
 
     /**

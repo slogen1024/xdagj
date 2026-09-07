@@ -207,4 +207,24 @@ public class BasicUtilsTest {
             assertEquals(ipAddress, extractIpAddress(ipAddressWithPort));
         }
     }
+
+    /**
+     * Audit round 2 U1: amount2xdagNew feeds XAmount.ofXAmount on every consensus path (link amounts,
+     * balance reads, snapshot import, supply). Its output is CONSENSUS-FROZEN to the legacy algorithm
+     * (double intermediate sum), which loses fraction bits once the integer part reaches 2^21 XDAG. An
+     * "exact" rewrite splits a mixed-version network on any near-full spend of a >= 2.1M XDAG balance.
+     * These pins were computed with the develop-branch algorithm.
+     */
+    @Test
+    public void amount2xdagNew_is_consensus_frozen_to_the_legacy_double_algorithm() {
+        // integer part 2^21: the legacy double drops the lowest fraction bit (exact would end ...4419)
+        assertEquals("2097152.6044444404542446136474609375",
+                amount2xdagNew((1L << 21 << 32) + 0x9ABCDEF1L).toPlainString());
+        // integer part 2^30: the legacy double keeps only 23 fraction bits
+        assertEquals("1073741824.9955556392669677734375",
+                amount2xdagNew((1L << 30 << 32) + 0xFEDCBA98L).toPlainString());
+        // below 2^21 the legacy double is exact, so the two algorithms agree
+        assertEquals("1000.60444444068707525730133056640625",
+                amount2xdagNew((1000L << 32) + 0x9ABCDEF1L).toPlainString());
+    }
 }

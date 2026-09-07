@@ -72,7 +72,23 @@ public record EvmStateAnchor(long height, Bytes rootLow, boolean daSkip) {
         return Bytes32.wrap(out);
     }
 
-    /** Decode from a 32-byte field payload. */
+    /**
+     * Lenient decode for block parsing (audit round 2 U2): returns {@code null} instead of throwing when
+     * the payload is malformed (wrong size, reserved flag bits, negative height). A legacy node ignores
+     * the 0x0A field whatever it holds, so a versioned block with a garbage anchor must still parse on a
+     * new node -- otherwise old nodes accept a block that new nodes can never decode, and the new nodes
+     * stall behind the main block that references it. Past activation the verdict logic sees "no anchor"
+     * and returns MISMATCH exactly as it does for an anchorless main candidate.
+     */
+    public static EvmStateAnchor parseLenient(Bytes field) {
+        try {
+            return parse(field);
+        } catch (IllegalArgumentException malformed) {
+            return null;
+        }
+    }
+
+    /** Strict decode from a 32-byte field payload; throws {@link IllegalArgumentException} when malformed. */
     public static EvmStateAnchor parse(Bytes field) {
         if (field == null || field.size() != Bytes32.SIZE) {
             throw new IllegalArgumentException("anchor field must be 32 bytes");
