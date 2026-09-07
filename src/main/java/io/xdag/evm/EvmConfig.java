@@ -66,6 +66,12 @@ public final class EvmConfig {
     /** Default EIP-3529 activation: always active (tests/devnet factory); production passes the spec value. */
     public static final long DEFAULT_EIP3529_ACTIVATION_HEIGHT = 0L;
 
+    /**
+     * Default invalid-tx-skip activation (audit round 2, P3): always active (tests/devnet factory);
+     * production passes the spec value.
+     */
+    public static final long DEFAULT_INVALID_TX_SKIP_ACTIVATION_HEIGHT = 0L;
+
     private final EvmSpecVersion fork;
     private final BigInteger chainId;
     private final long maxGasLimit;
@@ -73,6 +79,7 @@ public final class EvmConfig {
     private final long type2ActivationHeight;
     private final long bridgeActivationHeight;
     private final long eip3529ActivationHeight;
+    private final long invalidTxSkipActivationHeight;
 
     public EvmConfig(EvmSpecVersion fork, BigInteger chainId) {
         this(fork, chainId, DEFAULT_MAX_GAS_LIMIT);
@@ -99,6 +106,13 @@ public final class EvmConfig {
 
     public EvmConfig(EvmSpecVersion fork, BigInteger chainId, long maxGasLimit, BigInteger minGasPrice,
                      long type2ActivationHeight, long bridgeActivationHeight, long eip3529ActivationHeight) {
+        this(fork, chainId, maxGasLimit, minGasPrice, type2ActivationHeight, bridgeActivationHeight,
+                eip3529ActivationHeight, DEFAULT_INVALID_TX_SKIP_ACTIVATION_HEIGHT);
+    }
+
+    public EvmConfig(EvmSpecVersion fork, BigInteger chainId, long maxGasLimit, BigInteger minGasPrice,
+                     long type2ActivationHeight, long bridgeActivationHeight, long eip3529ActivationHeight,
+                     long invalidTxSkipActivationHeight) {
         this.fork = fork;
         this.chainId = chainId;
         this.maxGasLimit = maxGasLimit;
@@ -106,6 +120,7 @@ public final class EvmConfig {
         this.type2ActivationHeight = type2ActivationHeight;
         this.bridgeActivationHeight = bridgeActivationHeight;
         this.eip3529ActivationHeight = eip3529ActivationHeight;
+        this.invalidTxSkipActivationHeight = invalidTxSkipActivationHeight;
     }
 
     /**
@@ -166,5 +181,13 @@ public final class EvmConfig {
     /** Height at which EIP-3529 precise gas refunds activate; consensus-gated in EvmBlockProcessor. */
     public long eip3529ActivationHeight() {
         return eip3529ActivationHeight;
+    }
+
+    /**
+     * Height from which validation-failed tx refs are dropped instead of receipted (audit round 2, P3);
+     * consensus-gated in EvmBlockProcessor.
+     */
+    public long invalidTxSkipActivationHeight() {
+        return invalidTxSkipActivationHeight;
     }
 }

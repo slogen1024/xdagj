@@ -355,4 +355,12 @@ public class EvmConfigSectionTest {
         assertThrows("balance > 2^256-1", IllegalArgumentException.class, () -> AbstractConfig.parseEvmAlloc(
                 ConfigFactory.parseString("evm.alloc=[{address=\"" + A1 + "\",balance=\"" + overMax + "\"}]")));
     }
+
+    @Test
+    public void devnet_activates_invalid_tx_skip_at_genesis_and_shared_nets_do_not() {
+        // Audit round 2 P3 gate: validation-failed refs are dropped (no receipt) from this height on.
+        assertEquals(0L, new DevnetConfig().getEvmSpec().getEvmInvalidTxSkipActivationHeight());
+        assertEquals(Long.MAX_VALUE, new TestnetConfig().getEvmSpec().getEvmInvalidTxSkipActivationHeight());
+        assertEquals(Long.MAX_VALUE, new MainnetConfig().getEvmSpec().getEvmInvalidTxSkipActivationHeight());
+    }
 }

@@ -211,7 +211,8 @@ public class Kernel {
                     config.getEvmSpec().getEvmBlockGasLimit(), config.getEvmSpec().getEvmMinGasPrice(),
                     config.getEvmSpec().getEvmType2ActivationHeight(),
                     config.getEvmSpec().getEvmBridgeActivationHeight(),
-                    config.getEvmSpec().getEvmEip3529ActivationHeight());
+                    config.getEvmSpec().getEvmEip3529ActivationHeight(),
+                    config.getEvmSpec().getEvmInvalidTxSkipActivationHeight());
             evmTxStore = new io.xdag.evm.tx.EvmTxStore(evmTxSource);
             evmMetaStore = new io.xdag.evm.state.EvmMetaStore(evmMetaSource);
             evmTxPool = new io.xdag.evm.tx.EvmTxPool(evmTxStore, evmStateSource, evmChainId,
