@@ -350,6 +350,47 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
      * misconfiguration that would strand mis-remarked deposits — refuse to start (S-36
      * fund.address precedent). Static so the rule is unit-testable without a full config load.
      */
+    /**
+     * E6: the EVM consensus constants this network pins in code, or null when the network is
+     * HOCON-driven (devnet, the throwaway/test network). Shared networks override this.
+     */
+    protected EvmConsensusParams pinnedEvmConsensusParams() {
+        return null;
+    }
+
+    private void enforcePinnedEvmConsensusParams() {
+        EvmConsensusParams pinned = pinnedEvmConsensusParams();
+        if (pinned == null) {
+            return;
+        }
+        List<String> mismatches = pinned.mismatches(this);
+        if (!mismatches.isEmpty()) {
+            throw new IllegalStateException("EVM consensus parameters in the loaded configuration differ from "
+                    + "the values pinned for " + network + " (changing them is a coordinated hard fork, not a "
+                    + "node setting): " + String.join("; ", mismatches));
+        }
+    }
+
+    /** E6: fail fast on values that would throw inside setMain or make the EVM meaningless. */
+    static void validateEvmConsensusSanity(long stateRootLag, long blockGasLimit, long chainId,
+                                           BigInteger minGasPrice, long bridgeWithdrawalDelay) {
+        if (stateRootLag < 1) {
+            throw new IllegalStateException("evm.stateRootLag must be >= 1, got " + stateRootLag);
+        }
+        if (blockGasLimit <= 0) {
+            throw new IllegalStateException("evm.blockGasLimit must be > 0, got " + blockGasLimit);
+        }
+        if (chainId <= 0) {
+            throw new IllegalStateException("evm.chainId must be > 0, got " + chainId);
+        }
+        if (minGasPrice == null || minGasPrice.signum() < 0) {
+            throw new IllegalStateException("evm.minGasPrice must be >= 0, got " + minGasPrice);
+        }
+        if (bridgeWithdrawalDelay < 1) {
+            throw new IllegalStateException("evm.bridgeWithdrawalDelay must be >= 1, got " + bridgeWithdrawalDelay);
+        }
+    }
+
     static void validateBridgeConfig(com.typesafe.config.Config config) {
         // A4 (spec 2026-08-31): fee-routing sources the net EVM fee from the deposit lock
         // (transfer-from-lock model), which exists only when the bridge is scheduled. This runs BEFORE
@@ -600,6 +641,11 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
         evmStateHistoryWindow = config.hasPath("evm.stateHistoryWindow")
                 ? config.getInt("evm.stateHistoryWindow") : evmStateHistoryWindow;
         evmGenesisAlloc = parseEvmAlloc(config);
+        // Audit round 2, E6: consensus parameters must be sane on every network and, on a shared
+        // network, identical to the pinned constants — a divergent operator override forks the node.
+        validateEvmConsensusSanity(evmStateRootLag, evmBlockGasLimit, evmChainId, evmMinGasPrice,
+                evmBridgeWithdrawalDelay);
+        enforcePinnedEvmConsensusParams();
         nodeRation = config.hasPath("node.ration") ? config.getDouble("node.ration") : 5;
         // S-30: tolerate a missing/trimmed whiteIPs list and skip malformed entries instead of aborting startup.
         List<String> whiteIpList = config.hasPath("node.whiteIPs")

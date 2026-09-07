@@ -60,4 +60,10 @@ public class MainnetConfig extends AbstractConfig {
         this.walletFilePath = this.rootDir + "/wallet/" + Constants.WALLET_FILE_NAME;
     }
 
+
+    /** Audit round 2, E6: mainnet pins its EVM consensus parameters in code (see EvmConsensusParams). */
+    @Override
+    protected EvmConsensusParams pinnedEvmConsensusParams() {
+        return EvmConsensusParams.MAINNET;
+    }
 }
