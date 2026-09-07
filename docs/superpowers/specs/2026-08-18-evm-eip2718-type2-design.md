@@ -170,3 +170,12 @@ type-0 两者相等，行为逐字节不变。
 执行侧双双确定性拒绝；激活前兼容性质消除升级窗口内的根分叉；accessList 只影响
 intrinsic gas 计数（多收方向），不开新执行语义；feeCap 准入上界防第二步 baseFee
 上浮时的余额透支。无新增 P2P 消息、无新增存储格式 → 无新增 DoS 面。
+
+## Erratum (2026-09-08, audit round 2 P3)
+
+The pre-activation compatibility property ("upgraded node's status-0 receipt is byte-identical to the
+non-upgraded node's undecodable-blob receipt") holds in a stronger form from `evm.invalidTxSkipActivationHeight`
+on: both are validation failures and are now DROPPED identically — no receipt, no digest entry, no
+checkpoint — so the chained roots still agree across the upgrade window, and the gated type-2 tx is
+re-executable once the type-2 gate opens (`type2_gate_flips_exactly_at_the_activation_height` now
+re-references the SAME tx at the activation height and executes it).

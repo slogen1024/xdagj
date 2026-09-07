@@ -1292,6 +1292,7 @@ public class BlockchainImpl implements Blockchain {
                 Block ref = getBlockByHash(linkAddress, false);
                 if (compareAmountTo(ref.getInfo().getAmount(), link.getAmount()) < 0) {
                     log.info("ref balance is less than amount");
+                    noteRejectedSpendFromFeeDeferredBlock(ref, block, link.getAmount());
                     return XAmount.ZERO;
                 }
                 sumIn = sumIn.add(link.getAmount());
@@ -1582,9 +1583,13 @@ public class BlockchainImpl implements Blockchain {
                 // confirming block — so the credit unwinds with the execution and the async drain
                 // (onEvmBlobsAvailable) credits the identical block. At delta=1, M == mainNumber (the
                 // in-scope block), byte-identical to G3-T1.
+                long maturedHeightForFee = mainNumber
+                        - kernel.getConfig().getEvmSpec().getEvmStateRootLag() + 1;
+                if (evmFeeWei.signum() == 0 && maturedHeightForFee > 0) {
+                    warnDeferredFeeCredit(maturedHeightForFee, mainNumber); // B1: loud when blob-behind
+                }
                 if (evmFeeWei.signum() > 0) {
-                    long maturedHeight = mainNumber
-                            - kernel.getConfig().getEvmSpec().getEvmStateRootLag() + 1;
+                    long maturedHeight = maturedHeightForFee;
                     // M = mainNumber - lag + 1 <= nmain, and setMain confirms heights in ascending order,
                     // so getBlockByHeight(M) returns the freshly-confirmed canonical block. A null here is
                     // only reachable if lag approached the snapshot-prune window (~128) — a nonsensical
@@ -2881,6 +2886,73 @@ public class BlockchainImpl implements Blockchain {
     }
 
     /**
+     * Audit round 2, B1: the main height at which this node first REJECTED a spend from a payload block
+     * whose EVM fee credit was still deferred (blob-behind), or -1 if that never happened. A
+     * never-behind node had already credited that block and accepts the spend, so from that height on
+     * this node's native balances diverge from the network and are never re-evaluated: the late K1
+     * drain credit converges the block amount but not the rejected spend. Only a re-sync from below
+     * this height heals it. Node-local observability; no consensus meaning.
+     */
+    private volatile long evmFeeDivergenceHeight = -1L;
+
+    public long getEvmFeeDivergenceHeight() {
+        return evmFeeDivergenceHeight;
+    }
+
+    /**
+     * Audit round 2, B1: a spend from main block {@code ref} was just rejected for insufficient balance.
+     * If {@code ref} is the payload block of an EVM height this node has DEFERRED (blob-behind) and fee
+     * routing is active there, the rejection is very likely caused by the missing fee credit -- a
+     * never-behind node accepts the same spend -- so this node's native state has diverged. XDAG never
+     * re-evaluates a rejected spend, so the later drain credit cannot heal it: record the height, log
+     * CRITICAL, require a re-sync. Mirrors the bridge-release BEHIND policy (freeze -> re-sync).
+     */
+    private void noteRejectedSpendFromFeeDeferredBlock(Block ref, Block spender, XAmount amount) {
+        EvmMetaStore metaStore = kernel == null ? null : kernel.getEvmMetaStore();
+        if (metaStore == null || ref == null || (ref.getInfo().flags & BI_MAIN) == 0) {
+            return;
+        }
+        long payloadHeight = ref.getInfo().getHeight();
+        if (payloadHeight < kernel.getConfig().getEvmSpec().getEvmFeeRewardActivationHeight()) {
+            return; // no fee credit can be pending for this block
+        }
+        EvmMetaStore.PendingBlock pending = metaStore.getPending(payloadHeight).orElse(null);
+        if (pending == null || !pending.blockHash().equals(Bytes32.wrap(ref.getInfo().getHash()))) {
+            return; // not deferred (or a different block at that height): an ordinary insufficient balance
+        }
+        long confirmingHeight = xdagStats.nmain;
+        if (evmFeeDivergenceHeight < 0) {
+            evmFeeDivergenceHeight = confirmingHeight;
+        }
+        log.error("CRITICAL: native state DIVERGED at main height {} - rejected a {} spend (block {}) from "
+                + "payload block {} (height {}) whose EVM fee credit is still deferred on this node "
+                + "(blob-behind). A never-behind node accepts that spend; the late credit on drain will "
+                + "NOT re-apply it. Re-sync from below height {} to converge.", confirmingHeight,
+                amount.toDecimal(9, XUnit.XDAG).toPlainString(), spender.getHashLow().toHexString(),
+                ref.getHashLow().toHexString(), payloadHeight, confirmingHeight);
+    }
+
+    /**
+     * Audit round 2, B1: the matured height {@code maturedHeight} was deferred at {@code confirmingHeight}
+     * (blob-behind) while fee routing is active, so its payload block's amount lags the network until the
+     * blobs arrive. Loud, like the bridge-release BEHIND path: a spend from that block confirmed in the
+     * meantime is rejected here and never re-evaluated (see noteRejectedSpendFromFeeDeferredBlock).
+     */
+    private void warnDeferredFeeCredit(long maturedHeight, long confirmingHeight) {
+        EvmMetaStore metaStore = kernel == null ? null : kernel.getEvmMetaStore();
+        if (metaStore == null
+                || maturedHeight < kernel.getConfig().getEvmSpec().getEvmFeeRewardActivationHeight()
+                || metaStore.getPending(maturedHeight).isEmpty()) {
+            return;
+        }
+        log.error("CRITICAL: EVM fee credit for payload block at height {} is DEFERRED at main height {} "
+                + "(this node is blob-behind). Its native amount lags the network until the blobs arrive; "
+                + "any spend from it confirmed before then is rejected here and never re-evaluated "
+                + "(native state divergence -> re-sync). Fetching the missing payloads.",
+                maturedHeight, confirmingHeight);
+    }
+
+    /**
      * K1/G3-T1/A4: credit a matured EVM height's net fee (wei) to that height's OWN block
      * ({@code block}, at {@code height}) as a TRANSFER FROM THE BRIDGE LOCK (A4 transfer-from-lock,
      * design 2026-08-31): the payer's wei is a claim on locked native, so the fee is native they
@@ -2942,7 +3014,15 @@ public class BlockchainImpl implements Blockchain {
         if (evmProcessor == null) {
             return;
         }
+        long lag = kernel.getConfig().getEvmSpec().getEvmStateRootLag();
         for (EvmBlockProcessor.DrainedHeight drained : evmProcessor.onBlobsAvailable()) {
+            if (drained.netFeeWei().signum() > 0 && xdagStats.nmain > drained.height() + lag - 1) {
+                // B1: main blocks were confirmed while this credit was pending. If any of them spent from
+                // the payload block, that spend was rejected here (see getEvmFeeDivergenceHeight).
+                log.warn("Late EVM fee credit for payload block at height {} (drained at main height {}): "
+                        + "spends from it confirmed in between were rejected on this node; divergence "
+                        + "marker = {}", drained.height(), xdagStats.nmain, evmFeeDivergenceHeight);
+            }
             creditEvmFee(getBlockByHeight(drained.height()), drained.height(), drained.netFeeWei());
         }
     }

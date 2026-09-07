@@ -54,6 +54,14 @@ public interface EvmSpec {
     long getEvmEip3529ActivationHeight();
 
     /**
+     * Height from which a tx ref that FAILS VALIDATION (bad nonce, unaffordable, wrong chain, undecodable,
+     * ...) is dropped from the block instead of being recorded as a status-0 receipt (audit round 2, P3:
+     * the receipt consumed the tx hash forever, letting any miner burn a pending tx at zero cost).
+     * Long.MAX_VALUE = not scheduled (legacy receipt behaviour, byte-identical chained roots).
+     */
+    long getEvmInvalidTxSkipActivationHeight();
+
+    /**
      * Height at which the net EVM fee is credited to the miner reward pool (ADR-016 / G3-T1) instead
      * of burned. MAX_VALUE = not scheduled (fee stays burned; native accounting byte-identical).
      */

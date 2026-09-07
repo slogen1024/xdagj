@@ -48,6 +48,10 @@ Either way, `validateBridgeConfig` should gain the `evm.alloc`-vs-scheduled-brid
   CONSENSUS-FROZEN; `Block.parse` reads a malformed 0x0A anchor payload as "no anchor" (lenient), so new
   nodes never drop a block legacy nodes accept. Ship the EVM-off release carrying these BEFORE scheduling
   any activation height.
+- [x] **Audit round 2 Medium items P3 / B1 — FIXED (2026-09-08, after freeze-2)**: P3 validation-failed
+  refs are dropped (gate `evm.invalidTxSkipActivationHeight`, devnet 0 / shared MAX) instead of
+  consuming the tx hash; B1 a blob-behind node's rejected spend from a fee-deferred payload block is
+  detected, recorded (`evmFeeDivergenceHeight`) and logged CRITICAL with re-sync guidance (node-local).
 - [ ] External **security audit + bug bounty + testnet shakedown** (the "external track").
 - [ ] Shared-net `minGasPrice` / `blockGasLimit` reviewed as the consensus values (devnet's `minGasPrice=1` makes gas ~free there by design).
 - [ ] Documented node-recovery path for a corrupt EVM_META (re-sync / wipe EVM_STATE) so a single bad record can't wedge a node with no operator guidance.

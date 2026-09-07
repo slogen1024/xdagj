@@ -115,3 +115,25 @@ returns `null` for a malformed payload, `Block.parse` uses it (debug log only), 
 untouched, and past activation `verifyStateRootAnchor(null, …)` already returns MISMATCH for a main
 candidate, so no consensus check is weakened. Tests: `EvmStateAnchorTest`, `BlockEvmStateRootTest`,
 `NewBlockMessageMalformedAnchorTest`.
+
+---
+
+# Addendum — P3/B1 fix (2026-09-08)
+
+## P3 (validation failure consumed the tx hash)
+Decision: **drop, don't receipt** — from `evm.invalidTxSkipActivationHeight` a ref that fails validation
+in `executeOne` is skipped in `executeList` (no receipt, no digest entry, not in the tx list, reserved gas
+budget returned). Validation reads only the pre-state and charges nothing, so the verdict is identical on
+every node and replay (which re-runs the stored tx list) is unaffected. The alternative "invalid-at-height
+marker" would have put the hash in two heights' tx lists (invalid at H1, executed at H2) and broken the
+tx→height index; rejected. Gate default active for tooling (`EvmConfig`), devnet 0, shared nets MAX.
+
+## B1 (silent native fork on a blob-behind node)
+Decision: **observability parity with the bridge-release BEHIND path, keep the K1 drain credit.** Option
+(a) "burn on drain" is only self-consistent under a "deferral ⇒ re-sync" framing anyway (never-behind
+nodes still credit) and would make the common no-intermediate-spend case diverge permanently. So: keep
+crediting on drain (same journal height M as a never-behind node) and make the actual fork event loud and
+precise — `applyBlock` recognises a rejected `XDAG_FIELD_IN` spend whose input block is the payload of a
+still-pending EVM height with fee routing active, records `evmFeeDivergenceHeight` (first occurrence) and
+logs CRITICAL with re-sync guidance; `setMain` logs CRITICAL at deferral; the drain logs a late-credit WARN.
+No consensus change. Follow-up: surface `getEvmFeeDivergenceHeight()` via RPC/telnet status.

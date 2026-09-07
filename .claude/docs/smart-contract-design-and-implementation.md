@@ -274,7 +274,8 @@ chainedRoot = keccak256(concat(digest))
 ```
 解码/chainId/恢复 sender/gasLimit≤blockGasLimit/intrinsic gas    失败→ validationFailure
 gasPrice == 0 或 < minGasPrice → 拒绝（:453-456，池外手工载体块也逃不过执行期闸门）
-nonce == 账户 nonce？ balance ≥ value + maxFee？                  失败→ status-0 收据，不动状态
+nonce == 账户 nonce？ balance ≥ value + maxFee？                  失败→ 校验失败（门控前：status-0 收据；
+                                                                 evm.invalidTxSkipActivationHeight 后：整体丢弃、无收据，hash 可重执行——审计 P3）
 ── 以下整体套 try/catch（C1 防线：EVM 任何异常都不能逃进 setMain 砸共识）──
 adjustBalance(root, sender, -maxFee)      // 全额预扣 gasLimit×gasPrice（revert/OOG 也收费）
 messageGas = gasLimit - intrinsicGas

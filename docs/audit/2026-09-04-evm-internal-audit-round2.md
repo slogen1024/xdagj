@@ -81,12 +81,13 @@
 * **修复与验证（2026-09-05）**：`EvmTxPool` 新增 8 参构造（`maxTxBytes`，7 参默认 131072），`add` 在解码前拒绝超限 blob；Kernel 传 `getEvmMaxP2pTxBytes()` 使准入与 P2P ingest 共用同一上限；`EthRequestHandler` 映射 `TOO_LARGE → invalidParams`。测试 `EvmTxPoolTest`（自定义上限与默认上限）、`EthRequestHandlerTest.eth_sendRawTransaction_oversized_tx_errors_with_invalid_params`。
 * 建议（原文）：在 `EvmTxPool.add` 加 `rawRlp.size() <= evmMaxP2pTxBytes`（新增 `AddResult.TOO_LARGE`），`selectBatch/selectEvmBatch` 拒绝超限 blob 作纵深防御；`maturedPayloadAvailable` 也应要求每个成员 blob ≤ cap。
 
-### P3. 校验失败收据永久消耗 tx hash：任何矿工可零成本"烧掉"任何待处理交易
+### P3. ✅ 已修复（2026-09-08：`evm.invalidTxSkipActivationHeight` 门控后校验失败的引用被整体丢弃——无收据、不进 digest/tx list、归还 gas 预算；devnet=0，共享网 MAX）— 校验失败收据永久消耗 tx hash：任何矿工可零成本"烧掉"任何待处理交易
 `src/main/java/io/xdag/evm/EvmBlockProcessor.java:1050-1053, 781, 515-519`；`src/main/java/io/xdag/core/BlockchainImpl.java:1896-1907`
 * Severity: **Medium** · Category: miner-griefing / censorship
 * 描述：nonce 不匹配、余额不足等**校验**失败被写成状态 0、gasUsed 0 的收据并 `putReceipt`；dedup 对任何已有收据的 hash 永久跳过，而发送方 nonce 未变。以太坊里无效交易使整块无效，这里则是 hash 被消耗。
 * 失效场景：受害者 pending N、N+1；矿工引用 `[N+1]`（或 `[N+1, N]`），N+1 以 nonce mismatch 得到收据，从此在所有节点不可执行；它仍停留在池中该发送方 run 的头部，`selectEvmBatch` 对带收据的 tx 标 `stopped` 跳过整个 run，直至 TTL 过期或用户 RBF。预签名/硬件签名的交易被直接销毁。成本：零 gas、一个块位。
-* 建议：校验失败不消耗 hash——digest 仍折入 `(txHash,0,0)` 但记为独立的 "invalid-at-height" 标记且 dedup 忽略之；或直接从执行列表剔除校验失败的 ref（它们不耗 gas、不动状态）。两者跨节点均确定。
+* **修复与验证（2026-09-08，commit acafc3bd）**：采用建议的第二种方案——`TxOutcome` 新增 `invalid` 标记，`executeList` 在 `height ≥ invalidTxSkipActivationHeight` 时对校验失败的 ref 直接 `continue`（无收据、无 digest 条目、不进 tx list、归还已预留的 gas 预算）；校验只读前态、不改状态、不收 gas，因此跨节点确定；hash 之后仍可执行（前置条件满足即可，如更早的 nonce 上链）。门控接线镜像 `eip3529ActivationHeight`（EvmSpec / AbstractConfig / EvmConfig 8 参构造 / Kernel / 三网 conf + 测试 classpath 副本），门控前保持旧收据行为逐字节不变。测试：`EvmBlockProcessorTest.a_validation_failed_ref_leaves_no_receipt_and_stays_executable_later`（先引用 [N+1] 再引用 [N, N+1]，两笔均执行成功——修复前 N+1 永久 status 0）、`an_invalid_ref_does_not_consume_the_block_gas_budget`、`below_the_invalid_tx_skip_gate_a_validation_failure_keeps_the_legacy_status0_receipt`、type-2 边界测试改为同一笔 tx 在激活高度重新执行；旧"校验失败 status-0 收据"断言全部改写为新语义。全量 669 绿。
+* 建议（原文）：校验失败不消耗 hash——digest 仍折入 `(txHash,0,0)` 但记为独立的 "invalid-at-height" 标记且 dedup 忽略之；或直接从执行列表剔除校验失败的 ref（它们不耗 gas、不动状态）。两者跨节点均确定。
 
 ---
 
@@ -143,8 +144,9 @@
 
 ## 5. 桥 / 手续费（Medium / Low）
 
-### B1. 异步 blob-drain 的延迟记账使落后节点拒绝其它节点接受的块 M 支出，且永不重评 — Medium
+### B1. ✅ 已修复（2026-09-08：与释放路径对齐——延迟记账时 CRITICAL、被拒的支出精确检测并记录 `evmFeeDivergenceHeight` 要求重同步；节点本地，无共识变更）— 异步 blob-drain 的延迟记账使落后节点拒绝其它节点接受的块 M 支出，且永不重评 — Medium
 `BlockchainImpl.java:2725`（`onEvmBlobsAvailable → creditEvmFee`）、`:1149`（`applyBlock` 余额不足 → `return ZERO`，仅标 `BI_MAIN_REF`）。K1 让落后节点**最终**收敛到相同 `block.info.amount`，但在 `setMain(M+δ−1)` 与 drain 之间，矿池 `payPools` 按全额支出块 M 的 amount，落后节点以余额不足拒绝该支付块，之后不再重评。提现路径在同样情形下会 CRITICAL 冻结，手续费路径则静默分叉，且原生余额不被锚定。建议：(a) 经异步 drain 执行的高度不记手续费（同步路径在 defer 时也烧掉），或 (b) 与释放路径一致：CRITICAL + 要求重同步。
+* **修复与验证（2026-09-08，commit cca699e0）**：采用 (b)。方案 (a) 只在"落后即须重同步"的框架下才自洽（从不落后的节点仍会记账，单方面烧掉同样分歧），且会让"中间无支出"的常见情形也永久分歧，故保留 K1 的 drain 记账（与从不落后节点在同一高度 M 记日志）。新增三处节点本地诊断：`applyBlock` 对 `XDAG_FIELD_IN` 余额不足的拒绝，若输入块正是本节点仍 pending（延迟）的 EVM 高度的载荷块且费用路由已激活 → 记录 `evmFeeDivergenceHeight`（首次发生的确认高度）并 CRITICAL（含两个块哈希、要求从该高度以下重同步）；`setMain` 在成熟高度被延迟且费用路由激活时 CRITICAL；`onEvmBlobsAvailable` 在延迟期间已有主块确认时 WARN 并引用分歧标记。测试 `EvmFeeDeferralDivergenceIntegrationTest`（lag=2，blob 扣留 → 高度 K 延迟；从 K 支出 K.amount+1 nano 在 blob 到达前确认 → 被拒并标记；补上 blob 后 K 记账、金额足以覆盖该支出、标记仍在、支出块仍未应用）。全量 670 绿。后续可把 `getEvmFeeDivergenceHeight()` 暴露到 RPC/telnet 状态。
 
 ### B2. burn 扫描不检查收据状态 — Low（纵深防御）
 `EvmBlockProcessor.java:783` 对每个收据无条件 `collectBridgeBurns(receipt.logs(), …)`；`receiptOf` 无论 success 都拷贝 logs。Besu 的 revert/exceptionalHalt 会 `clearLogs()`，唯一绕过路径是 `XdagEvmExecutor.runToHalt:243-252` 的 S-26 `catch (RuntimeException)` 直接置 `EXCEPTIONAL_HALT` 而不清 logs（子 updater 未提交，wei 未动，但 burn 会被记录并在 W 后从 lock 释放）。可达性未证明。建议：`collectBridgeBurns` 要求 `status==1`；S-26 catch 中 `clearLogs()`。
@@ -211,4 +213,4 @@ Besu-EVM Shanghai（PUSH0）、预编译 0x01–0x09、EIP-155/2/2718/1559(type-
 ## 9. 建议的修复优先级
 1. **激活前必须**：C3（锚点高度）→ C4（hard-reject 替换路径）→ C1/C2（δ-lag 重组与排序）→ P1（内容分类）→ P2（池大小上限）→ U1/U2（回退为共识冻结算法 / 宽松解析，随 EVM-off 版本先发）。**以上 8 项均已修复（2026-09-07）。**
 2. **激活前应当**（否则日后为硬分叉）：E1 SELFDESTRUCT、E2 BASEFEE/GASPRICE/BLOCKHASH、E4 EIP-170/3541、E6 参数固化。
-3. **集成质量**：R1–R4、E3、P3、B1、批量 RPC、revert data、桥工具与文档。
+3. **集成质量**：R1–R4、E3、~~P3、B1~~（已修复 2026-09-08）、批量 RPC、revert data、桥工具与文档。

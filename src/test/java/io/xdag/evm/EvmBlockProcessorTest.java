@@ -233,16 +233,18 @@ public class EvmBlockProcessorTest {
         txs.put(underpriced);
         proc.processMainBlock(List.of(ref(underpriced)), 1L, 1001L, BLOCK_HASH_1);
 
-        assertEquals("underpriced tx must be rejected with a status-0 receipt", 0,
-                meta.getReceipt(underpriced.getHash()).orElseThrow().status());
+        assertTrue("underpriced tx must be rejected: dropped, no receipt (P3)",
+                meta.getReceipt(underpriced.getHash()).isEmpty());
+        assertTrue("a block of only rejected refs checkpoints nothing", meta.getHeightRecord(1L).isEmpty());
         assertEquals("a rejected tx must not be charged any gas", Wei.fromEth(1),
                 new RocksDbWorldUpdater(state).getAccount(sender).getBalance());
     }
 
     @Test
     public void a_tx_that_cannot_afford_gas_is_rejected_without_charging_the_sender() {
-        // Affordability guard: a sender that covers the value but not the gas fee gets a status-0
-        // receipt and is NOT partially debited (the check returns before the upfront gas debit).
+        // Affordability guard: a sender that covers the value but not the gas fee is rejected at
+        // validation (dropped, no receipt -- P3) and is NOT partially debited (the check returns
+        // before the upfront gas debit).
         InMemoryKVSource state = new InMemoryKVSource();
         EvmTxStore txs = new EvmTxStore(new InMemoryKVSource());
         EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
@@ -257,7 +259,7 @@ public class EvmBlockProcessorTest {
         txs.put(tx);
         proc.processMainBlock(List.of(ref(tx)), 1L, 1001L, BLOCK_HASH_1);
 
-        assertEquals(0, meta.getReceipt(tx.getHash()).orElseThrow().status());
+        assertTrue(meta.getReceipt(tx.getHash()).isEmpty());
         assertEquals("sender must not be charged when the tx is rejected", Wei.of(500),
                 new RocksDbWorldUpdater(state).getAccount(sender).getBalance());
     }
@@ -327,8 +329,8 @@ public class EvmBlockProcessorTest {
 
     @Test
     public void process_main_block_returns_zero_net_fee_for_a_validation_failure() {
-        // Wrong chain id -> validationFailure BEFORE any debit -> zero net fee, even though a status-0
-        // receipt is recorded.
+        // Wrong chain id -> validationFailure BEFORE any debit -> zero net fee (and, post-P3, the ref
+        // is dropped without a receipt).
         Wei gasPrice = Wei.of(1_000L);
         EvmTransaction wrongChain = EvmTransaction.unsigned(0L, gasPrice, 200_000L, Optional.empty(),
                 Wei.ZERO, INIT_CODE, CHAIN_ID.add(BigInteger.ONE)).sign(key, algo);
@@ -555,16 +557,49 @@ public class EvmBlockProcessorTest {
     }
 
     @Test
-    public void nonce_mismatch_yields_failed_receipt_and_no_state_change() {
+    public void nonce_mismatch_is_dropped_with_no_receipt_and_no_state_change() {
         EvmTransaction badNonce = storedTx(7, Optional.empty(), INIT_CODE, 200_000L);
         processor.processMainBlock(List.of(ref(badNonce)), 1L, 1001L, BLOCK_HASH_1);
 
-        EvmReceipt receipt = metaStore.getReceipt(badNonce.getHash()).orElseThrow();
+        assertTrue("P3: a validation failure must not consume the tx hash", metaStore.getReceipt(badNonce.getHash()).isEmpty());
+        assertEquals("failed validation must not burn the account nonce", 0L, account(sender).getNonce());
+        assertTrue("a validation-only block checkpoints nothing", metaStore.getHeightRecord(1L).isEmpty());
+    }
+
+    @Test
+    public void below_the_invalid_tx_skip_gate_a_validation_failure_keeps_the_legacy_status0_receipt() {
+        // Pre-activation byte-identity: with the P3 gate unscheduled the legacy behaviour is intact --
+        // the nonce-mismatch ref is receipted (status 0, gas 0), enters the tx list / digest, and the
+        // hash is consumed (re-references skip it). Shared networks run this until the fork.
+        EvmConfig legacy = new EvmConfig(EvmSpecVersion.SHANGHAI, EvmConfig.DEVNET_CHAIN_ID,
+                EvmConfig.DEFAULT_MAX_GAS_LIMIT, EvmConfig.DEFAULT_MIN_GAS_PRICE,
+                EvmConfig.DEFAULT_TYPE2_ACTIVATION_HEIGHT, EvmConfig.DEFAULT_BRIDGE_ACTIVATION_HEIGHT,
+                EvmConfig.DEFAULT_EIP3529_ACTIVATION_HEIGHT, Long.MAX_VALUE);
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmTxStore txs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor proc = new EvmBlockProcessor(legacy, state, txs, meta);
+        RocksDbWorldUpdater w = new RocksDbWorldUpdater(state);
+        w.createAccount(sender, 0L, Wei.fromEth(1));
+        w.commit();
+        EvmTransaction tx0 = EvmTransaction.unsigned(0L, Wei.of(1), 200_000L, Optional.empty(), Wei.ZERO,
+                INIT_CODE, CHAIN_ID).sign(key, algo);
+        EvmTransaction tx1 = EvmTransaction.unsigned(1L, Wei.of(1), 200_000L, Optional.empty(), Wei.ZERO,
+                INIT_CODE, CHAIN_ID).sign(key, algo);
+        txs.put(tx0);
+        txs.put(tx1);
+
+        proc.processMainBlock(List.of(ref(tx1)), 1L, 1001L, BLOCK_HASH_1);
+        EvmReceipt receipt = meta.getReceipt(tx1.getHash()).orElseThrow();
         assertEquals(0, receipt.status());
         assertEquals(0L, receipt.gasUsed());
-        assertEquals("failed validation must not burn the account nonce", 0L, account(sender).getNonce());
-        assertEquals("failed txs still enter consensus history", 1,
-                metaStore.getHeightRecord(1L).orElseThrow().txCount());
+        assertEquals("legacy: failed txs still enter consensus history", 1,
+                meta.getHeightRecord(1L).orElseThrow().txCount());
+
+        proc.processMainBlock(List.of(ref(tx0), ref(tx1)), 2L, 1002L, BLOCK_HASH_2);
+        assertEquals(1, (int) meta.getReceipt(tx0.getHash()).orElseThrow().status());
+        assertEquals("legacy: the consumed hash is never re-executed", 0,
+                (int) meta.getReceipt(tx1.getHash()).orElseThrow().status());
     }
 
     @Test
@@ -1234,19 +1269,19 @@ public class EvmBlockProcessorTest {
         txs.put(tx);
         proc.processMainBlock(List.of(ref(tx)), 1L, 1001L, BLOCK_HASH_1);
 
-        EvmReceipt receipt = meta.getReceipt(tx.getHash()).orElseThrow();
-        assertEquals("unaffordable at the fee cap -> status-0 receipt", 0, receipt.status());
-        assertEquals("rejected before execution -> zero gas used", 0L, receipt.gasUsed());
+        assertTrue("unaffordable at the fee cap -> rejected at validation, dropped without a receipt (P3)",
+                meta.getReceipt(tx.getHash()).isEmpty());
         assertEquals("sender must not be debited when the fee-cap check rejects the tx",
                 funded, new RocksDbWorldUpdater(state).getAccount(sender).getBalance());
     }
 
     @Test
     public void type2_before_activation_is_byte_identical_to_an_undecodable_blob() {
-        // The upgrade-window safety property: pre-activation, an upgraded node's "type-2 before
-        // activation" receipt must equal — field for field, hence byte for byte — the "undecodable
-        // blob" receipt a non-upgraded node produces for the same ref (receipts carry no reason
-        // string), so the chained roots stay identical across upgraded and non-upgraded nodes.
+        // The upgrade-window safety property: pre-activation, an upgraded node must treat a type-2
+        // ref exactly like a non-upgraded node treats the "undecodable blob" it sees for the same
+        // ref. Post-P3 both are validation failures and are dropped identically: no receipt, no
+        // digest entry, no checkpoint -- so the chained roots stay identical across upgraded and
+        // non-upgraded nodes.
         EvmConfig gated = new EvmConfig(EvmSpecVersion.SHANGHAI, EvmConfig.DEVNET_CHAIN_ID,
                 EvmConfig.DEFAULT_MAX_GAS_LIMIT, EvmConfig.DEFAULT_MIN_GAS_PRICE, Long.MAX_VALUE);
         InMemoryKVSource state = new InMemoryKVSource();
@@ -1268,12 +1303,11 @@ public class EvmBlockProcessorTest {
         proc.processMainBlock(List.of(ref(type2), Bytes32.wrap(garbageHash.getBytes())), 1L, 1001L,
                 BLOCK_HASH_1);
 
-        EvmReceipt gatedReceipt = meta.getReceipt(type2.getHash()).orElseThrow();
-        EvmReceipt undecodableReceipt = meta.getReceipt(garbageHash).orElseThrow();
-        assertEquals("pre-activation type-2 must fail validation", 0, gatedReceipt.status());
-        assertEquals("garbage blob must fail validation", 0, undecodableReceipt.status());
-        assertEquals("pre-activation type-2 receipt must be byte-identical to the undecodable-blob "
-                + "receipt (record equality = field equality)", undecodableReceipt, gatedReceipt);
+        assertTrue("pre-activation type-2 must fail validation and be dropped",
+                meta.getReceipt(type2.getHash()).isEmpty());
+        assertTrue("garbage blob must fail validation and be dropped", meta.getReceipt(garbageHash).isEmpty());
+        assertTrue("neither produces a checkpoint, so upgraded and non-upgraded roots agree",
+                meta.getHeightRecord(1L).isEmpty());
     }
 
     @Test
@@ -1283,6 +1317,8 @@ public class EvmBlockProcessorTest {
         // pre-activation type-2 and deducted its 21000 gas limit, the 30000 block budget would drop
         // to 9000 and the legacy ref behind it would be SKIPPED (no receipt, no digest entry) while
         // a non-upgraded node executes it — splitting the chained root during the upgrade window.
+        // (Post-P3 the invalid ref also returns any reserved budget, but the peek must still not
+        // decode it: the budget-order check runs before executeOne.)
         EvmConfig gated = new EvmConfig(EvmSpecVersion.SHANGHAI, EvmConfig.DEVNET_CHAIN_ID,
                 30_000L, EvmConfig.DEFAULT_MIN_GAS_PRICE, Long.MAX_VALUE);
         InMemoryKVSource state = new InMemoryKVSource();
@@ -1309,10 +1345,10 @@ public class EvmBlockProcessorTest {
         EvmReceipt legacyReceipt = meta.getReceipt(legacy.getHash()).orElseThrow();
         assertEquals("the legacy tx behind the gated type-2 must execute — the type-2 must not "
                 + "consume any of the 30000 block gas budget", 1, legacyReceipt.status());
-        EvmReceipt type2Receipt = meta.getReceipt(type2.getHash()).orElseThrow();
-        assertEquals("pre-activation type-2 keeps the status-0 undecodable-path receipt", 0,
-                type2Receipt.status());
-        assertEquals("pre-activation type-2 burns zero gas", 0L, type2Receipt.gasUsed());
+        assertTrue("pre-activation type-2 is a validation failure: dropped, no receipt (P3)",
+                meta.getReceipt(type2.getHash()).isEmpty());
+        assertEquals("only the legacy tx is in the block's tx list", List.of(legacy.getHash()),
+                meta.getTxList(1L));
     }
 
     @Test
@@ -1336,19 +1372,15 @@ public class EvmBlockProcessorTest {
                 Optional.of(recipient), Wei.of(100), Bytes.EMPTY, List.of(), CHAIN_ID).sign(key, algo);
         txs.put(gatedTx);
         proc.processMainBlock(List.of(ref(gatedTx)), 2L, 1001L, BLOCK_HASH_1);
-        EvmReceipt gatedReceipt = meta.getReceipt(gatedTx.getHash()).orElseThrow();
-        assertEquals("height 2 (last pre-activation height) must gate the type-2 to status 0",
-                0, gatedReceipt.status());
-        assertEquals("gated type-2 burns zero gas", 0L, gatedReceipt.gasUsed());
+        assertTrue("height 2 (last pre-activation height) must gate the type-2: dropped, no receipt (P3)",
+                meta.getReceipt(gatedTx.getHash()).isEmpty());
+        assertEquals("gated type-2 touches nothing", 0L,
+                new RocksDbWorldUpdater(state).getAccount(sender).getNonce());
 
-        // The gated tx never advanced the account nonce, so the height-3 tx is nonce 0 as well.
-        // A DIFFERENT value makes the hash differ — re-signing identical fields would reproduce
-        // the height-2 hash, and the receipt dedup would skip it instead of executing it.
-        EvmTransaction liveTx = EvmTransaction.unsignedType2(0L, Wei.of(1), Wei.of(3), 21_000L,
-                Optional.of(recipient), Wei.of(101), Bytes.EMPTY, List.of(), CHAIN_ID).sign(key, algo);
-        txs.put(liveTx);
-        proc.processMainBlock(List.of(ref(liveTx)), 3L, 1002L, BLOCK_HASH_2);
-        EvmReceipt liveReceipt = meta.getReceipt(liveTx.getHash()).orElseThrow();
+        // P3 makes the gated ref re-executable: the SAME tx referenced again at the activation
+        // height now runs (pre-P3 its status-0 receipt would have consumed the hash forever).
+        proc.processMainBlock(List.of(ref(gatedTx)), 3L, 1002L, BLOCK_HASH_2);
+        EvmReceipt liveReceipt = meta.getReceipt(gatedTx.getHash()).orElseThrow();
         assertEquals("height 3 (the activation height itself) must execute the type-2",
                 1, liveReceipt.status());
     }
@@ -2110,5 +2142,61 @@ public class EvmBlockProcessorTest {
         long gasUsed = metaStore.getReceipt(deploy.getHash()).orElseThrow().gasUsed();
         assertEquals("net fee is gasUsed * gasPrice",
                 BigInteger.valueOf(gasUsed).multiply(gasPrice.getAsBigInteger()), drained.get(0).netFeeWei());
+    }
+
+    // ---- Audit round 2, P3: a validation failure must not consume the tx hash -------------------
+
+    @Test
+    public void a_validation_failed_ref_leaves_no_receipt_and_stays_executable_later() {
+        // Griefing scenario: the victim has nonce-0 and nonce-1 txs pending. A miner references only
+        // the nonce-1 tx first (nonce mismatch). Pre-fix that wrote a status-0 receipt and the dedup
+        // then skipped the hash forever ("already executed"), so the tx could never run. Now the
+        // invalid ref is dropped (no receipt, no digest entry, no checkpoint) and a later block that
+        // references both in order executes both.
+        EvmTransaction tx0 = storedTx(0, Optional.empty(), INIT_CODE, 200_000L);
+        EvmTransaction tx1 = storedTx(1, Optional.empty(), INIT_CODE, 200_000L);
+
+        processor.processMainBlock(List.of(ref(tx1)), 1L, 1001L, BLOCK_HASH_1);
+
+        assertTrue("an invalid ref must not get a receipt", metaStore.getReceipt(tx1.getHash()).isEmpty());
+        assertTrue("a block of only invalid refs checkpoints nothing", metaStore.getHeightRecord(1L).isEmpty());
+        assertEquals("nothing executed -> account untouched", 0L, account(sender).getNonce());
+
+        processor.processMainBlock(List.of(ref(tx0), ref(tx1)), 2L, 1002L, BLOCK_HASH_2);
+
+        assertEquals(1, (int) metaStore.getReceipt(tx0.getHash()).orElseThrow().status());
+        assertEquals("the previously-invalid tx executes once its nonce is reachable", 1,
+                (int) metaStore.getReceipt(tx1.getHash()).orElseThrow().status());
+        assertEquals(List.of(tx0.getHash(), tx1.getHash()), metaStore.getTxList(2L));
+        assertEquals(2L, account(sender).getNonce());
+    }
+
+    @Test
+    public void an_invalid_ref_does_not_consume_the_block_gas_budget() {
+        // Budget 30000: the invalid (nonce-mismatch) 21000-gas ref ahead of a valid 21000-gas transfer
+        // must not reserve budget it never uses, or the valid tx behind it is starved.
+        EvmConfig tight = new EvmConfig(EvmSpecVersion.SHANGHAI, EvmConfig.DEVNET_CHAIN_ID, 30_000L,
+                EvmConfig.DEFAULT_MIN_GAS_PRICE);
+        InMemoryKVSource state = new InMemoryKVSource();
+        EvmTxStore txs = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore meta = new EvmMetaStore(new InMemoryKVSource());
+        EvmBlockProcessor proc = new EvmBlockProcessor(tight, state, txs, meta);
+        RocksDbWorldUpdater w = new RocksDbWorldUpdater(state);
+        w.createAccount(sender, 0L, Wei.fromEth(1));
+        w.commit();
+        Address to = Address.fromHexString("0x00000000000000000000000000000000000000aa");
+        EvmTransaction badNonce = EvmTransaction.unsigned(5L, Wei.of(1), 21_000L, Optional.of(to),
+                Wei.of(100), Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+        EvmTransaction valid = EvmTransaction.unsigned(0L, Wei.of(1), 21_000L, Optional.of(to),
+                Wei.of(100), Bytes.EMPTY, CHAIN_ID).sign(key, algo);
+        txs.put(badNonce);
+        txs.put(valid);
+
+        proc.processMainBlock(List.of(ref(badNonce), ref(valid)), 1L, 1001L, BLOCK_HASH_1);
+
+        assertTrue(meta.getReceipt(badNonce.getHash()).isEmpty());
+        assertEquals("the valid tx behind the dropped invalid ref must execute", 1,
+                (int) meta.getReceipt(valid.getHash()).orElseThrow().status());
+        assertEquals(List.of(valid.getHash()), meta.getTxList(1L));
     }
 }

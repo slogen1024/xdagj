@@ -91,6 +91,8 @@ public class EvmBlockProcessor {
     private final long bridgeActivationHeight;
     /** Height at which EIP-3529 net storage refunds apply; MAX_VALUE = not scheduled (no refund). */
     private final long eip3529ActivationHeight;
+    /** Audit round 2 P3 gate: from this height validation-failed refs are dropped, not receipted. */
+    private final long invalidTxSkipActivationHeight;
     private final KVSource<byte[], byte[]> stateStore;
     private final EvmTxStore txStore;
     private final EvmMetaStore metaStore;
@@ -146,6 +148,7 @@ public class EvmBlockProcessor {
         this.type2ActivationHeight = config.type2ActivationHeight();
         this.bridgeActivationHeight = config.bridgeActivationHeight();
         this.eip3529ActivationHeight = config.eip3529ActivationHeight();
+        this.invalidTxSkipActivationHeight = config.invalidTxSkipActivationHeight();
         this.stateStore = stateStore;
         this.txStore = txStore;
         this.metaStore = metaStore;
@@ -784,8 +787,15 @@ public class EvmBlockProcessor {
     private record ExecutionOutcome(Bytes32 root, List<Hash> executed, BigInteger netFeeWei) {
     }
 
-    /** One tx's receipt plus the wei actually removed from the sender (0 when no debit occurred). */
-    private record TxOutcome(EvmReceipt receipt, BigInteger netFeeWei) {
+    /**
+     * One tx's receipt plus the wei actually removed from the sender (0 when no debit occurred).
+     * {@code invalid} marks a VALIDATION failure (nothing executed, no state touched, no gas charged) as
+     * opposed to an executed-but-failed tx (revert / out-of-gas: gas charged, nonce bumped).
+     */
+    private record TxOutcome(EvmReceipt receipt, BigInteger netFeeWei, boolean invalid) {
+        TxOutcome(EvmReceipt receipt, BigInteger netFeeWei) {
+            this(receipt, netFeeWei, false);
+        }
     }
 
     /**
@@ -840,6 +850,19 @@ public class EvmBlockProcessor {
                     gasBudget -= txGasLimit;
                 }
                 TxOutcome exec = executeOne(root, blob, height, timestampSeconds);
+                if (exec.invalid() && height >= invalidTxSkipActivationHeight) {
+                    // Audit round 2, P3: a validation failure touches no state and charges no gas, so
+                    // it is dropped from the block outright -- no receipt (the hash stays executable
+                    // in a later block once its precondition holds, e.g. the earlier nonce lands), no
+                    // digest entry, not in the tx list, and its reserved budget is returned. Recording
+                    // it as a status-0 receipt let any miner burn a pending tx at zero cost by
+                    // referencing it out of order. Deterministic: given the same pre-state every node
+                    // reaches the same validation verdict.
+                    if (txGasLimit > 0) {
+                        gasBudget += txGasLimit;
+                    }
+                    continue;
+                }
                 EvmReceipt receipt = exec.receipt();
                 netFeeWei = netFeeWei.add(exec.netFeeWei());
                 metaStore.putReceipt(txHash, receipt);
@@ -930,9 +953,10 @@ public class EvmBlockProcessor {
 
     /**
      * Executes a single tx. Validation failure (undecodable, type-2 before its activation height,
-     * wrong chain, bad nonce, value not covered, gas out of bounds) produces a status-0 receipt
-     * with zero gas and no state change — the tx stays part of consensus history but burns nothing
-     * (validation failures charge no gas by policy).
+     * wrong chain, bad nonce, value not covered, gas out of bounds) produces an {@code invalid}
+     * outcome with a status-0 / zero-gas receipt and no state change. Below
+     * {@code invalidTxSkipActivationHeight} the caller records that receipt (legacy: the tx stays part
+     * of consensus history); from that height on the caller drops the ref entirely (audit round 2, P3).
      */
     private TxOutcome executeOne(RocksDbWorldUpdater root, Bytes rawRlp, long height,
                                   long timestampSeconds) {
@@ -1113,7 +1137,7 @@ public class EvmBlockProcessor {
 
     private TxOutcome validationFailure(String reason, String detail) {
         log.warn("EVM tx validation failed ({}): {}", reason, detail);
-        return new TxOutcome(new EvmReceipt(0, 0L, Optional.empty(), List.of()), BigInteger.ZERO);
+        return new TxOutcome(new EvmReceipt(0, 0L, Optional.empty(), List.of()), BigInteger.ZERO, true);
     }
 
     private static EvmReceipt receiptOf(XdagExecutionResult result, long intrinsicGas) {
