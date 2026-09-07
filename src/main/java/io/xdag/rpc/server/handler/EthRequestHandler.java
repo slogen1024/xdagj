@@ -158,7 +158,7 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
                     CallArgs args = callObject(request, 0);
                     XdagExecutionResult r = simulate(args, resolveTarget(request, 1), args.gas());
                     if (!r.success()) {
-                        throw JsonRpcException.internalError(revertMessage(r));
+                        throw reverted(r);
                     }
                     yield EthHex.data(r.returnData());
                 }
@@ -621,7 +621,7 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
         long hi = args.gas();
         XdagExecutionResult atCap = simulate(args, target, hi);
         if (!atCap.success()) {
-            throw JsonRpcException.internalError(revertMessage(atCap));
+            throw reverted(atCap);
         }
         long lo = Math.max(intrinsic, 0L) - 1L; // < intrinsic never executes
         // Tighten the upper bound to what the cap run actually consumed plus a 64/63 head-room
@@ -648,10 +648,29 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
         return hi;
     }
 
-    private static String revertMessage(XdagExecutionResult result) {
-        return result.revertReason()
-                .map(r -> "execution reverted: " + r.toHexString())
-                .orElse("execution reverted");
+    /** Error(string) selector: keccak("Error(string)")[0..4]. */
+    private static final Bytes ERROR_STRING_SELECTOR = Bytes.fromHexString("0x08c379a0");
+
+    /**
+     * R7: a failed simulation as wallets expect it — code 3, "execution reverted" (+ the decoded
+     * Error(string) reason when the payload is one), and the raw payload hex in {@code data}.
+     */
+    private static JsonRpcException reverted(XdagExecutionResult result) {
+        Bytes payload = result.revertReason().orElse(result.returnData() == null ? Bytes.EMPTY : result.returnData());
+        String message = "execution reverted";
+        if (payload.size() >= 4 + 64 && payload.slice(0, 4).equals(ERROR_STRING_SELECTOR)) {
+            try {
+                int offset = payload.slice(4, 32).toUnsignedBigInteger().intValueExact();
+                int length = payload.slice(4 + offset, 32).toUnsignedBigInteger().intValueExact();
+                if (length >= 0 && 4 + offset + 32 + length <= payload.size()) {
+                    message += ": " + new String(payload.slice(4 + offset + 32, length).toArrayUnsafe(),
+                            java.nio.charset.StandardCharsets.UTF_8);
+                }
+            } catch (RuntimeException ignored) {
+                // not a well-formed Error(string): keep the bare message, the raw data still travels
+            }
+        }
+        return JsonRpcException.executionReverted(message, payload.isEmpty() ? null : EthHex.data(payload));
     }
 
     private Address addressParam(JsonRpcRequest request, int index) {

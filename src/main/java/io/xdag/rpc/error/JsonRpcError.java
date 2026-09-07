@@ -64,14 +64,27 @@ public class JsonRpcError {
     // Parameter related errors (-10500 to -10599)
     public static final int ERR_XDAG_PARAM = -10500;        // Invalid parameter value
 
+    /** geth's "execution reverted" code; {@code data} then carries the revert payload (R7). */
+    public static final int ERR_EXECUTION_REVERTED = 3;
+
     @JsonProperty("code")
     private final int code;
 
     @JsonProperty("message")
     private final String message;
 
+    /** Optional machine-readable detail (e.g. the 0x-hex revert payload); omitted from JSON when null. */
+    @JsonProperty("data")
+    @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+    private final Object data;
+
     public JsonRpcError(int code, String message) {
+        this(code, message, null);
+    }
+
+    public JsonRpcError(int code, String message, Object data) {
         this.code = code;
         this.message = message;
+        this.data = data;
     }
 }

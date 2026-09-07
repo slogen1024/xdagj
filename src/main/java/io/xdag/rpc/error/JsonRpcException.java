@@ -29,17 +29,40 @@ import lombok.Getter;
 public class JsonRpcException extends RuntimeException {
     private final int code;
     private final String message;
+    /** Optional machine-readable detail carried into the error object's {@code data} (R7). */
+    private final Object data;
 
 
     public JsonRpcException(int code, String message) {
+        this(code, message, null);
+    }
+
+    public JsonRpcException(int code, String message, Object data) {
         super(message);
         this.code = code;
         this.message = message;
-
+        this.data = data;
     }
 
     public JsonRpcException(JsonRpcError error) {
-        this(error.getCode(), error.getMessage());
+        this(error.getCode(), error.getMessage(), error.getData());
+    }
+
+    public Object getData() {
+        return data;
+    }
+
+    /** The JSON-RPC error object for this exception, including {@code data} when present. */
+    public JsonRpcError toError() {
+        return new JsonRpcError(code, message, data);
+    }
+
+    /**
+     * R7: an EVM revert as wallets expect it (geth): code 3, "execution reverted[: reason]", and the
+     * raw 0x-hex revert payload in {@code data} so clients can decode custom errors.
+     */
+    public static JsonRpcException executionReverted(String message, String revertDataHex) {
+        return new JsonRpcException(JsonRpcError.ERR_EXECUTION_REVERTED, message, revertDataHex);
     }
 
     public static JsonRpcException invalidRequest(String message) {

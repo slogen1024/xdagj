@@ -1011,6 +1011,60 @@ public class BlockchainImpl implements Blockchain {
         return xdagStats.nmain;
     }
 
+    /** The last EVM head announced to the subscription sink (R7); -1 = nothing announced yet. */
+    private long lastAnnouncedEvmHead = -1L;
+    /** Heads further behind than this on a catch-up are skipped: announce only the latest. */
+    private static final long MAX_HEAD_ANNOUNCE_CATCHUP = 64L;
+
+    /**
+     * R1/R7: announce every executed EVM head above the last announced one (bounded catch-up), each
+     * with a real header, to the newHeads subscription sink. Runs after setMain's EVM step and after an
+     * async blob-drain; a reorg lowers the watermark so the replacement chain re-announces.
+     */
+    private void announceEvmHeads() {
+        EvmSubscriptionSink sink = subscriptionSink;
+        if (sink == null) {
+            return;
+        }
+        long executed = getEvmExecutedHeight();
+        if (executed <= lastAnnouncedEvmHead) {
+            return;
+        }
+        long from = Math.max(lastAnnouncedEvmHead + 1, executed - MAX_HEAD_ANNOUNCE_CATCHUP + 1);
+        for (long h = Math.max(from, 1L); h <= executed; h++) {
+            EvmSubscriptionSink.HeadInfo head = buildEvmHeadInfo(h);
+            if (head != null) {
+                sink.onNewMainHead(head);
+            }
+        }
+        lastAnnouncedEvmHead = executed;
+    }
+
+    /** The newHeads header for executed height {@code h}; null when the main block is unknown. */
+    private EvmSubscriptionSink.HeadInfo buildEvmHeadInfo(long h) {
+        Block block = getBlockByHeight(h);
+        if (block == null) {
+            return null;
+        }
+        Block parent = h > 1 ? getBlockByHeight(h - 1) : null;
+        Bytes32 parentHash = parent == null ? Bytes32.ZERO : Bytes32.wrap(parent.getInfo().getHash());
+        long timestampSeconds = XdagTime.xdagTimestampToMs(block.getTimestamp()) / 1000;
+        EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
+        EvmMetaStore metaStore = kernel == null ? null : kernel.getEvmMetaStore();
+        long gasUsed = 0L;
+        Bytes bloom = null;
+        if (metaStore != null) {
+            for (org.hyperledger.besu.datatypes.Hash txHash : metaStore.getTxList(h)) {
+                gasUsed += metaStore.getReceipt(txHash).map(io.xdag.evm.state.EvmReceipt::gasUsed).orElse(0L);
+            }
+            bloom = metaStore.getHeightBloom(h).orElse(null);
+        }
+        Bytes32 stateRoot = evmProcessor == null ? Bytes32.ZERO : evmProcessor.chainedRootAt(h);
+        long gasLimit = kernel == null ? 0L : kernel.getConfig().getEvmSpec().getEvmBlockGasLimit();
+        return new EvmSubscriptionSink.HeadInfo(h, Bytes32.wrap(block.getInfo().getHash()), parentHash,
+                timestampSeconds, gasLimit, gasUsed, stateRoot, bloom);
+    }
+
     @Override
     public long getEvmExecutedHeight() {
         EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
@@ -1611,13 +1665,10 @@ public class BlockchainImpl implements Blockchain {
             // Spec §3.2 ordering: native accounting, then EVM execution, then matured releases.
             // Deliberately OUTSIDE the refs/deposits guard — a release height needs neither.
             releaseMaturedWithdrawals(mainNumber);
-            // C6: a new main block became canonical -> drive newHeads. Fires once per confirmed main
-            // block, independent of whether it carries EVM refs. Read the sink into a local so a
-            // concurrent setSubscriptionSink(null) cannot NPE mid-method.
-            EvmSubscriptionSink sink = subscriptionSink;
-            if (sink != null) {
-                sink.onNewMainHead(mainNumber, Bytes32.wrap(block.getInfo().getHash()), timestampSeconds);
-            }
+            // C6 + R1/R7: drive newHeads for every newly EXECUTED EVM head (the native head runs up to
+            // lag-1 ahead), with a real header. With the EVM off the executed head is the native head,
+            // so a non-EVM node still announces each confirmed main block.
+            announceEvmHeads();
             // Main block REF points to itself
             // TODO: Add fee
             updateBlockRef(block, new Address(block));
@@ -3034,6 +3085,7 @@ public class BlockchainImpl implements Blockchain {
             }
             creditEvmFee(getBlockByHeight(drained.height()), drained.height(), drained.netFeeWei());
         }
+        announceEvmHeads(); // R7: the drain advanced the executed head
     }
 
     // TODO: Accept amount to block which in snapshot

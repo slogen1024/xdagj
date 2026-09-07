@@ -36,6 +36,8 @@ import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
+import io.netty.handler.codec.http.QueryStringDecoder;
+import java.util.List;
 import lombok.extern.slf4j.Slf4j;
 
 import java.nio.charset.StandardCharsets;
@@ -92,11 +94,30 @@ public class AuthHandler extends ChannelInboundHandlerAdapter {
 
     private boolean isAuthorized(HttpRequest request) {
         String header = request.headers().get(HttpHeaderNames.AUTHORIZATION);
-        if (header == null || header.length() <= BEARER_PREFIX.length()
-                || !header.regionMatches(true, 0, BEARER_PREFIX, 0, BEARER_PREFIX.length())) {
-            return false;
+        if (header != null && header.length() > BEARER_PREFIX.length()
+                && header.regionMatches(true, 0, BEARER_PREFIX, 0, BEARER_PREFIX.length())) {
+            return tokenMatches(header.substring(BEARER_PREFIX.length()).trim());
         }
-        String provided = header.substring(BEARER_PREFIX.length()).trim();
+        // R7: a browser WebSocket cannot set Authorization on the upgrade GET; accept the bearer token
+        // as a `token` (or `access_token`) query parameter, compared exactly like the header.
+        String queryToken = queryToken(request.uri());
+        return queryToken != null && tokenMatches(queryToken);
+    }
+
+    private static String queryToken(String uri) {
+        if (uri == null || uri.indexOf('?') < 0) {
+            return null;
+        }
+        try {
+            var params = new QueryStringDecoder(uri).parameters();
+            List<String> values = params.getOrDefault("token", params.get("access_token"));
+            return values == null || values.isEmpty() ? null : values.get(0);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private boolean tokenMatches(String provided) {
         byte[] expectedBytes = apiToken.getBytes(StandardCharsets.UTF_8);
         byte[] providedBytes = provided.getBytes(StandardCharsets.UTF_8);
         // Constant-time comparison to avoid leaking the token via timing side channels.

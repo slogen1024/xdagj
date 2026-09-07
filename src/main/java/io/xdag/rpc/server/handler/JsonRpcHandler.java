@@ -26,6 +26,7 @@ package io.xdag.rpc.server.handler;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -43,6 +44,7 @@ import io.xdag.rpc.server.protocol.JsonRpcResponse;
 import lombok.extern.slf4j.Slf4j;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 
 @Slf4j
@@ -50,6 +52,8 @@ import java.util.List;
 public class JsonRpcHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
 
     public static final ObjectMapper MAPPER;
+    /** Upper bound on the calls in one JSON-RPC batch array (R7); keeps a batch from being a DoS lever. */
+    public static final int MAX_BATCH_SIZE = 100;
     private final RPCSpec rpcSpec;
     private final List<JsonRpcRequestHandler> handlers;
 
@@ -91,29 +95,80 @@ public class JsonRpcHandler extends SimpleChannelInboundHandler<FullHttpRequest>
         }
 
         String content = request.content().toString(StandardCharsets.UTF_8);
-        JsonRpcRequest rpcRequest;
+        JsonNode root;
         try {
-            rpcRequest = MAPPER.readValue(content, JsonRpcRequest.class);
-        } catch (JsonRpcException e) {
-            sendError(ctx, new JsonRpcError(e.getCode(), e.getMessage()), null);
-            return;
+            root = MAPPER.readTree(content);
         } catch (Exception e) {
             log.debug("Failed to parse JSON-RPC request", e);
             // Do not echo the parser's exception detail (may include request content) to the client.
             sendError(ctx, new JsonRpcError(JsonRpcError.ERR_PARSE, "Invalid JSON request"));
             return;
         }
+        if (root != null && root.isArray()) {
+            // R7: JSON-RPC 2.0 batch — one response object per call, in order, as an array.
+            if (root.isEmpty()) {
+                sendError(ctx, new JsonRpcError(JsonRpcError.ERR_INVALID_REQUEST, "Empty batch"));
+                return;
+            }
+            if (root.size() > MAX_BATCH_SIZE) {
+                sendError(ctx, new JsonRpcError(JsonRpcError.ERR_INVALID_REQUEST,
+                        "Batch too large, max " + MAX_BATCH_SIZE + " calls"));
+                return;
+            }
+            List<Object> responses = new ArrayList<>(root.size());
+            for (JsonNode element : root) {
+                responses.add(processOne(element, this::dispatch));
+            }
+            sendJson(ctx, responses);
+            return;
+        }
+        sendJson(ctx, processOne(root, this::dispatch));
+    }
 
+    /** A dispatcher for one parsed request; shared by the HTTP and WebSocket transports. */
+    @FunctionalInterface
+    public interface Dispatcher {
+        Object dispatch(JsonRpcRequest request) throws JsonRpcException;
+    }
+
+    /**
+     * Turns one JSON element into its response object (success or error), never throwing: a batch
+     * entry's failure must not fail its siblings. Shared by the HTTP and WebSocket transports.
+     */
+    public static Object processOne(JsonNode element, Dispatcher dispatcher) {
+        JsonRpcRequest rpcRequest;
         try {
-            Object result = dispatch(rpcRequest);
-            sendResponse(ctx, new JsonRpcResponse(rpcRequest.getId(), result));
+            if (element == null || !element.isObject()) {
+                return new JsonRpcErrorResponse(null,
+                        new JsonRpcError(JsonRpcError.ERR_INVALID_REQUEST, "Request must be a JSON object"));
+            }
+            rpcRequest = MAPPER.treeToValue(element, JsonRpcRequest.class);
+        } catch (JsonRpcException e) {
+            return new JsonRpcErrorResponse(null, e.toError());
+        } catch (Exception e) {
+            log.debug("Failed to bind JSON-RPC request", e);
+            return new JsonRpcErrorResponse(null, new JsonRpcError(JsonRpcError.ERR_PARSE, "Invalid JSON request"));
+        }
+        try {
+            return new JsonRpcResponse(rpcRequest.getId(), dispatcher.dispatch(rpcRequest));
         } catch (JsonRpcException e) {
             log.debug("RPC error: {}", e.getMessage());
-            sendError(ctx, new JsonRpcError(e.getCode(), e.getMessage()), rpcRequest);
+            return new JsonRpcErrorResponse(rpcRequest.getId(), e.toError());
         } catch (Exception e) {
             log.error("Error processing request", e);
             // Keep the detail server-side only; return a generic message to the client.
-            sendError(ctx, new JsonRpcError(JsonRpcError.ERR_INTERNAL, "Internal error"), rpcRequest);
+            return new JsonRpcErrorResponse(rpcRequest.getId(),
+                    new JsonRpcError(JsonRpcError.ERR_INTERNAL, "Internal error"));
+        }
+    }
+
+    private void sendJson(ChannelHandlerContext ctx, Object body) {
+        try {
+            ByteBuf content = Unpooled.copiedBuffer(MAPPER.writeValueAsString(body), StandardCharsets.UTF_8);
+            sendHttpResponse(ctx, content, HttpResponseStatus.OK);
+        } catch (Exception e) {
+            log.error("Error sending response", e);
+            sendError(ctx, new JsonRpcError(JsonRpcError.ERR_INTERNAL, "Internal error"));
         }
     }
 

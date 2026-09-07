@@ -94,11 +94,15 @@ public final class SubscriptionManager implements EvmSubscriptionSink {
     }
 
     @Override
-    public void onNewMainHead(long height, Bytes32 blockHash, long timestampSeconds) {
-        String hashHex = EthHex.data(blockHash);
+    public void onNewMainHead(HeadInfo head) {
+        // R7: a real header (parentHash / stateRoot / gasUsed / logsBloom), not a placeholder.
+        String hashHex = EthHex.data(head.hash());
+        String parentHex = head.parentHash() == null ? ZERO_HASH : EthHex.data(head.parentHash());
+        String rootHex = head.stateRoot() == null ? ZERO_HASH : EthHex.data(head.stateRoot());
+        String bloomHex = head.logsBloom() == null ? EthObjects.ZERO_BLOOM : EthHex.data(head.logsBloom());
         forEachSub(Type.NEW_HEADS, (channel, sub) -> {
-            Map<String, Object> header = EthObjects.block(height, hashHex, ZERO_HASH, timestampSeconds,
-                    0L, 0L, ZERO_HASH, List.of());
+            Map<String, Object> header = EthObjects.block(head.height(), hashHex, parentHex,
+                    head.timestampSeconds(), head.gasLimit(), head.gasUsed(), rootHex, List.of(), bloomHex);
             header.remove("transactions"); // newHeads is a header only — drop the tx/uncle collections
             header.remove("uncles");
             push(channel, sub.id(), header);

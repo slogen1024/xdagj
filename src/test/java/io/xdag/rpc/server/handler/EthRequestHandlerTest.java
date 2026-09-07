@@ -956,4 +956,21 @@ public class EthRequestHandlerTest {
                 (String) h.handle(request("eth_call", Map.of("to", timeC.toHexString()), "latest"))));
     }
 
+    @Test
+    public void eth_call_revert_surfaces_the_revert_payload_in_error_data() {
+        // R7: wallets decode custom errors from error.data; code 3 = "execution reverted" (geth).
+        InMemoryKVSource store = new InMemoryKVSource();
+        Address reverter = Address.fromHexString("0x00000000000000000000000000000000000000d1");
+        // MSTORE(0, 0xdeadbeef); REVERT(28, 4) -> revert data 0xdeadbeef
+        runtimeAt(store, reverter, Bytes.fromHexString("0x63deadbeef6000526004601cfd"));
+        EthRequestHandler h = handlerOver(store, 10L);
+        JsonRpcException e = assertThrows(JsonRpcException.class,
+                () -> h.handle(request("eth_call", Map.of("to", reverter.toHexString()), "latest")));
+        assertEquals(3, e.getCode());
+        assertEquals("0xdeadbeef", e.getData());
+        assertTrue(e.getMessage(), e.getMessage().startsWith("execution reverted"));
+        JsonRpcException est = assertThrows(JsonRpcException.class,
+                () -> h.handle(request("eth_estimateGas", Map.of("to", reverter.toHexString()))));
+        assertEquals("0xdeadbeef", est.getData());
+    }
 }

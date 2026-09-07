@@ -88,4 +88,19 @@ public class RpcWebSocketFrameHandlerTest {
         ch.runPendingTasks();
         assertTrue(((TextWebSocketFrame) ch.readOutbound()).text().contains("\"error\""));
     }
+
+    @Test
+    public void a_batch_frame_returns_an_array_response() {
+        // Audit round 2, R7: ethers v6 batches by default; a batch over WS must answer with an array.
+        SubscriptionManager mgr = new SubscriptionManager();
+        EmbeddedChannel ch = new EmbeddedChannel(new RpcWebSocketFrameHandler(mgr, List.of()));
+        ch.writeInbound(new TextWebSocketFrame(
+                "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_subscribe\",\"params\":[\"newHeads\"]},"
+                        + "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"nope\"}]"));
+        ch.runPendingTasks();
+        String out = ((TextWebSocketFrame) ch.readOutbound()).text();
+        assertTrue(out, out.startsWith("[") && out.endsWith("]"));
+        assertTrue(out.contains("\"result\":\"0x"));
+        assertTrue(out.contains("\"code\":-32601"));
+    }
 }
