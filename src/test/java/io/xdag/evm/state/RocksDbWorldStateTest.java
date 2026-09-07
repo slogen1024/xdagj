@@ -282,4 +282,38 @@ public class RocksDbWorldStateTest {
                 .findFirst().orElseThrow();
         assertArrayEquals(priorSlot, deleted.priorValue());
     }
+
+    // ---- Audit round 2, E5: "original" storage value is the TRANSACTION-start value ---------------
+
+    @Test
+    public void nested_frame_original_storage_is_the_tx_start_value_when_tx_originals_are_enabled() {
+        RocksDbWorldUpdater seed = new RocksDbWorldUpdater(store);
+        seed.createAccount(addr, 1L, Wei.ZERO).setStorageValue(UInt256.ZERO, UInt256.valueOf(5));
+        seed.commit();
+
+        // Per-height root -> tx-level child -> frame-level child (outer call) -> nested call frame.
+        RocksDbWorldUpdater root = new RocksDbWorldUpdater(store, true);
+        WorldUpdater tx = root.updater();
+        WorldUpdater outerFrame = tx.updater();
+        outerFrame.getAccount(addr).setStorageValue(UInt256.ZERO, UInt256.valueOf(9)); // pending in the outer frame
+        WorldUpdater nested = outerFrame.updater();
+        Account nestedView = nested.getAccount(addr);
+        assertEquals("current value sees the outer frame's pending write", UInt256.valueOf(9),
+                nestedView.getStorageValue(UInt256.ZERO));
+        assertEquals("E5: original = value at transaction start, not the parent frame's current value",
+                UInt256.valueOf(5), nestedView.getOriginalStorageValue(UInt256.ZERO));
+    }
+
+    @Test
+    public void nested_frame_original_storage_is_the_parent_current_value_in_legacy_mode() {
+        RocksDbWorldUpdater seed = new RocksDbWorldUpdater(store);
+        seed.createAccount(addr, 1L, Wei.ZERO).setStorageValue(UInt256.ZERO, UInt256.valueOf(5));
+        seed.commit();
+
+        RocksDbWorldUpdater root = new RocksDbWorldUpdater(store); // legacy (pinned pre-fork behaviour)
+        WorldUpdater outerFrame = root.updater().updater();
+        outerFrame.getAccount(addr).setStorageValue(UInt256.ZERO, UInt256.valueOf(9));
+        Account nestedView = outerFrame.updater().getAccount(addr);
+        assertEquals(UInt256.valueOf(9), nestedView.getOriginalStorageValue(UInt256.ZERO));
+    }
 }

@@ -65,17 +65,30 @@ public class RocksDbWorldUpdater implements WorldUpdater {
 
     private final RocksDbWorldUpdater parent;
     private final KVSource<byte[], byte[]> store;
+    /**
+     * Audit round 2 E5 (semantics v2): when true, a child account's "original" storage value is the
+     * TRANSACTION-start value (resolved through the per-height root), not the parent frame's current
+     * value. Inherited by every child updater and account created from this one.
+     */
+    private final boolean txOriginalStorage;
     private Map<Address, Optional<RocksDbAccount>> accounts = new HashMap<>();
 
-    /** Root updater backed by the EVM_STATE store. */
+    /** Root updater backed by the EVM_STATE store (legacy original-storage semantics). */
     public RocksDbWorldUpdater(KVSource<byte[], byte[]> store) {
+        this(store, false);
+    }
+
+    /** Root updater backed by the EVM_STATE store; {@code txOriginalStorage} selects the E5 semantics. */
+    public RocksDbWorldUpdater(KVSource<byte[], byte[]> store, boolean txOriginalStorage) {
         this.parent = null;
         this.store = store;
+        this.txOriginalStorage = txOriginalStorage;
     }
 
     private RocksDbWorldUpdater(RocksDbWorldUpdater parent) {
         this.parent = parent;
         this.store = parent.store;
+        this.txOriginalStorage = parent.txOriginalStorage;
     }
 
     @Override
@@ -98,7 +111,8 @@ public class RocksDbWorldUpdater implements WorldUpdater {
             Account parentAccount = parent.getAccount(address);
             if (parentAccount != null) {
                 RocksDbAccount child = new RocksDbAccount(parentAccount, parentAccount.getAddress(),
-                        parentAccount.getNonce(), parentAccount.getBalance(), parentAccount.getCode());
+                        parentAccount.getNonce(), parentAccount.getBalance(), parentAccount.getCode(),
+                        txOriginalStorage);
                 accounts.put(address, Optional.of(child));
                 return child;
             }

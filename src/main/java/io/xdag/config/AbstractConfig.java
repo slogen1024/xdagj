@@ -168,6 +168,7 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected long evmBridgeActivationHeight = Long.MAX_VALUE;
     protected long evmEip3529ActivationHeight = Long.MAX_VALUE;
     protected long evmInvalidTxSkipActivationHeight = Long.MAX_VALUE;
+    protected long evmSemanticsV2ActivationHeight = Long.MAX_VALUE;
     protected long evmFeeRewardActivationHeight = Long.MAX_VALUE;
     protected long evmStateRootActivationHeight = Long.MAX_VALUE;
     protected long evmStateRootLag = 16;
@@ -240,6 +241,11 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     @Override
     public long getEvmInvalidTxSkipActivationHeight() {
         return evmInvalidTxSkipActivationHeight;
+    }
+
+    @Override
+    public long getEvmSemanticsV2ActivationHeight() {
+        return evmSemanticsV2ActivationHeight;
     }
 
     @Override
@@ -566,6 +572,8 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
                 ? config.getLong("evm.eip3529ActivationHeight") : evmEip3529ActivationHeight;
         evmInvalidTxSkipActivationHeight = config.hasPath("evm.invalidTxSkipActivationHeight")
                 ? config.getLong("evm.invalidTxSkipActivationHeight") : evmInvalidTxSkipActivationHeight;
+        evmSemanticsV2ActivationHeight = config.hasPath("evm.semanticsV2ActivationHeight")
+                ? config.getLong("evm.semanticsV2ActivationHeight") : evmSemanticsV2ActivationHeight;
         evmFeeRewardActivationHeight = config.hasPath("evm.feeRewardActivationHeight")
                 ? config.getLong("evm.feeRewardActivationHeight") : evmFeeRewardActivationHeight;
         evmStateRootActivationHeight = config.hasPath("evm.stateRootActivationHeight")

@@ -363,4 +363,12 @@ public class EvmConfigSectionTest {
         assertEquals(Long.MAX_VALUE, new TestnetConfig().getEvmSpec().getEvmInvalidTxSkipActivationHeight());
         assertEquals(Long.MAX_VALUE, new MainnetConfig().getEvmSpec().getEvmInvalidTxSkipActivationHeight());
     }
+
+    @Test
+    public void devnet_activates_semantics_v2_at_genesis_and_shared_nets_do_not() {
+        // Audit round 2 E1/E2/E4/E5/B2 fork pack.
+        assertEquals(0L, new DevnetConfig().getEvmSpec().getEvmSemanticsV2ActivationHeight());
+        assertEquals(Long.MAX_VALUE, new TestnetConfig().getEvmSpec().getEvmSemanticsV2ActivationHeight());
+        assertEquals(Long.MAX_VALUE, new MainnetConfig().getEvmSpec().getEvmSemanticsV2ActivationHeight());
+    }
 }

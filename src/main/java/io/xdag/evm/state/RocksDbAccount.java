@@ -59,6 +59,12 @@ public class RocksDbAccount implements MutableAccount {
     private boolean immutable = false;
     /** Set by {@link #clearStorage()} (SELFDESTRUCT / account recreation): originals must be wiped at commit. */
     private boolean storageCleared = false;
+    /**
+     * Audit round 2 E5 (semantics v2): resolve "original" storage to the TRANSACTION-start value by
+     * climbing to the account whose parent is the per-height root, instead of the parent frame's
+     * current value. False = legacy behaviour.
+     */
+    private final boolean txOriginalStorage;
 
     /** Root/store-backed account loaded from the EVM_STATE store. */
     public RocksDbAccount(KVSource<byte[], byte[]> store, Address address, long nonce, Wei balance, Bytes code) {
@@ -68,16 +74,24 @@ public class RocksDbAccount implements MutableAccount {
         this.nonce = nonce;
         this.balance = balance;
         this.code = code == null ? Bytes.EMPTY : code;
+        this.txOriginalStorage = false;
     }
 
-    /** Child account copied from a parent updater's account. */
+    /** Child account copied from a parent updater's account (legacy original-storage semantics). */
     public RocksDbAccount(Account parent, Address address, long nonce, Wei balance, Bytes code) {
+        this(parent, address, nonce, balance, code, false);
+    }
+
+    /** Child account copied from a parent updater's account; {@code txOriginalStorage} selects E5 semantics. */
+    public RocksDbAccount(Account parent, Address address, long nonce, Wei balance, Bytes code,
+                          boolean txOriginalStorage) {
         this.parent = parent;
         this.store = null;
         this.address = address;
         this.nonce = nonce;
         this.balance = balance;
         this.code = code == null ? Bytes.EMPTY : code;
+        this.txOriginalStorage = txOriginalStorage;
     }
 
     @Override
@@ -120,14 +134,27 @@ public class RocksDbAccount implements MutableAccount {
         if (storageCleared) {
             return UInt256.ZERO;
         }
-        return getOriginalStorageValue(key);
+        // Current value: fall through to the parent's CURRENT value (a frame sees its caller's pending
+        // writes); only the root reads the store. Distinct from getOriginalStorageValue under E5.
+        return parent != null ? parent.getStorageValue(key) : storedStorageValue(key);
     }
 
     @Override
     public UInt256 getOriginalStorageValue(UInt256 key) {
         if (parent != null) {
+            // E5 (semantics v2): the transaction-start value is the per-height root's CURRENT value
+            // (prior txs of the height included). Climb through intermediate frame-level copies —
+            // each of which has a parent of its own — until the copy whose parent is that root.
+            if (txOriginalStorage && parent instanceof RocksDbAccount parentCopy && parentCopy.parent != null) {
+                return parentCopy.getOriginalStorageValue(key);
+            }
             return parent.getStorageValue(key);
         }
+        return storedStorageValue(key);
+    }
+
+    /** The slot's persisted value for a root/store-backed account (zero when absent or store-less). */
+    private UInt256 storedStorageValue(UInt256 key) {
         if (store != null) {
             byte[] raw = store.get(EvmStateSchema.storageKey(address, key));
             return raw == null ? UInt256.ZERO : EvmStateSchema.decodeStorageValue(raw);

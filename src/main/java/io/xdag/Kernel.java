@@ -212,7 +212,8 @@ public class Kernel {
                     config.getEvmSpec().getEvmType2ActivationHeight(),
                     config.getEvmSpec().getEvmBridgeActivationHeight(),
                     config.getEvmSpec().getEvmEip3529ActivationHeight(),
-                    config.getEvmSpec().getEvmInvalidTxSkipActivationHeight());
+                    config.getEvmSpec().getEvmInvalidTxSkipActivationHeight(),
+                    config.getEvmSpec().getEvmSemanticsV2ActivationHeight());
             evmTxStore = new io.xdag.evm.tx.EvmTxStore(evmTxSource);
             evmMetaStore = new io.xdag.evm.state.EvmMetaStore(evmMetaSource);
             evmTxPool = new io.xdag.evm.tx.EvmTxPool(evmTxStore, evmStateSource, evmChainId,
@@ -258,6 +259,13 @@ public class Kernel {
 
         // Initialize blockchain
         blockchain = new BlockchainImpl(this);
+        if (evmBlockProcessor != null) {
+            // E2 (semantics v2): BLOCKHASH resolves the canonical main block at a height; null -> zero.
+            evmBlockProcessor.setBlockHashLookup(h -> {
+                io.xdag.core.Block b = blockchain.getBlockByHeight(h);
+                return b == null ? null : org.apache.tuweni.bytes.Bytes32.wrap(b.getInfo().getHash());
+            });
+        }
         XdagStats xdagStats = blockchain.getXdagStats();
         
         // Create genesis block if first startup
