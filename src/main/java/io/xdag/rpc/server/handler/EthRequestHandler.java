@@ -59,6 +59,8 @@ import org.hyperledger.besu.datatypes.Log;
 import org.hyperledger.besu.datatypes.LogsBloomFilter;
 import org.hyperledger.besu.datatypes.Wei;
 import org.hyperledger.besu.evm.account.Account;
+import org.hyperledger.besu.evm.fluent.SimpleBlockValues;
+import org.hyperledger.besu.evm.frame.BlockValues;
 import org.hyperledger.besu.evm.worldstate.WorldUpdater;
 
 /** Serves the read-only Ethereum JSON-RPC surface (sub-project C1) over the EVM_STATE world state. */
@@ -123,7 +125,7 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
                 case "net_version" -> evmConfig.chainId().toString();
                 case "web3_clientVersion" -> CLIENT_VERSION;
                 case "eth_gasPrice" -> EthHex.quantity(minGasPriceWei);
-                case "eth_blockNumber" -> EthHex.quantity(blockchain.getLatestMainBlockNumber());
+                case "eth_blockNumber" -> EthHex.quantity(executedHead()); // R1: the EXECUTED EVM head
                 case "eth_accounts" -> List.of();
                 case "net_listening" -> Boolean.TRUE;
                 case "eth_getBalance" -> {
@@ -134,7 +136,11 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
                 case "eth_getTransactionCount" -> {
                     Address addr = addressParam(request, 0);
                     Account a = account(addr, request, 1);
-                    yield EthHex.quantity(a == null ? 0L : a.getNonce());
+                    long nonce = a == null ? 0L : a.getNonce();
+                    if ("pending".equals(tagParam(request, 1)) && evmTxPool != null) {
+                        nonce = evmTxPool.nextNonce(addr, nonce); // R3: next free nonce incl. the pool queue
+                    }
+                    yield EthHex.quantity(nonce);
                 }
                 case "eth_getCode" -> {
                     Address addr = addressParam(request, 0);
@@ -149,22 +155,14 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
                     yield EthHex.data(value.toBytes());
                 }
                 case "eth_call" -> {
-                    XdagExecutionResult r = simulate(callObject(request, 0), historicalWorld(request, 1));
+                    CallArgs args = callObject(request, 0);
+                    XdagExecutionResult r = simulate(args, resolveTarget(request, 1), args.gas());
                     if (!r.success()) {
                         throw JsonRpcException.internalError(revertMessage(r));
                     }
                     yield EthHex.data(r.returnData());
                 }
-                case "eth_estimateGas" -> {
-                    CallArgs args = callObject(request, 0);
-                    XdagExecutionResult r = simulate(args, historicalWorld(request, 1));
-                    if (!r.success()) {
-                        throw JsonRpcException.internalError(revertMessage(r));
-                    }
-                    // call objects carry no access list
-                    long intrinsic = IntrinsicGas.compute(args.data(), args.to() == null, List.of());
-                    yield EthHex.quantity(intrinsic + r.gasUsed());
-                }
+                case "eth_estimateGas" -> EthHex.quantity(estimateGas(callObject(request, 0), resolveTarget(request, 1)));
                 case "eth_maxPriorityFeePerGas" -> EthHex.quantity(minGasPriceWei);
                 case "eth_feeHistory" -> feeHistory(request);
                 case "eth_sendRawTransaction" -> sendRawTransaction(request);
@@ -250,7 +248,7 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
         long requested = params[0] instanceof Number n ? n.longValue()
                 : EthHex.decodeQuantity((String) params[0]).longValueExact();
         long blockCount = Math.max(1L, Math.min(requested, 1024L));
-        long newest = resolveHeight((String) params[1], blockchain.getLatestMainBlockNumber());
+        long newest = resolveHeight((String) params[1], executedHead());
         if (newest < 0) {
             throw new IllegalArgumentException("invalid newestBlock");
         }
@@ -325,9 +323,20 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
             return null;
         }
         String blockHash = blockHashAt(loc.get().height());
-        List<Object> logs = buildLogs(receipt.get(), tx.get(), loc.get(), blockHash, 0);
+        // R4: block-wide coordinates — logIndex continues across the block's earlier txs (matching
+        // eth_getLogs / WS) and cumulativeGasUsed sums the block's receipts up to this one.
+        long cumulativeGas = 0L;
+        int firstLogIndex = 0;
+        List<Hash> blockTxs = evmMetaStore.getTxList(loc.get().height());
+        for (int i = 0; i < Math.min(loc.get().index(), blockTxs.size()); i++) {
+            Optional<EvmReceipt> earlier = evmMetaStore.getReceipt(blockTxs.get(i));
+            cumulativeGas += earlier.map(EvmReceipt::gasUsed).orElse(0L);
+            firstLogIndex += earlier.map(er -> er.logs().size()).orElse(0);
+        }
+        cumulativeGas += receipt.get().gasUsed();
+        List<Object> logs = buildLogs(receipt.get(), tx.get(), loc.get(), blockHash, firstLogIndex);
         return EthObjects.receipt(tx.get(), receipt.get(), loc.get().height(), blockHash,
-                loc.get().index(), logs);
+                loc.get().index(), logs, cumulativeGas);
     }
 
     /** Builds the log objects for one tx's receipt, numbering logIndex from {@code startLogIndex}. */
@@ -342,7 +351,7 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
     }
 
     private Object getBlockByNumber(JsonRpcRequest request) {
-        long head = blockchain.getLatestMainBlockNumber();
+        long head = executedHead();
         long height = resolveHeight(stringParam(request, 0), head);
         if (height < 0 || height > head) {
             return null;
@@ -357,8 +366,8 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
             return null;
         }
         long height = block.getInfo().getHeight();
-        if (height <= 0) {
-            return null; // not a confirmed main block
+        if (height <= 0 || height > executedHead()) {
+            return null; // not a confirmed main block, or not yet executed by the EVM (R1)
         }
         boolean fullTx = request.getParams().length > 1 && Boolean.TRUE.equals(request.getParams()[1]);
         return buildBlock(height, fullTx);
@@ -390,6 +399,8 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
                 evmMetaStore == null ? Optional.empty() : evmMetaStore.getHeightRecord(height);
         String stateRoot = record.map(r -> EthHex.data(r.stateRoot())).orElse("0x" + "0".repeat(64));
         List<Hash> txHashes = evmMetaStore == null ? List.of() : evmMetaStore.getTxList(height);
+        String logsBloom = evmMetaStore == null ? EthObjects.ZERO_BLOOM
+                : evmMetaStore.getHeightBloom(height).map(EthHex::data).orElse(EthObjects.ZERO_BLOOM); // R6
 
         List<Object> txs = new ArrayList<>();
         long gasUsed = 0L;
@@ -405,7 +416,7 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
             }
         }
         return EthObjects.block(height, hash, parentHash, timestampSeconds,
-                evmConfig.maxGasLimit(), gasUsed, stateRoot, txs);
+                evmConfig.maxGasLimit(), gasUsed, stateRoot, txs, logsBloom);
     }
 
     private Object getLogs(JsonRpcRequest request) {
@@ -413,10 +424,26 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
         if (params == null || params.length < 1 || !(params[0] instanceof Map<?, ?> filter)) {
             throw JsonRpcException.invalidParams("missing filter object");
         }
-        long head = blockchain.getLatestMainBlockNumber();
-        long from = filter.get("fromBlock") == null ? head
-                : resolveHeight((String) filter.get("fromBlock"), head);
-        long to = filter.get("toBlock") == null ? head : resolveHeight((String) filter.get("toBlock"), head);
+        long head = executedHead(); // R1: never scan heights whose receipts do not exist yet
+        long from;
+        long to;
+        if (filter.get("blockHash") != null) {
+            // R2 (EIP-234): blockHash selects exactly one block and excludes fromBlock/toBlock.
+            if (filter.get("fromBlock") != null || filter.get("toBlock") != null) {
+                throw JsonRpcException.invalidParams("blockHash cannot be combined with fromBlock/toBlock");
+            }
+            Block byHash = blockchain.getBlockByHash(
+                    Bytes32.wrap(EthHex.decodeData((String) filter.get("blockHash"))), false);
+            long height = byHash == null ? -1L : byHash.getInfo().getHeight();
+            if (height <= 0 || height > head) {
+                throw JsonRpcException.invalidParams("unknown block hash");
+            }
+            from = height;
+            to = height;
+        } else {
+            from = filter.get("fromBlock") == null ? head : resolveHeight((String) filter.get("fromBlock"), head);
+            to = filter.get("toBlock") == null ? head : resolveHeight((String) filter.get("toBlock"), head);
+        }
         if (from < 0 || to < 0 || to < from) {
             throw JsonRpcException.invalidParams("invalid block range");
         }
@@ -451,9 +478,19 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
         return out;
     }
 
-    /** The latest executed EVM height (state anchor); 0 when no EVM tx has executed (genesis only). */
-    private long evmHead() {
+    /** The highest EVM checkpoint height (state anchor); 0 when no EVM tx has executed (genesis only). */
+    private long checkpointHead() {
         return evmMetaStore == null ? 0L : evmMetaStore.highestHeight().orElse(0L);
+    }
+
+    /**
+     * R1: the height every eth_* block tag resolves against — the highest EVM height this node has fully
+     * executed (never below the highest checkpoint), NOT the native main-chain head, which runs ahead by
+     * up to stateRootLag-1 heights (plus any blob-deferred height). Receipts, logs, tx lists and state
+     * are therefore all consistent at and below this number.
+     */
+    private long executedHead() {
+        return Math.max(blockchain.getEvmExecutedHeight(), checkpointHead());
     }
 
     /** The block tag at {@code index}, defaulting to "latest" when omitted/blank. */
@@ -463,10 +500,31 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
                 ? s : "latest";
     }
 
-    /** A read-only world at the height named by the block tag at {@code index} (C4). */
+    /** The height the block tag at {@code index} names, resolved against the executed head (R1). */
+    private long resolveTarget(JsonRpcRequest request, int index) {
+        long target = resolveHeight(tagParam(request, index), executedHead());
+        if (target < 0) {
+            throw new IllegalArgumentException("invalid block tag");
+        }
+        return target;
+    }
+
+    /**
+     * A read-only world at {@code target} (C4 + R1): a height above the executed head is not available
+     * yet; between the highest checkpoint and the executed head nothing changed the state, so those
+     * heights read the live store; below the checkpoint the journals reconstruct the past state.
+     */
+    private WorldUpdater worldAt(long target) {
+        if (target > executedHead()) {
+            throw new StateUnavailableException(target);
+        }
+        long checkpoint = checkpointHead();
+        return historical.worldAt(Math.min(target, checkpoint), checkpoint);
+    }
+
+    /** A read-only world at the height named by the block tag at {@code index}. */
     private WorldUpdater historicalWorld(JsonRpcRequest request, int index) {
-        long head = evmHead();
-        return historical.worldAt(resolveHeight(tagParam(request, index), head), head);
+        return worldAt(resolveTarget(request, index));
     }
 
     /** Loads an account at the block tag's height; null when absent. Read-only (never committed). */
@@ -474,8 +532,33 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
         return historicalWorld(request, tagIndex).getAccount(address);
     }
 
+    /** E3: the block context a simulation at {@code height} observes (NUMBER / TIMESTAMP / GASLIMIT / BASEFEE). */
+    private BlockValues blockValuesAt(long height) {
+        SimpleBlockValues values = new SimpleBlockValues();
+        values.setNumber(height);
+        Block block = blockchain.getBlockByHeight(height);
+        values.setTimestamp(block == null ? 0L
+                : io.xdag.utils.XdagTime.xdagTimestampToMs(block.getTimestamp()) / 1000);
+        values.setGasLimit(evmConfig.maxGasLimit());
+        if (height >= evmConfig.semanticsV2ActivationHeight()) {
+            values.setBaseFee(Optional.of(Wei.ZERO));
+        }
+        return values;
+    }
+
+    /** The fork options in force at {@code height}, mirroring EvmBlockProcessor's consensus choice. */
+    private XdagEvmExecutor.ExecutionOptions optionsAt(long height, Wei gasPrice) {
+        if (height < evmConfig.semanticsV2ActivationHeight()) {
+            return XdagEvmExecutor.ExecutionOptions.LEGACY;
+        }
+        return new XdagEvmExecutor.ExecutionOptions(true, gasPrice, h -> {
+            Block b = blockchain.getBlockByHeight(h);
+            return b == null ? null : b.getHash();
+        });
+    }
+
     /** Parsed eth_call / eth_estimateGas arguments. {@code to == null} means contract creation. */
-    private record CallArgs(Address from, Address to, Bytes data, Wei value, long gas) {
+    private record CallArgs(Address from, Address to, Bytes data, Wei value, long gas, Wei gasPrice) {
     }
 
     private CallArgs callObject(JsonRpcRequest request, int index) {
@@ -490,18 +573,79 @@ public class EthRequestHandler implements JsonRpcRequestHandler {
         Wei value = map.get("value") == null ? Wei.ZERO : Wei.of(EthHex.decodeQuantity((String) map.get("value")));
         long gas = map.get("gas") == null ? evmConfig.maxGasLimit()
                 : EthHex.decodeQuantity((String) map.get("gas")).longValueExact();
-        return new CallArgs(from, to, data, value, gas);
+        Object price = map.get("gasPrice") != null ? map.get("gasPrice") : map.get("maxFeePerGas");
+        Wei gasPrice = price == null ? Wei.ZERO : Wei.of(EthHex.decodeQuantity((String) price));
+        return new CallArgs(from, to, data, value, gas, gasPrice);
     }
 
     /**
      * Runs the call/creation through the executor's simulation path, which NEVER commits, so
-     * eth_call/eth_estimateGas cannot mutate the EVM_STATE (ADR-005). The updater is a read-only
-     * historical world (C4); it is discarded when this method returns.
+     * eth_call/eth_estimateGas cannot mutate the EVM_STATE (ADR-005). {@code gasLimit} is the
+     * TRANSACTION gas limit: the intrinsic cost is charged first exactly as in execution, so a result
+     * (and eth_estimateGas, which bisects over this) is a real tx gas limit. Runs in the tagged block's
+     * context (E3) on a read-only historical world (C4), discarded when this method returns.
      */
-    private XdagExecutionResult simulate(CallArgs args, WorldUpdater updater) {
+    private XdagExecutionResult simulate(CallArgs args, long target, long gasLimit) {
+        long intrinsic = IntrinsicGas.compute(args.data(), args.to() == null, List.of()); // no access list
+        long messageGas = gasLimit - intrinsic;
+        WorldUpdater world = worldAt(target);
+        if (messageGas <= 0L) {
+            if (args.to() != null && messageGas == 0L) {
+                Account to = world.getAccount(args.to());
+                boolean hasCode = to != null && to.getCode() != null && !to.getCode().isEmpty();
+                if (!hasCode) {
+                    // A 21000-gas value transfer: no code to run, succeeds with nothing to execute.
+                    return new XdagExecutionResult(true, Bytes.EMPTY, 0L, 0L, List.of(), Optional.empty(),
+                            Optional.empty());
+                }
+            }
+            throw new IllegalArgumentException("intrinsic gas exceeds gas limit");
+        }
+        BlockValues blockValues = blockValuesAt(target);
+        XdagEvmExecutor.ExecutionOptions options = optionsAt(target, args.gasPrice());
         return args.to() == null
-                ? executor.simulateDeploy(updater, args.from(), args.data(), args.value(), args.gas())
-                : executor.simulateCall(updater, args.from(), args.to(), args.data(), args.value(), args.gas());
+                ? executor.simulateDeploy(world, args.from(), args.data(), args.value(), messageGas, blockValues,
+                        options)
+                : executor.simulateCall(world, args.from(), args.to(), args.data(), args.value(), messageGas,
+                        blockValues, options);
+    }
+
+    /**
+     * R5: eth_estimateGas as a binary search for the smallest tx gas limit that executes successfully,
+     * geth-style. A single run at the cap under-estimates whenever a sub-call is involved: with exactly
+     * "intrinsic + gasUsed" the caller can forward only 63/64 of its remaining gas (EIP-150) and the
+     * callee runs out. Fails with the revert reason when even the cap does not execute.
+     */
+    private long estimateGas(CallArgs args, long target) {
+        long intrinsic = IntrinsicGas.compute(args.data(), args.to() == null, List.of());
+        long hi = args.gas();
+        XdagExecutionResult atCap = simulate(args, target, hi);
+        if (!atCap.success()) {
+            throw JsonRpcException.internalError(revertMessage(atCap));
+        }
+        long lo = Math.max(intrinsic, 0L) - 1L; // < intrinsic never executes
+        // Tighten the upper bound to what the cap run actually consumed plus a 64/63 head-room
+        // (sub-call forwarding), then bisect: monotone in gas, so O(log) simulations.
+        long used = intrinsic + atCap.gasUsed();
+        long tightened = used + used / 63L + 1L;
+        if (tightened < hi && simulate(args, target, tightened).success()) {
+            hi = tightened;
+        }
+        while (lo + 1L < hi) {
+            long mid = lo + (hi - lo) / 2L;
+            boolean ok;
+            try {
+                ok = simulate(args, target, mid).success();
+            } catch (IllegalArgumentException below) {
+                ok = false; // mid below the intrinsic cost (or otherwise unexecutable)
+            }
+            if (ok) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        return hi;
     }
 
     private static String revertMessage(XdagExecutionResult result) {

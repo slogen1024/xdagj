@@ -455,6 +455,18 @@ public class EvmBlockProcessor {
         return missing;
     }
 
+    /**
+     * The highest EVM height that is fully executed given the native head (R1): the matured height
+     * {@code nativeHead - lag + 1} unless some earlier height is still blob-deferred, in which case the
+     * height just below the lowest pending one. Never negative.
+     */
+    public synchronized long executedHead(long nativeHead, long lag) {
+        List<Long> pending = metaStore.pendingHeights();
+        long head = pending.isEmpty() ? maturedEvmHeight(nativeHead, lag)
+                : pending.stream().mapToLong(Long::longValue).min().orElseThrow() - 1;
+        return Math.max(0L, head);
+    }
+
     /** True if some deferred (blob-stalled) height at or below {@code height} is still unexecuted. */
     public synchronized boolean hasUnexecutedHeightAtOrBelow(long height) {
         for (long pending : metaStore.pendingHeights()) {

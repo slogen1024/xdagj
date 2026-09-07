@@ -35,6 +35,7 @@ import org.apache.tuweni.bytes.Bytes32;
 import org.hyperledger.besu.datatypes.Hash;
 import org.hyperledger.besu.datatypes.Log;
 import org.hyperledger.besu.datatypes.LogTopic;
+import org.hyperledger.besu.datatypes.LogsBloomFilter;
 
 /** Builds Ethereum JSON-RPC tx/receipt/block/log objects as ordered maps (Jackson-serialisable). */
 public final class EthObjects {
@@ -100,8 +101,25 @@ public final class EthObjects {
         return out;
     }
 
+    /** Bloom over a receipt's own logs (R6); the zero bloom when it emitted none. */
+    public static String bloomOf(List<Log> logs) {
+        if (logs == null || logs.isEmpty()) {
+            return ZERO_BLOOM;
+        }
+        LogsBloomFilter.Builder b = LogsBloomFilter.builder();
+        logs.forEach(b::insertLog);
+        return EthHex.data(b.build().getBytes());
+    }
+
     public static Map<String, Object> receipt(EvmTransaction tx, EvmReceipt receipt, long blockNumber,
                                               String blockHash, int txIndex, List<Object> logs) {
+        return receipt(tx, receipt, blockNumber, blockHash, txIndex, logs, receipt.gasUsed());
+    }
+
+    /** As above with the block-wide cumulative gas (R4): the sum of this block's receipts up to this tx. */
+    public static Map<String, Object> receipt(EvmTransaction tx, EvmReceipt receipt, long blockNumber,
+                                              String blockHash, int txIndex, List<Object> logs,
+                                              long cumulativeGasUsed) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("transactionHash", EthHex.data(tx.getHash().getBytes()));
         m.put("transactionIndex", EthHex.quantity(txIndex));
@@ -109,12 +127,12 @@ public final class EthObjects {
         m.put("blockNumber", EthHex.quantity(blockNumber));
         m.put("from", EthHex.data(tx.getSender().getBytes()));
         m.put("to", tx.getTo().map(a -> (Object) EthHex.data(a.getBytes())).orElse(null));
-        m.put("cumulativeGasUsed", EthHex.quantity(receipt.gasUsed()));
+        m.put("cumulativeGasUsed", EthHex.quantity(cumulativeGasUsed));
         m.put("gasUsed", EthHex.quantity(receipt.gasUsed()));
         m.put("contractAddress",
                 receipt.contractAddress().map(a -> (Object) EthHex.data(a.getBytes())).orElse(null));
         m.put("logs", logs);
-        m.put("logsBloom", ZERO_BLOOM);
+        m.put("logsBloom", bloomOf(receipt.logs()));
         m.put("status", receipt.status() == 1 ? "0x1" : "0x0");
         m.put("effectiveGasPrice", EthHex.quantity(tx.getEffectiveGasPrice().getAsBigInteger()));
         m.put("type", tx.getType() == EvmTransaction.TYPE_EIP1559 ? "0x2" : "0x0");
@@ -124,13 +142,21 @@ public final class EthObjects {
     public static Map<String, Object> block(long number, String hash, String parentHash,
                                             long timestampSeconds, long gasLimit, long gasUsed,
                                             String stateRoot, List<Object> transactions) {
+        return block(number, hash, parentHash, timestampSeconds, gasLimit, gasUsed, stateRoot, transactions,
+                ZERO_BLOOM);
+    }
+
+    /** As above with the block's logs bloom (R6: served from EVM_META 0x05). */
+    public static Map<String, Object> block(long number, String hash, String parentHash,
+                                            long timestampSeconds, long gasLimit, long gasUsed,
+                                            String stateRoot, List<Object> transactions, String logsBloom) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("number", EthHex.quantity(number));
         m.put("hash", hash);
         m.put("parentHash", parentHash);
         m.put("nonce", "0x0000000000000000");
         m.put("sha3Uncles", "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347");
-        m.put("logsBloom", ZERO_BLOOM);
+        m.put("logsBloom", logsBloom == null ? ZERO_BLOOM : logsBloom);
         m.put("transactionsRoot", stateRoot);
         m.put("stateRoot", stateRoot);
         m.put("receiptsRoot", stateRoot);

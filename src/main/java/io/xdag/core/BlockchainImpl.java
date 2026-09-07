@@ -1011,6 +1011,15 @@ public class BlockchainImpl implements Blockchain {
         return xdagStats.nmain;
     }
 
+    @Override
+    public long getEvmExecutedHeight() {
+        EvmBlockProcessor evmProcessor = kernel == null ? null : kernel.getEvmBlockProcessor();
+        if (evmProcessor == null) {
+            return xdagStats.nmain;
+        }
+        return evmProcessor.executedHead(xdagStats.nmain, kernel.getConfig().getEvmSpec().getEvmStateRootLag());
+    }
+
     /**
      * The height at which a main-candidate block that links {@code pretopHashLow} will be CONFIRMED:
      * {@code nmain} + (the still-unconfirmed BI_MAIN_CHAIN candidates on the max-difficulty path from
