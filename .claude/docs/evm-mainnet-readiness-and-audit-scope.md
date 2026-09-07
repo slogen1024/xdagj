@@ -3,7 +3,7 @@
 > 适用版本：`dev-evm` 分支。本文是**缺陷 5**（"主网未开、上线审计闭环未建立"）的落地产物，
 > 作为第三方安全审计的入口文档与 `evm.enabled = true` 于共享网络前的门槛清单。
 > 交叉引用：[智能合约设计与实施](smart-contract-design-and-implementation.md)（下称"设计文档"，本文 §x.y 均指其章节）。
-> **审计基线（code freeze）：tag `evm-audit-freeze-2` = commit `a94d47e2`（2026-09-07，全量 665 测试绿 + license:check 通过；取代 `evm-audit-freeze-1` = `3bbfc68f`，两标签间的增量 = 第二轮内部审计 8 项 High 修复，见 §2.12 与 §6）。英文审计入口（面向审计机构，自包含，r2 已按 freeze-2 重发）：[`docs/audit/2026-09-01-xdag-evm-external-audit-brief.md`](../../docs/audit/2026-09-01-xdag-evm-external-audit-brief.md)；第二轮内部审计报告（中文）：[`docs/audit/2026-09-04-evm-internal-audit-round2.md`](../../docs/audit/2026-09-04-evm-internal-audit-round2.md)。**
+> **审计基线（code freeze）：tag `evm-audit-freeze-3` = commit `e4c6fe46`（2026-09-08，全量 703 测试绿 + license:check 通过；取代 `evm-audit-freeze-2` = `a94d47e2`，两标签间的增量 = 第二轮内部审计其余全部发现的修复（P3/B1、E1–E6/B2、R1–R7），第二轮至此全部关闭；freeze-2 与 freeze-1 之间为 8 项 High 的修复）。英文审计入口（面向审计机构，自包含，r3 已按 freeze-3 重发）：[`docs/audit/2026-09-01-xdag-evm-external-audit-brief.md`](../../docs/audit/2026-09-01-xdag-evm-external-audit-brief.md)；第二轮内部审计报告（中文）：[`docs/audit/2026-09-04-evm-internal-audit-round2.md`](../../docs/audit/2026-09-04-evm-internal-audit-round2.md)。**
 > **本文只覆盖"工程硬门槛 + 审计范围"（上线的必要条件）。完整的主网上线排期 + 生态配套（钱包/浏览器/桥 UI/RPC/dApp demo/文档/运营）见 [主网上线与生态建设详细计划](evm-mainnet-launch-and-ecosystem-plan.md)；本文的 §3 硬门槛即该计划的 Track A 关键路径。**
 
 ---
@@ -25,13 +25,13 @@
 | # | 步骤 | 性质 | 当前状态 |
 |---|------|------|----------|
 | ① | `dev-evm` 合入 `develop`,JDK 21 全量测试进 CI 门禁 | 仓库内 | **就绪**：合并无冲突（§7）；CI 已加全量测试 job（§4）。待发起合并 |
-| ② | 第三方安全审计（范围见 §2） | 外部 | **已启动（2026-09-01），基线已更新（2026-09-07）**：冻结 tag `evm-audit-freeze-2` 已推送（取代 freeze-1——第二轮内部审计发现 freeze-1 的锚点规则不可满足等 8 项 High，全部修复后重新冻结），英文 brief r2 已就绪（`docs/audit/`）；待选定审计机构 |
+| ② | 第三方安全审计（范围见 §2） | 外部 | **已启动（2026-09-01），基线已两次更新（freeze-2 2026-09-07 → freeze-3 2026-09-08）**：冻结 tag `evm-audit-freeze-3` 已推送（第二轮内部审计 8 项 High + 其余全部发现均已修复后重新冻结），英文 brief r3 已就绪（`docs/audit/`）；待选定审计机构 |
 | ③ | testnet 公测周期 + bug bounty | 外部 | 待启动——testnet 配置已 scaffold（§5） |
 | ④ | 审计报告与修复清单归档进 repo | 外部产物入库 | 待 ② 完成 |
 | ⑤ | §13.3 三项硬门槛全部关闭 | 仓库内（需硬分叉） | **✅ 已关闭（2026-08-26/28/30）**：Gate 1（57e9ebb4/f5582ee8/b92993cb/3428ccc1）、Gate 2（2506b6c4/c090dc2f/75dfdaaa/5d9cfbb1/4557113a）、G3-T1/T2/T3（807a7079/dc30a3b7/aaa38a7b）；另 A4-full transfer-from-lock（3bbfc68f，2026-09-01）关闭费用守恒；**第二轮内部审计 8 项 High 已修复（2026-09-05/07）**：C3/C4 291a240f、C1/C2 bb177b80、P1/P2 54bc2281、U1/U2 a94d47e2 |
 | ⑥ | 定 mainnet `activationHeight` + `evm.enabled = true` | 配置 | 待 ①–⑤ 全绿 |
 
-**放行顺序**：⑤ 已关闭；② 已启动（代码冻结于 `evm-audit-freeze-2`）；① 待发起（发布负责人决策，见 §7）；⑥ 是终点。**额外前置**：U1/U2 修复后的版本与 develop 在共识路径上位级兼容，但仍应随 EVM-off 版本先发布到全网节点，再排期任何激活高度（§2.12）。
+**放行顺序**：⑤ 已关闭；② 已启动（代码冻结于 `evm-audit-freeze-3`）；① 待发起（发布负责人决策，见 §7）；⑥ 是终点。**额外前置**：U1/U2 修复后的版本与 develop 在共识路径上位级兼容，但仍应随 EVM-off 版本先发布到全网节点，再排期任何激活高度（§2.12）。
 
 ---
 
@@ -111,9 +111,23 @@ EVM 通过 `applyBlock`（收集）/ `tryToConnect`（导入期锚点判定，�
 ### 2.12 滚动升级兼容性——不受 `evm.enabled` 门控的路径（第二轮审计 U1/U2，2026-09-07 落地）
 
 - 背景：两条路径在 `evm.enabled=false` 下也运行，因此 EVM 版本一经部署就在全网生效，与 develop 节点的任何行为差异都会在滚动升级期分裂网络。U1：`BasicUtils.amount2xdagNew`（32.32 定点 → nano，被 `XAmount.ofXAmount` 用于每个链接金额、每次余额读取、快照导入、供应量）曾被改写为精确 BigDecimal，与已部署算法在整数部分 ≥ 2^21 XDAG 时相差 ≥ 1 nano（≥ 210 万 XDAG 持仓的近全额转账 → 新旧节点一收一拒）——现恢复遗留 double 算法原样并标注 CONSENSUS-FROZEN，回归向量取自 develop。U2：transport 字节 0 ≥ 1 的块把 0x0A 字段当锚点严格解析，保留 flag 位/负高度在消息解码时抛异常——新节点丢弃旧节点接受的块且永远补不到（卡在引用它的主块之后）——现 `Block.parse` 改用 `parseLenient`。
-- 审计问题：在 `evm.enabled=false` 且全部激活高度 = `Long.MAX_VALUE` 下，freeze-2 节点与 develop 节点在**每条共识路径**上是否逐字节一致？除 U1/U2 外是否还有其它未门控的行为差异？`ofXAmount/toXAmount` 的舍入是否确实与 develop 位级一致（`BasicUtilsTest`/`XAmountTest` 钉住的向量）？v1 块在旧节点上的接受性/哈希是否与新节点完全相同？
+- 审计问题：在 `evm.enabled=false` 且全部激活高度 = `Long.MAX_VALUE` 下，freeze-3 节点与 develop 节点在**每条共识路径**上是否逐字节一致？除 U1/U2 外是否还有其它未门控的行为差异？`ofXAmount/toXAmount` 的舍入是否确实与 develop 位级一致（`BasicUtilsTest`/`XAmountTest` 钉住的向量）？v1 块在旧节点上的接受性/哈希是否与新节点完全相同？
 - 代码：`utils/BasicUtils`（amount2xdagNew）、`core/XAmount`（ofXAmount/toXAmount）、`core/Block.parse`、`core/EvmStateAnchor.parseLenient`、`net/message/consensus/NewBlockMessage|SyncBlockMessage`。
 - 合并：a94d47e2（fix d65a1b74）。
+
+### 2.13 执行语义 v2 分叉包 + 校验失败不消耗 hash（第二轮审计 E1/E2/E4/E5/B2 与 P3，2026-09-08 落地）
+
+- 背景：两个新分叉门，devnet 均为 0、共享网均为 MAX，门控前逐字节不变。`evm.semanticsV2ActivationHeight`：SELFDESTRUCT 在交易尾声删除账户并按 EIP-161 清理 touched-empty 账户；BASEFEE 读 0（此前异常停机）；GASPRICE 读有效价（此前 0）；BLOCKHASH 按 Kernel 接入的规范查找解析主块哈希（此前 0）；EIP-170/3541 创建规则；嵌套帧原值取交易起始值；失败帧不返回日志（burn 扫描只读成功收据）。`evm.invalidTxSkipActivationHeight`：校验失败的引用整体丢弃（无收据、不进 tx list、归还预算），hash 之后仍可执行，堵住矿工零成本烧交易。
+- 审计问题：门控是否覆盖了每一处（创建处理器选择、交易尾声、`collect()` 日志抑制、baseFee、E5 更新器标志、burn 扫描过滤），门控前后是否全网一致？`XdagEvmExecutor.finishTransaction` 的删除尾声是否完备——嵌套自毁上合、受益人转账保留、CREATE2 重建干净——又是否可能删掉不该删的账户（发送者、桥合约、touched 但非空账户）？BLOCKHASH 查找在重组与重放下是否规范（只解析 ≤ 重放目标的高度）？E5 原值爬升在任意帧深度、含内层帧已提交进父帧后是否仍为交易起始值？丢弃的校验失败引用是否让矿工的 grief 更便宜？
+- 代码：`evm/XdagEvmExecutor`（ExecutionOptions / finishTransaction / collect）、`evm/EvmBlockProcessor`（executeOne / executeList / burnScanEligible / zeroGasCall）、`evm/state/RocksDbAccount`（getOriginalStorageValue）、`Kernel`（block-hash 查找接线）。
+- 合并：196f8d3c（v2 包）、acafc3bd（P3）；测试 `EvmSemanticsV2Test`（每项 v2 + legacy 钉住）、`RocksDbWorldStateTest`、`EvmBlockProcessorTest`。
+
+### 2.14 已执行头 RPC + 固化共识参数（第二轮审计 R1–R7/E3 与 E6，2026-09-08 落地）— **节点本地 / 启动期，非共识**
+
+- 背景：`Blockchain.getEvmExecutedHeight()`（`EvmBlockProcessor.executedHead`：成熟高度或最低 pending 高度减一）成为一切 eth 区块标签、`eth_blockNumber`、日志范围、`newHeads` 的解析基准；模拟在所解析区块上下文中运行并先扣 intrinsic gas；`eth_estimateGas` 二分；`blockHash` 过滤；含池队列的 pending nonce；按块 logIndex 与真实 cumulativeGasUsed；真实 bloom；HTTP/WS 批量（上限 100）；revert 返回 code 3 + `data`；WS `?token=`。E6：`EvmConsensusParams.TESTNET/MAINNET` 在代码中固化全部共识参数与分叉高度，加载时不一致即拒绝启动；所有网络对非法值 fail-fast；devnet 不固化。
+- 审计问题：已执行头是否恒 ≥ 最高检查点，客户端是否可能拿到收据/日志/状态尚不一致的区块号？批量路径的 DoS 面（上限、逐条隔离、`eth_estimateGas` 二分 × 批量的放大）？`?token=` 是否不弱于 header（不记日志、不回显）？固化常量是否与随附 HOCON 一致、是否还有未固化却进入执行的 `evm.*` 值？
+- 代码：`rpc/server/handler/EthRequestHandler`、`rpc/server/handler/JsonRpcHandler`（processOne）、`rpc/ws/*`、`rpc/server/handler/AuthHandler`、`core/BlockchainImpl`（getEvmExecutedHeight / announceEvmHeads）、`config/EvmConsensusParams`、`config/AbstractConfig`。
+- 合并：bd1e8013（R1–R6/E3）、3027b066（R7）、9366265c（E6）、cca699e0（B1 诊断）。
 
 ---
 
@@ -167,8 +181,8 @@ EVM 通过 `applyBlock`（收集）/ `tryToConnect`（导入期锚点判定，�
 - [x] §3 硬门槛-3（费用路由/配额/退款）已关闭（2026-08-30；A4-full 守恒 2026-09-01）
 - [x] 内部对抗性审计第一轮（2026-08-30，4 路）发现已修复归档：`docs/superpowers/specs/2026-08-30-evm-audit-findings-and-pre-activation-checklist.md`
 - [x] 内部对抗性审计第二轮（2026-09-04，5 路，针对 freeze-1）8 项 High（C1–C4 / P1–P2 / U1–U2）已全部修复（2026-09-05/07）并归档：`docs/audit/2026-09-04-evm-internal-audit-round2.md`；开放项 B2/E1–E6/R1–R7 已披露给审计方（brief §6.2）；P3/B1 已于 2026-09-08 修复（acafc3bd / cca699e0，freeze-2 之后、将进入 freeze-3）
-- [x] 审计冻结基线已推送：tag `evm-audit-freeze-2` = `a94d47e2`（全量 665 测试绿；取代 freeze-1 = `3bbfc68f`/633）；英文 brief r2 已按 freeze-2 重发
-- [x] 第二轮审计其余全部发现（E1–E6 / B2 / R1–R7）已修复（2026-09-08：196f8d3c / 9366265c / bd1e8013 / 3027b066；freeze-2 之后、将进入 freeze-3）
+- [x] 审计冻结基线已推送：tag `evm-audit-freeze-3` = `e4c6fe46`（全量 703 测试绿；取代 freeze-2 = `a94d47e2`/665 与 freeze-1 = `3bbfc68f`/633）；英文 brief r3 已按 freeze-3 重发
+- [x] 第二轮审计其余全部发现（E1–E6 / B2 / R1–R7）已修复（2026-09-08：196f8d3c / 9366265c / bd1e8013 / 3027b066；已进入 freeze-3）
 - [ ] 带 U1/U2 修复的 EVM-off 版本已发布到全网节点（排期任何激活高度的前置）
 - [ ] 第三方审计报告归档
 - [ ] testnet 公测周期完成
@@ -178,7 +192,7 @@ EVM 通过 `applyBlock`（收集）/ `tryToConnect`（导入期锚点判定，�
 
 ## 7. 合并信息（dev-evm → develop）
 
-- **领先**：`dev-evm` 领先 `develop` 274 个提交,落后 0（2026-09-07，含 freeze-2 及其后的两个 docs-only 提交）；本地 `develop` 与 `upstream/develop` 一致。
+- **领先**：`dev-evm` 领先 `develop` 285 个提交,落后 0（2026-09-08，freeze-3 = 分支顶端）；本地 `develop` 与 `upstream/develop` 一致。
 - **冲突**：`develop` 是 `dev-evm` 的祖先——可 fast-forward、无冲突；按 gitflow 建议 `--no-ff` 保留特性分支合并点。
-- **改动面**：238 文件 +37636/−361（EVM 栈 `io.xdag.evm.*` + 共识四挂载 + 块编解码 v1 + P2P 5 码 + RPC eth_* + 配置 + 测试 + 文档 + local-explorer 工具）。
+- **改动面**：248 文件 +40112/−371（EVM 栈 `io.xdag.evm.*` + 共识四挂载 + 块编解码 v1 + P2P 5 码 + RPC eth_*/WS + 配置与共识参数固化 + 测试 + 文档 + local-explorer 工具）。
 - **合并动作**：由发布负责人确认后执行（本仓库 gitflow：`develop` 无直接提交,走 PR)。
