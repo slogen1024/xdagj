@@ -93,6 +93,13 @@ public class EvmBlockProcessor {
     private final long eip3529ActivationHeight;
     /** Audit round 2 P3 gate: from this height validation-failed refs are dropped, not receipted. */
     private final long invalidTxSkipActivationHeight;
+    /** Audit round 2 E1/E2/E4/E5/B2 gate: from this height the execution-semantics-v2 pack applies. */
+    private final long semanticsV2ActivationHeight;
+    /**
+     * Main-block hash by height for BLOCKHASH (semantics v2); null/absent -> zero hash. Wired by the
+     * Kernel from the blockchain; canonical by height, so replay resolves identical values.
+     */
+    private volatile java.util.function.LongFunction<Bytes32> blockHashLookup = h -> null;
     private final KVSource<byte[], byte[]> stateStore;
     private final EvmTxStore txStore;
     private final EvmMetaStore metaStore;
@@ -117,6 +124,25 @@ public class EvmBlockProcessor {
 
     public void setSubscriptionSink(EvmSubscriptionSink sink) {
         this.subscriptionSink = sink;
+    }
+
+    /** Installs the canonical main-block-hash-by-height lookup used by BLOCKHASH under semantics v2. */
+    public void setBlockHashLookup(java.util.function.LongFunction<Bytes32> lookup) {
+        this.blockHashLookup = lookup == null ? h -> null : lookup;
+    }
+
+    /** True if this height executes under the semantics-v2 fork pack (audit round 2 E1/E2/E4/E5/B2). */
+    boolean semanticsV2At(long height) {
+        return height >= semanticsV2ActivationHeight;
+    }
+
+    /**
+     * B2: whether a receipt's logs are scanned for bridge burns. Under semantics v2 only a successful
+     * execution's logs count (a failed frame's logs are never bridge-relevant); legacy scanned every
+     * receipt (pinned for byte-identity below the gate).
+     */
+    static boolean burnScanEligible(EvmReceipt receipt, boolean semanticsV2) {
+        return !semanticsV2 || receipt.status() == 1;
     }
 
     /** Always-active processor (activation height 0), no genesis alloc — used by tests. */
@@ -149,6 +175,7 @@ public class EvmBlockProcessor {
         this.bridgeActivationHeight = config.bridgeActivationHeight();
         this.eip3529ActivationHeight = config.eip3529ActivationHeight();
         this.invalidTxSkipActivationHeight = config.invalidTxSkipActivationHeight();
+        this.semanticsV2ActivationHeight = config.semanticsV2ActivationHeight();
         this.stateStore = stateStore;
         this.txStore = txStore;
         this.metaStore = metaStore;
@@ -426,6 +453,18 @@ public class EvmBlockProcessor {
             exp.unknownRefs().forEach(h -> { if (seen.add(h)) missing.add(h); }); // may be a legacy single tx
         });
         return missing;
+    }
+
+    /**
+     * The highest EVM height that is fully executed given the native head (R1): the matured height
+     * {@code nativeHead - lag + 1} unless some earlier height is still blob-deferred, in which case the
+     * height just below the lowest pending one. Never negative.
+     */
+    public synchronized long executedHead(long nativeHead, long lag) {
+        List<Long> pending = metaStore.pendingHeights();
+        long head = pending.isEmpty() ? maturedEvmHeight(nativeHead, lag)
+                : pending.stream().mapToLong(Long::longValue).min().orElseThrow() - 1;
+        return Math.max(0L, head);
     }
 
     /** True if some deferred (blob-stalled) height at or below {@code height} is still unexecuted. */
@@ -808,7 +847,8 @@ public class EvmBlockProcessor {
      */
     private ExecutionOutcome executeList(List<Hash> txHashes, long height, long timestampSeconds,
                                          Bytes32 previousRoot) {
-        RocksDbWorldUpdater root = new RocksDbWorldUpdater(stateStore);
+        boolean semanticsV2 = semanticsV2At(height);
+        RocksDbWorldUpdater root = new RocksDbWorldUpdater(stateStore, semanticsV2); // E5 original-storage mode
         // Bridge deposits mint FIRST (spec §2.2): a same-height tx may spend deposited funds, and the
         // mints land on the SAME root updater so the height's state delta covers mints and executions
         // in one commit. Reading from EVM_META (not a parameter) makes replay identical to live
@@ -867,7 +907,9 @@ public class EvmBlockProcessor {
                 netFeeWei = netFeeWei.add(exec.netFeeWei());
                 metaStore.putReceipt(txHash, receipt);
                 receipt.logs().forEach(bloomBuilder::insertLog);
-                collectBridgeBurns(receipt.logs(), burns, height);
+                if (burnScanEligible(receipt, semanticsV2)) {
+                    collectBridgeBurns(receipt.logs(), burns, height);
+                }
                 executed.add(txHash);
                 digest.add(Bytes.concatenate(txHash.getBytes(),
                         Bytes.of((byte) receipt.status()),
@@ -1026,6 +1068,14 @@ public class EvmBlockProcessor {
         blockValues.setNumber(height);
         blockValues.setTimestamp(timestampSeconds);
         blockValues.setGasLimit(blockGasLimit);
+        boolean semanticsV2 = semanticsV2At(height);
+        if (semanticsV2) {
+            // E2: BASEFEE reads 0 (no base-fee market) instead of an INVALID_OPERATION halt.
+            blockValues.setBaseFee(Optional.of(Wei.ZERO));
+        }
+        XdagEvmExecutor.ExecutionOptions options = semanticsV2
+                ? new XdagEvmExecutor.ExecutionOptions(true, tx.getEffectiveGasPrice(), blockHashLookup)
+                : XdagEvmExecutor.ExecutionOptions.LEGACY;
         // Message execution gets whatever gas survives the intrinsic charge. The single most common
         // Ethereum tx — a 21000-gas value transfer — leaves exactly zero, which is legal: it moves
         // value to a codeless account with no opcodes to run. Anything that must run code (a CREATE,
@@ -1051,7 +1101,7 @@ public class EvmBlockProcessor {
                 } else {
                     // deploy() bumps + commits the sender nonce itself, even when execution fails (S-24).
                     XdagExecutionResult result = executor.deploy(root.updater(), sender, tx.getPayload(),
-                            tx.getValue(), messageGas, blockValues, Address.ZERO);
+                            tx.getValue(), messageGas, blockValues, Address.ZERO, options);
                     rawStorageRefund = result.gasRefund();
                     receipt = receiptOf(result, intrinsicGas);
                 }
@@ -1061,10 +1111,10 @@ public class EvmBlockProcessor {
                 bumpNonce(root, sender);
                 Address to = tx.getTo().orElseThrow();
                 if (messageGas <= 0L) {
-                    receipt = zeroGasCall(root, sender, to, tx.getValue(), intrinsicGas);
+                    receipt = zeroGasCall(root, sender, to, tx.getValue(), intrinsicGas, semanticsV2);
                 } else {
                     XdagExecutionResult result = executor.call(root.updater(), sender, to, tx.getPayload(),
-                            tx.getValue(), messageGas, blockValues, Address.ZERO);
+                            tx.getValue(), messageGas, blockValues, Address.ZERO, options);
                     rawStorageRefund = result.gasRefund();
                     receipt = receiptOf(result, intrinsicGas);
                 }
@@ -1160,11 +1210,15 @@ public class EvmBlockProcessor {
      * account, otherwise fails out-of-gas. The sender nonce was already bumped by the caller.
      */
     private EvmReceipt zeroGasCall(RocksDbWorldUpdater root, Address sender, Address to, Wei value,
-                                   long intrinsicGas) {
+                                   long intrinsicGas, boolean semanticsV2) {
         Account target = root.getAccount(to);
         boolean hasCode = target != null && target.getCode() != null && !target.getCode().isEmpty();
         if (hasCode) {
             return failedReceipt(intrinsicGas); // executing the code would need gas we don't have
+        }
+        if (semanticsV2 && value.isZero()) {
+            // EIP-161 (E1): a zero-value transfer touches nothing — do not materialise an empty account.
+            return new EvmReceipt(1, intrinsicGas, Optional.empty(), List.of());
         }
         WorldUpdater child = root.updater();
         MutableAccount from = child.getOrCreate(sender);

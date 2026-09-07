@@ -122,22 +122,22 @@
 
 ## 4. EVM 语义 / 执行上下文（确定性偏差，所有节点一致，但会让合约行为错误）
 
-### E1. `SELFDESTRUCT` 从不删除账户 — Medium
+### E1. ✅ 已修复（2026-09-08，semantics-v2 分叉包 196f8d3c：`XdagEvmExecutor.finishTransaction` 在提交前删除 `getSelfDestructs()` 中的账户并按 EIP-161 清理 touched-empty 账户；`zeroGasCall` 零值转账不再落盘空账户）— `SELFDESTRUCT` 从不删除账户 — Medium
 `src/main/java/io/xdag/evm/XdagEvmExecutor.java:233-254`；`EvmBlockProcessor.java:963-984`。执行器只驱动 Besu 的 message processor；账户删除属于 transaction processor 的职责（`initialFrame.getSelfDestructs() → deleteAccount`），本项目无任何调用（`grep getSelfDestructs src/main` 为空；`deleteAccount` 仅在 `RocksDbWorldUpdater` 定义）。结果：`selfdestruct` 后代码、存储、nonce 全部保留，余额清零，合约仍可调用，地址永不能被 CREATE2 重建。建议：成功路径 `parent.commit()` 前 `frame.getSelfDestructs().forEach(parent::deleteAccount)`（并按 EIP-161 清空 touched-empty 账户），分叉门控。
 
-### E2. `BASEFEE` 异常停机；`GASPRICE`=0；`BLOCKHASH`=0 — Medium
+### E2. ✅ 已修复（2026-09-08，196f8d3c：`setBaseFee(Optional.of(Wei.ZERO))`；帧 `gasPrice` = `tx.getEffectiveGasPrice()`；`EvmBlockProcessor.setBlockHashLookup` 由 Kernel 接入 `blockchain.getBlockByHeight`，`BLOCKHASH` 按高度解析主块哈希）— `BASEFEE` 异常停机；`GASPRICE`=0；`BLOCKHASH`=0 — Medium
 `EvmBlockProcessor.java:937-940`（`SimpleBlockValues` 从不 `setBaseFee`，Besu `BaseFeeOperation` 在 `baseFee.isEmpty()` 时返回 `INVALID_OPERATION`，两路子任务均以 javap 验证）；`XdagEvmExecutor.java:217`（`.gasPrice(Wei.ZERO)`，而发送方实际按 `effectiveGasPrice` 付费）；`:227`（`blockHashLookup → Hash.ZERO`，注释"Sub-project B/C 提供真实查找"从未兑现）。审计简报 §7 写的"BASEFEE 读 0"**不正确**（是 revert 并耗尽 gas）。ERC-4337 EntryPoint（`getUserOpGasPrice` 用 `block.basefee`）、gas 返还中继等确定性失败。建议：`setBaseFee(Optional.of(Wei.ZERO))`、传入 `tx.getEffectiveGasPrice()`、按高度接入主块哈希；均改变收据/根，需分叉门控。
 
-### E3. `eth_call` / `eth_estimateGas` 使用全零区块上下文 — Medium（功能）
+### E3. ✅ 已修复（2026-09-08，bd1e8013：模拟在所解析区块的上下文中运行——NUMBER/TIMESTAMP/GASLIMIT/BASEFEE，以及该高度生效的 semantics-v2 选项；模拟先扣 intrinsic gas，`gas` 即真实交易 gas 上限）— `eth_call` / `eth_estimateGas` 使用全零区块上下文 — Medium（功能）
 `XdagEvmExecutor.java:118, 170-172`：`new SimpleBlockValues()` + `Address.ZERO` → `block.number=0`、`block.timestamp=0`。任何时间/高度相关逻辑的模拟结果与链上不一致（deadline 检查、估算 gas 错误）。建议：传入 head 的高度与时间戳。
 
-### E4. 合约创建规则列表为空：EIP-170（24 KiB 代码上限）与 EIP-3541（`0xEF` 前缀）未强制 — Low
+### E4. ✅ 已修复（2026-09-08，196f8d3c：v2 下使用带 `MaxCodeSizeRule.from(evm)` + `PrefixCodeRule.of()` 的第二个 `ContractCreationProcessor`）— 合约创建规则列表为空：EIP-170（24 KiB 代码上限）与 EIP-3541（`0xEF` 前缀）未强制 — Low
 `XdagEvmExecutor.java:77` `new ContractCreationProcessor(evm, true, List.of(), 1L)`。以后补上是硬分叉。建议：`List.of(MaxCodeSizeRule.from(evm), PrefixCodeRule.of())`。
 
-### E5. 嵌套帧的 `getOriginalStorageValue` 返回父帧**当前**值而非交易起始值 — Low
+### E5. ✅ 已修复（2026-09-08，196f8d3c：`RocksDbWorldUpdater(store, txOriginalStorage)` 传播到子账户，`getOriginalStorageValue` 逐级爬到父为每高度根的那一份取交易起始值；当前值读取仍落到父帧当前值）— 嵌套帧的 `getOriginalStorageValue` 返回父帧**当前**值而非交易起始值 — Low
 `src/main/java/io/xdag/evm/state/RocksDbAccount.java:127-129`：`return parent.getStorageValue(key)`。子调用中的 SSTORE 计价/退款偏离 EIP-2200/3529（受 gasUsed/5 上限约束，不可牟利）。建议：在交易级账户保留 original 快照或递归到根。
 
-### E6. `evm.minGasPrice`、`evm.blockGasLimit`、`stateRootLag`、`bridgeWithdrawalDelay`、`alloc`、`bridgeRecoveryAddress` 等为节点本地 HOCON，却决定收据状态/预算/`GASLIMIT` 操作码/根链 — Low（设计）
+### E6. ✅ 已修复（2026-09-08，9366265c：`EvmConsensusParams.TESTNET/MAINNET` 在代码中固化 chainId/gasLimit/minGasPrice/lag/提现延迟/恢复地址/alloc/全部分叉高度，`AbstractConfig` 加载时比对有效值不一致即拒绝启动；`validateEvmConsensusSanity` 在所有网络上对 lag<1、gasLimit≤0、chainId≤0、minGasPrice<0、delay<1 fail-fast；devnet 不固化）— `evm.minGasPrice`、`evm.blockGasLimit`、`stateRootLag`、`bridgeWithdrawalDelay`、`alloc`、`bridgeRecoveryAddress` 等为节点本地 HOCON，却决定收据状态/预算/`GASLIMIT` 操作码/根链 — Low（设计）
 `EvmBlockProcessor.java:916, 770, 940`；`AbstractConfig.java:554-585`。两个节点任一参数不同即根链分叉（如一方调高 minGasPrice 反垃圾）。且 `stateRootLag`、`blockGasLimit`、`chainId` 等未在加载时校验（lag=0 会在 `setMain` 内抛异常）。建议：作为不可覆盖的网络常量固化到 `EvmSpec`/`TestnetConfig`/`MainnetConfig`，或在握手中交换 genesis-params 摘要；启动时对覆盖值 fail-fast。
 
 ---
@@ -148,23 +148,25 @@
 `BlockchainImpl.java:2725`（`onEvmBlobsAvailable → creditEvmFee`）、`:1149`（`applyBlock` 余额不足 → `return ZERO`，仅标 `BI_MAIN_REF`）。K1 让落后节点**最终**收敛到相同 `block.info.amount`，但在 `setMain(M+δ−1)` 与 drain 之间，矿池 `payPools` 按全额支出块 M 的 amount，落后节点以余额不足拒绝该支付块，之后不再重评。提现路径在同样情形下会 CRITICAL 冻结，手续费路径则静默分叉，且原生余额不被锚定。建议：(a) 经异步 drain 执行的高度不记手续费（同步路径在 defer 时也烧掉），或 (b) 与释放路径一致：CRITICAL + 要求重同步。
 * **修复与验证（2026-09-08，commit cca699e0）**：采用 (b)。方案 (a) 只在"落后即须重同步"的框架下才自洽（从不落后的节点仍会记账，单方面烧掉同样分歧），且会让"中间无支出"的常见情形也永久分歧，故保留 K1 的 drain 记账（与从不落后节点在同一高度 M 记日志）。新增三处节点本地诊断：`applyBlock` 对 `XDAG_FIELD_IN` 余额不足的拒绝，若输入块正是本节点仍 pending（延迟）的 EVM 高度的载荷块且费用路由已激活 → 记录 `evmFeeDivergenceHeight`（首次发生的确认高度）并 CRITICAL（含两个块哈希、要求从该高度以下重同步）；`setMain` 在成熟高度被延迟且费用路由激活时 CRITICAL；`onEvmBlobsAvailable` 在延迟期间已有主块确认时 WARN 并引用分歧标记。测试 `EvmFeeDeferralDivergenceIntegrationTest`（lag=2，blob 扣留 → 高度 K 延迟；从 K 支出 K.amount+1 nano 在 blob 到达前确认 → 被拒并标记；补上 blob 后 K 记账、金额足以覆盖该支出、标记仍在、支出块仍未应用）。全量 670 绿。后续可把 `getEvmFeeDivergenceHeight()` 暴露到 RPC/telnet 状态。
 
-### B2. burn 扫描不检查收据状态 — Low（纵深防御）
+### B2. ✅ 已修复（2026-09-08，196f8d3c：v2 下 `burnScanEligible` 仅扫描 status==1 的收据；`collect()` 对失败帧不再返回 logs，覆盖 S-26 catch 路径）— burn 扫描不检查收据状态 — Low（纵深防御）
 `EvmBlockProcessor.java:783` 对每个收据无条件 `collectBridgeBurns(receipt.logs(), …)`；`receiptOf` 无论 success 都拷贝 logs。Besu 的 revert/exceptionalHalt 会 `clearLogs()`，唯一绕过路径是 `XdagEvmExecutor.runToHalt:243-252` 的 S-26 `catch (RuntimeException)` 直接置 `EXCEPTIONAL_HALT` 而不清 logs（子 updater 未提交，wei 未动，但 burn 会被记录并在 W 后从 lock 释放）。可达性未证明。建议：`collectBridgeBurns` 要求 `status==1`；S-26 catch 中 `clearLogs()`。
 
 ---
 
-## 6. RPC / WS（对集成方返回错误数据；无鉴权/注入问题）
+## 6. RPC / WS（对集成方返回错误数据；无鉴权/注入问题）— ✅ R1–R7 全部已修复（2026-09-08：R1–R6/E3 bd1e8013，R7 3027b066）
 
 | # | 发现 | 位置 | 严重度 |
 |---|---|---|---|
-| R1 | `eth_blockNumber`/`latest`/`eth_getLogs`/`eth_getBlockByNumber` 用**原生** head，而收据/交易列表/日志在 δ−1 个块后才写入；状态读取却用 executed head。δ=16 时每次扫描最顶 15 个高度返回空且以后不再重扫 → 索引器/交易所永久漏掉存款日志；`eth_getBalance(addr,"0x<eth_blockNumber>")` 返回 -32000 | `EthRequestHandler.java:126,344,372,415-428`；`HistoricalStateReader.java:73` | Medium（latent δ≥2） |
-| R2 | `eth_getLogs` 忽略 EIP-234 `blockHash` 过滤键，退化为 from=to=head 并成功返回 head 的日志 | `EthRequestHandler.java:416-418`；`LogFilter.java:69` | Medium |
-| R3 | `eth_getTransactionCount(addr,"pending")` 不看交易池；池条目只在 admission 时按 executed nonce 修剪，`remove` 无调用方。ethers/viem 连续两笔同 nonce → 第二笔 REPLACED 静默丢第一笔（δ≥2 时第一笔已上链但未执行，第二笔上链后 nonce mismatch 并被 P3 烧掉） | `EthRequestHandler.java:134-138,372`；`EvmTxPool.java:181-188` | Medium |
-| R4 | 收据 `logIndex` 从 0 按交易计数（`buildLogs(…,0)`），`eth_getLogs`/WS 按块计数；`cumulativeGasUsed = gasUsed` | `EthRequestHandler.java:327`；`EthObjects.java:112` | Medium |
-| R5 | `eth_estimateGas` 单次模拟（gas=cap）返回 `intrinsic+gasUsed`，无 EIP-150 63/64 余量，含子调用的交易按估算值执行会 OOG | `EthRequestHandler.java:158-167` | Low |
-| R6 | 区块/收据 `logsBloom` 恒为零（EVM_META 0x05 已存真实 bloom） | `EthObjects.java:117,133` | Low |
-| R7 | 不支持 JSON-RPC 批量数组（ethers v6 默认批量）；revert 数据只在 `message` 无 `data` 字段（钱包无法解码自定义错误）；`newHeads` 推送占位头；WS 升级要求 `Authorization` 头（浏览器无法设置） | `JsonRpcHandler.java`；`RpcWebSocketFrameHandler.java:62`；`SubscriptionManager.java:100-102`；`RpcWebSocketServer.java:97` | 功能缺口 |
+| R1 ✅ | `eth_blockNumber`/`latest`/`eth_getLogs`/`eth_getBlockByNumber` 用**原生** head，而收据/交易列表/日志在 δ−1 个块后才写入；状态读取却用 executed head。δ=16 时每次扫描最顶 15 个高度返回空且以后不再重扫 → 索引器/交易所永久漏掉存款日志；`eth_getBalance(addr,"0x<eth_blockNumber>")` 返回 -32000 | `EthRequestHandler.java:126,344,372,415-428`；`HistoricalStateReader.java:73` | Medium（latent δ≥2） |
+| R2 ✅ | `eth_getLogs` 忽略 EIP-234 `blockHash` 过滤键，退化为 from=to=head 并成功返回 head 的日志 | `EthRequestHandler.java:416-418`；`LogFilter.java:69` | Medium |
+| R3 ✅ | `eth_getTransactionCount(addr,"pending")` 不看交易池；池条目只在 admission 时按 executed nonce 修剪，`remove` 无调用方。ethers/viem 连续两笔同 nonce → 第二笔 REPLACED 静默丢第一笔（δ≥2 时第一笔已上链但未执行，第二笔上链后 nonce mismatch 并被 P3 烧掉） | `EthRequestHandler.java:134-138,372`；`EvmTxPool.java:181-188` | Medium |
+| R4 ✅ | 收据 `logIndex` 从 0 按交易计数（`buildLogs(…,0)`），`eth_getLogs`/WS 按块计数；`cumulativeGasUsed = gasUsed` | `EthRequestHandler.java:327`；`EthObjects.java:112` | Medium |
+| R5 ✅ | `eth_estimateGas` 单次模拟（gas=cap）返回 `intrinsic+gasUsed`，无 EIP-150 63/64 余量，含子调用的交易按估算值执行会 OOG | `EthRequestHandler.java:158-167` | Low |
+| R6 ✅ | 区块/收据 `logsBloom` 恒为零（EVM_META 0x05 已存真实 bloom） | `EthObjects.java:117,133` | Low |
+| R7 ✅ | 不支持 JSON-RPC 批量数组（ethers v6 默认批量）；revert 数据只在 `message` 无 `data` 字段（钱包无法解码自定义错误）；`newHeads` 推送占位头；WS 升级要求 `Authorization` 头（浏览器无法设置） | `JsonRpcHandler.java`；`RpcWebSocketFrameHandler.java:62`；`SubscriptionManager.java:100-102`；`RpcWebSocketServer.java:97` | 功能缺口 |
 
+
+**修复要点（2026-09-08）**：R1 新增 `Blockchain.getEvmExecutedHeight()`（`EvmBlockProcessor.executedHead`：成熟高度，或最低 pending 高度减一），`eth_blockNumber`/`latest`/日志范围/`getBlockByNumber`/`feeHistory` 一律按它解析；最高检查点与已执行头之间读实时状态，超出的范围截断、区块不存在。R2 `blockHash` 过滤（与 from/to 互斥，未知哈希 -32602）。R3 `EvmTxPool.nextNonce`，`"pending"` = 含池队列的下一个空闲 nonce。R4 收据按块计 `logIndex`、真实 `cumulativeGasUsed`。R5 `eth_estimateGas` 二分搜索最小可执行 gas 上限（模拟先扣 intrinsic），修正 EIP-150 63/64 子调用低估。R6 区块 bloom 取自 EVM_META 0x05，收据 bloom 由其 logs 计算。R7 HTTP/WS 批量数组（逐条应答、空批 -32600、上限 100）；revert 返回 code 3 + `data`（Error(string) 解码进 message）；`newHeads` 推送已执行头的真实头（parentHash/stateRoot/gasUsed/logsBloom），由 `BlockchainImpl.announceEvmHeads` 在 setMain 与异步 drain 后触发；`AuthHandler` 接受 `?token=` 查询参数。测试：`EthRequestHandlerTest`（+8）、`JsonRpcHandlerTest`/`RpcWebSocketFrameHandlerTest` 批量、`SubscriptionManagerTest`、`AuthHandlerTest`、`EvmHeadSubscriptionIntegrationTest`。
 ---
 
 ## 7. 功能完整性评估
@@ -212,5 +214,5 @@ Besu-EVM Shanghai（PUSH0）、预编译 0x01–0x09、EIP-155/2/2718/1559(type-
 
 ## 9. 建议的修复优先级
 1. **激活前必须**：C3（锚点高度）→ C4（hard-reject 替换路径）→ C1/C2（δ-lag 重组与排序）→ P1（内容分类）→ P2（池大小上限）→ U1/U2（回退为共识冻结算法 / 宽松解析，随 EVM-off 版本先发）。**以上 8 项均已修复（2026-09-07）。**
-2. **激活前应当**（否则日后为硬分叉）：E1 SELFDESTRUCT、E2 BASEFEE/GASPRICE/BLOCKHASH、E4 EIP-170/3541、E6 参数固化。
-3. **集成质量**：R1–R4、E3、~~P3、B1~~（已修复 2026-09-08）、批量 RPC、revert data、桥工具与文档。
+2. ~~**激活前应当**（否则日后为硬分叉）：E1 SELFDESTRUCT、E2 BASEFEE/GASPRICE/BLOCKHASH、E4 EIP-170/3541、E6 参数固化。~~ **已全部修复（2026-09-08）**：E1/E2/E4/E5/B2 合并为一个分叉门 `evm.semanticsV2ActivationHeight`（devnet 0 / 共享网 MAX，门控前逐字节不变）；E6 以 `EvmConsensusParams` 固化。
+3. ~~**集成质量**：R1–R4、E3、P3、B1、批量 RPC、revert data~~ **已全部修复（2026-09-08）**；仍待办：桥工具与文档、EVM_META/0x60 恢复 runbook。

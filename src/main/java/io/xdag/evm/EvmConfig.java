@@ -72,6 +72,12 @@ public final class EvmConfig {
      */
     public static final long DEFAULT_INVALID_TX_SKIP_ACTIVATION_HEIGHT = 0L;
 
+    /**
+     * Default execution-semantics-v2 activation (audit round 2 E1/E2/E4/E5/B2): always active
+     * (tests/devnet factory); production passes the spec value.
+     */
+    public static final long DEFAULT_SEMANTICS_V2_ACTIVATION_HEIGHT = 0L;
+
     private final EvmSpecVersion fork;
     private final BigInteger chainId;
     private final long maxGasLimit;
@@ -80,6 +86,7 @@ public final class EvmConfig {
     private final long bridgeActivationHeight;
     private final long eip3529ActivationHeight;
     private final long invalidTxSkipActivationHeight;
+    private final long semanticsV2ActivationHeight;
 
     public EvmConfig(EvmSpecVersion fork, BigInteger chainId) {
         this(fork, chainId, DEFAULT_MAX_GAS_LIMIT);
@@ -113,6 +120,13 @@ public final class EvmConfig {
     public EvmConfig(EvmSpecVersion fork, BigInteger chainId, long maxGasLimit, BigInteger minGasPrice,
                      long type2ActivationHeight, long bridgeActivationHeight, long eip3529ActivationHeight,
                      long invalidTxSkipActivationHeight) {
+        this(fork, chainId, maxGasLimit, minGasPrice, type2ActivationHeight, bridgeActivationHeight,
+                eip3529ActivationHeight, invalidTxSkipActivationHeight, DEFAULT_SEMANTICS_V2_ACTIVATION_HEIGHT);
+    }
+
+    public EvmConfig(EvmSpecVersion fork, BigInteger chainId, long maxGasLimit, BigInteger minGasPrice,
+                     long type2ActivationHeight, long bridgeActivationHeight, long eip3529ActivationHeight,
+                     long invalidTxSkipActivationHeight, long semanticsV2ActivationHeight) {
         this.fork = fork;
         this.chainId = chainId;
         this.maxGasLimit = maxGasLimit;
@@ -121,6 +135,7 @@ public final class EvmConfig {
         this.bridgeActivationHeight = bridgeActivationHeight;
         this.eip3529ActivationHeight = eip3529ActivationHeight;
         this.invalidTxSkipActivationHeight = invalidTxSkipActivationHeight;
+        this.semanticsV2ActivationHeight = semanticsV2ActivationHeight;
     }
 
     /**
@@ -189,5 +204,13 @@ public final class EvmConfig {
      */
     public long invalidTxSkipActivationHeight() {
         return invalidTxSkipActivationHeight;
+    }
+
+    /**
+     * Height from which the execution-semantics-v2 fork pack applies (audit round 2 E1/E2/E4/E5/B2);
+     * consensus-gated in EvmBlockProcessor / XdagEvmExecutor.
+     */
+    public long semanticsV2ActivationHeight() {
+        return semanticsV2ActivationHeight;
     }
 }

@@ -40,8 +40,27 @@ public interface EvmSubscriptionSink {
     record LogRecord(Log log, Hash txHash, int txIndex, int logIndex) {
     }
 
-    /** A new main block became canonical (drives {@code newHeads}). Fires once per confirmed main block. */
-    void onNewMainHead(long height, Bytes32 blockHash, long timestampSeconds);
+    /**
+     * A newly EXECUTED EVM head (R1/R7): the full header {@code newHeads} pushes. {@code parentHash}
+     * is the previous main block's hash, {@code stateRoot} the chained EVM root at this height,
+     * {@code gasUsed} the sum of its receipts, {@code logsBloom} the EVM_META 0x05 bloom (null = none).
+     */
+    record HeadInfo(long height, Bytes32 hash, Bytes32 parentHash, long timestampSeconds, long gasLimit,
+                    long gasUsed, Bytes32 stateRoot, org.apache.tuweni.bytes.Bytes logsBloom) {
+    }
+
+    /**
+     * A new EVM head became executed (drives {@code newHeads}). Implementations override EITHER this
+     * overload or the legacy 3-argument one below; the two defaults delegate to each other.
+     */
+    default void onNewMainHead(HeadInfo head) {
+        onNewMainHead(head.height(), head.hash(), head.timestampSeconds());
+    }
+
+    /** Legacy shape (height, hash, timestamp): a header with zero parent/root/gas. */
+    default void onNewMainHead(long height, Bytes32 blockHash, long timestampSeconds) {
+        onNewMainHead(new HeadInfo(height, blockHash, Bytes32.ZERO, timestampSeconds, 0L, 0L, Bytes32.ZERO, null));
+    }
 
     /**
      * A main height's EVM logs were produced ({@code removed=false}) or reverted by a reorg

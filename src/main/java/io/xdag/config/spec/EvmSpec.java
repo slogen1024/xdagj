@@ -62,6 +62,15 @@ public interface EvmSpec {
     long getEvmInvalidTxSkipActivationHeight();
 
     /**
+     * Height from which the "execution semantics v2" fork pack applies (audit round 2 E1/E2/E4/E5/B2):
+     * SELFDESTRUCT deletes the account + EIP-161 touched-empty cleanup, BASEFEE reads 0 (was an
+     * exceptional halt), GASPRICE reads the effective price (was 0), BLOCKHASH resolves main-block
+     * hashes (was 0), EIP-170 / EIP-3541 creation rules, transaction-start "original" storage values,
+     * and failed executions surface no logs. Long.MAX_VALUE = not scheduled (legacy semantics).
+     */
+    long getEvmSemanticsV2ActivationHeight();
+
+    /**
      * Height at which the net EVM fee is credited to the miner reward pool (ADR-016 / G3-T1) instead
      * of burned. MAX_VALUE = not scheduled (fee stays burned; native accounting byte-identical).
      */

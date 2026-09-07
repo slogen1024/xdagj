@@ -75,11 +75,18 @@ public class SubscriptionManagerTest {
         SubscriptionManager m = new SubscriptionManager();
         EmbeddedChannel ch = new EmbeddedChannel();
         String id = m.subscribe(ch, "newHeads", null);
-        m.onNewMainHead(5, HASH, 1000L);
+        Bytes32 parent = Bytes32.fromHexString("0x" + "44".repeat(32));
+        Bytes32 root = Bytes32.fromHexString("0x" + "55".repeat(32));
+        m.onNewMainHead(new EvmSubscriptionSink.HeadInfo(5, HASH, parent, 1000L, 30_000_000L, 21_000L, root, null));
         String json = drain(ch);
         assertTrue(json.contains("\"method\":\"eth_subscription\""));
         assertTrue(json.contains("\"subscription\":\"" + id + "\""));
         assertTrue(json.contains("\"number\":\"0x5\""));
+        // R7: a real header, not a placeholder.
+        assertTrue(json.contains("\"parentHash\":\"" + parent.toHexString() + "\""));
+        assertTrue(json.contains("\"stateRoot\":\"" + root.toHexString() + "\""));
+        assertTrue(json.contains("\"gasUsed\":\"0x5208\""));
+        assertTrue("header only", !json.contains("\"transactions\""));
     }
 
     @Test
@@ -109,7 +116,7 @@ public class SubscriptionManagerTest {
         EmbeddedChannel ch = new EmbeddedChannel();
         m.subscribe(ch, "newHeads", null);
         m.remove(ch);
-        m.onNewMainHead(1, HASH, 1L);
+        m.onNewMainHead(new EvmSubscriptionSink.HeadInfo(1, HASH, HASH, 1L, 0L, 0L, HASH, null));
         assertNull("removed channel gets no push", drain(ch));
     }
 

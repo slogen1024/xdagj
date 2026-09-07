@@ -241,4 +241,34 @@ public class JsonRpcHandlerTest {
 //        assertTrue("Response should contain id", content.contains("\"id\":\"1\"");
         assertFalse("Response should not contain result", content.contains("\"result\""));
     }
+
+    // ---- Audit round 2, R7: JSON-RPC batch arrays -------------------------------------------
+
+    private FullHttpResponse post(String json) {
+        FullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, "/",
+                Unpooled.copiedBuffer(json, StandardCharsets.UTF_8));
+        request.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json")
+                .set(HttpHeaderNames.ORIGIN, "http://localhost:3000");
+        channel.writeInbound(request);
+        return channel.readOutbound();
+    }
+
+    @Test
+    public void a_batch_request_returns_an_array_with_one_entry_per_call() {
+        when(xdagApi.xdag_blockNumber()).thenReturn("12345");
+        FullHttpResponse response = post("[{\"jsonrpc\":\"2.0\",\"method\":\"xdag_blockNumber\",\"id\":1},"
+                + "{\"jsonrpc\":\"2.0\",\"method\":\"no_such_method\",\"id\":2}]");
+        assertEquals(HttpResponseStatus.OK, response.status());
+        String content = response.content().toString(StandardCharsets.UTF_8);
+        assertTrue("array response: " + content, content.startsWith("[") && content.endsWith("]"));
+        assertTrue(content.contains("\"result\":\"12345\""));
+        assertTrue("per-entry errors keep their id", content.contains("\"code\":-32601") && content.contains("\"id\":2"));
+    }
+
+    @Test
+    public void an_empty_batch_is_an_invalid_request() {
+        String content = post("[]").content().toString(StandardCharsets.UTF_8);
+        assertTrue(content, content.contains("\"code\":-32600"));
+        assertTrue("a single error object, not an array", content.startsWith("{"));
+    }
 } 

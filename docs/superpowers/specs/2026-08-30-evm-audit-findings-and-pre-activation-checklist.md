@@ -52,6 +52,10 @@ Either way, `validateBridgeConfig` should gain the `evm.alloc`-vs-scheduled-brid
   refs are dropped (gate `evm.invalidTxSkipActivationHeight`, devnet 0 / shared MAX) instead of
   consuming the tx hash; B1 a blob-behind node's rejected spend from a fee-deferred payload block is
   detected, recorded (`evmFeeDivergenceHeight`) and logged CRITICAL with re-sync guidance (node-local).
+- [x] **Audit round 2 remaining items E1–E6 / B2 / R1–R7 — FIXED (2026-09-08)**: semantics-v2 fork pack
+  (`evm.semanticsV2ActivationHeight`, 196f8d3c), pinned consensus params (9366265c), executed-head RPC +
+  block-context simulation (bd1e8013), batches / revert data / real newHeads / WS query token (3027b066).
+  Round 2 is now fully closed; an `evm-audit-freeze-3` tag should carry all of it.
 - [ ] External **security audit + bug bounty + testnet shakedown** (the "external track").
 - [ ] Shared-net `minGasPrice` / `blockGasLimit` reviewed as the consensus values (devnet's `minGasPrice=1` makes gas ~free there by design).
 - [ ] Documented node-recovery path for a corrupt EVM_META (re-sync / wipe EVM_STATE) so a single bad record can't wedge a node with no operator guidance.

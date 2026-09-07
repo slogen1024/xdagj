@@ -234,6 +234,23 @@ public class EvmTxPool {
         return replaced ? AddResult.REPLACED : AddResult.ADDED;
     }
 
+    /**
+     * The next nonce a wallet should use for {@code sender} (R3, the "pending" block tag): the first
+     * nonce at or above the executed {@code accountNonce} that has no queued tx — so back-to-back sends
+     * from a client that reads {@code eth_getTransactionCount(addr, "pending")} chain instead of
+     * colliding on the same slot.
+     */
+    public synchronized long nextNonce(Address sender, long accountNonce) {
+        NavigableMap<Long, PoolEntry> queue = bySender.get(sender);
+        long next = accountNonce;
+        if (queue != null) {
+            while (queue.containsKey(next)) {
+                next++;
+            }
+        }
+        return next;
+    }
+
     /** Live (non-expired) txs, highest effective gas price first; insertion order breaks ties. */
     public synchronized List<EvmTransaction> selectTransactions(int maxCount) {
         long now = clockSeconds.getAsLong();

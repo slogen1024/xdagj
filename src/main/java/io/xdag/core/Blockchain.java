@@ -64,6 +64,14 @@ public interface Blockchain {
     // Get the latest main block number
     long getLatestMainBlockNumber();
 
+    /**
+     * The highest EVM height this node has fully executed (audit round 2, R1): under delta-lagged
+     * execution the native head runs up to lag-1 heights ahead of the EVM, and a blob-deferred height
+     * holds execution back further. eth_* block tags ("latest", eth_blockNumber, log ranges) resolve
+     * against THIS height so receipts, logs and state are consistent for a given block number.
+     */
+    long getEvmExecutedHeight();
+
     // Get list of main blocks with specified count
     List<Block> listMainBlocks(int count);
 

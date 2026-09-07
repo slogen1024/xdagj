@@ -25,6 +25,8 @@ package io.xdag.rpc.server.handler;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -79,6 +81,7 @@ public class EthRequestHandlerTest {
     public void setUp() {
         Blockchain blockchain = Mockito.mock(Blockchain.class);
         Mockito.when(blockchain.getLatestMainBlockNumber()).thenReturn(4096L);
+        Mockito.when(blockchain.getEvmExecutedHeight()).thenReturn(4096L);
         InMemoryKVSource store = new InMemoryKVSource();
         handler = new EthRequestHandler(
                 new EvmConfig(EvmSpecVersion.SHANGHAI,
@@ -113,6 +116,7 @@ public class EthRequestHandlerTest {
     private EthRequestHandler handlerOver(InMemoryKVSource store, long head) {
         Blockchain bc = Mockito.mock(Blockchain.class);
         Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(head);
+        Mockito.when(bc.getEvmExecutedHeight()).thenReturn(head);
         return new EthRequestHandler(
                 new EvmConfig(EvmSpecVersion.SHANGHAI,
                         BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, null, null, null, null, 1024L,
@@ -134,6 +138,7 @@ public class EthRequestHandlerTest {
     private EthRequestHandler writeHandler(InMemoryKVSource stateStore, EvmTxPool pool, List<Bytes> broadcasts) {
         Blockchain bc = Mockito.mock(Blockchain.class);
         Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(1L);
+        Mockito.when(bc.getEvmExecutedHeight()).thenReturn(1L);
         Consumer<Bytes> broadcaster = broadcasts::add;
         return new EthRequestHandler(
                 new EvmConfig(EvmSpecVersion.SHANGHAI,
@@ -224,15 +229,18 @@ public class EthRequestHandlerTest {
     }
 
     @Test
-    public void block_height_above_evm_head_is_unavailable() {
-        // handlerOver has no evmMetaStore, so evmHead == 0: only the anchor height (latest/0x0/earliest)
-        // resolves to the live store; any height above it falls outside the window and maps to -32000.
+    public void block_height_above_the_executed_head_is_unavailable() {
+        // R1: the executed EVM head is 10 (mock) and there is no checkpoint at all, so every height up
+        // to 10 reads the live store (nothing executed in between); anything above 10 is not yet
+        // executed and maps to -32000. Pre-fix "latest" meant the NATIVE head while state reads were
+        // anchored at the highest checkpoint, so eth_getBalance(addr, "0x<eth_blockNumber>") errored.
         EthRequestHandler h = handlerOver(new InMemoryKVSource(), 10L);
         assertThrows(JsonRpcException.class,
-                () -> h.handle(request("eth_getBalance", eoaHex(), "0x5")));
-        // latest == earliest == 0x0 == evmHead(0): the live store, empty account -> 0.
+                () -> h.handle(request("eth_getBalance", eoaHex(), "0xb")));
         assertEquals("0x0", h.handle(request("eth_getBalance", eoaHex(), "latest")));
+        assertEquals("0x0", h.handle(request("eth_getBalance", eoaHex(), "0x5")));
         assertEquals("0x0", h.handle(request("eth_getBalance", eoaHex(), "0x0")));
+        assertEquals("0x0", h.handle(request("eth_getBalance", eoaHex(), "0xa")));
     }
 
     @Test
@@ -257,6 +265,7 @@ public class EthRequestHandlerTest {
         meta.putHeightRecord(2, Bytes32.ZERO, Bytes32.ZERO, 1, 0); // evmHead = 2
         HistoricalStateReader historical = new HistoricalStateReader(state, journal, 128);
         Blockchain bc = Mockito.mock(Blockchain.class);
+        Mockito.when(bc.getEvmExecutedHeight()).thenReturn(2L);
         EthRequestHandler h = new EthRequestHandler(
                 new EvmConfig(EvmSpecVersion.SHANGHAI,
                         BigInteger.valueOf(0xCAFE), 30_000_000L), BigInteger.ONE, bc, null, null,
@@ -320,6 +329,7 @@ public class EthRequestHandlerTest {
                                            EvmMetaStore metaStore, long head) {
         Blockchain bc = Mockito.mock(Blockchain.class);
         Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(head);
+        Mockito.when(bc.getEvmExecutedHeight()).thenReturn(head);
         Block block = Mockito.mock(Block.class);
         Mockito.when(block.getHash()).thenReturn(Bytes32.fromHexString("0x" + "ab".repeat(32)));
         Mockito.when(block.getTimestamp()).thenReturn(0L);
@@ -364,6 +374,7 @@ public class EthRequestHandlerTest {
         EvmMetaStore metaStore = new EvmMetaStore(new InMemoryKVSource());
         Blockchain bc = Mockito.mock(Blockchain.class);
         Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(10L);
+        Mockito.when(bc.getEvmExecutedHeight()).thenReturn(10L);
         // Height 0 has no block (pruned/genesis); height 1 exists but its parent (0) does not.
         Block block1 = Mockito.mock(Block.class);
         Mockito.when(block1.getHash()).thenReturn(Bytes32.fromHexString("0x" + "cd".repeat(32)));
@@ -715,6 +726,7 @@ public class EthRequestHandlerTest {
         fundSender(gatedStore);
         Blockchain bc = Mockito.mock(Blockchain.class);
         Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(1L);
+        Mockito.when(bc.getEvmExecutedHeight()).thenReturn(1L);
         EthRequestHandler gated = new EthRequestHandler(
                 new EvmConfig(EvmSpecVersion.SHANGHAI,
                         BigInteger.valueOf(0xCAFE), 30_000_000L, BigInteger.ONE, Long.MAX_VALUE),
@@ -743,5 +755,222 @@ public class EthRequestHandlerTest {
         EthRequestHandler active = writeHandler(activeStore, poolFor(activeStore), new ArrayList<>());
         String result = (String) active.handle(request("eth_sendRawTransaction", VECTOR_A.toHexString()));
         assertEquals("0xb3fc4070c80b884bd43a25f925c2fd779f25bab8b31b4715a0fe29394b83a242", result);
+    }
+
+    // ---- Audit round 2, R1-R6 + E3 ------------------------------------------------------------
+
+    /** Constructor prefix: CODECOPY the {@code len} runtime bytes after the 12-byte prefix, RETURN them. */
+    private static Bytes runtimeAt(InMemoryKVSource store, Address at, Bytes runtime) {
+        RocksDbWorldUpdater w = new RocksDbWorldUpdater(store);
+        MutableAccount a = w.getAccount(at) == null ? w.createAccount(at, 1L, Wei.ZERO) : w.getAccount(at);
+        a.setCode(runtime);
+        w.commit();
+        return runtime;
+    }
+
+    @Test
+    public void eth_blockNumber_and_latest_follow_the_executed_evm_height_not_the_native_head() throws Exception {
+        // R1: native head 4096 but the EVM has executed only up to 4090 (delta lag / a deferred blob).
+        InMemoryKVSource stateStore = new InMemoryKVSource();
+        EvmTxStore txStore = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore metaStore = new EvmMetaStore(new InMemoryKVSource());
+        EvmTransaction tx = signedTx(0, BigInteger.valueOf(0xCAFE));
+        seedLogHeight(metaStore, 4095L, tx, EMITTER, SIG);          // a log at a not-yet-executed height
+        Blockchain bc = Mockito.mock(Blockchain.class);
+        Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(4096L);
+        Mockito.when(bc.getEvmExecutedHeight()).thenReturn(4090L);
+        Block block = Mockito.mock(Block.class);
+        Mockito.when(block.getHash()).thenReturn(Bytes32.fromHexString("0x" + "ab".repeat(32)));
+        Mockito.when(bc.getBlockByHeight(Mockito.anyLong())).thenReturn(block);
+        EthRequestHandler h = new EthRequestHandler(
+                new EvmConfig(EvmSpecVersion.SHANGHAI, BigInteger.valueOf(0xCAFE), 30_000_000L),
+                BigInteger.ONE, bc, null, null, txStore, metaStore, 1024L,
+                new HistoricalStateReader(stateStore, new EvmStateJournal(new InMemoryKVSource()), 128));
+
+        assertEquals("0xffa", h.handle(request("eth_blockNumber")));
+        assertNull("a block beyond the executed head does not exist for eth_*",
+                h.handle(request("eth_getBlockByNumber", "0x1000", false)));
+        assertNotNull(h.handle(request("eth_getBlockByNumber", "latest", false)));
+        assertEquals("0xffa", ((Map<?, ?>) h.handle(request("eth_getBlockByNumber", "latest", false))).get("number"));
+        // An unbounded log query scans only executed heights: the 4095 log is not (yet) visible, and an
+        // explicit range past the head is clamped rather than rejected.
+        assertTrue(((List<?>) h.handle(request("eth_getLogs", Map.of("topics", List.of(SIG.toHexString()))))).isEmpty());
+        assertTrue(((List<?>) h.handle(request("eth_getLogs",
+                Map.of("fromBlock", "0xff0", "toBlock", "0x1000", "topics", List.of(SIG.toHexString()))))).isEmpty());
+        // State at the executed head is readable by number (no -32000).
+        assertEquals("0x0", h.handle(request("eth_getBalance", eoaHex(), "0xffa")));
+    }
+
+    @Test
+    public void eth_getLogs_honours_the_blockHash_filter_key() throws Exception {
+        // R2 (EIP-234): blockHash selects exactly that block; it is exclusive with fromBlock/toBlock.
+        InMemoryKVSource stateStore = new InMemoryKVSource();
+        EvmTxStore txStore = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore metaStore = new EvmMetaStore(new InMemoryKVSource());
+        EvmTransaction txA = signedTx(0, BigInteger.valueOf(0xCAFE));
+        EvmTransaction txB = signedTx(1, BigInteger.valueOf(0xCAFE));
+        seedLogHeight(metaStore, 4L, txA, EMITTER, SIG);
+        seedLogHeight(metaStore, 5L, txB, EMITTER, SIG);
+        Bytes32 hash4 = Bytes32.fromHexString("0x" + "44".repeat(32));
+        Blockchain bc = Mockito.mock(Blockchain.class);
+        Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(10L);
+        Mockito.when(bc.getEvmExecutedHeight()).thenReturn(10L);
+        Block block4 = Mockito.mock(Block.class);
+        io.xdag.core.BlockInfo info4 = new io.xdag.core.BlockInfo();
+        info4.setHeight(4L);
+        Mockito.when(block4.getInfo()).thenReturn(info4);
+        Mockito.when(block4.getHash()).thenReturn(hash4);
+        Mockito.when(bc.getBlockByHash(Mockito.eq(hash4), Mockito.anyBoolean())).thenReturn(block4);
+        Mockito.when(bc.getBlockByHeight(Mockito.anyLong())).thenReturn(block4);
+        EthRequestHandler h = new EthRequestHandler(
+                new EvmConfig(EvmSpecVersion.SHANGHAI, BigInteger.valueOf(0xCAFE), 30_000_000L),
+                BigInteger.ONE, bc, null, null, txStore, metaStore, 1024L,
+                new HistoricalStateReader(stateStore, new EvmStateJournal(new InMemoryKVSource()), 128));
+
+        List<?> hits = (List<?>) h.handle(request("eth_getLogs", Map.of("blockHash", hash4.toHexString())));
+        assertEquals("only height 4's log, not the head's", 1, hits.size());
+        assertEquals("0x4", ((Map<?, ?>) hits.get(0)).get("blockNumber"));
+        assertThrows(JsonRpcException.class, () -> h.handle(request("eth_getLogs",
+                Map.of("blockHash", hash4.toHexString(), "fromBlock", "0x4"))));
+        assertThrows(JsonRpcException.class, () -> h.handle(request("eth_getLogs",
+                Map.of("blockHash", "0x" + "99".repeat(32)))));
+    }
+
+    @Test
+    public void pending_transaction_count_includes_the_pool_queue() throws Exception {
+        // R3: "pending" must be the next free nonce (executed nonce + queued txs), so a client sending
+        // two txs back-to-back chains them instead of REPLACING the first at the same nonce.
+        InMemoryKVSource stateStore = new InMemoryKVSource();
+        fundSender(stateStore);
+        EvmTxPool pool = poolFor(stateStore);
+        EthRequestHandler h = writeHandler(stateStore, pool, new ArrayList<>());
+        String sender = KEY1_SENDER.toHexString();
+        assertEquals("0x0", h.handle(request("eth_getTransactionCount", sender, "pending")));
+        h.handle(request("eth_sendRawTransaction", signedTx(0, BigInteger.valueOf(0xCAFE)).getRawRlp().toHexString()));
+        h.handle(request("eth_sendRawTransaction", signedTx(1, BigInteger.valueOf(0xCAFE)).getRawRlp().toHexString()));
+        assertEquals("0x2", h.handle(request("eth_getTransactionCount", sender, "pending")));
+        assertEquals("latest stays the executed nonce", "0x0",
+                h.handle(request("eth_getTransactionCount", sender, "latest")));
+    }
+
+    @Test
+    public void receipts_report_block_wide_log_index_and_cumulative_gas() throws Exception {
+        // R4: logIndex counts across the whole block (matching eth_getLogs / WS) and cumulativeGasUsed
+        // sums the block's receipts up to and including this tx.
+        InMemoryKVSource stateStore = new InMemoryKVSource();
+        EvmTxStore txStore = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore metaStore = new EvmMetaStore(new InMemoryKVSource());
+        EvmTransaction txA = signedTx(0, BigInteger.valueOf(0xCAFE));
+        EvmTransaction txB = signedTx(1, BigInteger.valueOf(0xCAFE));
+        txStore.put(txA);
+        txStore.put(txB);
+        metaStore.putTxList(5L, List.of(txA.getHash(), txB.getHash()));
+        Log log = new Log(EMITTER, Bytes.EMPTY, List.of(LogTopic.wrap(SIG)));
+        metaStore.putReceipt(txA.getHash(), new EvmReceipt(1, 21_000L, Optional.empty(), List.of(log, log)));
+        metaStore.putReceipt(txB.getHash(), new EvmReceipt(1, 30_000L, Optional.empty(), List.of(log)));
+        EthRequestHandler h = queryHandler(stateStore, txStore, metaStore, 10L);
+
+        Map<?, ?> rB = (Map<?, ?>) h.handle(request("eth_getTransactionReceipt", txB.getHash().getBytes().toHexString()));
+        assertEquals("0x1", rB.get("transactionIndex"));
+        assertEquals("0x7530", rB.get("gasUsed"));            // 30000
+        assertEquals("0xc738", rB.get("cumulativeGasUsed"));  // 51000
+        assertEquals("0x2", ((Map<?, ?>) ((List<?>) rB.get("logs")).get(0)).get("logIndex"));
+        Map<?, ?> rA = (Map<?, ?>) h.handle(request("eth_getTransactionReceipt", txA.getHash().getBytes().toHexString()));
+        assertEquals("0x5208", rA.get("cumulativeGasUsed"));
+        assertEquals("0x1", ((Map<?, ?>) ((List<?>) rA.get("logs")).get(1)).get("logIndex"));
+        // The receipt's logsBloom reflects its logs (R6), not the zero bloom.
+        assertNotEquals(EthObjects.ZERO_BLOOM, rA.get("logsBloom"));
+        assertEquals(EthHex.data(LogsBloomFilter.builder().insertLog(log).build().getBytes()), rA.get("logsBloom"));
+    }
+
+    @Test
+    public void estimateGas_returns_an_amount_that_actually_executes_through_a_sub_call() throws Exception {
+        // R5: A CALLs B (5 fresh SSTOREs, ~110k gas) and REVERTs unless the call succeeded. A single
+        // run at the cap reports intrinsic + gasUsed, but with exactly that much gas A can only forward
+        // 63/64 of what remains (EIP-150) and B runs out -> the estimate must be searched, not measured.
+        InMemoryKVSource store = new InMemoryKVSource();
+        Address b = Address.fromHexString("0x00000000000000000000000000000000000000b0");
+        Address a = Address.fromHexString("0x00000000000000000000000000000000000000a0");
+        runtimeAt(store, b, Bytes.fromHexString("0x6001600055600260015560036002556004600355600560045500"));
+        // CALL(gas, B, 0,0,0,0,0); ISZERO; PUSH1 0x26; JUMPI; STOP; JUMPDEST; REVERT(0,0)
+        runtimeAt(store, a, Bytes.concatenate(Bytes.fromHexString("0x60006000600060006000" + "73"),
+                b.getBytes(), Bytes.fromHexString("0x5af115602657005b60006000fd")));
+        EthRequestHandler h = handlerOver(store, 10L);
+
+        Map<String, Object> call = new java.util.HashMap<>();
+        call.put("from", eoaHex());
+        call.put("to", a.toHexString());
+        long estimate = EthHex.decodeQuantity((String) h.handle(request("eth_estimateGas", call))).longValueExact();
+        assertTrue(estimate > 110_000L);
+        Map<String, Object> withGas = new java.util.HashMap<>(call);
+        withGas.put("gas", EthHex.quantity(estimate));
+        assertEquals("a call with exactly the estimate must succeed", "0x",
+                h.handle(request("eth_call", withGas, "latest")));
+        Map<String, Object> tooLittle = new java.util.HashMap<>(call);
+        tooLittle.put("gas", EthHex.quantity(estimate - 2_000L));
+        assertThrows("the estimate is tight: noticeably less gas reverts", JsonRpcException.class,
+                () -> h.handle(request("eth_call", tooLittle, "latest")));
+    }
+
+    @Test
+    public void blocks_carry_the_real_logs_bloom() throws Exception {
+        // R6: EVM_META 0x05 already stores the height bloom; eth_getBlockByNumber must serve it.
+        InMemoryKVSource stateStore = new InMemoryKVSource();
+        EvmTxStore txStore = new EvmTxStore(new InMemoryKVSource());
+        EvmMetaStore metaStore = new EvmMetaStore(new InMemoryKVSource());
+        EvmTransaction tx = signedTx(0, BigInteger.valueOf(0xCAFE));
+        txStore.put(tx);
+        seedLogHeight(metaStore, 4L, tx, EMITTER, SIG);
+        EthRequestHandler h = queryHandler(stateStore, txStore, metaStore, 10L);
+        Map<?, ?> block = (Map<?, ?>) h.handle(request("eth_getBlockByNumber", "0x4", false));
+        assertEquals(EthHex.data(metaStore.getHeightBloom(4L).orElseThrow()), block.get("logsBloom"));
+        assertNotEquals(EthObjects.ZERO_BLOOM, block.get("logsBloom"));
+        Map<?, ?> empty = (Map<?, ?>) h.handle(request("eth_getBlockByNumber", "0x2", false));
+        assertEquals(EthObjects.ZERO_BLOOM, empty.get("logsBloom"));
+    }
+
+    @Test
+    public void eth_call_sees_the_resolved_block_number_and_timestamp() throws Exception {
+        // E3: simulation runs in the tagged block's context, not an all-zero one.
+        InMemoryKVSource store = new InMemoryKVSource();
+        Address numberC = Address.fromHexString("0x00000000000000000000000000000000000000c1");
+        Address timeC = Address.fromHexString("0x00000000000000000000000000000000000000c2");
+        runtimeAt(store, numberC, Bytes.fromHexString("0x4360005260206000f3")); // return NUMBER
+        runtimeAt(store, timeC, Bytes.fromHexString("0x4260005260206000f3"));   // return TIMESTAMP
+        Blockchain bc = Mockito.mock(Blockchain.class);
+        Mockito.when(bc.getLatestMainBlockNumber()).thenReturn(12L);
+        Mockito.when(bc.getEvmExecutedHeight()).thenReturn(10L);
+        Block head = Mockito.mock(Block.class);
+        long ms = 1_600_000_000_000L;
+        Mockito.when(head.getTimestamp()).thenReturn(io.xdag.utils.XdagTime.msToXdagtimestamp(ms));
+        Mockito.when(head.getHash()).thenReturn(Bytes32.fromHexString("0x" + "ab".repeat(32)));
+        Mockito.when(bc.getBlockByHeight(10L)).thenReturn(head);
+        EthRequestHandler h = new EthRequestHandler(
+                new EvmConfig(EvmSpecVersion.SHANGHAI, BigInteger.valueOf(0xCAFE), 30_000_000L),
+                BigInteger.ONE, bc, null, null, null, null, 1024L,
+                new HistoricalStateReader(store, new EvmStateJournal(new InMemoryKVSource()), 128));
+
+        assertEquals(BigInteger.valueOf(10L), EthHex.decodeQuantity(
+                (String) h.handle(request("eth_call", Map.of("to", numberC.toHexString()), "latest"))));
+        assertEquals(BigInteger.valueOf(ms / 1000L), EthHex.decodeQuantity(
+                (String) h.handle(request("eth_call", Map.of("to", timeC.toHexString()), "latest"))));
+    }
+
+    @Test
+    public void eth_call_revert_surfaces_the_revert_payload_in_error_data() {
+        // R7: wallets decode custom errors from error.data; code 3 = "execution reverted" (geth).
+        InMemoryKVSource store = new InMemoryKVSource();
+        Address reverter = Address.fromHexString("0x00000000000000000000000000000000000000d1");
+        // MSTORE(0, 0xdeadbeef); REVERT(28, 4) -> revert data 0xdeadbeef
+        runtimeAt(store, reverter, Bytes.fromHexString("0x63deadbeef6000526004601cfd"));
+        EthRequestHandler h = handlerOver(store, 10L);
+        JsonRpcException e = assertThrows(JsonRpcException.class,
+                () -> h.handle(request("eth_call", Map.of("to", reverter.toHexString()), "latest")));
+        assertEquals(3, e.getCode());
+        assertEquals("0xdeadbeef", e.getData());
+        assertTrue(e.getMessage(), e.getMessage().startsWith("execution reverted"));
+        JsonRpcException est = assertThrows(JsonRpcException.class,
+                () -> h.handle(request("eth_estimateGas", Map.of("to", reverter.toHexString()))));
+        assertEquals("0xdeadbeef", est.getData());
     }
 }

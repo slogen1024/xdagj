@@ -57,27 +57,31 @@ public class RpcWebSocketFrameHandler extends SimpleChannelInboundHandler<TextWe
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, TextWebSocketFrame frame) {
-        JsonRpcRequest request;
+        com.fasterxml.jackson.databind.JsonNode root;
         try {
-            request = JsonRpcHandler.MAPPER.readValue(frame.text(), JsonRpcRequest.class);
+            root = JsonRpcHandler.MAPPER.readTree(frame.text());
         } catch (Exception e) {
             log.debug("Failed to parse WS JSON-RPC request", e);
             send(ctx, new JsonRpcErrorResponse(null, new JsonRpcError(JsonRpcError.ERR_PARSE,
                     "Invalid JSON request")));
             return;
         }
-        try {
-            Object result = handle(ctx, request);
-            send(ctx, new JsonRpcResponse(request.getId(), result));
-        } catch (JsonRpcException e) {
-            log.debug("WS RPC error: {}", e.getMessage());
-            send(ctx, new JsonRpcErrorResponse(request.getId(), new JsonRpcError(e.getCode(), e.getMessage())));
-        } catch (Exception e) {
-            log.error("Error processing WS request", e);
-            // Keep the detail server-side only; return a generic message to the client.
-            send(ctx, new JsonRpcErrorResponse(request.getId(),
-                    new JsonRpcError(JsonRpcError.ERR_INTERNAL, "Internal error")));
+        JsonRpcHandler.Dispatcher dispatcher = request -> handle(ctx, request);
+        if (root != null && root.isArray()) {
+            // R7: batch over WS mirrors the HTTP transport (array in, array out).
+            if (root.isEmpty() || root.size() > JsonRpcHandler.MAX_BATCH_SIZE) {
+                send(ctx, new JsonRpcErrorResponse(null, new JsonRpcError(JsonRpcError.ERR_INVALID_REQUEST,
+                        root.isEmpty() ? "Empty batch" : "Batch too large, max " + JsonRpcHandler.MAX_BATCH_SIZE + " calls")));
+                return;
+            }
+            java.util.List<Object> responses = new java.util.ArrayList<>(root.size());
+            for (com.fasterxml.jackson.databind.JsonNode element : root) {
+                responses.add(JsonRpcHandler.processOne(element, dispatcher));
+            }
+            send(ctx, responses);
+            return;
         }
+        send(ctx, JsonRpcHandler.processOne(root, dispatcher));
     }
 
     private Object handle(ChannelHandlerContext ctx, JsonRpcRequest request) throws JsonRpcException {
