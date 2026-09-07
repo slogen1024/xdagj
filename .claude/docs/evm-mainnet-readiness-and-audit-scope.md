@@ -99,11 +99,12 @@ EVM 通过 `applyBlock`（收集）/ `tryToConnect`（导入期锚点判定，�
 
 - 审计问题：净费 = **锁→矿工转移**（非铸造）：`creditEvmFee` 的 debit 锁 → 0x0B 日志 → credit 块 的顺序与全跳过守卫（锁不足/A1 溢出 = 确定性 skip-ALL、费燃烧）是否任何输入下全网一致？`reverseEvmFeeDebit` 在 unWindMain 中"精确反转做过的事"——0x0B 日志的 sweep⊆walk（removeAbove 绝不能扫掉未反转的日志）是否成立？异步 blob-drain 与同步 setMain 是否 credit 同一载荷块 M（K1 收敛，落后节点金额一致）？`GenesisLockSeeder` 创世入金（ADDRESS-CF 标记 0x60，ADD 非 SET——保留升级/预激活滞留余额；EVM_STATE 擦盘不得重播种）幂等性？快照引导节点必须携带 0x60 标记（或共享网 alloc 留空）——见就绪 caveat？`getSupply` 加 bridge 门控的 alloc premine 后是否仍为闭式精确值、共享网逐字节不变？配置整-nano/上限 fail-fast + `allocTotalNano` 运行时尘额后备是否双层完备？
 - 代码：`core/BlockchainImpl`（creditEvmFee/reverseEvmFeeDebit/getSupply/onEvmBlobsAvailable）、`evm/bridge/GenesisLockSeeder`、`evm/state/EvmMetaStore`（0x0B）、`db/AddressStore*`（0x60 标记）、`config/AbstractConfig`（alloc 校验）。
-- 合并：807a7079（G3-T1）/ b8c72862（K1）/ 0741a8a2（A4 fail-safe）/ 3bbfc68f（A4-full）。守恒断言：capstone 测试断言锁-debit 等式（同步+异步）。
+- 合并：807a7079（G3-T1）/ b8c72862（K1）/ 0741a8a2（A4 fail-safe）/ 3bbfc68f（A4-full）/ **cca699e0（B1：落后节点被拒支出的 CRITICAL 检测 + `evmFeeDivergenceHeight`，节点本地）**。守恒断言：capstone 测试断言锁-debit 等式（同步+异步）。
 
 ### 2.11 批量打包 + type-2 信封 + mempool 公平驱逐（2026-08-17/18/30 落地）
 
 - 审计问题：0x0F 批承诺 + 池内 nonce 链 + 双查找执行是否与逐笔路径语义一致（MAX_BATCH_TXS=3971 传输上限）？EIP-2718 type-2（0x02 信封、effective/feeCap 费拆分、ethers 向量钉住）的 4 处激活门（含预激活逐字节收据）是否完备？`EvmTxPool` 满池优先驱逐（price ASC → sender-load DESC → age ASC，仅尾部、不自孤、一进一出）是否不可被用作定向逐出攻击——注意此面为**节点本地非共识**，优先级低于 2.8–2.10。
+- 第二轮审计修正（P3，commit acafc3bd）：校验失败的 ref 曾被写成 status-0 收据并永久消耗 hash（矿工零成本烧掉任意待处理交易）——现由 `evm.invalidTxSkipActivationHeight` 门控（devnet 0 / 共享网 MAX）后整体丢弃（无收据、不进 tx list、归还预算），hash 之后仍可执行。
 - 第二轮审计修正（P1/P2，合并 54bc2281）：批次体经 `EVM_TX_REPLY` 送达曾被存进 tx 键空间并被当作"不可解码单笔交易"执行（状态 0 收据折入根链、粘滞且被重放）——现按内容分类（§2.3）；交易池曾无大小上限——现 `EvmTxPool.maxTxBytes` = `evm.maxP2pTxBytes`，RPC 映射 -32602。
 - 代码：`evm/tx/EvmTxPool`、`evm/tx/EvmTransaction`（type-2）、`evm/tx/EvmTxStore`（decodeBatchBody）、`net/`（0x1F/0x20）、批承诺执行路径。
 
@@ -133,7 +134,7 @@ EVM 通过 `applyBlock`（收集）/ `tryToConnect`（导入期锚点判定，�
 - 状态根是链式 delta 承诺而非绝对状态 MPT：无 `eth_getProof`/轻客户端；跨节点一致性靠 **PoW 锚点**（导入期拒绝 + setMain 硬拒）检测，不靠状态证明。
 - `GASPRICE`/`BLOCKHASH`/`PREVRANDAO`/`COINBASE` 读 0（确定性占位,无随机性）；**`BASEFEE` 当前是异常停机而非读 0**（Besu `BaseFeeOperation` 在 baseFee 为空时返回 INVALID_OPERATION；第二轮审计 E2，未修，修复改收据/根需分叉门控）。
 - 原生金额换算 32.32 ↔ nano 经 `double`，每个链接在整数部分 > 2^21 XDAG 时丢失小数位——这是全网已部署节点的行为，因此位级冻结（§2.12）；改动即硬分叉。
-- 第二轮审计仍开放的确定性语义项（全网一致但合约行为错误，均待分叉门控修复）：E1 `SELFDESTRUCT` 不删账户；E3 `eth_call`/`estimateGas` 用全零区块上下文；E4 EIP-170/3541 未强制；E5 嵌套帧 `getOriginalStorageValue` 取父帧当前值；E6 共识参数为节点本地 HOCON。另 P3（校验失败收据永久消耗 tx hash，矿工零成本 grief）、B1（异步 drain 延迟记账使落后节点拒收矿池支出块）、B2、R1–R7（RPC 返回错误数据）见报告。
+- 第二轮审计仍开放的确定性语义项（全网一致但合约行为错误，均待分叉门控修复）：E1 `SELFDESTRUCT` 不删账户；E3 `eth_call`/`estimateGas` 用全零区块上下文；E4 EIP-170/3541 未强制；E5 嵌套帧 `getOriginalStorageValue` 取父帧当前值；E6 共识参数为节点本地 HOCON。另 ~~P3（校验失败收据永久消耗 tx hash，矿工零成本 grief）、B1（异步 drain 延迟记账使落后节点拒收矿池支出块）~~（均已修复 2026-09-08：P3 `evm.invalidTxSkipActivationHeight` 门控后丢弃校验失败引用；B1 落后节点被拒支出精确检测 + CRITICAL + `evmFeeDivergenceHeight`）、B2、R1–R7（RPC 返回错误数据）见报告。
 - `getLogs` 扫描范围 ≤ `maxLogScanRange`(1024)；历史状态查询仅覆盖最近 `stateHistoryWindow`(128) 个高度。
 - type-2 第二步(真 EIP-1559 base fee 市场)未实现：`baseFee≡0`,拥堵靠 `minGasPrice` 一刀切（设计文档 §13.1 缺陷 1）。
 - A4-full 快照引导 caveat：快照引导的节点必须随快照携带 ADDRESS-CF 创世播种标记（0x60），否则会在快照余额之上重复播种锁（共享网当前计划 alloc 留空，天然规避）；写入运维/恢复文档前审计需知情。
@@ -165,7 +166,7 @@ EVM 通过 `applyBlock`（收集）/ `tryToConnect`（导入期锚点判定，�
 - [x] §3 硬门槛-2（DA 强制）已关闭（2026-08-28）
 - [x] §3 硬门槛-3（费用路由/配额/退款）已关闭（2026-08-30；A4-full 守恒 2026-09-01）
 - [x] 内部对抗性审计第一轮（2026-08-30，4 路）发现已修复归档：`docs/superpowers/specs/2026-08-30-evm-audit-findings-and-pre-activation-checklist.md`
-- [x] 内部对抗性审计第二轮（2026-09-04，5 路，针对 freeze-1）8 项 High（C1–C4 / P1–P2 / U1–U2）已全部修复（2026-09-05/07）并归档：`docs/audit/2026-09-04-evm-internal-audit-round2.md`；开放项 P3/B1/B2/E1–E6/R1–R7 已披露给审计方（brief §6.2）
+- [x] 内部对抗性审计第二轮（2026-09-04，5 路，针对 freeze-1）8 项 High（C1–C4 / P1–P2 / U1–U2）已全部修复（2026-09-05/07）并归档：`docs/audit/2026-09-04-evm-internal-audit-round2.md`；开放项 B2/E1–E6/R1–R7 已披露给审计方（brief §6.2）；P3/B1 已于 2026-09-08 修复（acafc3bd / cca699e0，freeze-2 之后、将进入 freeze-3）
 - [x] 审计冻结基线已推送：tag `evm-audit-freeze-2` = `a94d47e2`（全量 665 测试绿；取代 freeze-1 = `3bbfc68f`/633）；英文 brief r2 已按 freeze-2 重发
 - [ ] 带 U1/U2 修复的 EVM-off 版本已发布到全网节点（排期任何激活高度的前置）
 - [ ] 第三方审计报告归档

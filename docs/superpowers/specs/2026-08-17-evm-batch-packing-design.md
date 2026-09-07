@@ -179,3 +179,9 @@
   and defensively in `expandRefs`.
 - **Admission size cap.** `EvmTxPool.add` rejects blobs above `evm.maxP2pTxBytes` (`TOO_LARGE`), so a
   miner can never pack a tx its peers would refuse to ingest.
+- **(2026-09-08, audit round 2 P3) Validation failures no longer yield status-0 receipts.** The
+  "dead batch = deterministic status-0 receipts" wording above describes the pre-gate behaviour. From
+  `evm.invalidTxSkipActivationHeight` on, an out-of-order / underfunded member fails validation and is
+  DROPPED (no receipt, no digest entry, not in the tx list, budget returned) so the hash stays executable
+  later; the receipt had let any miner burn a pending tx at zero cost. Still deterministic network-wide,
+  still no stall.
