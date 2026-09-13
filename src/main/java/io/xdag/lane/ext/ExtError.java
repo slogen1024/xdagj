@@ -26,21 +26,38 @@ package io.xdag.lane.ext;
 
 /** Structural errors of extension blocks and chunk chains. Decoding never throws; it reports one of these. */
 public enum ExtError {
+    /** The block carries no extension header field. */
     NO_EXT,
+    /** The extension header's kind byte is not one of the assigned {@link ExtKind} codes. */
     UNKNOWN_KIND,
+    /** A byte that must be zero (padding, reserved, or trailing) is non-zero. */
     RESERVED_NONZERO,
+    /** A declared length is inconsistent with the data actually available. */
     BAD_LENGTH,
+    /** A required link (e.g. to a continuation or referenced block) is absent. */
     MISSING_LINK,
+    /** A link is present where the format requires none. */
     EXTRA_LINK,
+    /** Inline arguments exceed the space reserved for them in the header. */
     INLINE_ARGS_TOO_LONG,
+    /** The number of 32-byte payload fields does not match the declared/expected length. */
     PAYLOAD_COUNT_MISMATCH,
+    /** A CHUNK's sequence number does not immediately follow the previous chunk's. */
     CHUNK_SEQ_GAP,
+    /** The chunk chain's declared total does not match the sum actually observed. */
     CHUNK_TOTAL_MISMATCH,
+    /** The chunk chain exceeds the maximum number of chunks allowed. */
     CHUNK_TOO_MANY,
+    /** The last (tail) chunk in a chain carries a link to a further chunk. */
     CHUNK_TAIL_HAS_LINK,
+    /** Following chunk links revisits a block already seen in the chain. */
     CHUNK_CYCLE,
+    /** The referenced block is not a CHUNK extension block. */
     NOT_A_CHUNK,
+    /** Reserved for the code store / SP1; not produced by the SP0a codecs. */
     CODE_TOO_LARGE,
+    /** Reserved for the code store / SP1; not produced by the SP0a codecs. */
     CODE_HASH_MISMATCH,
+    /** Reserved for the code store / SP1; not produced by the SP0a codecs. */
     CODE_UNKNOWN
 }

@@ -24,14 +24,23 @@
 
 package io.xdag.lane.ext;
 
-/** Either a decoded value or an {@link ExtError}. */
+import java.util.Objects;
+
+/** Either a decoded value or an {@link ExtError}; exactly one of the two is non-null. */
 public record ExtResult<T>(T value, ExtError error) {
+
+    public ExtResult {
+        if ((value == null) == (error == null)) {
+            throw new IllegalArgumentException("exactly one of value/error must be set");
+        }
+    }
 
     public static <T> ExtResult<T> ok(T value) {
         return new ExtResult<>(value, null);
     }
 
     public static <T> ExtResult<T> fail(ExtError error) {
+        Objects.requireNonNull(error, "error");
         return new ExtResult<>(null, error);
     }
 

@@ -28,6 +28,7 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import java.util.List;
@@ -50,6 +51,38 @@ public class ExtCodecTest {
         assertEquals(0x08, a[6] & 0xff);
         assertTrue(ExtCodec.isZero(a, 14, 32));
         assertFalse(ExtCodec.isZero(a, 0, 32));
+        assertEquals("0xefbeefbeadde0807060504030201" + "00".repeat(18), Bytes.wrap(a).toHexString());
+    }
+
+    @Test
+    public void u64KeepsUnsignedBitPattern() {
+        byte[] a = new byte[32];
+        ExtCodec.putU64(a, 0, 0xFFFFFFFFFFFFFFFFL);
+        assertEquals(-1L, ExtCodec.u64(a, 0));
+        assertEquals("18446744073709551615", Long.toUnsignedString(ExtCodec.u64(a, 0)));
+        ExtCodec.putU64(a, 8, 0x8000000000000000L);
+        assertEquals(Long.MIN_VALUE, ExtCodec.u64(a, 8));
+    }
+
+    @Test
+    public void encodeGuardsRejectOutOfRange() {
+        assertThrows(IllegalArgumentException.class, () -> ExtCodec.putU16(new byte[2], 0, 0x10000));
+        assertThrows(IllegalArgumentException.class, () -> ExtCodec.putU32(new byte[4], 0, 0x1_0000_0000L));
+        assertThrows(IllegalArgumentException.class, () -> ExtCodec.fieldsFor(-1));
+    }
+
+    @Test
+    public void readBytesNeverThrowsOnBadInput() {
+        assertEquals(ExtError.PAYLOAD_COUNT_MISMATCH, ExtCodec.readBytes(null, 0).error());
+        assertEquals(ExtError.PAYLOAD_COUNT_MISMATCH, ExtCodec.readBytes(List.of(), -1).error());
+        ExtResult<Bytes> empty = ExtCodec.readBytes(List.of(), 0);
+        assertTrue(empty.isOk());
+        assertEquals(Bytes.EMPTY, empty.value());
+    }
+
+    @Test
+    public void resultRejectsNullError() {
+        assertThrows(NullPointerException.class, () -> ExtResult.fail(null));
     }
 
     @Test

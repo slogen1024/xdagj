@@ -38,33 +38,58 @@ public final class ExtCodec {
     private ExtCodec() {
     }
 
+    /** Reads an unsigned 8-bit value at byte offset {@code off}. */
     public static int u8(byte[] a, int off) {
         return a[off] & 0xff;
     }
 
+    /** Reads a little-endian unsigned 16-bit value starting at byte offset {@code off}. */
     public static int u16(byte[] a, int off) {
         return (a[off] & 0xff) | ((a[off + 1] & 0xff) << 8);
     }
 
+    /** Reads a little-endian unsigned 32-bit value starting at byte offset {@code off}. */
     public static long u32(byte[] a, int off) {
         return (u16(a, off) & 0xffffL) | ((long) u16(a, off + 2) << 16);
     }
 
+    /**
+     * Reads a little-endian 64-bit value starting at byte offset {@code off}.
+     * Returns the unsigned 64-bit value as a raw bit pattern; values >= 2^63 come back negative
+     * — compare with {@code Long.compareUnsigned}, never with {@code <}/{@code >}.
+     */
     public static long u64(byte[] a, int off) {
         return (u32(a, off) & 0xffffffffL) | (u32(a, off + 4) << 32);
     }
 
+    /**
+     * Writes {@code v} as a little-endian unsigned 16-bit value at byte offset {@code off}.
+     *
+     * @throws IllegalArgumentException if {@code v} does not fit in 16 bits
+     */
     public static void putU16(byte[] a, int off, int v) {
+        if ((v & ~0xFFFF) != 0) {
+            throw new IllegalArgumentException("u16 out of range: " + v);
+        }
         a[off] = (byte) v;
         a[off + 1] = (byte) (v >>> 8);
     }
 
+    /**
+     * Writes {@code v} as a little-endian unsigned 32-bit value at byte offset {@code off}.
+     *
+     * @throws IllegalArgumentException if {@code v} does not fit in 32 bits
+     */
     public static void putU32(byte[] a, int off, long v) {
+        if ((v & ~0xFFFFFFFFL) != 0) {
+            throw new IllegalArgumentException("u32 out of range: " + v);
+        }
         for (int i = 0; i < 4; i++) {
             a[off + i] = (byte) (v >>> (8 * i));
         }
     }
 
+    /** Writes {@code v} as a little-endian 64-bit raw bit pattern at byte offset {@code off}. */
     public static void putU64(byte[] a, int off, long v) {
         for (int i = 0; i < 8; i++) {
             a[off + i] = (byte) (v >>> (8 * i));
@@ -80,13 +105,26 @@ public final class ExtCodec {
         return true;
     }
 
-    /** Number of 32-byte fields needed to carry {@code len} bytes. */
+    /**
+     * Number of 32-byte fields needed to carry {@code len} bytes; overflow-free.
+     *
+     * @throws IllegalArgumentException if {@code len} is negative
+     */
     public static int fieldsFor(int len) {
-        return (len + FIELD - 1) / FIELD;
+        if (len < 0) {
+            throw new IllegalArgumentException("negative length: " + len);
+        }
+        return Math.ceilDiv(len, FIELD);
     }
 
-    /** Concatenates payload fields and returns the first {@code len} bytes; trailing bytes must be zero. */
+    /**
+     * Concatenates payload fields and returns the first {@code len} bytes; trailing bytes must be zero.
+     * Never throws; malformed input is reported via {@link ExtResult#error()}.
+     */
     public static ExtResult<Bytes> readBytes(List<Bytes32> payload, int len) {
+        if (payload == null || len < 0) {
+            return ExtResult.fail(ExtError.PAYLOAD_COUNT_MISMATCH);
+        }
         if (payload.size() != fieldsFor(len)) {
             return ExtResult.fail(ExtError.PAYLOAD_COUNT_MISMATCH);
         }
