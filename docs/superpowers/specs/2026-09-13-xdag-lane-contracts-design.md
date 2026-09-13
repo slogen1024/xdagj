@@ -146,6 +146,7 @@
 - **块链接的角色按位置分配**：块内所有 `XDAG_FIELD_OUT`（指向块、amount = 0）按字段顺序编号 link[0], link[1]…，各 kind 规定每个位置的含义。
 - 扩展块的值结算部分（INPUT/OUTPUT/nonce/签名/fee）**完全沿用现有规则**，旧节点把它们当普通账户交易处理。
 - 激活高度 `lane.activationHeight` 之前，所有节点忽略扩展语义（与旧节点行为一致）。
+- **EXT 不影响 L1 有效性（SP0a 决策 2026-09-13）**：`tryToConnect` 不读扩展字段，格式错误的扩展块仍是合法 L1 块并正常结算值；通道语义只在 `setMain`/`applyBlock` 按主块高度激活后解释，格式错误的调用记为 `INVALID_FORMAT` 输入（value 退回通道内余额）。导入期的分片费率与配额检查是节点本地反垃圾策略（SP0b），不是共识。
 
 ### 5.2 各 kind 的字节级布局
 
@@ -192,10 +193,10 @@ value 的 L1 目标是**通道金库**而非合约；目标合约只出现在扩
 | 0 | 1 | kind | 0x03 |
 | 1 | 4 | seq | u32，链内序号，首片为 0 |
 | 5 | 4 | totalLen | u32，整条链的载荷总字节数 |
-| 9 | 2 | dataLen | u16，本片有效字节数（≤ 416） |
+| 9 | 2 | dataLen | u16，本片有效字节数（≤ 352） |
 | 11 | 21 | 保留 | 0 |
 
-link[0] = 下一片（末片无）。载荷字段最多 13 个（header 1 + link 1 + 扩展头 1 + 13 = 16），每片 416B。分片块**无签名、无 INPUT、fee = 0**（与现有 link block 同类）。分片链的费用由 link 它的付费块承担（§5.4）。100KB WASM ≈ 246 片。
+link[0] = 下一片（末片无）。分片块必须带 **2 个全零 `SIGN_OUT` 字段**（`checkMineAndAdd` 对缺失的 outsig 会抛异常导致导入 ERROR；全零签名被解析为矿工伪块 (1,1)，不需要真正签名），因此载荷字段最多 **11 个**（header 1 + link 1 + 扩展头 1 + 签名 2 + 11 = 16），每片 **352B**。分片块**无 INPUT、无公钥、fee = 0**（与现有 link block 同类）。分片链的费用由 link 它的付费块承担（§5.4）。100KB WASM ≈ 291 片。
 
 链的完整性校验：`totalLen == Σ dataLen`，`seq` 连续，末片无 link；载荷哈希 `sha256(拼接后的字节)` 由使用方（CALL/DEPLOY/ANCHOR…）的语义决定是否需要匹配某个承诺。
 
@@ -257,12 +258,12 @@ payload[0] = `index u64 ‖ amount u64 ‖ 保留 16B`；payload[1] = `recipient
 
 ### 5.4 费用规则（L1 层）
 
-扩展块的 header fee 必须满足：`fee ≥ MIN_GAS × outputs + chunkFee × 该块直接 link 的所有分片链总片数`。`chunkFee` 为协议参数（初始 0.01 XDAG/片）。不满足则 `INVALID_BLOCK`。这笔费用与现有交易费一样归 PoW 主块矿工，覆盖排序与 DA 成本。
+扩展块的 header fee 字段必须满足：`header.fee ≥ chunkFee × 该块直接 link 的所有分片链总片数`（`MIN_GAS × outputs` 部分由现有 `getTxFee` 规则已经保证）。`chunkFee` 为协议参数（初始 0.01 XDAG/片）。两层执行：导入期作为节点本地策略拒绝（SP0b，可配置）；`applyBlock` 时作为共识复核，不足者记为 `INVALID_FEE` 输入（value 退回通道内余额，分片链不被使用）。这笔费用与现有交易费一样归 PoW 主块矿工，覆盖排序与 DA 成本。
 
 ### 5.5 兼容性与硬分叉点
 
 - **软兼容部分**：旧节点解析 `0x0F` 走 `default`，把 CALL/DEPLOY/ANCHOR/BOND/CHALLENGE/CLAIM 当普通账户交易结算，哈希/签名不受影响。
-- **硬分叉部分**（激活高度后行为分歧）：(a) CLAIM 与 UNBOND 到期的**系统划账**改变 L1 余额；(b) 扩展块的费用规则更严；(c) 孤块池与导入流水线改动不影响共识。因此 `lane.activationHeight` 必须作为硬分叉高度统一升级，与 dev-evm 的 `*ActivationHeight` 治理方式相同。
+- **硬分叉部分**（激活高度后行为分歧）：(a) CLAIM 与 UNBOND 到期的**系统划账**改变 L1 余额；(b) 快照必须携带 `LANE_L1`；(c) 孤块池、导入流水线与导入期费率策略均为节点本地，不影响共识。因此 `lane.activationHeight` 必须作为硬分叉高度统一升级，与 dev-evm 的 `*ActivationHeight` 治理方式相同。
 - **激活前的资金陷阱**：旧节点把 CALL 当普通转账，value 进金库却没有通道语义，激活前发出的调用资金无法 CLAIM。因此钱包、SDK 与 `lane_*` RPC 在激活高度前必须拒绝构造/提交扩展块；协议侧只从激活高度起记录通道输入，激活前进入金库的余额视为捐赠，不做补救。
 
 ---
@@ -275,7 +276,7 @@ payload[0] = `index u64 ‖ amount u64 ‖ 保留 16B`；payload[1] = `recipient
 |------|-----|-------|------|
 | 0x01 | laneId | 配置（gasPrice, D, maxCallGas）、创建高度、创建块 hash | 通道注册表 |
 | 0x02 | contract(20) | laneId ‖ codeHash ‖ 部署高度 | 合约 → 通道 |
-| 0x03 | codeHash | 原始 WASM 字节 | 代码库（全网保存，仲裁需要） |
+| 0x03 | codeHash | refCount ‖ 原始 WASM 字节 | 代码库（全网保存，仲裁需要；引用计数到 0 删除，保证 unwind 后"codeHash 已存在"判定全网一致） |
 | 0x04 | attester(20) ‖ laneId | 保证金额 ‖ 解锁申请高度 | 保证金账本 |
 | 0x05 | laneId | 规范头 seq ‖ 锚定块 hash | 锚定链头 |
 | 0x06 | laneId ‖ seq | 锚定记录：hash、stateRoot、outboxMapRoot、inputCount、确认高度、状态（canonical/final/voided） | 锚定索引 |
@@ -284,14 +285,17 @@ payload[0] = `index u64 ‖ amount u64 ‖ 保留 16B`；payload[1] = `recipient
 | 0x09 | height | 待到期列表（UNBOND、锚定终局） | 高度触发器 |
 | 0x0A | challengeHash | 仲裁结果 | 挑战记录 |
 | 0x0B | dstLane ‖ srcLane | 已消费游标 `to`、已消费到的 srcAnchorSeq | 段消费游标（§7.5） |
+| 0x0C | laneId ‖ height ‖ index | blockHash ‖ kind ‖ status ‖ contract | 输入索引（执行者按此重建输入流） |
+| 0x0E | blockHash | laneId ‖ height ‖ index | unapply 反向索引 |
 
 ### 6.2 钩子位置
 
 | 时机 | 动作 | 对称回滚 |
 |------|------|---------|
-| `tryToConnect`（锁外预验证） | 扩展头解析、字段预算、费用规则、分片链结构校验、签名验证 | 无状态 |
-| `applyBlock` DFS 中遇到扩展块 | CALL/DEPLOY：仅当 L1 值结算 `BI_APPLIED` 时记为通道输入（计数 +1，DEPLOY 更新注册表/代码库）；BOND/UNBOND：更新保证金账本；ANCHOR：有效性检查 → 规范链；CHALLENGE：仲裁（§10）；CLAIM：证明校验 → 系统划账 | `unApplyBlock` 中逐项反向 |
-| `setMain(h)` 末尾 | 按固定顺序处理高度 h 的到期项：① 仲裁本高度确认的 CHALLENGE ② 锚定终局 ③ UNBOND 归还 ④ 消息段变为可交付 ⑤ 本高度成为规范的锚定产生本高度的"锚定奖励"系统输入（§7.1） | `unSetMain` 反向 |
+| `tryToConnect` | **不读 EXT**（原则：EXT 不影响 L1 有效性）；SP0b 的导入期策略在锁外做分片费率/配额过滤 | 无状态 |
+| `onSetMainBegin(h)` | `setMain` 中 `BI_MAIN` 置位后、`applyBlock` 前：`h ≥ activationHeight` 才建立 DFS 上下文 | `onUnsetMain` 清上下文 |
+| `onBlockApplied`（`applyBlock` 置 `BI_APPLIED` 后，DFS 序） | CALL/DEPLOY：登记通道输入（0x0C/0x0E/0x07；DEPLOY 更新注册表/合约表/代码库）；BOND/UNBOND：更新保证金账本；ANCHOR：有效性检查 → 规范链；CHALLENGE：仲裁（§10）；CLAIM：证明校验 → 系统划账 | `onBlockUnapplied`（`unApplyBlock` 逆序）逐项反向 |
+| `onSetMainEnd(h)` | 按固定顺序处理高度 h 的到期项：① 仲裁本高度确认的 CHALLENGE ② 锚定终局 ③ UNBOND 归还 ④ 消息段变为可交付 ⑤ 本高度成为规范的锚定产生本高度的"锚定奖励"系统输入（§7.1） | `onUnsetMain` 反向 |
 
 **规则**：每个新增写操作必须有成对的反操作，并在 SP0 中用"随机 unwind/replay 后状态相等"的属性测试锁死。
 
@@ -702,13 +706,16 @@ verify(challenge):
 
 | # | 子项目 | 核心交付 | 依赖 |
 |---|--------|---------|------|
-| **SP0** | 块格式与 L1 钩子 | `XDAG_FIELD_EXT` 编解码；7 种 kind 解析与校验；分片链；`LANE_L1` 存储；注册表/代码库；激活高度门控（含钱包/RPC 激活前拒绝构造扩展块）；apply/unApply 骨架与属性测试；**快照扩展与 laneStateHash（§6.3）**；导入流水线并行预验证与孤块池分队列（含按来源的分片块配额与 TTL 淘汰）；L1 导入基准 | — |
-| **SP1** | 通道执行引擎 | Chicory 集成；部署验证 + 插桩（含栈高度计量与保守 `-Xss` 无关上限）；宿主 ABI；SMT/MMR；**见证比例计费与 §8.3 不等式的属性测试**；输入流构建；确定性执行；变更日志/回滚/快照；软预执行；两模式一致性测试；gas 微基准 | SP0 |
+| **SP0a** | 块格式与 L1 钩子（共识层） | `XDAG_FIELD_EXT` 编解码；7 种 kind 解析与校验；分片链；`LANE_L1` 存储 + `batchWrite`；注册表/合约表/代码库（引用计数）/输入索引；五个 setMain/applyBlock 钩子与对称 unapply；激活高度与 `LaneSpec`；`LaneActivation` 供钱包/RPC 门控；**快照扩展与 laneStateHash（§6.3）**；属性测试。详见 `2026-09-13-xdag-lane-sp0a-block-format-and-l1-hooks-design.md` | — |
+| **SP0b** | 导入流水线与孤块池（节点本地） | `tryToConnect` 锁外并行预验证（签名、解析）；孤块池按通道/来源分队列、分片块配额与 TTL 淘汰、`orphanPoolLimit`；导入期分片费率策略；L1 导入基准（块/s 前后对比） | SP0a（可与 SP1 并行） |
+| **SP1** | 通道执行引擎 | Chicory 集成；部署验证 + 插桩（含栈高度计量与保守 `-Xss` 无关上限）；宿主 ABI；SMT/MMR；**见证比例计费与 §8.3 不等式的属性测试**；输入流构建；确定性执行；变更日志/回滚/快照；软预执行；两模式一致性测试；gas 微基准 | SP0a |
 | **SP2** | 资产流 | 金库记账；withdraw/outbox(L1)；CLAIM 校验与系统划账；跨通道转值对账；不变量 I1–I3 测试 | SP1 |
 | **SP3** | 认证与仲裁 | BOND/UNBOND；锚定有效性与规范链；承诺链；终局 W；见证格式；E1/E2/E3 仲裁；**锁外预计算裁决缓存**；罚没；级联回滚 | SP1（与 SP2 并行） |
 | **SP4** | 订阅与 P2P | 订阅集合（含 `lane.subscribeAll` 过渡模式，D6）；`0x1B–0x1F` 消息；快照同步；证明拉取；交付规则 D；执行者只跑订阅通道；多节点 devnet | SP2, SP3 |
 | **SP5** | 开发者面 | `lane_*` RPC；Rust SDK；客户端库；CLI；三个参考 DApp；文档 | SP4 |
 | SP6（v2） | 扩展 | 编织原子跨通道锚定（ANCHOR flags.bit0）；BATCH 密度块；DA 采样 | v1 上线后 |
+
+顺序：SP0a → SP1 → SP2 / SP3（SP1 后可并行）→ SP4 → SP5；SP0b 与 SP1 并行。
 
 每个子项目：brainstorming（细化 spec）→ writing-plans → TDD 实施 → 代码评审 → 合入 `dev-dag-contract`。
 
