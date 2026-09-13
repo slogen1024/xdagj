@@ -182,21 +182,19 @@ public class ChunkChainTest {
         Map<Bytes32, Block> idx = index(chunks);
         Bytes32 thirdHash = Bytes32.wrap(chunks.get(2).getHashLow().toArray());
 
-        // The lookup returns null only for the third chunk's hash. countLenient's loop condition
-        // runs `visited.add(cur)` *before* the body calls the lookup, so by the time the null
-        // result is discovered, the third hash has already been recorded as visited. The walk then
-        // breaks, having visited all 3 hashes -- not 2. (Deviation from the task description, which
-        // expected 2 for this scenario; verified against the unmodified plan algorithm, kept as
-        // given per requirement B.)
+        // The lookup returns null only for the third chunk's hash. countLenient only increments its
+        // counter after a block was found and decoded as a chunk, so chunk 0 and chunk 1 count
+        // (2), then the missing third hash ends the walk without being counted.
         Map<Bytes32, Block> missingThird = new HashMap<>(idx);
         missingThird.remove(thirdHash);
-        assertEquals(3, ChunkChain.countLenient(head(chunks), h -> missingThird.get(h), 4096));
+        assertEquals(2, ChunkChain.countLenient(head(chunks), h -> missingThird.get(h), 4096));
 
-        // The second block IS reachable (lookup succeeds) but classifies as a non-chunk, so it
-        // counts as visited and then the walk stops on the classification check -- exactly 2.
+        // The second block IS reachable (lookup succeeds) but classifies as a non-chunk. Chunk 0
+        // counts (1), then the walk stops on the classification check without counting the
+        // non-chunk block.
         Map<Bytes32, Block> notChunk = new HashMap<>(idx);
         notChunk.put(Bytes32.wrap(chunks.get(1).getHashLow().toArray()), LaneBlockClassifierTest.extBlock(config, List.of(), List.of()));
-        assertEquals(2, ChunkChain.countLenient(head(chunks), h -> notChunk.get(h), 4096));
+        assertEquals(1, ChunkChain.countLenient(head(chunks), h -> notChunk.get(h), 4096));
     }
 
     @Test

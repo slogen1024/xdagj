@@ -141,21 +141,19 @@ public final class ChunkChain {
     }
 
     /**
-     * Number of chunk blocks reachable from {@code head}, stopping at the first structural problem
-     * or once {@code maxChunks} hashes have been visited. Used for fee/size checks where only a
-     * count is needed, not the reassembled payload; unlike {@link #assemble}, it never fails and
-     * has no return value other than the count — it only counts, bounded by {@code maxChunks}, and
-     * never throws.
-     *
-     * <p>Note the loop condition records a hash as visited (via {@code visited.add(cur)}) before
-     * the loop body looks that hash up, so a hop whose {@code lookup} result is {@code null} is
-     * still counted as visited: the count reflects hashes the walk reached, not only hashes that
-     * decoded as a valid chunk.
+     * Number of existing, well-formed CHUNK blocks reachable from {@code head}, stopping at the
+     * first missing or non-chunk block, at most {@code maxChunks}. Used for fee checks (the chunk
+     * fee charges for chunk blocks the network actually stores): a hash whose {@code lookup} fails,
+     * or whose block does not classify as {@link ExtKind#CHUNK} with {@link Classified#isOk()},
+     * ends the walk without being counted — only a block that was found and decoded as a chunk
+     * increments the count. Unlike {@link #assemble}, this never fails and has no return value
+     * other than the count; it is bounded by {@code maxChunks} and cycle-safe, and never throws.
      */
     public static int countLenient(Bytes32 head, RawBlockLookup lookup, int maxChunks) {
         Set<Bytes32> visited = new HashSet<>();
+        int count = 0;
         Bytes32 cur = head;
-        while (cur != null && visited.size() < maxChunks && visited.add(cur)) {
+        while (cur != null && count < maxChunks && visited.add(cur)) {
             Block b = lookup.get(cur);
             if (b == null) {
                 break;
@@ -164,8 +162,9 @@ public final class ChunkChain {
             if (c.kind() != ExtKind.CHUNK || !c.isOk()) {
                 break;
             }
+            count++;
             cur = c.as(ChunkExt.class).next();
         }
-        return visited.size();
+        return count;
     }
 }
