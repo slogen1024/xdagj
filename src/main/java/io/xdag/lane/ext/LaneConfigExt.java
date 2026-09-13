@@ -41,7 +41,7 @@ import org.apache.tuweni.bytes.Bytes32;
  * {@code deliveryDelayD} and {@code maxCallGas} must fit a u32 ({@code gasPriceNano} is unconstrained,
  * being a raw u64 bit pattern).
  *
- * <p>{@link #decode} validates the reserved zero tail (bytes 16..32); it never throws.
+ * <p>{@link #decode} validates the reserved zero tail (bytes 16..31); it never throws.
  *
  * <p>{@link #encode()} throws {@link IllegalArgumentException} if {@code deliveryDelayD} or
  * {@code maxCallGas} do not fit their header width; the compact constructor already rejects such

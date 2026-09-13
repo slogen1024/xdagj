@@ -73,7 +73,13 @@ import org.apache.tuweni.bytes.Bytes32;
  * ({@code BAD_LENGTH} / {@code PAYLOAD_COUNT_MISMATCH} otherwise), otherwise
  * {@code argsLen <= CallExt#MAX_INLINE_ARGS} ({@code INLINE_ARGS_TOO_LONG}) and the remaining payload
  * decoded as inline args; and finally the expected number of links (code head, then args head)
- * ({@code MISSING_LINK} / {@code EXTRA_LINK} otherwise).
+ * ({@code MISSING_LINK} / {@code EXTRA_LINK} otherwise). A {@code null} element at the
+ * {@code codeHash} (payload[0]) or {@code config} (payload[1]) position likewise fails with
+ * {@code PAYLOAD_COUNT_MISMATCH} rather than propagating a {@link NullPointerException}.
+ *
+ * <p>{@code CallExt.MAX_INLINE_ARGS} (256 B) is only an upper bound for DEPLOY: the effective inline
+ * capacity is field-count limited (codeHash, optional config and chain links each take a field) — the
+ * block builder computes it per shape.
  *
  * <p>{@link #encodeHeader()} throws {@link IllegalArgumentException} if {@code gasLimit} or
  * {@code argsLen} do not fit their header width; the compact constructor already rejects such values,

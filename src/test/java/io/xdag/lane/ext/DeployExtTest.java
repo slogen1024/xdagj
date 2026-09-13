@@ -32,6 +32,7 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import io.xdag.core.Address;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import org.apache.tuweni.bytes.Bytes;
@@ -171,5 +172,113 @@ public class DeployExtTest {
         assertEquals(ExtError.MISSING_LINK,
                 DeployExt.decode(chained.encodeHeader(), chained.encodePayload(), Arrays.asList((Address) null))
                         .error());
+    }
+
+    @Test
+    public void allFlagCombinationsRoundTrip() {
+        for (int f = 0; f < 8; f++) {
+            boolean newLane = (f & DeployExt.FLAG_NEW_LANE) != 0;
+            boolean codeChain = (f & DeployExt.FLAG_CODE_CHAIN) != 0;
+            boolean argsChain = (f & DeployExt.FLAG_ARGS_CHAIN) != 0;
+
+            Bytes laneId = newLane ? ZERO_LANE : LANE;
+            LaneConfigExt config = newLane ? CONFIG : null;
+            Bytes32 codeHead = codeChain ? hashLow(10 + f) : null;
+            Bytes32 argsHead = argsChain ? hashLow(20 + f) : null;
+            int argsLen = argsChain ? 0 : 40;
+            Bytes inlineArgs = argsChain ? Bytes.EMPTY : Bytes.random(40);
+
+            DeployExt d = new DeployExt(f, laneId, 1L, argsLen, CODE_HASH, config, inlineArgs, codeHead, argsHead);
+
+            List<Address> links = new ArrayList<>();
+            if (codeChain) {
+                links.add(link(codeHead));
+            }
+            if (argsChain) {
+                links.add(link(argsHead));
+            }
+
+            ExtResult<DeployExt> r = DeployExt.decode(d.encodeHeader(), d.encodePayload(), links);
+            assertTrue("flags=" + f + ": " + r.error(), r.isOk());
+            assertEquals("flags=" + f, d, r.value());
+
+            int expectedFields = 1 + (newLane ? 1 : 0) + (argsChain ? 0 : 2);
+            assertEquals("flags=" + f, expectedFields, d.encodePayload().size());
+        }
+    }
+
+    @Test
+    public void decodeBranchGuards() {
+        DeployExt c = new DeployExt(0, LANE, 1L, 0, CODE_HASH, null, Bytes.EMPTY, null, null);
+
+        byte[] wrongKind = c.encodeHeader().toArray();
+        wrongKind[0] = ExtKind.CALL.code();
+        assertEquals(ExtError.UNKNOWN_KIND,
+                DeployExt.decode(Bytes32.wrap(wrongKind), c.encodePayload(), List.of()).error());
+
+        byte[] dirtyTail = c.encodeHeader().toArray();
+        dirtyTail[29] = 1;
+        assertEquals(ExtError.RESERVED_NONZERO,
+                DeployExt.decode(Bytes32.wrap(dirtyTail), c.encodePayload(), List.of()).error());
+
+        assertEquals(ExtError.PAYLOAD_COUNT_MISMATCH,
+                DeployExt.decode(c.encodeHeader(), Arrays.asList((Bytes32) null), List.of()).error());
+
+        DeployExt nl = new DeployExt(DeployExt.FLAG_NEW_LANE, ZERO_LANE, 1L, 0, CODE_HASH, CONFIG, Bytes.EMPTY, null, null);
+        List<Bytes32> dirtyConfig = new ArrayList<>(nl.encodePayload());
+        byte[] cfg = dirtyConfig.get(1).toArray();
+        cfg[20] = 1;
+        dirtyConfig.set(1, Bytes32.wrap(cfg));
+        assertEquals(ExtError.RESERVED_NONZERO, DeployExt.decode(nl.encodeHeader(), dirtyConfig, List.of()).error());
+
+        Bytes32 argsHead = hashLow(30);
+        DeployExt ac = new DeployExt(DeployExt.FLAG_ARGS_CHAIN, LANE, 1L, 0, CODE_HASH, null, Bytes.EMPTY, null, argsHead);
+        byte[] badArgsLen = ac.encodeHeader().toArray();
+        badArgsLen[26] = 4;
+        assertEquals(ExtError.BAD_LENGTH,
+                DeployExt.decode(Bytes32.wrap(badArgsLen), ac.encodePayload(), List.of(link(argsHead))).error());
+
+        assertEquals(ExtError.PAYLOAD_COUNT_MISMATCH,
+                DeployExt.decode(ac.encodeHeader(), List.of(CODE_HASH, CODE_HASH), List.of(link(argsHead))).error());
+
+        Bytes tenBytes = Bytes.random(10);
+        DeployExt inl = new DeployExt(0, LANE, 1L, 10, CODE_HASH, null, tenBytes, null, null);
+        List<Bytes32> dirtyPadding = new ArrayList<>(inl.encodePayload());
+        byte[] last = dirtyPadding.get(1).toArray();
+        last[31] = 1;
+        dirtyPadding.set(1, Bytes32.wrap(last));
+        assertEquals(ExtError.RESERVED_NONZERO, DeployExt.decode(inl.encodeHeader(), dirtyPadding, List.of()).error());
+
+        Bytes32 codeHead2 = hashLow(31);
+        Bytes32 argsHead2 = hashLow(32);
+        DeployExt both = new DeployExt(DeployExt.FLAG_CODE_CHAIN | DeployExt.FLAG_ARGS_CHAIN, LANE, 1L, 0, CODE_HASH,
+                null, Bytes.EMPTY, codeHead2, argsHead2);
+        ExtResult<DeployExt> swapped = DeployExt.decode(both.encodeHeader(), both.encodePayload(),
+                List.of(link(argsHead2), link(codeHead2)));
+        assertTrue(swapped.isOk());
+        assertEquals(argsHead2, swapped.value().codeChainHead());
+    }
+
+    @Test
+    public void inlineArgsAtLimitAndBeyond() {
+        Bytes atLimit = Bytes.random(CallExt.MAX_INLINE_ARGS);
+        DeployExt ok = new DeployExt(0, LANE, 1L, CallExt.MAX_INLINE_ARGS, CODE_HASH, null, atLimit, null, null);
+        ExtResult<DeployExt> r = DeployExt.decode(ok.encodeHeader(), ok.encodePayload(), List.of());
+        assertTrue(String.valueOf(r.error()), r.isOk());
+        assertEquals(9, ok.encodePayload().size());
+
+        Bytes over = Bytes.random(CallExt.MAX_INLINE_ARGS + 1);
+        DeployExt bad = new DeployExt(0, LANE, 1L, CallExt.MAX_INLINE_ARGS + 1, CODE_HASH, null, over, null, null);
+        assertEquals(ExtError.INLINE_ARGS_TOO_LONG,
+                DeployExt.decode(bad.encodeHeader(), bad.encodePayload(), List.of()).error());
+    }
+
+    @Test
+    public void laneConfigKeepsU64BitPattern() {
+        LaneConfigExt maxBits = new LaneConfigExt(-1L, 0xFFFFFFFFL, 0xFFFFFFFFL);
+        assertEquals("0x" + "ff".repeat(16) + "00".repeat(16), maxBits.encode().toHexString());
+        ExtResult<LaneConfigExt> r = LaneConfigExt.decode(maxBits.encode());
+        assertTrue(r.isOk());
+        assertEquals(maxBits, r.value());
     }
 }
