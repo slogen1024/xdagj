@@ -262,6 +262,7 @@ payload[0] = `index u64 ‖ amount u64 ‖ 保留 16B`；payload[1] = `recipient
 
 - **软兼容部分**：旧节点解析 `0x0F` 走 `default`，把 CALL/DEPLOY/ANCHOR/BOND/CHALLENGE/CLAIM 当普通账户交易结算，哈希/签名不受影响。
 - **硬分叉部分**（激活高度后行为分歧）：(a) CLAIM 与 UNBOND 到期的**系统划账**改变 L1 余额；(b) 扩展块的费用规则更严；(c) 孤块池与导入流水线改动不影响共识。因此 `lane.activationHeight` 必须作为硬分叉高度统一升级，与 dev-evm 的 `*ActivationHeight` 治理方式相同。
+- **激活前的资金陷阱**：旧节点把 CALL 当普通转账，value 进金库却没有通道语义，激活前发出的调用资金无法 CLAIM。因此钱包、SDK 与 `lane_*` RPC 在激活高度前必须拒绝构造/提交扩展块；协议侧只从激活高度起记录通道输入，激活前进入金库的余额视为捐赠，不做补救。
 
 ---
 
@@ -292,6 +293,10 @@ payload[0] = `index u64 ‖ amount u64 ‖ 保留 16B`；payload[1] = `recipient
 | `setMain(h)` 末尾 | 按固定顺序处理高度 h 的到期项：① 仲裁本高度确认的 CHALLENGE ② 锚定终局 ③ UNBOND 归还 ④ 消息段变为可交付 ⑤ 本高度成为规范的锚定产生本高度的"锚定奖励"系统输入（§7.1） | `unSetMain` 反向 |
 
 **规则**：每个新增写操作必须有成对的反操作，并在 SP0 中用"随机 unwind/replay 后状态相等"的属性测试锁死。
+
+### 6.3 快照扩展（SP0 范围）
+
+XDAG 主网节点通常从快照启动。`LANE_L1` 的全部内容（注册表、合约→通道、代码库、保证金账本、锚定链头与索引、每高度输入计数、已认领集合、高度触发器、段游标）必须随快照一起导出/导入，并在快照中附带一个 `laneStateHash = sha256(LANE_L1 全部 KV 的规范序列化)` 供校验；快照启动的节点若缺少该段则拒绝启动到激活高度之后。理由：dev-evm 曾因 alloc 标记未进快照导致快照节点与全量节点状态分歧，本设计的 L1 小状态直接影响锚定有效性判定与系统划账，缺失即分叉。
 
 ---
 
@@ -392,10 +397,10 @@ confirmedBlocks(L, h):   高度 h 的主块 applyBlock DFS 中，目标为 L 且
 | `caller(ptr)` / `self_address(ptr)` / `lane_id(ptr)` | `(i32)->()` | 20B 写入 | 10 |
 | `value()` | `()->i64` | 本次 value（nano） | 5 |
 | `height()` / `timestamp()` | `()->i64` | 当前 seq / 该主块时间戳 | 5 |
-| `storage_get(kptr,klen,vptr,vcap)` | `(i32,i32,i32,i32)->i32` | 返回长度或 −1 | 200 + 1/32B |
-| `storage_set(kptr,klen,vptr,vlen)` | `(i32,i32,i32,i32)->()` | 写 | 1000 + 100/32B（新 key 额外 2000） |
-| `storage_remove(kptr,klen)` | `(i32,i32)->()` | 删（退 500） | 500 |
-| `storage_scan(pptr,plen,max,out)` | `(i32,i32,i32,i32)->i32` | 有界前缀扫描（≤ 256 条） | 500 + 200/条 |
+| `storage_get(kptr,klen,vptr,vcap)` | `(i32,i32,i32,i32)->i32` | 返回长度或 −1 | 200 + `gasPerWitnessByte × witnessBytes(key)`（同 key 重复读只计一次见证） |
+| `storage_set(kptr,klen,vptr,vlen)` | `(i32,i32,i32,i32)->()` | 写 | 1000 + 100/32B（新 key 额外 2000）+ `gasPerWitnessByte × witnessBytes(key)`（同 key 已读过则不重复计） |
+| `storage_remove(kptr,klen)` | `(i32,i32)->()` | 删（退 500） | 500 + `gasPerWitnessByte × witnessBytes(key)` |
+| `storage_scan(pptr,plen,max,out)` | `(i32,i32,i32,i32)->i32` | 有界前缀扫描（≤ 256 条） | 500 + 200/条 + `gasPerWitnessByte × Σ witnessBytes` |
 | `balance(aptr)` | `(i32)->i64` | 通道内余额 | 100 |
 | `transfer(aptr,amount)` | `(i32,i64)->i32` | 通道内转账 | 500 |
 | `transfer_from_caller(amount)` | `(i64)->i32` | 领取本次 value | 200 |
@@ -410,6 +415,14 @@ confirmedBlocks(L, h):   高度 h 的主块 applyBlock DFS 中，目标为 L 且
 
 费用表为初始值，SP1 用微基准校准后固化为协议参数；激活后只能通过硬分叉调整。
 
+**见证比例计费（硬约束）**：`witnessBytes(key) = 64 + 32 × nonEmptySiblings(key) + valueLen(key)`，其中 `nonEmptySiblings` 是该 key 在当前 SMT 路径上非空子树兄弟的数量（状态的确定性函数，执行者与仲裁者算得一致），`valueLen` 是读到/写前的值长度。`gasPerWitnessByte`（初始 10）与 `maxCallGas`、`maxWitnessBytes` 必须满足
+
+```
+maxCallGas / gasPerWitnessByte + 固定开销(≤ 32KB) ≤ maxWitnessBytes
+```
+
+这保证**任何在 gas 上限内完成的调用，其欺诈证明见证都装得下**，认证者无法通过构造"读集巨大"的调用制造不可挑战的错误锚定。SP1 必须用属性测试锁死：随机调用的实际见证字节数 ≤ 由 gasUsed 推出的上界。
+
 ### 8.4 确定性规则
 
 1. 部署期验证（§8.1）失败 → DEPLOY 输入 `status = INVALID_CODE`。
@@ -420,6 +433,7 @@ confirmedBlocks(L, h):   高度 h 的主块 applyBlock DFS 中，目标为 L 且
    - 插桩后的模块缓存于本地，codeHash 仍为原始字节哈希。
 3. 运行期：内存越界、整数除零、未定义 `unreachable`、导入返回错误码等一律为 trap，语义由 WASM 规范唯一确定。
 4. 宿主函数不得引入非确定性（无时钟、无随机、无 I/O）。
+5. 见证比例计费（§8.3）是共识规则：`nonEmptySiblings` 的计算方式随 SMT 定义一起固化，改变它等于硬分叉。
 
 ### 8.5 运行时模式
 
@@ -524,7 +538,9 @@ verify(challenge):
   return C'_k != C_k ? CHALLENGE_SUCCEEDS : CHALLENGE_FAILS
 ```
 
-**有界性**：一次仲裁 ≤ `maxCallGas` 的 WASM 执行 + ≤ `maxWitnessBytes` 的证明校验；主块 `setMain` 内最多处理 `maxChallengesPerHeight`（初始 8）个挑战，超出的顺延到下一高度（确定性队列）。
+**有界性**：一次仲裁 ≤ `maxCallGas`（初始 10,000,000）的 WASM 解释执行 + ≤ `maxWitnessBytes` 的证明校验；主块 `setMain` 内最多处理 `maxChallengesPerHeight`（初始 4）个挑战，超出的顺延到下一高度（确定性队列，按 DFS 序）。
+
+**锁外预计算**：CHALLENGE 块在 `tryToConnect` 导入时（尚未确认）即在锁外线程池计算裁决并缓存 `(challengeHash → verdict)`；`setMain` 时只应用缓存结果，缓存缺失（如节点重启）才在锁内重算。裁决只依赖 L1 已确认状态与见证内容，因此预计算与锁内重算结果相同；SP3 用"缓存与重算一致"的测试锁死。这样正常情况下主锁内的仲裁开销接近零，恶意挑战最多让锁外线程池忙碌。
 
 ### 10.4 经济
 
@@ -572,7 +588,7 @@ verify(challenge):
 | WASM 非确定性 | §8.1 白名单 + 插桩；部署期拒绝 |
 | 资源耗尽（内存/栈/gas） | 硬上限 + trap；仲裁有界 |
 
-**信任假设汇总**：PoW 主链诚实多数（不变）；每条通道在任意 W 窗口内至少一个诚实观察者在线。
+**信任假设汇总**：PoW 主链诚实多数（不变）；每条通道在任意 W 窗口内至少一个诚实观察者在线；出主块的矿池是事实上的排序者，其抢跑与短期审查能力与今天 XDAG 交易的情况相同，本设计不消除它（§20.1 S3）。
 
 ---
 
@@ -661,9 +677,10 @@ verify(challenge):
 | `minChallengeDeposit` | minBond / 10 | |
 | `slashSplit` | 50% 挑战者 / 50% 销毁 | |
 | `D`（通道默认） | W | 部署时可设 0..W |
-| `maxCallGas` | 50,000,000（待校准） | 单次调用与单次仲裁上限 |
-| `maxWitnessBytes` | 1 MB | |
-| `maxChallengesPerHeight` | 8 | |
+| `maxCallGas` | 10,000,000（待校准，只能下调） | 单次调用与单次仲裁上限 |
+| `gasPerWitnessByte` | 10 | 见证比例计费系数，须满足 §8.3 不等式 |
+| `maxWitnessBytes` | 1 MB（1,048,576 B） | 与 maxCallGas / gasPerWitnessByte 满足 §8.3 不等式 |
+| `maxChallengesPerHeight` | 4 | |
 | `maxInlineArgs` | 256 B | |
 | `maxChunksPerChain` | 4096 | ≈ 1.7 MB |
 | `chunkFee` | 0.01 XDAG/片 | 归 PoW 矿工 |
@@ -675,7 +692,7 @@ verify(challenge):
 | `minGasPrice` | 1 nano/gas | |
 | `K`（变更日志窗口） | 128 seq | |
 | `snapshotInterval` | 64 seq | |
-| `maxWithdrawPerWindow` | 关闭（可选） | 纵深防御 |
+| `maxWithdrawPerWindow` | 开启，公式由 SP3 定（初始建议 ≤ 该通道总保证金 × 2 / W 窗口） | 纵深防御（§20.1 S2） |
 | `orphanPoolLimit` | 100,000 | 替代 MAX_ORPHAN_SIZE |
 
 ---
@@ -684,10 +701,10 @@ verify(challenge):
 
 | # | 子项目 | 核心交付 | 依赖 |
 |---|--------|---------|------|
-| **SP0** | 块格式与 L1 钩子 | `XDAG_FIELD_EXT` 编解码；7 种 kind 解析与校验；分片链；`LANE_L1` 存储；注册表/代码库；激活高度门控；apply/unApply 骨架与属性测试；导入流水线并行预验证与孤块池分队列；L1 导入基准 | — |
-| **SP1** | 通道执行引擎 | Chicory 集成；部署验证 + 插桩；宿主 ABI；SMT/MMR；输入流构建；确定性执行；变更日志/回滚/快照；软预执行；两模式一致性测试；gas 微基准 | SP0 |
+| **SP0** | 块格式与 L1 钩子 | `XDAG_FIELD_EXT` 编解码；7 种 kind 解析与校验；分片链；`LANE_L1` 存储；注册表/代码库；激活高度门控（含钱包/RPC 激活前拒绝构造扩展块）；apply/unApply 骨架与属性测试；**快照扩展与 laneStateHash（§6.3）**；导入流水线并行预验证与孤块池分队列（含按来源的分片块配额与 TTL 淘汰）；L1 导入基准 | — |
+| **SP1** | 通道执行引擎 | Chicory 集成；部署验证 + 插桩（含栈高度计量与保守 `-Xss` 无关上限）；宿主 ABI；SMT/MMR；**见证比例计费与 §8.3 不等式的属性测试**；输入流构建；确定性执行；变更日志/回滚/快照；软预执行；两模式一致性测试；gas 微基准 | SP0 |
 | **SP2** | 资产流 | 金库记账；withdraw/outbox(L1)；CLAIM 校验与系统划账；跨通道转值对账；不变量 I1–I3 测试 | SP1 |
-| **SP3** | 认证与仲裁 | BOND/UNBOND；锚定有效性与规范链；承诺链；终局 W；见证格式；E1/E2/E3 仲裁；罚没；级联回滚 | SP1（与 SP2 并行） |
+| **SP3** | 认证与仲裁 | BOND/UNBOND；锚定有效性与规范链；承诺链；终局 W；见证格式；E1/E2/E3 仲裁；**锁外预计算裁决缓存**；罚没；级联回滚 | SP1（与 SP2 并行） |
 | **SP4** | 订阅与 P2P | 订阅集合；`0x1B–0x1F` 消息；快照同步；证明拉取；交付规则 D；执行者只跑订阅通道；多节点 devnet | SP2, SP3 |
 | **SP5** | 开发者面 | `lane_*` RPC；Rust SDK；客户端库；CLI；三个参考 DApp；文档 | SP4 |
 | SP6（v2） | 扩展 | 编织原子跨通道锚定（ANCHOR flags.bit0）；BATCH 密度块；DA 采样 | v1 上线后 |
@@ -712,20 +729,43 @@ verify(challenge):
 
 ## 20. 风险与开放问题
 
-| # | 风险 / 问题 | 处理 |
-|---|-------------|------|
-| R1 | Chicory 解释器性能是否足以支撑仲裁上限 `maxCallGas` | SP1 微基准；必要时下调 maxCallGas |
-| R2 | 保证金经济：`minBond` 与通道可提现额的关系 | SP3 经济分析；可选 `maxWithdrawPerWindow` |
-| R3 | 级联回滚对复杂 DApp 的影响 | 同运营方通道群用 D=0，外部用 D=W；SP4 端到端演练 |
-| R4 | 512B 内联参数偏小导致多数调用需要分片链 | 观察参考 DApp 的参数分布；BATCH 块作为密度补救 |
-| R5 | L1 导入带宽是"无上限"的最后瓶颈 | SP0 流水线 + v2 DA 采样 |
-| R6 | 纯异步跨通道对开发者的心智负担（Vite 教训） | 通道内同步作为主要编程模型；SDK 提供消息模式模板 |
-| R7 | 硬分叉治理与 dev-evm 归档 | 与社区沟通；dev-evm 保留为历史分支 |
-| O1 | SMT 哈希用 SHA-256 还是 blake3 | SP1 基准后在激活前定死 |
-| O2 | 参数编码规范（borsh 风格）细节 | SP5 ABI 附录 |
-| O3 | 事件索引与浏览器方案 | SP5 后续生态项目 |
+分三档：**结构性**（由 XDAG 节奏与乐观模型决定，工程无法消除，只能缓解或接受）、**工程性**（可在子项目内解决，但必须现在设计进去）、**生态与交付**。
 
----
+### 20.1 结构性风险
+
+| # | 风险 | 影响 | 缓解 / 现状 |
+|---|------|------|------------|
+| S1 | **延迟**：主块 64s、确认约 2 epoch，调用要 2–3 分钟才进入通道输入流；跨通道再加 D，提现再加 W（≈ 34 min） | DeFi 体验明显弱于秒级链 | 软预执行只改善展示；终局时间不可缩短，除非改主链节奏（非目标）。诚实地把它写进产品预期 |
+| S2 | **冷门通道无人看守**：安全前提是每条通道在 W 内有诚实观察者；金库 ≫ 保证金时理性认证者有作恶动机；终局锚定不可挑战，一旦得逞永久损失 | 长尾通道资金风险 | `maxWithdrawPerWindow ≤ f(总保证金)` 默认**开启**（改自"可选"，SP3 定公式）；钱包对无独立观察者的通道给出风险提示；社区运行公共观察者 |
+| S3 | **矿池即排序者**：DFS 顺序由出主块的矿池决定，矿池天然拥有 DEX 抢跑权，也能拖延 CHALLENGE 块确认；XDAG 矿池集中度高，矿池很可能同时成为主要认证者 | MEV 与中心化压力 | 通道可选"epoch 内按块 hash 排序"的反 MEV 模式（v2 研究项）；W 取 32 而非更小，使拖延挑战需要长时间多数算力；把风险写入 §12 信任假设 |
+| S4 | **可组合性碎片化与引力效应**：没有原子跨通道，代币与 DEX 会挤进同一条大通道，实际吞吐退化为单执行者上限，"无上限"被引力抵消 | 实践中的 TPS 远低于理论 | v2 编织原子跨通道锚定（ANCHOR flags.bit0 已预留）；SDK 提供跨通道代币/流动性模式；单通道执行引擎本身做多核并行（同通道内互不冲突的合约可并行，v2） |
+| S5 | **级联回滚**：D=0 通道群在上游锚定被否决时连锁回滚，开发者要理解"已确认但可撤销"的状态语义 | DApp 难写对（Vite 教训） | 通道内同步作为主编程模型；SDK 只暴露 `confirmed/anchored/final` 三级明确语义；D=0 需部署者显式声明 |
+| S6 | **经济参数无市场**：gasPrice 由部署者定死、L1 块费固定、保证金与罚没比例靠估计，激活后只能硬分叉调整 | 定价失真、参数僵化 | v2 引入通道级 gasPrice 治理（部署者可更新）与 L1 费率市场；激活前用 testnet 数据校准 |
+
+### 20.2 工程性风险
+
+| # | 风险 | 处理（已合入规格） |
+|---|------|------------------|
+| E1 | 见证体积超上限使某些调用不可挑战 | §8.3 见证比例计费 + `maxCallGas / gasPerWitnessByte ≤ maxWitnessBytes` 硬不等式，SP1 属性测试锁死 |
+| E2 | 仲裁在主锁内跑 WASM，恶意挑战让节点卡顿 | `maxCallGas` 降为 10M、每高度 4 个；§10.3 锁外预计算裁决缓存 |
+| E3 | 快照启动节点缺 `LANE_L1` 导致分叉 | §6.3 快照扩展 + `laneStateHash`，纳入 SP0 |
+| E4 | Chicory 成熟度：1.x、无内建燃料、解释器 Java 递归受 `-Xss` 影响、编译模式遇 JVM 64KB 方法上限退回解释器 | 栈高度插桩与保守上限（SP1）；仲裁只用解释器；性能基准决定 `maxCallGas` 是否再下调；保留更换运行时的接口边界（执行器只依赖一个 `WasmEngine` 接口） |
+| E5 | 激活前资金陷阱 | §5.5 钱包/RPC 门控；协议只从激活起记录输入 |
+| E6 | 免费分片块垃圾攻击填满孤块池 | 孤块池按来源 IP/地址配额 + 分片块 TTL 淘汰（SP0）；被付费块引用后才落盘 |
+| E7 | L1 存储无界增长：每笔调用 512B 永久全网保存，1k tx/s ≈ 44 GB/天，XDAG 无剪枝 | v1 内：已终局锚定之前的分片链载荷允许本地剪枝为 hash（保留块 header 以维持 DAG 结构与 sum 同步）；v2 DA 采样。这是运营上的硬伤，必须在 testnet 期间测出增长曲线 |
+| E8 | L1 导入带宽是"无上限"的最后瓶颈 | §15.2 流水线；BATCH 密度块；v2 DA 采样 |
+| E9 | 保证金经济：`minBond` 与通道可提现额的关系 | SP3 经济分析；S2 的提现限速默认开启 |
+| E10 | SMT 哈希 SHA-256 vs blake3（开放问题 O1） | SP1 基准后在激活前定死 |
+
+### 20.3 生态与交付风险
+
+| # | 风险 | 处理 |
+|---|------|------|
+| D1 | **冷启动**：无 Hardhat/MetaMask/Etherscan，只有 Rust SDK；NEAR、Polkadot 最终都补回了 EVM 层 | 通道抽象与 VM 无关：v2 可以引入"EVM 通道"（把 dev-evm 的执行器装进一条通道），不违背 L1 设计；v1 先做 Rust SDK + AssemblyScript |
+| D2 | **交付风险**："一步到位分片"让 v1 覆盖 SP0–SP5，任一子项目卡住整个方向无法上线 | 建议 SP4 提供 `subscribeAll` 配置：节点订阅全部通道时行为退化为"全复制并行执行"，可作为过渡模式先上 testnet；分片订阅、认证与仲裁在同一代码路径上逐步启用（**待用户决定是否纳入 v1 范围**） |
+| D3 | 硬分叉治理与 dev-evm 归档；若主网仍有非 xdagj 实现需同步实现 EXT 语义 | 与社区沟通；确认主网节点实现构成 |
+| D4 | 参数编码规范（borsh 风格）细节（O2）；事件索引与浏览器（O3） | SP5 ABI 附录；后续生态项目 |
+
 
 ## 21. 术语表
 
