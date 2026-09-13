@@ -26,6 +26,7 @@ package io.xdag.lane.ext;
 
 /** Structural errors of extension blocks and chunk chains. Decoding never throws; it reports one of these. */
 public enum ExtError {
+    // Append new constants at the end; never reorder.
     /** The block carries no extension header field. */
     NO_EXT,
     /** The extension header's kind byte is not one of the assigned {@link ExtKind} codes. */
@@ -52,8 +53,6 @@ public enum ExtError {
     CHUNK_TAIL_HAS_LINK,
     /** Following chunk links revisits a block already seen in the chain. */
     CHUNK_CYCLE,
-    /** A chunk block older than the paying block's previous epoch; snapshot nodes cannot be expected to hold its raw bytes. */
-    CHUNK_TOO_OLD,
     /** The referenced block is not a CHUNK extension block. */
     NOT_A_CHUNK,
     /** Reserved for the code store / SP1; not produced by the SP0a codecs. */
@@ -61,5 +60,7 @@ public enum ExtError {
     /** Reserved for the code store / SP1; not produced by the SP0a codecs. */
     CODE_HASH_MISMATCH,
     /** Reserved for the code store / SP1; not produced by the SP0a codecs. */
-    CODE_UNKNOWN
+    CODE_UNKNOWN,
+    /** A chunk block older than the paying block's previous epoch; snapshot nodes cannot be expected to hold its raw bytes. */
+    CHUNK_TOO_OLD
 }

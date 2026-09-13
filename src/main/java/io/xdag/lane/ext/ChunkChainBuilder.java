@@ -45,22 +45,32 @@ import org.apache.tuweni.bytes.Bytes32;
  * builds one raw block per piece, tail piece first (so each block's {@code link[0]} can point at
  * the already-built next chunk's hashlow), then returns the list head-first — index 0 is the chunk
  * with {@code seq == 0}, the one a caller passes to {@code assemble} as {@code head}. Chunk
- * {@code i}'s block carries timestamp {@code headTimestamp - i}: the head (i = 0) gets
- * {@code headTimestamp} itself and every later chunk gets a strictly smaller timestamp, oldest
- * (highest seq, the tail) last. {@code split} itself enforces no bound on the number of chunks
- * produced; the caller is responsible for keeping {@code ceil(payload.size() / MAX_DATA_LEN) <=
- * lane.chunk.maxPerChain} (the protocol-level chunk count limit), since only the caller knows that
- * configured limit.
+ * {@code i}'s block carries timestamp {@code head - i}, where {@code head} is {@code headTimestamp}
+ * itself whenever that already keeps the whole chain in one epoch, or otherwise a value {@code split}
+ * computes by snapping {@code headTimestamp} down to the last tick of the epoch before it (see
+ * below): the returned head (index 0) gets the highest timestamp and every later chunk gets a
+ * strictly smaller one, oldest (highest seq, the tail) last. {@code split} itself enforces no bound
+ * on the number of chunks produced; the caller is responsible for keeping
+ * {@code ceil(payload.size() / MAX_DATA_LEN) <= lane.chunk.maxPerChain} (the protocol-level chunk
+ * count limit), since only the caller knows that configured limit.
+ *
+ * <p>{@code headTimestamp} is a hint, not a guarantee: the returned chunks always share a single
+ * {@code XdagTime.getEpoch} value, so {@code split} never returns a chain that straddles an epoch
+ * boundary. This matters because {@link ChunkChain}'s age rule requires
+ * {@code epoch(tail) >= epoch(payingBlock) - 1} — the tail is the oldest chunk and therefore the
+ * binding hop, since every other chunk in the chain has an epoch at least as high. A straddling
+ * chain's tail would sit one epoch behind its own head, so it could only be paid for inside the
+ * head's own epoch — a window that can be arbitrarily short, down to zero ticks, depending on where
+ * {@code headTimestamp} falls. Keeping the whole chain in one epoch instead means the paying block
+ * may be built in that same epoch or the next one, so a caller that submits the paying block right
+ * after building the chain always gets that full window.
  *
  * <p>Because the head is the newest block in the chain and every other chunk is older, and because
  * XDAG requires a block's timestamp to be no later than any block it references, the chunks must be
- * imported tail-first (oldest first) and the head last; and whatever block goes on to reference the
- * chain (typically the head, to make it reachable) must itself carry a timestamp strictly later than
- * {@code headTimestamp}, i.e. later than every chunk in the chain. A chain may still cross an epoch
- * boundary (its chunks span more than one {@code XdagTime.getEpoch} value) and remain within
- * {@link ChunkChain}'s age rule, as long as the referencing (paying) block is built shortly after
- * {@code headTimestamp} — in practice within about 4 seconds of it, i.e. before the head chunk's own
- * epoch is more than one epoch behind the paying block's.
+ * imported tail-first (oldest first) and the head last. The paying block's own timestamp is still
+ * entirely the caller's choice — {@code split} only guarantees that the chunks themselves do not
+ * straddle an epoch — but it must carry a timestamp strictly later than the head chunk's, i.e. later
+ * than every chunk in the chain.
  *
  * <p>Each built block carries no on-chain value transfer and is signed with nothing: it is
  * constructed with {@code keys == null} and {@code defKeyIndex == -1}, so its wire form ends up with
@@ -84,6 +94,11 @@ public final class ChunkChainBuilder {
             throw new IllegalArgumentException("empty payload");
         }
         int n = (total + ChunkExt.MAX_DATA_LEN - 1) / ChunkExt.MAX_DATA_LEN;
+        long head = headTimestamp;
+        if ((head & 0xffffL) < n - 1) {
+            // The chain would cross into the previous epoch: move it wholly into that epoch (last tick).
+            head = (head & ~0xffffL) - 1;
+        }
         List<Block> tailFirst = new ArrayList<>(n);
         Bytes32 next = null;
         for (int i = n - 1; i >= 0; i--) {
@@ -93,14 +108,12 @@ public final class ChunkChainBuilder {
             List<Bytes32> fields = new ArrayList<>();
             fields.add(ext.encodeHeader());
             fields.addAll(ext.encodePayload());
-            // The chunk's OUT link (if any) is passed as the constructor's `pendings` argument, with
-            // its `links` argument left null: Block's constructor emits field type-nibbles in the
-            // order links, then pendings, then remark, then extFields, and the CHUNK ext header must
-            // land in field 1 (right after the field-0 block header) for LaneBlockClassifier/ChunkExt
-            // to see the layout they expect. Passing this same address list as `links` instead would
-            // shift the ext header to field 2 and desynchronize the codec from the wire encoding.
+            // Only one of links/pendings is non-empty here (links is always null), so the
+            // constructor's links-then-pendings field-type-nibble order and the encoder's
+            // inputs-then-outputs write order cannot disagree; the OUT reference is simply passed as
+            // a pending output.
             List<Address> links = next == null ? null : List.of(new Address(next, XDAG_FIELD_OUT, false));
-            Block raw = new Block(config, headTimestamp - i, null, links, false, null, null, -1, XAmount.ZERO, null, fields);
+            Block raw = new Block(config, head - i, null, links, false, null, null, -1, XAmount.ZERO, null, fields);
             Block parsed = new Block(new XdagBlock(raw.toBytes()));
             next = Bytes32.wrap(parsed.getHashLow().toArray());
             tailFirst.add(parsed);

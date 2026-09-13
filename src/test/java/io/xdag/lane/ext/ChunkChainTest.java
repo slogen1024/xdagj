@@ -98,9 +98,13 @@ public class ChunkChainTest {
     @Test
     public void chunkBlocksHaveDescendingTimestampsZeroSignaturesAndSeqFromHead() {
         List<Block> chunks = ChunkChainBuilder.split(config, payload(1000, 7), TS);
+        // TS sits exactly on an epoch boundary, so split snaps this 3-chunk chain's head down by one
+        // tick to keep it non-straddling (see splitNeverStraddlesAnEpoch); assert descending
+        // timestamps relative to the actual (possibly snapped) head rather than the raw TS parameter.
+        long headTs = chunks.get(0).getTimestamp();
         for (int i = 0; i < chunks.size(); i++) {
             Block b = chunks.get(i);
-            assertEquals(TS - i, b.getTimestamp());
+            assertEquals(headTs - i, b.getTimestamp());
             ChunkExt c = LaneBlockClassifier.classify(b).as(ChunkExt.class);
             assertEquals(i, c.seq());
             assertEquals(1000, c.totalLen());
@@ -278,22 +282,54 @@ public class ChunkChainTest {
         Map<Bytes32, Block> idx = index(chunks);
         long epoch = XdagTime.getEpoch(TS);
 
-        // minEpoch one epoch behind the head's own epoch: every chunk (head at `epoch`, the rest at
-        // `epoch - 1` since TS falls exactly on an epoch boundary) is still new enough.
+        // TS sits exactly on an epoch boundary, so a naive 3-chunk chain built at TS would straddle
+        // it; split now snaps the whole chain into the previous epoch instead -- every chunk, head
+        // included, shares epoch - 1 (it is no longer split between `epoch` and `epoch - 1`).
+        for (Block b : chunks) {
+            assertEquals(epoch - 1, XdagTime.getEpoch(b.getTimestamp()));
+        }
+
+        // minEpoch one epoch behind the chain's own epoch (epoch - 1): every chunk is still new
+        // enough.
         ExtResult<Bytes> okResult = ChunkChain.assemble(head(chunks), h -> idx.get(h), 4096, epoch - 1);
         assertTrue(String.valueOf(okResult.error()), okResult.isOk());
 
-        // minEpoch past the head's own epoch: even the head chunk is now too old.
+        // minEpoch past the chain's own epoch: every chunk, starting with the head, is now too old.
         assertEquals(ExtError.CHUNK_TOO_OLD, ChunkChain.assemble(head(chunks), h -> idx.get(h), 4096, epoch + 1).error());
         assertEquals(0, ChunkChain.countLenient(head(chunks), h -> idx.get(h), 4096, epoch + 1));
 
-        // A single-chunk chain (payload small enough to need no continuation) carries its only
-        // block at TS itself, so it satisfies minEpoch == epoch with no epoch-1 slack needed.
+        // A single-chunk chain (payload small enough to need no continuation) never needs snapping
+        // (n = 1), so its only block still carries timestamp TS itself and satisfies minEpoch ==
+        // epoch with no epoch-1 slack needed.
         List<Block> single = ChunkChainBuilder.split(config, payload(100, 72), TS);
         assertEquals(1, single.size());
+        assertEquals(TS, single.get(0).getTimestamp());
         Map<Bytes32, Block> singleIdx = index(single);
         ExtResult<Bytes> sameEpochResult = ChunkChain.assemble(head(single), h -> singleIdx.get(h), 4096, epoch);
         assertTrue(String.valueOf(sameEpochResult.error()), sameEpochResult.isOk());
+    }
+
+    @Test
+    public void splitNeverStraddlesAnEpoch() {
+        // 2 ticks into an epoch: low enough that a naive 3-chunk chain (tail at head - 2) would just
+        // barely still fit without straddling, exercising the boundary of the snapping condition.
+        long headTimestamp = (TS | 0xffffL) - (0xffffL - 2);
+        List<Block> chunks = ChunkChainBuilder.split(config, payload(1000, 81), headTimestamp);
+        assertEquals(3, chunks.size());
+
+        long chunkHeadTs = chunks.get(0).getTimestamp();
+        assertTrue(chunkHeadTs <= headTimestamp);
+
+        long epoch = XdagTime.getEpoch(chunkHeadTs);
+        for (Block b : chunks) {
+            assertEquals(epoch, XdagTime.getEpoch(b.getTimestamp()));
+        }
+
+        Map<Bytes32, Block> idx = index(chunks);
+        ExtResult<Bytes> okResult = ChunkChain.assemble(head(chunks), idx::get, 4096, epoch);
+        assertTrue(String.valueOf(okResult.error()), okResult.isOk());
+
+        assertEquals(ExtError.CHUNK_TOO_OLD, ChunkChain.assemble(head(chunks), idx::get, 4096, epoch + 2).error());
     }
 
     @Test
