@@ -98,8 +98,8 @@ public class XdagField implements Cloneable {
         XDAG_FIELD_OUTPUT(0x0D),
         // Transaction nonce field
         XDAG_FIELD_TRANSACTION_NONCE(0x0E),
-        // Reserved field 6
-        XDAG_FIELD_RESERVE6(0x0F);
+        // Extension field: first EXT field in a block is the extension header (byte0 = kind), later ones are raw payload
+        XDAG_FIELD_EXT(0x0F);
 
         private static final Map<Integer, FieldType> intToTypeMap = new HashMap<>();
 

@@ -85,6 +85,10 @@ public class Block implements Cloneable {
      * Main block nonce records miner address and nonce
      */
     private Bytes32 nonce;
+    /**
+     * Extension fields (type XDAG_FIELD_EXT), in field order. The first one is the extension header.
+     */
+    private List<Bytes32> extFields = new CopyOnWriteArrayList<>();
     private XdagBlock xdagBlock;
     private boolean parsed;
     private boolean isOurs;
@@ -104,6 +108,21 @@ public class Block implements Cloneable {
             int defKeyIndex,
             XAmount fee,
             UInt64 txNonce) {
+        this(config, timestamp, links, pendings, mining, keys, remark, defKeyIndex, fee, txNonce, null);
+    }
+
+    public Block(
+            Config config,
+            long timestamp,
+            List<Address> links,
+            List<Address> pendings,
+            boolean mining,
+            List<ECKeyPair> keys,
+            String remark,
+            int defKeyIndex,
+            XAmount fee,
+            UInt64 txNonce,
+            List<Bytes32> extFields) {
         parsed = true;
         info = new BlockInfo();
         this.info.setTimestamp(timestamp);
@@ -154,6 +173,13 @@ public class Block implements Cloneable {
             Arrays.fill(safeRemark, (byte) 0);
             System.arraycopy(data, 0, safeRemark, 0, Math.min(data.length, 32));
             this.info.setRemark(safeRemark);
+        }
+
+        if (CollectionUtils.isNotEmpty(extFields)) {
+            for (Bytes32 ext : extFields) {
+                setType(XDAG_FIELD_EXT, lenghth++);
+                this.extFields.add(ext);
+            }
         }
 
         if (CollectionUtils.isNotEmpty(keys)) {
@@ -310,6 +336,7 @@ public class Block implements Cloneable {
 //                            new BigInteger(1, Arrays.copyOfRange(encodePub, 1, encodePub.length)), Sign.CURVE_NAME);
                     pubKeys.add(publicKey);
                 }
+                case XDAG_FIELD_EXT -> extFields.add(Bytes32.wrap(field.getData().toArray()));
                 default -> {
                 }
                 //                    log.debug("no match xdagBlock field type:" + field.getType());
@@ -360,6 +387,9 @@ public class Block implements Cloneable {
         }
         if (info.getRemark() != null) {
             encoder.write(info.getRemark());
+        }
+        for (Bytes32 ext : extFields) {
+            encoder.writeField(ext.toArray());
         }
         for (PublicKey publicKey : pubKeys) {
             byte[] pubkeyBytes = publicKey.toBytes().toArray();
@@ -539,6 +569,20 @@ public class Block implements Cloneable {
         links.addAll(getInputs());
         links.addAll(getOutputs());
         return links;
+    }
+
+    /**
+     * Block references (XDAG_FIELD_OUT pointing at a block, amount 0) in field order: link[0], link[1], ...
+     * Extension kinds assign roles to links by position.
+     */
+    public List<Address> getBlockLinks() {
+        List<Address> res = Lists.newArrayList();
+        for (Address a : outputs) {
+            if (!a.getIsAddress() && a.getType() == XDAG_FIELD_OUT) {
+                res.add(a);
+            }
+        }
+        return res;
     }
 
     @Override
