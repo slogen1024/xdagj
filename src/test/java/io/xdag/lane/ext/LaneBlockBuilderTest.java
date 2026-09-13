@@ -33,13 +33,18 @@ import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_TRANSACTION_NONCE;
 import static io.xdag.lane.ext.ChunkChainTest.index;
 import static io.xdag.lane.ext.ChunkChainTest.payload;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import io.xdag.config.Config;
+import io.xdag.config.Constants;
 import io.xdag.config.DevnetConfig;
+import io.xdag.core.Address;
 import io.xdag.core.Block;
 import io.xdag.core.XAmount;
 import io.xdag.core.XUnit;
+import io.xdag.core.XdagBlock;
 import io.xdag.core.XdagField;
 import io.xdag.crypto.SampleKeys;
 import io.xdag.crypto.hash.HashUtils;
@@ -228,5 +233,144 @@ public class LaneBlockBuilderTest {
         // positions, but assembling them would then yield the wrong payload.
         assertEquals(wasm, ChunkChain.assemble(d.codeChainHead(), idx::get, 4096).value());
         assertEquals(initArgs, ChunkChain.assemble(d.argsChainHead(), idx::get, 4096).value());
+    }
+
+    @Test
+    public void everyShapeSatisfiesTheL1AmountRule() {
+        assertAmountRule(LaneBlockBuilder.call(config, TS, sender, UInt64.ONE, LANE, CONTRACT, 7, 100L,
+                LaneBlockBuilder.requiredValue(FEE, 0), FEE, payload(200, 701)).value());
+        assertAmountRule(LaneBlockBuilder.call(config, TS, sender, UInt64.ONE, LANE, CONTRACT, 7, 100L,
+                LaneBlockBuilder.requiredValue(FEE, 1), FEE, payload(1000, 702)).value());
+        assertAmountRule(LaneBlockBuilder.deployNewLane(config, TS, sender, UInt64.ONE, FEE, payload(5000, 703), CFG,
+                payload(160, 704), 1_000L).value());
+        assertAmountRule(LaneBlockBuilder.deployNewLane(config, TS, sender, UInt64.ONE, FEE, payload(5000, 705), CFG,
+                payload(300, 706), 1_000L).value());
+        assertAmountRule(LaneBlockBuilder.deployIntoLane(config, TS, sender, UInt64.ONE, LANE,
+                LaneBlockBuilder.requiredValue(FEE, 0), FEE, null, Bytes32.random(), payload(100, 707), 1L).value());
+        assertAmountRule(LaneBlockBuilder.deployIntoLane(config, TS, sender, UInt64.ONE, LANE,
+                LaneBlockBuilder.requiredValue(FEE, 1), FEE, payload(500, 708), null, payload(100, 709), 1L).value());
+        assertAmountRule(LaneBlockBuilder.deployIntoLane(config, TS, sender, UInt64.ONE, LANE,
+                LaneBlockBuilder.requiredValue(FEE, 2), FEE, payload(500, 710), null, payload(300, 711), 1L).value());
+    }
+
+    /** Asserts the built block satisfies the L1 input/output amount rule and that {@code Built}'s bookkeeping matches the block. */
+    private static void assertAmountRule(LaneBlockBuilder.Built built) {
+        Block block = built.block();
+        assertEquals(built.chainLinks(), block.getBlockLinks().size());
+        assertEquals(built.totalChunks(), built.chunks().size());
+
+        int outputs = block.getOutputs().size();
+        XAmount txFee = FEE.add(Constants.MIN_GAS.multiply(outputs));
+        XAmount inputAmount = block.getInputs().get(0).getAmount();
+        assertTrue(inputAmount.compareTo(txFee) >= 0);
+
+        XAmount outputLimit = Constants.MIN_GAS.compareTo(txFee.divide(outputs)) > 0
+                ? Constants.MIN_GAS : txFee.divide(outputs);
+        for (Address out : block.getOutputs()) {
+            if (out.getType() == XDAG_FIELD_OUTPUT) {
+                assertTrue(out.getAmount().compareTo(outputLimit) >= 0);
+            }
+        }
+    }
+
+    @Test
+    public void inlineCapacityBoundaries() {
+        // CALL: 256 bytes stays inline (0 chunks) and exactly fills the 16-field budget.
+        LaneBlockBuilder.Built callInline = LaneBlockBuilder.call(config, TS, sender, UInt64.ONE, LANE, CONTRACT, 7,
+                100L, ONE, FEE, payload(256, 801)).value();
+        assertTrue(callInline.chunks().isEmpty());
+        assertEquals(16, usedFieldCount(callInline.block()));
+
+        // 257 bytes must chain.
+        LaneBlockBuilder.Built callChained = LaneBlockBuilder.call(config, TS, sender, UInt64.ONE, LANE, CONTRACT, 7,
+                100L, ONE, FEE, payload(257, 802)).value();
+        assertEquals(1, callChained.chunks().size());
+        assertTrue(LaneBlockClassifier.classify(callChained.block()).as(CallExt.class).argsByChain());
+
+        // deployIntoLane, no code chain: 224 bytes stays inline, 225 chains.
+        LaneBlockBuilder.Built intoInline = LaneBlockBuilder.deployIntoLane(config, TS, sender, UInt64.ONE, LANE, ONE,
+                FEE, null, Bytes32.random(), payload(224, 803), 1L).value();
+        assertFalse(LaneBlockClassifier.classify(intoInline.block()).as(DeployExt.class).argsByChain());
+        LaneBlockBuilder.Built intoChained = LaneBlockBuilder.deployIntoLane(config, TS, sender, UInt64.ONE, LANE, ONE,
+                FEE, null, Bytes32.random(), payload(225, 804), 1L).value();
+        assertTrue(LaneBlockClassifier.classify(intoChained.block()).as(DeployExt.class).argsByChain());
+
+        // deployIntoLane, with a code chain: 192 bytes stays inline, 193 chains.
+        LaneBlockBuilder.Built intoCodeInline = LaneBlockBuilder.deployIntoLane(config, TS, sender, UInt64.ONE, LANE,
+                ONE, FEE, payload(500, 805), null, payload(192, 806), 1L).value();
+        assertFalse(LaneBlockClassifier.classify(intoCodeInline.block()).as(DeployExt.class).argsByChain());
+        LaneBlockBuilder.Built intoCodeChained = LaneBlockBuilder.deployIntoLane(config, TS, sender, UInt64.ONE, LANE,
+                ONE, FEE, payload(500, 807), null, payload(193, 808), 1L).value();
+        assertTrue(LaneBlockClassifier.classify(intoCodeChained.block()).as(DeployExt.class).argsByChain());
+        // deployNewLane's 160/161 boundary is already covered by deployNewLaneChainsCodeAndKeepsSmallArgsInline
+        // and deployNewLaneChainsArgsWhenTheyDoNotFit.
+    }
+
+    /** Counts field 0 (the header) plus every field 1..15 whose type is not the padding {@code XDAG_FIELD_NONCE}. */
+    private static int usedFieldCount(Block b) {
+        int count = 1;
+        for (int i = 1; i < XdagBlock.XDAG_BLOCK_FIELDS; i++) {
+            if (b.getXdagBlock().getField(i).getType() != XdagField.FieldType.XDAG_FIELD_NONCE) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    @Test
+    public void errorsAreReportedForPayloadProblems() {
+        assertEquals(ExtError.BAD_LENGTH, LaneBlockBuilder.deployNewLane(config, TS, sender, UInt64.ONE, FEE,
+                Bytes.EMPTY, CFG, payload(10, 901), 1L).error());
+
+        assertEquals(ExtError.BAD_LENGTH, LaneBlockBuilder.deployIntoLane(config, TS, sender, UInt64.ONE, LANE, ONE,
+                FEE, null, null, payload(10, 902), 1L).error());
+
+        Bytes hugeArgs = payload(LaneBlockBuilder.MAX_CHUNKS_PER_CHAIN * ChunkExt.MAX_DATA_LEN + 1, 903);
+        assertEquals(ExtError.CHUNK_TOO_MANY,
+                LaneBlockBuilder.call(config, TS, sender, UInt64.ONE, LANE, CONTRACT, 7, 100L, ONE, FEE, hugeArgs)
+                        .error());
+
+        assertThrows(IllegalArgumentException.class, () -> LaneBlockBuilder.call(config, TS, sender, UInt64.ONE,
+                Bytes.random(19), CONTRACT, 7, 100L, ONE, FEE, payload(10, 904)));
+
+        assertThrows(NullPointerException.class, () -> LaneBlockBuilder.call(config, TS, sender, null, LANE,
+                CONTRACT, 7, 100L, ONE, FEE, payload(10, 905)));
+    }
+
+    @Test
+    public void identicalChainsAreDeduplicated() {
+        Bytes x = payload(500, 1001);
+        LaneBlockBuilder.Built built = LaneBlockBuilder.deployIntoLane(config, TS, sender, UInt64.ONE, LANE, ONE, FEE,
+                x, null, x, 1L).value();
+        int expectedPerChain = LaneBlockBuilder.chunksFor(500);
+        assertEquals(expectedPerChain, built.chunks().size());
+        assertEquals(2 * expectedPerChain, built.totalChunks());
+        assertEquals(2, built.chainLinks());
+        DeployExt d = LaneBlockClassifier.classify(built.block()).as(DeployExt.class);
+        assertEquals(d.codeChainHead(), d.argsChainHead());
+    }
+
+    @Test
+    public void chunkHeadsAvoidTheEndOfEpochTick() {
+        assertEquals(0, TS & 0xffffL);
+        LaneBlockBuilder.Built built = LaneBlockBuilder.call(config, TS, sender, UInt64.ONE, LANE, CONTRACT, 7, 100L,
+                ONE, FEE, payload(1000, 1101)).value();
+        Block head = built.chunks().get(0);
+        assertFalse(XdagTime.isEndOfEpoch(head.getTimestamp()));
+
+        long minEpoch = XdagTime.getEpoch(built.block().getTimestamp()) - 1;
+        for (Block chunk : built.chunks()) {
+            assertTrue(XdagTime.getEpoch(chunk.getTimestamp()) >= minEpoch);
+        }
+    }
+
+    @Test
+    public void requiredValueHelper() {
+        assertEquals(FEE.add(XAmount.of(100, XUnit.MILLI_XDAG)), LaneBlockBuilder.requiredValue(FEE, 0));
+        assertEquals(FEE.add(XAmount.of(300, XUnit.MILLI_XDAG)), LaneBlockBuilder.requiredValue(FEE, 2));
+
+        assertEquals(LaneBlockBuilder.chunksFor(500) + LaneBlockBuilder.chunksFor(300),
+                LaneBlockBuilder.deployNewLaneChunks(500, 300));
+        assertEquals(LaneBlockBuilder.chunksFor(500), LaneBlockBuilder.deployNewLaneChunks(500, 160));
     }
 }
