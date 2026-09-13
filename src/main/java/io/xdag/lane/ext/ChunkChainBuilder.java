@@ -47,19 +47,31 @@ import org.apache.tuweni.bytes.Bytes32;
  * with {@code seq == 0}, the one a caller passes to {@code assemble} as {@code head}. Chunk
  * {@code i}'s block carries timestamp {@code headTimestamp - i}: the head (i = 0) gets
  * {@code headTimestamp} itself and every later chunk gets a strictly smaller timestamp, oldest
- * (highest seq, the tail) last.
+ * (highest seq, the tail) last. {@code split} itself enforces no bound on the number of chunks
+ * produced; the caller is responsible for keeping {@code ceil(payload.size() / MAX_DATA_LEN) <=
+ * lane.chunk.maxPerChain} (the protocol-level chunk count limit), since only the caller knows that
+ * configured limit.
  *
  * <p>Because the head is the newest block in the chain and every other chunk is older, and because
  * XDAG requires a block's timestamp to be no later than any block it references, the chunks must be
  * imported tail-first (oldest first) and the head last; and whatever block goes on to reference the
  * chain (typically the head, to make it reachable) must itself carry a timestamp strictly later than
- * {@code headTimestamp}, i.e. later than every chunk in the chain.
+ * {@code headTimestamp}, i.e. later than every chunk in the chain. A chain may still cross an epoch
+ * boundary (its chunks span more than one {@code XdagTime.getEpoch} value) and remain within
+ * {@link ChunkChain}'s age rule, as long as the referencing (paying) block is built shortly after
+ * {@code headTimestamp} — in practice within about 4 seconds of it, i.e. before the head chunk's own
+ * epoch is more than one epoch behind the paying block's.
  *
  * <p>Each built block carries no on-chain value transfer and is signed with nothing: it is
  * constructed with {@code keys == null} and {@code defKeyIndex == -1}, so its wire form ends up with
  * two zero-valued {@code XDAG_FIELD_SIGN_OUT} fields (re-parsing such a block yields a non-null
  * {@link Block#getOutsig()} — the all-zero signature parses as the (1,1) pseudo signature) — by
- * construction, not by any special-casing in this method.
+ * construction, not by any special-casing in this method. Because it is also built with
+ * {@code mining == false}, field 15 of its wire form is never typed {@code XDAG_FIELD_SIGN_IN} (that
+ * only happens for a block built with {@code mining == true}), so {@code Block.getNonce()} is always
+ * {@code null} for a chunk block and it can therefore never be flagged {@code BI_EXTRA} — even a
+ * chunk whose timestamp happens to land at the very end of an epoch is stored as an ordinary block,
+ * not as a mining "extra" block, and so still lands on disk normally.
  */
 public final class ChunkChainBuilder {
 
@@ -81,6 +93,12 @@ public final class ChunkChainBuilder {
             List<Bytes32> fields = new ArrayList<>();
             fields.add(ext.encodeHeader());
             fields.addAll(ext.encodePayload());
+            // The chunk's OUT link (if any) is passed as the constructor's `pendings` argument, with
+            // its `links` argument left null: Block's constructor emits field type-nibbles in the
+            // order links, then pendings, then remark, then extFields, and the CHUNK ext header must
+            // land in field 1 (right after the field-0 block header) for LaneBlockClassifier/ChunkExt
+            // to see the layout they expect. Passing this same address list as `links` instead would
+            // shift the ext header to field 2 and desynchronize the codec from the wire encoding.
             List<Address> links = next == null ? null : List.of(new Address(next, XDAG_FIELD_OUT, false));
             Block raw = new Block(config, headTimestamp - i, null, links, false, null, null, -1, XAmount.ZERO, null, fields);
             Block parsed = new Block(new XdagBlock(raw.toBytes()));

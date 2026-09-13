@@ -52,6 +52,8 @@ public enum ExtError {
     CHUNK_TAIL_HAS_LINK,
     /** Following chunk links revisits a block already seen in the chain. */
     CHUNK_CYCLE,
+    /** A chunk block older than the paying block's previous epoch; snapshot nodes cannot be expected to hold its raw bytes. */
+    CHUNK_TOO_OLD,
     /** The referenced block is not a CHUNK extension block. */
     NOT_A_CHUNK,
     /** Reserved for the code store / SP1; not produced by the SP0a codecs. */

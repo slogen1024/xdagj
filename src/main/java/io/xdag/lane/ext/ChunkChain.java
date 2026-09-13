@@ -25,6 +25,7 @@
 package io.xdag.lane.ext;
 
 import io.xdag.core.Block;
+import io.xdag.utils.XdagTime;
 import java.io.ByteArrayOutputStream;
 import java.util.HashSet;
 import java.util.Set;
@@ -34,15 +35,19 @@ import org.apache.tuweni.bytes.Bytes32;
 /**
  * Walks a chunk chain head -&gt; tail via {@code link[0]} and reassembles the payload.
  *
- * <p>{@link #assemble} never throws; each hop applies these checks, in order, and returns the
- * first one that fires:
+ * <p>{@link #assemble} never throws of its own accord; an exception thrown by {@code lookup}
+ * itself propagates unchanged to the caller. A {@code null} {@code head} fails immediately with
+ * {@link ExtError#MISSING_LINK} (there is nothing to look up). Otherwise each hop applies these
+ * checks, in order, and returns the first one that fires:
  * <ol>
  *   <li>the hop's hash was already visited: {@link ExtError#CHUNK_CYCLE};</li>
  *   <li>visiting the hop would exceed {@code maxChunks} hashes: {@link ExtError#CHUNK_TOO_MANY};</li>
  *   <li>{@code lookup} returns {@code null} for the hop's hash: {@link ExtError#MISSING_LINK};</li>
- *   <li>{@link LaneBlockClassifier#classify} on the looked-up block does not report
- *       {@link ExtKind#CHUNK} as its kind (no extension field, an unassigned kind byte, or an
- *       extension field of some other assigned kind): {@link ExtError#NOT_A_CHUNK};</li>
+ *   <li>the looked-up block's timestamp falls in an epoch older than {@code minEpoch}:
+ *       {@link ExtError#CHUNK_TOO_OLD} — see below;</li>
+ *   <li>{@link LaneBlockClassifier#classify} on the block does not report {@link ExtKind#CHUNK} as
+ *       its kind (no extension field, an unassigned kind byte, or an extension field of some other
+ *       assigned kind): {@link ExtError#NOT_A_CHUNK};</li>
  *   <li>the block classifies as {@code CHUNK} but the CHUNK codec itself failed to decode it: the
  *       codec's own {@link ExtError} (e.g. {@code BAD_LENGTH}, {@code RESERVED_NONZERO},
  *       {@code EXTRA_LINK}, {@code PAYLOAD_COUNT_MISMATCH}), propagated unchanged — {@code
@@ -68,6 +73,31 @@ import org.apache.tuweni.bytes.Bytes32;
  * buffer to an absurd length, well before the per-hop {@code maxChunks} count bound would ever
  * trigger on its own.
  *
+ * <p><b>Age rule ({@code minEpoch}).</b> A chunk block may lie no earlier than {@code minEpoch}:
+ * callers implementing "same epoch as the paying block, or the epoch immediately before it" pass
+ * {@code minEpoch = XdagTime.getEpoch(payingBlock.getTimestamp()) - 1}. This exists because a
+ * snapshot-bootstrapped node has no raw bytes for blocks older than its snapshot time, while
+ * {@code tryToConnect}'s NO_PARENT check is satisfied by a {@code BlockInfo} alone; without an age
+ * bound, a DEPLOY/CALL block could reference an old, content-addressed chunk chain that assembles
+ * on a full node (which kept the raw bytes) but fails with {@code MISSING_LINK} on a snapshot node
+ * (which did not) — the same chain would then have two different verdicts depending on which node
+ * evaluated it. {@code getBlockByHash(hash, true)} returns {@code null} exactly when the raw bytes
+ * are absent (pruned, or before the snapshot boot time); the age rule is what makes the outcome
+ * identical on full and snapshot nodes, since both are expected to retain raw bytes for recent
+ * epochs. The 3-argument overloads of {@link #assemble} and {@link #countLenient} pass
+ * {@code minEpoch = Long.MIN_VALUE}, i.e. no age bound.
+ *
+ * <p><b>Fee contract between {@link #assemble} and {@link #countLenient}.</b> When {@code assemble}
+ * succeeds on a chain of N chunks, {@code countLenient} (called with the same {@code lookup},
+ * {@code maxChunks} and {@code minEpoch}) returns exactly N. On a chain {@code assemble} rejects,
+ * {@code countLenient} may return more than the number of chunks a caller might expect, but never
+ * fewer — it counts every existing, well-formed {@code CHUNK} block reachable before the first
+ * problem, which can include chunks past whatever point made {@code assemble} fail (for example, a
+ * {@code CHUNK_TOTAL_MISMATCH} caused by a later chunk does not stop {@code countLenient} from
+ * still counting that chunk, since it does classify as a well-formed CHUNK on its own). A fee check
+ * built on {@code countLenient} must therefore be evaluated together with, or strictly after, the
+ * {@code assemble} verdict — never in place of it.
+ *
  * <p>{@code lookup} must return raw blocks: parsed from their 512 bytes via
  * {@code new Block(XdagBlock)}, or fetched from storage with {@code getBlockByHash(hash, true)}. A
  * block loaded with {@code isRaw=false} (built from a {@code BlockInfo} alone) carries neither
@@ -87,7 +117,15 @@ public final class ChunkChain {
     private ChunkChain() {
     }
 
+    /** Equivalent to {@link #assemble(Bytes32, RawBlockLookup, int, long)} with no age bound. */
     public static ExtResult<Bytes> assemble(Bytes32 head, RawBlockLookup lookup, int maxChunks) {
+        return assemble(head, lookup, maxChunks, Long.MIN_VALUE);
+    }
+
+    public static ExtResult<Bytes> assemble(Bytes32 head, RawBlockLookup lookup, int maxChunks, long minEpoch) {
+        if (head == null) {
+            return ExtResult.fail(ExtError.MISSING_LINK);
+        }
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         Set<Bytes32> visited = new HashSet<>();
         long expectSeq = 0;
@@ -103,6 +141,9 @@ public final class ChunkChain {
             Block b = lookup.get(cur);
             if (b == null) {
                 return ExtResult.fail(ExtError.MISSING_LINK);
+            }
+            if (XdagTime.getEpoch(b.getTimestamp()) < minEpoch) {
+                return ExtResult.fail(ExtError.CHUNK_TOO_OLD);
             }
             Classified c = LaneBlockClassifier.classify(b);
             if (c.kind() != ExtKind.CHUNK) {
@@ -140,22 +181,33 @@ public final class ChunkChain {
         return ExtResult.ok(Bytes.wrap(out.toByteArray()));
     }
 
+    /** Equivalent to {@link #countLenient(Bytes32, RawBlockLookup, int, long)} with no age bound. */
+    public static int countLenient(Bytes32 head, RawBlockLookup lookup, int maxChunks) {
+        return countLenient(head, lookup, maxChunks, Long.MIN_VALUE);
+    }
+
     /**
      * Number of existing, well-formed CHUNK blocks reachable from {@code head}, stopping at the
-     * first missing or non-chunk block, at most {@code maxChunks}. Used for fee checks (the chunk
-     * fee charges for chunk blocks the network actually stores): a hash whose {@code lookup} fails,
+     * first missing, too-old, or non-chunk block, at most {@code maxChunks}. Used for fee checks
+     * (the chunk fee charges for chunk blocks the network actually stores): a hash whose
+     * {@code lookup} fails, whose block's timestamp falls in an epoch older than {@code minEpoch},
      * or whose block does not classify as {@link ExtKind#CHUNK} with {@link Classified#isOk()},
-     * ends the walk without being counted — only a block that was found and decoded as a chunk
-     * increments the count. Unlike {@link #assemble}, this never fails and has no return value
-     * other than the count; it is bounded by {@code maxChunks} and cycle-safe, and never throws.
+     * ends the walk without being counted — only a block that was found, new enough, and decoded as
+     * a chunk increments the count. Unlike {@link #assemble}, this never fails and has no return
+     * value other than the count; it is bounded by {@code maxChunks} and cycle-safe, and never
+     * throws (barring an exception thrown by {@code lookup} itself). See the class documentation
+     * for how this count relates to {@link #assemble}'s verdict.
      */
-    public static int countLenient(Bytes32 head, RawBlockLookup lookup, int maxChunks) {
+    public static int countLenient(Bytes32 head, RawBlockLookup lookup, int maxChunks, long minEpoch) {
         Set<Bytes32> visited = new HashSet<>();
         int count = 0;
         Bytes32 cur = head;
         while (cur != null && count < maxChunks && visited.add(cur)) {
             Block b = lookup.get(cur);
             if (b == null) {
+                break;
+            }
+            if (XdagTime.getEpoch(b.getTimestamp()) < minEpoch) {
                 break;
             }
             Classified c = LaneBlockClassifier.classify(b);
