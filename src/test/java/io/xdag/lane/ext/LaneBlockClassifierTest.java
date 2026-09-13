@@ -30,12 +30,14 @@ import static io.xdag.lane.ext.ChunkExtTest.link;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
 import io.xdag.core.Address;
 import io.xdag.core.Block;
+import io.xdag.core.BlockInfo;
 import io.xdag.core.XAmount;
 import io.xdag.core.XUnit;
 import io.xdag.core.XdagBlock;
@@ -147,5 +149,43 @@ public class LaneBlockClassifierTest {
                 extBlock(config, ext, List.of(link(hashLow(12)), link(hashLow(11)))));
         assertTrue(String.valueOf(reversed.error()), reversed.isOk());
         assertEquals(hashLow(12), reversed.as(DeployExt.class).codeChainHead());
+    }
+
+    @Test
+    public void everyKindDispatchesToItsCodec() {
+        for (ExtKind k : ExtKind.values()) {
+            byte[] h = new byte[32];
+            h[0] = k.code();
+            Classified c = LaneBlockClassifier.classify(extBlock(config, List.of(Bytes32.wrap(h)), List.of()));
+            assertEquals(k, c.kind());
+        }
+    }
+
+    @Test
+    public void unknownKindForZeroAndFf() {
+        byte[] zero = new byte[32];
+        Classified zeroResult = LaneBlockClassifier.classify(extBlock(config, List.of(Bytes32.wrap(zero)), List.of()));
+        assertEquals(ExtError.UNKNOWN_KIND, zeroResult.error());
+        assertNull(zeroResult.kind());
+
+        byte[] ff = new byte[32];
+        ff[0] = (byte) 0xFF;
+        Classified ffResult = LaneBlockClassifier.classify(extBlock(config, List.of(Bytes32.wrap(ff)), List.of()));
+        assertEquals(ExtError.UNKNOWN_KIND, ffResult.error());
+        assertNull(ffResult.kind());
+    }
+
+    @Test
+    public void blockInfoOnlyBlockClassifiesAsNone() {
+        Classified c = LaneBlockClassifier.classify(new Block(new BlockInfo()));
+        assertSame(Classified.NONE, c);
+    }
+
+    @Test
+    public void asThrowsOnErrorResult() {
+        CallExt chained = new CallExt(CallExt.FLAG_ARGS_CHAIN, Bytes.random(20), 1, 1, 0, Bytes.EMPTY, hashLow(1));
+        Classified c = LaneBlockClassifier.classify(extBlock(config, List.of(chained.encodeHeader()), List.of()));
+        assertEquals(ExtError.MISSING_LINK, c.error());
+        assertThrows(IllegalStateException.class, () -> c.as(CallExt.class));
     }
 }

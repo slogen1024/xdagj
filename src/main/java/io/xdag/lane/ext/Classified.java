@@ -39,12 +39,26 @@ public record Classified(ExtKind kind, Object value, ExtError error) {
     /** The block carries no extension header field at all. */
     public static final Classified NONE = new Classified(null, null, ExtError.NO_EXT);
 
+    public Classified {
+        if ((value == null) == (error == null)) {
+            throw new IllegalArgumentException("exactly one of value/error must be set");
+        }
+    }
+
     public boolean isOk() {
         return error == null;
     }
 
-    /** Casts {@link #value()} to the given {@code *Ext} record type. */
+    /**
+     * Casts {@link #value()} to the given {@code *Ext} record type. Call {@link #isOk()} first: this
+     * throws when classification failed rather than returning a cast of {@code null}.
+     *
+     * @throws IllegalStateException if {@link #error()} is set
+     */
     public <T> T as(Class<T> type) {
+        if (error != null) {
+            throw new IllegalStateException("classification failed: " + error);
+        }
         return type.cast(value);
     }
 }

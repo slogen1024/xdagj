@@ -28,6 +28,7 @@ import io.xdag.core.Address;
 import io.xdag.core.Block;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import org.apache.tuweni.bytes.Bytes32;
 
 /**
@@ -41,8 +42,11 @@ import org.apache.tuweni.bytes.Bytes32;
  * codec input. Dispatch is by the header's kind byte via {@link ExtKind#fromCode(int)}; an
  * unassigned code yields {@link ExtError#UNKNOWN_KIND} rather than throwing.
  *
- * <p>{@code block} must be non-null; passing {@code null} is a programming error, not a data
- * condition this class reports via {@link Classified}.
+ * <p>{@code block} must be non-null (enforced) and must carry its raw fields: parsed from its 512
+ * bytes via {@code new Block(XdagBlock)} / {@code getBlockByHash(hash, true)}, or freshly built in
+ * memory. A {@link Block} loaded with {@code isRaw=false} (constructed from a {@code BlockInfo}
+ * alone) has neither ext fields nor links and classifies as {@link Classified#NONE}; callers on the
+ * consensus path must use the raw lookup.
  */
 public final class LaneBlockClassifier {
 
@@ -55,9 +59,15 @@ public final class LaneBlockClassifier {
      * when the header's kind byte is not assigned, and otherwise the matching {@code *Ext.decode}
      * result wrapped as a {@link Classified}.
      *
-     * @param block the block to classify; must not be {@code null}
+     * @param block the block to classify; must carry its raw fields (parsed from its 512 bytes via
+     *              {@code new Block(XdagBlock)} / {@code getBlockByHash(hash, true)}, or freshly
+     *              built in memory) — a {@link Block} loaded with {@code isRaw=false} (from a
+     *              {@code BlockInfo} only) has neither ext fields nor links and classifies as
+     *              {@link Classified#NONE}; callers on the consensus path must use the raw lookup
+     * @throws NullPointerException if {@code block} is {@code null}
      */
     public static Classified classify(Block block) {
+        Objects.requireNonNull(block, "block");
         List<Bytes32> ext = block.getExtFields();
         if (ext == null || ext.isEmpty()) {
             return Classified.NONE;

@@ -43,7 +43,7 @@ public enum ExtKind {
     /** Returns the kind for a code, or null when the code is not assigned. */
     public static ExtKind fromCode(int code) {
         for (ExtKind k : values()) {
-            if (k.code == code) {
+            if ((k.code & 0xff) == code) {
                 return k;
             }
         }
