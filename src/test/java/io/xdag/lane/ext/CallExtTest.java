@@ -32,6 +32,9 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import io.xdag.core.Address;
+import io.xdag.crypto.hash.HashUtils;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import org.apache.tuweni.bytes.Bytes;
@@ -110,6 +113,10 @@ public class CallExtTest {
                 () -> new CallExt(0, CONTRACT, 1, 1, 0, Bytes.EMPTY, hashLow(1)));
         assertThrows(IllegalArgumentException.class,
                 () -> new CallExt(0, CONTRACT, 1, 0x1_0000_0000L, 0, Bytes.EMPTY, null));
+        assertThrows(IllegalArgumentException.class,
+                () -> new CallExt(0x100, CONTRACT, 1, 1, 0, Bytes.EMPTY, null));
+        assertThrows(IllegalArgumentException.class,
+                () -> new CallExt(CallExt.FLAG_ARGS_CHAIN, CONTRACT, 1, 1, 4, Bytes.random(4), hashLow(3)));
     }
 
     @Test
@@ -123,5 +130,56 @@ public class CallExtTest {
         CallExt chained = new CallExt(CallExt.FLAG_ARGS_CHAIN, CONTRACT, 1, 1, 0, Bytes.EMPTY, hashLow(2));
         assertEquals(ExtError.MISSING_LINK,
                 CallExt.decode(chained.encodeHeader(), List.of(), Arrays.asList((Address) null)).error());
+    }
+
+    @Test
+    public void chainBranchGuards() {
+        Bytes32 head = hashLow(7);
+        CallExt c = new CallExt(CallExt.FLAG_ARGS_CHAIN, CONTRACT, 1, 1, 0, Bytes.EMPTY, head);
+
+        byte[] h = c.encodeHeader().toArray();
+        h[30] = 4;
+        assertEquals(ExtError.BAD_LENGTH,
+                CallExt.decode(Bytes32.wrap(h), List.of(), List.of(link(head))).error());
+
+        assertEquals(ExtError.PAYLOAD_COUNT_MISMATCH,
+                CallExt.decode(c.encodeHeader(), List.of(hashLow(1)), List.of(link(head))).error());
+    }
+
+    @Test
+    public void inlinePayloadGuards() {
+        Bytes args = Bytes.random(40);
+        CallExt c = new CallExt(0, CONTRACT, 1, 1, 40, args, null);
+        List<Bytes32> payload = new ArrayList<>(c.encodePayload());
+        assertEquals(2, payload.size());
+
+        byte[] last = payload.get(1).toArray();
+        last[31] = 1;
+        List<Bytes32> dirty = new ArrayList<>(payload);
+        dirty.set(1, Bytes32.wrap(last));
+        assertEquals(ExtError.RESERVED_NONZERO, CallExt.decode(c.encodeHeader(), dirty, List.of()).error());
+
+        assertEquals(ExtError.PAYLOAD_COUNT_MISMATCH,
+                CallExt.decode(c.encodeHeader(), List.of(payload.get(0)), List.of()).error());
+
+        assertEquals(ExtError.PAYLOAD_COUNT_MISMATCH, CallExt.decode(c.encodeHeader(), null, List.of()).error());
+    }
+
+    @Test
+    public void negativeSelectorAndMaxGasRoundTrip() {
+        CallExt c = new CallExt(0, CONTRACT, 0xFFFFFFFE, 0xFFFFFFFFL, 0, Bytes.EMPTY, null);
+        ExtResult<CallExt> r = CallExt.decode(c.encodeHeader(), c.encodePayload(), List.of());
+        assertTrue(r.isOk());
+        assertEquals(c, r.value());
+        assertEquals("0xfeffffff", c.encodeHeader().slice(22, 4).toHexString());
+        assertEquals("0xffffffff", c.encodeHeader().slice(26, 4).toHexString());
+    }
+
+    @Test
+    public void selectorIsLittleEndianReadingOfHashPrefix() {
+        Bytes32 hash = HashUtils.sha256(Bytes.wrap("transfer(address,uint64)".getBytes(StandardCharsets.US_ASCII)));
+        int selector = (int) ExtCodec.u32(hash.toArray(), 0);
+        CallExt c = new CallExt(0, CONTRACT, selector, 1, 0, Bytes.EMPTY, null);
+        assertEquals(hash.slice(0, 4), c.encodeHeader().slice(22, 4));
     }
 }

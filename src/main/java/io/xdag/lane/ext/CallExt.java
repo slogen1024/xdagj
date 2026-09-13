@@ -25,6 +25,7 @@
 package io.xdag.lane.ext;
 
 import io.xdag.core.Address;
+import io.xdag.core.XdagBlock;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
@@ -39,25 +40,31 @@ import org.apache.tuweni.bytes.Bytes32;
  * {@code argsLen} gives their length; {@code argsChainHead} is {@code null} and there must be no link.
  * When the flag is set, {@code argsLen} is 0, the payload is empty, and link[0] is the head of the chunk
  * chain carrying the arguments; {@code argsChainHead} holds that head hashlow. Inline args and the chain
- * head are mutually exclusive: exactly one of them is populated, matching the flag.
+ * head are mutually exclusive: exactly one of them is populated, matching the flag. The args chain link
+ * (link[0]) is emitted by the block builder, not by {@link #encodeHeader()}/{@link #encodePayload()}.
+ *
+ * <p>{@code selector} is the little-endian reading of {@code sha256(methodSignature)[0..4]}, so header
+ * byte 22 holds {@code sha256(...)[0]}; SDKs must encode it the same way.
  *
  * <p>The compact constructor only enforces that the record can round-trip through the wire format:
- * {@code contract} is non-null and exactly 20 bytes; {@code inlineArgs} is non-null; {@code gasLimit}
- * fits a u32 and {@code argsLen} a u16; {@code inlineArgs.size() == argsLen}; and
- * {@code FLAG_ARGS_CHAIN} being set in {@code flags} agrees with {@code argsChainHead} being non-null.
- * {@code contract}, {@code inlineArgs} and {@code argsChainHead} are defensively copied. It does NOT
- * enforce the protocol-level ranges (unknown flag bits, {@code argsLen <= MAX_INLINE_ARGS}) —
+ * {@code flags} fits a u8; {@code contract} is non-null and exactly 20 bytes; {@code inlineArgs} is
+ * non-null; {@code gasLimit} fits a u32 and {@code argsLen} a u16; {@code inlineArgs.size() == argsLen};
+ * {@code FLAG_ARGS_CHAIN} being set in {@code flags} agrees with {@code argsChainHead} being non-null;
+ * and a set {@code FLAG_ARGS_CHAIN} forces {@code argsLen == 0} (and hence empty inline args, since
+ * {@code inlineArgs.size() == argsLen} is already enforced). {@code contract}, {@code inlineArgs} and
+ * {@code argsChainHead} are defensively copied. It does NOT enforce the protocol-level range
+ * {@code argsLen <= MAX_INLINE_ARGS} nor reject unknown (non-{@code FLAG_ARGS_CHAIN}) flag bits —
  * {@link #decode} enforces those, and the negative tests deliberately build such out-of-range records
  * through the record.
  *
  * <p>{@link #decode} validates, in order: the header is non-null (else {@code NO_EXT}); a {@code null}
- * {@code links} or {@code payload} list is treated as empty, and any {@code null} element in
- * {@code links} fails with {@code MISSING_LINK}; the kind byte ({@code UNKNOWN_KIND} otherwise); unknown
- * flag bits ({@code RESERVED_NONZERO}); when {@code FLAG_ARGS_CHAIN} is set, {@code argsLen == 0} and an
- * empty payload ({@code BAD_LENGTH} / {@code PAYLOAD_COUNT_MISMATCH} otherwise), then exactly one link
- * ({@code MISSING_LINK} / {@code EXTRA_LINK}); otherwise {@code argsLen <= MAX_INLINE_ARGS}
- * ({@code INLINE_ARGS_TOO_LONG}), no link ({@code EXTRA_LINK}), and the payload field count and zero
- * padding.
+ * {@code payload} fails with {@code PAYLOAD_COUNT_MISMATCH}; a {@code null} {@code links} list is
+ * treated as empty, and any {@code null} element in {@code links} fails with {@code MISSING_LINK}; the
+ * kind byte ({@code UNKNOWN_KIND} otherwise); unknown flag bits ({@code RESERVED_NONZERO}); when
+ * {@code FLAG_ARGS_CHAIN} is set, {@code argsLen == 0} and an empty payload ({@code BAD_LENGTH} /
+ * {@code PAYLOAD_COUNT_MISMATCH} otherwise), then exactly one link ({@code MISSING_LINK} /
+ * {@code EXTRA_LINK}); otherwise {@code argsLen <= MAX_INLINE_ARGS} ({@code INLINE_ARGS_TOO_LONG}), no
+ * link ({@code EXTRA_LINK}), and the payload field count and zero padding.
  *
  * <p>{@link #encodeHeader()} throws {@link IllegalArgumentException} if {@code gasLimit} or
  * {@code argsLen} do not fit their header width; the compact constructor already rejects such values,
@@ -69,9 +76,13 @@ public record CallExt(int flags, Bytes contract, int selector, long gasLimit, in
     /** Header flag bit0: call arguments are carried by a chunk chain rather than inline. */
     public static final int FLAG_ARGS_CHAIN = 0x01;
     /** Maximum number of inline argument bytes carried directly in the payload fields. */
-    public static final int MAX_INLINE_ARGS = 256;
+    public static final int MAX_INLINE_ARGS = (XdagBlock.XDAG_BLOCK_FIELDS - 8) * ExtCodec.FIELD;
+    // header, nonce, INPUT, OUTPUT, pubkey, two SIGN_OUT, ext header
 
     public CallExt {
+        if (flags < 0 || flags > 0xFF) {
+            throw new IllegalArgumentException("flags out of u8 range: " + flags);
+        }
         Objects.requireNonNull(contract, "contract");
         if (contract.size() != 20) {
             throw new IllegalArgumentException("contract must be 20 bytes: " + contract.size());
@@ -89,6 +100,9 @@ public record CallExt(int flags, Bytes contract, int selector, long gasLimit, in
         if (((flags & FLAG_ARGS_CHAIN) != 0) != (argsChainHead != null)) {
             throw new IllegalArgumentException("FLAG_ARGS_CHAIN and argsChainHead must agree");
         }
+        if (((flags & FLAG_ARGS_CHAIN) != 0) && argsLen != 0) {
+            throw new IllegalArgumentException("chained args must have argsLen 0");
+        }
         contract = Bytes.wrap(contract.toArray());
         inlineArgs = Bytes.wrap(inlineArgs.toArray());
         argsChainHead = argsChainHead == null ? null : Bytes32.wrap(argsChainHead.toArray());
@@ -105,7 +119,7 @@ public record CallExt(int flags, Bytes contract, int selector, long gasLimit, in
             return ExtResult.fail(ExtError.NO_EXT);
         }
         if (payload == null) {
-            payload = List.of();
+            return ExtResult.fail(ExtError.PAYLOAD_COUNT_MISMATCH);
         }
         if (links == null) {
             links = List.of();
