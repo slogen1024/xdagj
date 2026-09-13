@@ -203,19 +203,30 @@ public class LaneBlockBuilderTest {
 
     @Test
     public void deployIntoLaneWithBothChainsUsesSameHeadTimestamp() {
+        Bytes wasm = payload(500, 51);
+        Bytes initArgs = payload(300, 52);
         LaneBlockBuilder.Built built = LaneBlockBuilder.deployIntoLane(config, TS, sender, UInt64.ONE, LANE, ONE, FEE,
-                payload(500, 51), null, payload(300, 52), 1L).value();
+                wasm, null, initArgs, 1L).value();
         Block block = built.block();
         DeployExt d = LaneBlockClassifier.classify(block).as(DeployExt.class);
         assertTrue(d.codeByChain());
         assertTrue(d.argsByChain());
         assertEquals(2, block.getBlockLinks().size());
-        assertEquals(d.codeChainHead(), block.getBlockLinks().get(0).getAddress());
-        assertEquals(d.argsChainHead(), block.getBlockLinks().get(1).getAddress());
+
+        // The code chain head is chunks[0]; the args chain head is the first chunk of the second
+        // chain, right after the code chain's chunks. Both chains are rooted at the same
+        // headTimestamp (timestamp - 1), so their heads must share a timestamp.
+        int argsHeadIndex = LaneBlockBuilder.chunksFor(wasm.size());
+        assertEquals(built.chunks().get(0).getTimestamp(), built.chunks().get(argsHeadIndex).getTimestamp());
 
         long minEpoch = XdagTime.getEpoch(block.getTimestamp()) - 1;
         Map<Bytes32, Block> idx = index(built.chunks());
         assertTrue(ChunkChain.assemble(d.codeChainHead(), idx::get, 4096, minEpoch).isOk());
         assertTrue(ChunkChain.assemble(d.argsChainHead(), idx::get, 4096, minEpoch).isOk());
+        // Content assertions (not just link-position echoes) catch a code/args link swap: decoding a
+        // swapped pair would still make codeChainHead()/argsChainHead() agree with their own link
+        // positions, but assembling them would then yield the wrong payload.
+        assertEquals(wasm, ChunkChain.assemble(d.codeChainHead(), idx::get, 4096).value());
+        assertEquals(initArgs, ChunkChain.assemble(d.argsChainHead(), idx::get, 4096).value());
     }
 }
