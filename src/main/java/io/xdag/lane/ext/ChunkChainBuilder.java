@@ -47,14 +47,15 @@ import org.apache.tuweni.bytes.Bytes32;
  * with {@code seq == 0}, the one a caller passes to {@code assemble} as {@code head}. Chunk
  * {@code i}'s block carries timestamp {@code head - i}, where {@code head} is {@code headTimestamp}
  * itself whenever that already keeps the whole chain in one epoch, or otherwise a value {@code split}
- * computes by snapping {@code headTimestamp} down to the last tick of the epoch before it (see
+ * computes by snapping {@code headTimestamp} down to the second-to-last tick of the epoch before it (see
  * below): the returned head (index 0) gets the highest timestamp and every later chunk gets a
  * strictly smaller one, oldest (highest seq, the tail) last. {@code split} itself enforces no bound
  * on the number of chunks produced; the caller is responsible for keeping
  * {@code ceil(payload.size() / MAX_DATA_LEN) <= lane.chunk.maxPerChain} (the protocol-level chunk
  * count limit), since only the caller knows that configured limit.
  *
- * <p>{@code headTimestamp} is a hint, not a guarantee: the returned chunks always share a single
+ * <p>{@code headTimestamp} is a hint, not a guarantee: for any chain of at most 65535 chunks (far
+ * above the protocol's {@code maxPerChain}) the returned chunks always share a single
  * {@code XdagTime.getEpoch} value, so {@code split} never returns a chain that straddles an epoch
  * boundary. This matters because {@link ChunkChain}'s age rule requires
  * {@code epoch(tail) >= epoch(payingBlock) - 1} — the tail is the oldest chunk and therefore the
@@ -96,8 +97,12 @@ public final class ChunkChainBuilder {
         int n = (total + ChunkExt.MAX_DATA_LEN - 1) / ChunkExt.MAX_DATA_LEN;
         long head = headTimestamp;
         if ((head & 0xffffL) < n - 1) {
-            // The chain would cross into the previous epoch: move it wholly into that epoch (last tick).
-            head = (head & ~0xffffL) - 1;
+            // The chain would cross into the previous epoch: move it wholly into that epoch. The head is
+            // placed on the second-to-last tick (low 16 bits 0xfffe), not the last one, because a timestamp
+            // with low bits 0xffff is XdagTime.isEndOfEpoch and would route the block down the RandomX
+            // difficulty path in calculateCurrentBlockDiff; 65535 ticks of capacity still cover any chain
+            // the protocol allows (maxPerChain = 4096).
+            head = (head & ~0xffffL) - 2;
         }
         List<Block> tailFirst = new ArrayList<>(n);
         Bytes32 next = null;
