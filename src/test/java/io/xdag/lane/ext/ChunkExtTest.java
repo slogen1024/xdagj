@@ -27,10 +27,12 @@ package io.xdag.lane.ext;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUT;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import io.xdag.core.Address;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
@@ -105,5 +107,47 @@ public class ChunkExtTest {
         assertEquals(ExtError.RESERVED_NONZERO, ChunkExt.decode(c.encodeHeader(), dirty, List.of()).error());
 
         assertEquals(ExtError.PAYLOAD_COUNT_MISMATCH, ChunkExt.decode(c.encodeHeader(), List.of(dirty.get(0)), List.of()).error());
+    }
+
+    @Test
+    public void headerLayoutIsPinned() {
+        ChunkExt c = new ChunkExt(0x01020304L, 0x0A0B0C0DL, 0x0102, null, Bytes.random(0x0102));
+        assertEquals("0x03040302010d0c0b0a0201000000000000000000000000000000000000000000", c.encodeHeader().toHexString());
+    }
+
+    @Test
+    public void constructorRejectsInconsistentRecords() {
+        assertThrows(IllegalArgumentException.class, () -> new ChunkExt(0, 100, 5, null, Bytes.wrap(new byte[32])));
+        assertThrows(IllegalArgumentException.class, () -> new ChunkExt(0x1_0000_0000L, 0, 0, null, Bytes.EMPTY));
+        assertThrows(IllegalArgumentException.class, () -> new ChunkExt(0, 0, 70000, null, Bytes.EMPTY));
+        assertThrows(NullPointerException.class, () -> new ChunkExt(0, 0, 0, null, null));
+    }
+
+    @Test
+    public void decodeNeverThrowsOnNullShapes() {
+        assertEquals(ExtError.NO_EXT, ChunkExt.decode(null, List.of(), List.of()).error());
+
+        ChunkExt tail = new ChunkExt(0, 1, 1, null, Bytes.of((byte) 0x42));
+        ExtResult<ChunkExt> r = ChunkExt.decode(tail.encodeHeader(), tail.encodePayload(), null);
+        assertTrue(r.isOk());
+
+        assertEquals(ExtError.MISSING_LINK,
+                ChunkExt.decode(tail.encodeHeader(), tail.encodePayload(), Arrays.asList((Address) null)).error());
+
+        assertEquals(ExtError.PAYLOAD_COUNT_MISMATCH,
+                ChunkExt.decode(tail.encodeHeader(), Arrays.asList((Bytes32) null), List.of()).error());
+    }
+
+    @Test
+    public void maxU32AndBoundaryRoundTrip() {
+        ChunkExt maxSeq = new ChunkExt(4294967295L, 4294967295L, 352, null, Bytes.random(352));
+        ExtResult<ChunkExt> r1 = ChunkExt.decode(maxSeq.encodeHeader(), maxSeq.encodePayload(), List.of());
+        assertTrue(r1.isOk());
+        assertEquals(maxSeq, r1.value());
+
+        ChunkExt boundary = new ChunkExt(1, 352, 352, null, Bytes.random(352));
+        ExtResult<ChunkExt> r2 = ChunkExt.decode(boundary.encodeHeader(), boundary.encodePayload(), List.of());
+        assertTrue(r2.isOk());
+        assertEquals(boundary, r2.value());
     }
 }

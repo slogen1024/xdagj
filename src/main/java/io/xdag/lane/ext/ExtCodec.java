@@ -131,6 +131,9 @@ public final class ExtCodec {
         byte[] all = new byte[payload.size() * FIELD];
         int p = 0;
         for (Bytes32 f : payload) {
+            if (f == null) {
+                return ExtResult.fail(ExtError.PAYLOAD_COUNT_MISMATCH);
+            }
             System.arraycopy(f.toArray(), 0, all, p, FIELD);
             p += FIELD;
         }
