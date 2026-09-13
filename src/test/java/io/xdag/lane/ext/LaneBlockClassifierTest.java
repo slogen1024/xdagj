@@ -28,6 +28,7 @@ import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUTPUT;
 import static io.xdag.lane.ext.ChunkExtTest.hashLow;
 import static io.xdag.lane.ext.ChunkExtTest.link;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
@@ -158,6 +159,8 @@ public class LaneBlockClassifierTest {
             h[0] = k.code();
             Classified c = LaneBlockClassifier.classify(extBlock(config, List.of(Bytes32.wrap(h)), List.of()));
             assertEquals(k, c.kind());
+            // a mis-wired switch arm would still stamp the right kind but the wrong codec answers UNKNOWN_KIND
+            assertNotEquals(ExtError.UNKNOWN_KIND, c.error());
         }
     }
 
