@@ -87,7 +87,11 @@ public record ClaimExt(boolean toLaneVault, Bytes srcLane, long seq, long index,
         proofHead = Bytes32.wrap(proofHead.toArray());
     }
 
-    /** Decodes a header/payload/links triple into a {@link ClaimExt}; never throws. */
+    /**
+     * Decodes a header/payload/links triple into a {@link ClaimExt}; never throws. {@code links} must
+     * be the block's {@code XDAG_FIELD_OUT} block references in field order ({@code isAddress == false});
+     * the link field's amount and type are the classifier's concern, not this codec's.
+     */
     public static ExtResult<ClaimExt> decode(Bytes32 header, List<Bytes32> payload, List<Address> links) {
         if (header == null) {
             return ExtResult.fail(ExtError.NO_EXT);

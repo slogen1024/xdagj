@@ -71,7 +71,12 @@ public record ChallengeExt(long inputIndex, long deposit, Bytes32 anchor, Bytes3
         witnessHead = Bytes32.wrap(witnessHead.toArray());
     }
 
-    /** Decodes a header/payload/links triple into a {@link ChallengeExt}; never throws. */
+    /**
+     * Decodes a header/payload/links triple into a {@link ChallengeExt}; never throws. {@code links}
+     * must be the block's {@code XDAG_FIELD_OUT} block references in field order
+     * ({@code isAddress == false}); the link field's amount and type are the classifier's concern, not
+     * this codec's.
+     */
     public static ExtResult<ChallengeExt> decode(Bytes32 header, List<Bytes32> payload, List<Address> links) {
         if (header == null) {
             return ExtResult.fail(ExtError.NO_EXT);

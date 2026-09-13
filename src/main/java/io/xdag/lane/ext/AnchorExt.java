@@ -33,11 +33,14 @@ import org.apache.tuweni.bytes.Bytes32;
 
 /**
  * ANCHOR (kind 4): a lane's periodic state commitment into L1. Header: b0 kind, b1 flags (must be 0
- * in v1), b2..21 laneId (20 bytes), b22..29 seq u64, b30..31 zero. Payload: field[0] stateRoot,
- * field[1] outboxMapRoot, field[2] prevSeq u64 | inputCount u32 | segmentCount u32 | 16 zero. Links:
- * [0] the previous anchor for this lane, [1] the main block at {@code seq}, [2] the head of the
- * commitment chain covering the inputs/segments folded into this anchor; all three are emitted by the
- * block builder, not by {@link #encodeHeader()}/{@link #encodePayload()}.
+ * in v1 — reserved for a v2 "braided" cross-lane anchor format; enabling it is a hard fork, since v1
+ * {@link #decode} rejects any non-zero flags byte), b2..21 laneId (20 bytes), b22..29 seq u64 (the
+ * main-block height this lane's anchor chain has consumed up to), b30..31 zero. Payload: field[0]
+ * stateRoot, field[1] outboxMapRoot, field[2] prevSeq u64 | inputCount u32 | segmentCount u32 |
+ * eventsRootAgg (16 bytes, reserved, must be zero in v1). Links: [0] the previous anchor for this
+ * lane, [1] the main block at height {@code seq}, [2] the head of the commitment chain covering the
+ * inputs/segments folded into this anchor; all three are emitted by the block builder, not by
+ * {@link #encodeHeader()}/{@link #encodePayload()}.
  *
  * <p>{@code seq} and {@code prevSeq} are raw little-endian 64-bit bit patterns (an anchor sequence
  * number), unconstrained by this record — see {@link LaneConfigExt#gasPriceNano()} for the same
@@ -63,10 +66,11 @@ import org.apache.tuweni.bytes.Bytes32;
  * {@code PAYLOAD_COUNT_MISMATCH}; and finally the reserved zero tail of the third payload field
  * ({@code RESERVED_NONZERO}).
  *
- * <p>{@link #encodeHeader()} and {@link #encodePayload()} throw {@link IllegalArgumentException} if
- * {@code inputCount} or {@code segmentCount} do not fit their payload width; the compact constructor
- * already rejects such values, so this cannot happen for an instance built through the public
- * constructor.
+ * <p>{@link #encodeHeader()} cannot throw: {@code laneId} is already fixed at 20 bytes and {@code seq}
+ * is an unconstrained raw u64 bit pattern. {@link #encodePayload()} throws
+ * {@link IllegalArgumentException} only if {@code inputCount} or {@code segmentCount} do not fit their
+ * u32 payload width; the compact constructor already rejects such values, so this cannot happen for an
+ * instance built through the public constructor.
  */
 public record AnchorExt(Bytes laneId, long seq, Bytes32 stateRoot, Bytes32 outboxMapRoot, long prevSeq,
                          long inputCount, long segmentCount, Bytes32 prevAnchor, Bytes32 mainBlock,
@@ -96,7 +100,12 @@ public record AnchorExt(Bytes laneId, long seq, Bytes32 stateRoot, Bytes32 outbo
         commitmentHead = Bytes32.wrap(commitmentHead.toArray());
     }
 
-    /** Decodes a header/payload/links triple into an {@link AnchorExt}; never throws. */
+    /**
+     * Decodes a header/payload/links triple into an {@link AnchorExt}; never throws. {@code links}
+     * must be the block's {@code XDAG_FIELD_OUT} block references in field order
+     * ({@code isAddress == false}); the link field's amount and type are the classifier's concern, not
+     * this codec's.
+     */
     public static ExtResult<AnchorExt> decode(Bytes32 header, List<Bytes32> payload, List<Address> links) {
         if (header == null) {
             return ExtResult.fail(ExtError.NO_EXT);

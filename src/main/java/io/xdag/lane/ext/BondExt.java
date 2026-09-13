@@ -34,13 +34,15 @@ import org.apache.tuweni.bytes.Bytes32;
 /**
  * BOND (kind 5): stakes or unstakes a lane operator bond. Header: b0 kind, b1 flags (bit0 =
  * {@link #FLAG_UNBOND}), b2..21 laneId (20 bytes; all-zero means a global/unassigned bond — a
- * protocol-level convention, not enforced by this record), b22..29 amount u64, b30..31 zero. BOND
- * carries no payload fields and no links.
+ * protocol-level convention, not enforced by this record), b22..29 amount u64 (the amount to unbond),
+ * b30..31 zero. BOND carries no payload fields and no links.
  *
- * <p>{@code amount} is a raw little-endian 64-bit bit pattern (an amount of bonded funds),
- * unconstrained by this record — see {@link LaneConfigExt#gasPriceNano()} for the same convention;
- * values at or above 2^63 come back as a negative {@code long} and must be compared with
- * {@link Long#compareUnsigned(long, long)}, never {@code <}/{@code >}.
+ * <p>{@code amount} is a raw little-endian 64-bit bit pattern, unconstrained by this record — see
+ * {@link LaneConfigExt#gasPriceNano()} for the same convention; values at or above 2^63 come back as a
+ * negative {@code long} and must be compared with {@link Long#compareUnsigned(long, long)}, never
+ * {@code <}/{@code >}. It is meaningful only when {@link #FLAG_UNBOND} is set: for a stake
+ * ({@code unbond == false}) this field is ignored, since the staked amount is instead carried by the
+ * block's OUTPUT to the bond vault, not by this extension.
  *
  * <p>The compact constructor only enforces that the record can round-trip through the wire format:
  * {@code laneId} is non-null and exactly 20 bytes. It does NOT enforce the protocol-level rules that
@@ -71,7 +73,11 @@ public record BondExt(boolean unbond, Bytes laneId, long amount) {
         laneId = Bytes.wrap(laneId.toArray());
     }
 
-    /** Decodes a header/payload/links triple into a {@link BondExt}; never throws. */
+    /**
+     * Decodes a header/payload/links triple into a {@link BondExt}; never throws. {@code links} must
+     * be the block's {@code XDAG_FIELD_OUT} block references in field order ({@code isAddress == false});
+     * the link field's amount and type are the classifier's concern, not this codec's.
+     */
     public static ExtResult<BondExt> decode(Bytes32 header, List<Bytes32> payload, List<Address> links) {
         if (header == null) {
             return ExtResult.fail(ExtError.NO_EXT);
