@@ -87,6 +87,9 @@ public class Block implements Cloneable {
     private Bytes32 nonce;
     /**
      * Extension fields (type XDAG_FIELD_EXT), in field order. The first one is the extension header.
+     * Populated only when the block is parsed from raw bytes; a {@link Block} built from a
+     * {@link BlockInfo} alone (e.g. {@code getBlockByHash(hash, false)}) has an empty list here —
+     * callers that need extension fields must use the raw lookup ({@code isRaw=true}).
      */
     private List<Bytes32> extFields = new CopyOnWriteArrayList<>();
     private XdagBlock xdagBlock;
@@ -560,6 +563,9 @@ public class Block implements Cloneable {
     }
 
     private void setType(XdagField.FieldType type, int n) {
+        if (n >= XdagBlock.XDAG_BLOCK_FIELDS) {
+            throw new IllegalArgumentException("block field budget exceeded: field index " + n);
+        }
         long typeByte = type.asByte();
         this.info.type |= typeByte << (n << 2);
     }
@@ -572,8 +578,12 @@ public class Block implements Cloneable {
     }
 
     /**
-     * Block references (XDAG_FIELD_OUT pointing at a block, amount 0) in field order: link[0], link[1], ...
-     * Extension kinds assign roles to links by position.
+     * Block references (XDAG_FIELD_OUT pointing at a block) in field order: link[0], link[1], ...
+     * Extension kinds assign roles to links by position. The amount is not checked here; consensus
+     * validation of OUT-link amounts stays in {@code tryToConnect}. Populated only when the block
+     * is parsed from raw bytes; a {@link Block} built from a {@link BlockInfo} alone (e.g.
+     * {@code getBlockByHash(hash, false)}) has an empty list here — callers that need block links
+     * must use the raw lookup ({@code isRaw=true}).
      */
     public List<Address> getBlockLinks() {
         List<Address> res = Lists.newArrayList();

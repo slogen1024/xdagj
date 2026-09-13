@@ -25,10 +25,19 @@
 package io.xdag.core;
 
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_EXT;
+import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_HEAD_TEST;
+import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_INPUT;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUT;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUTPUT;
+import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_PUBLIC_KEY_0;
+import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_PUBLIC_KEY_1;
+import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_REMARK;
+import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_SIGN_OUT;
+import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_TRANSACTION_NONCE;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
@@ -36,10 +45,12 @@ import io.xdag.crypto.SampleKeys;
 import io.xdag.crypto.keys.ECKeyPair;
 import io.xdag.utils.BytesUtils;
 import io.xdag.utils.XdagTime;
+import java.util.ArrayList;
 import java.util.List;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 import org.apache.tuweni.bytes.MutableBytes32;
+import org.apache.tuweni.units.bigints.UInt64;
 import org.junit.Test;
 
 public class BlockExtFieldTest {
@@ -106,5 +117,80 @@ public class BlockExtFieldTest {
         assertEquals(2, links.size());
         assertEquals(a, links.get(0).getAddress());
         assertEquals(c, links.get(1).getAddress());
+    }
+
+    @Test
+    public void mixedBlockKeepsTypeMaskAndEncodedOrderInSync() {
+        List<Bytes32> ext = List.of(extField(0x03), extField(0x04));
+        Address input = new Address(BytesUtils.arrayToByte32(key.toAddress().toArray()),
+                XDAG_FIELD_INPUT, XAmount.of(1, XUnit.XDAG), true);
+        Address outBlockRef = new Address(blockRef(5), XDAG_FIELD_OUT, false);
+        Address output = new Address(BytesUtils.arrayToByte32(SampleKeys.KEY_PAIR2.toAddress().toArray()),
+                XDAG_FIELD_OUTPUT, XAmount.of(2, XUnit.XDAG), true);
+        List<Address> pendings = List.of(input, outBlockRef, output);
+
+        Block b = new Block(config, XdagTime.getCurrentTimestamp(), null, pendings, false,
+                List.of(key), "mix", 0, XAmount.ZERO, UInt64.ONE, ext);
+        b.signOut(key);
+
+        Block parsed = new Block(new XdagBlock(b.toBytes()));
+
+        XdagField.FieldType[] expected = {
+                XDAG_FIELD_HEAD_TEST,
+                XDAG_FIELD_TRANSACTION_NONCE,
+                XDAG_FIELD_INPUT,
+                XDAG_FIELD_OUT,
+                XDAG_FIELD_OUTPUT,
+                XDAG_FIELD_REMARK,
+                XDAG_FIELD_EXT,
+                XDAG_FIELD_EXT,
+        };
+        for (int i = 0; i < expected.length; i++) {
+            assertEquals("field " + i, expected[i], parsed.getXdagBlock().getField(i).getType());
+        }
+        XdagField.FieldType pubKeyType = parsed.getXdagBlock().getField(8).getType();
+        assertTrue(pubKeyType == XDAG_FIELD_PUBLIC_KEY_0 || pubKeyType == XDAG_FIELD_PUBLIC_KEY_1);
+        assertEquals(XDAG_FIELD_SIGN_OUT, parsed.getXdagBlock().getField(9).getType());
+        assertEquals(XDAG_FIELD_SIGN_OUT, parsed.getXdagBlock().getField(10).getType());
+
+        assertEquals(ext, parsed.getExtFields());
+        assertEquals(1, parsed.verifiedKeys().size());
+    }
+
+    @Test
+    public void chunkShapeFitsExactlySixteenFieldsAndOneMoreIsRejected() {
+        List<Address> links = List.of(new Address(blockRef(7), XDAG_FIELD_OUT, false));
+
+        List<Bytes32> twelveExt = new ArrayList<>();
+        for (int i = 0; i < 12; i++) {
+            twelveExt.add(extField(0x10 + i));
+        }
+
+        Block b = new Block(config, XdagTime.getCurrentTimestamp(), links, null, false,
+                null, null, -1, XAmount.ZERO, null, twelveExt);
+        byte[] raw = b.toBytes();
+        assertEquals(512, raw.length);
+
+        Block parsed = new Block(new XdagBlock(raw));
+        assertEquals(twelveExt, parsed.getExtFields());
+
+        int signOutCount = 0;
+        for (int i = 0; i < XdagBlock.XDAG_BLOCK_FIELDS; i++) {
+            if (parsed.getXdagBlock().getField(i).getType() == XDAG_FIELD_SIGN_OUT) {
+                signOutCount++;
+            }
+        }
+        assertEquals(2, signOutCount);
+        assertNotNull(parsed.getOutsig());
+
+        List<Bytes32> thirteenExt = new ArrayList<>(twelveExt);
+        thirteenExt.add(extField(0x20));
+        try {
+            new Block(config, XdagTime.getCurrentTimestamp(), links, null, false,
+                    null, null, -1, XAmount.ZERO, null, thirteenExt);
+            fail("expected IllegalArgumentException");
+        } catch (IllegalArgumentException expected) {
+            // block field budget exceeded, as intended
+        }
     }
 }
