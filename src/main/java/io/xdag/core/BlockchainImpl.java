@@ -46,6 +46,7 @@ import io.xdag.db.rocksdb.SnapshotStoreImpl;
 import io.xdag.lane.l1.LaneL1Hooks;
 import io.xdag.lane.l1.LaneL1Processor;
 import io.xdag.lane.l1.LaneL1Store;
+import io.xdag.lane.l1.LaneSnapshotGate;
 import io.xdag.listener.BlockMessage;
 import io.xdag.listener.Listener;
 import io.xdag.listener.PretopMessage;
@@ -287,6 +288,10 @@ public class BlockchainImpl implements Blockchain {
         xdagTopStatus.setTop(lastBlock.getHashLow().toArray());
         xdagTopStatus.setTopDiff(lastBlock.getInfo().getDifficulty());
         xdagTopStatus.setPreTopDiff(lastBlock.getInfo().getDifficulty());
+
+        // Lane contracts (SP0a): LANE_L1 travels with the snapshot and is mandatory once the
+        // snapshot height is at or past the lane activation height (hash-verified on import).
+        LaneSnapshotGate.checkAndImport(kernel.getConfig(), snapshotHeight, kernel.getLaneL1Store());
 
         // Calculate total balance
         XAmount allBalance = snapshotStore.getAllBalance().add(snapshotAddressStore.getAllBalance());

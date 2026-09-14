@@ -38,6 +38,8 @@ import io.xdag.db.SnapshotStore;
 import io.xdag.db.rocksdb.DatabaseName;
 import io.xdag.db.rocksdb.RocksdbKVSource;
 import io.xdag.db.rocksdb.SnapshotStoreImpl;
+import io.xdag.lane.l1.LaneL1Store;
+import io.xdag.lane.l1.LaneSnapshotGate;
 import io.xdag.utils.BytesUtils;
 import io.xdag.utils.XdagTime;
 import org.apache.commons.cli.CommandLine;
@@ -521,6 +523,23 @@ public class XdagCli extends Launcher {
         Path source = Paths.get(getConfig().getRootDir() + "/rocksdb/xdagdb/ADDRESS");
         Path target = Paths.get(getConfig().getRootDir() + "/rocksdb/xdagdb/SNAPSHOT/ADDRESS");
         copyDir(source.toString(),target.toString());
+
+        // Lane contracts (SP0a): carry LANE_L1 alongside SNAPSHOT/BLOCKS and SNAPSHOT/ADDRESS
+        RocksdbKVSource laneSource = new RocksdbKVSource(DatabaseName.LANE_L1.toString());
+        laneSource.setConfig(getConfig());
+        LaneL1Store laneStore = new LaneL1Store(laneSource);
+        laneStore.start();
+        try {
+            if (LaneSnapshotGate.shouldExport(getConfig(), laneStore)) {
+                LaneSnapshotGate.export(getConfig(), laneStore);
+                System.out.println("lane state snapshot written to " + LaneSnapshotGate.snapshotDir(getConfig()));
+            } else {
+                System.out.println("lane protocol unscheduled and LANE_L1 empty: no lane state snapshot written");
+            }
+        } finally {
+            laneStore.stop();
+        }
+
         long end = System.currentTimeMillis();
         System.out.println("make snapshot done");
         System.out.println("time：" + (end - start) + "ms");
