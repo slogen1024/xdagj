@@ -28,6 +28,7 @@ import static io.xdag.lane.ext.ChunkChainTest.payload;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
@@ -51,13 +52,16 @@ public class LaneL1UnwindTest extends LaneL1TestBase {
     public void reorgRemovesLaneStateAndReapplyRestoresIt() {
         Block forkPoint = null;
         long forkTime = 0;
+        long nmainAtFork = 0;
         for (int i = 0; i < 12; i++) {
             Block m = mineMain(List.of());
             if (i == 7) {
                 forkPoint = m;
                 forkTime = generateTime;
+                nmainAtFork = blockchain.getXdagStats().nmain;
             }
         }
+        assertNotNull(forkPoint);
 
         Bytes wasm = payload(5_000, 21);
         LaneBlockBuilder.Built deploy = deployNewLane(wasm, payload(10, 22));
@@ -82,6 +86,9 @@ public class LaneL1UnwindTest extends LaneL1TestBase {
 
         // A competing branch from the fork point. Branch A above the fork point has at most 12 blocks of weight
         // < 2^47 each; 24 blocks of weight >= 2^46 each are strictly heavier, so the reorg is deterministic.
+        long branchABlocks = blockchain.getXdagStats().nmain - nmainAtFork;
+        assertTrue("branch A grew past the 12-block bound the fork weight argument relies on: " + branchABlocks,
+                branchABlocks <= 12);
         rewindTo(forkPoint, forkTime);
         Block last = null;
         for (int i = 0; i < 24; i++) {
@@ -91,7 +98,8 @@ public class LaneL1UnwindTest extends LaneL1TestBase {
         assertArrayEquals("fork branch did not overtake", hashLow(last).toArray(), blockchain.getXdagTopStatus().getTop());
 
         // unwind of the confirmed main blocks removed every lane record symmetrically
-        assertEquals("lane state left behind after the reorg: " + describeKeys(), 1, laneStore.sortedKeys().size());
+        List<byte[]> leftover = laneStore.sortedKeys();
+        assertEquals("lane state left behind after the reorg: " + describeKeys(leftover), 1, leftover.size());
         assertFalse(laneStore.hasLane(laneId));
         assertFalse(laneStore.hasCode(HashUtils.sha256(wasm)));
         assertTrue(laneStore.getReverse(deploy.block().getHash()).isEmpty());
@@ -109,18 +117,25 @@ public class LaneL1UnwindTest extends LaneL1TestBase {
         Block mCall2 = mineMain(List.of(hashLow(call.block())));
         confirm(call.block());
         assertTrue(laneStore.hasLane(laneId));
+        assertNotEquals(heightOf(mDeploy), heightOf(mDeploy2));
         assertEquals(heightOf(mDeploy2), laneStore.getLane(laneId).createdHeight());
+        assertEquals(1L, laneStore.getLane(laneId).contractCount());
+        assertEquals(laneId, laneStore.getContract(contract).laneId());
         assertEquals(1L, laneStore.getCodeRefCount(HashUtils.sha256(wasm)));
         assertEquals(wasm, laneStore.getCode(HashUtils.sha256(wasm)));
+        assertEquals(1L, laneStore.getCallCount(laneId, heightOf(mDeploy2)));
+        assertEquals(1L, laneStore.getCallCount(laneId, heightOf(mCall2)));
+        assertEquals(1, laneStore.getReverse(deploy.block().getHash()).size());
+        assertEquals(1, laneStore.getReverse(call.block().getHash()).size());
         assertEquals(InputStatus.OK, laneStore.getInput(laneId, heightOf(mCall2), 0).status());
         assertEquals(contract, laneStore.getInput(laneId, heightOf(mCall2), 0).contract());
         assertEquals(keysWhenApplied, laneStore.sortedKeys().size());
     }
 
     /** Leftover LANE_L1 keys as hex, for diagnosing an unwind asymmetry from the failure message alone. */
-    private String describeKeys() {
+    private static String describeKeys(List<byte[]> keys) {
         List<String> out = new ArrayList<>();
-        for (byte[] k : laneStore.sortedKeys()) {
+        for (byte[] k : keys) {
             out.add(Bytes.wrap(k).toHexString());
         }
         return out.toString();
