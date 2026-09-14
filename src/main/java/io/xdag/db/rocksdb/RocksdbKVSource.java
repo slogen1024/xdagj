@@ -279,12 +279,16 @@ public class RocksdbKVSource implements KVSource<byte[], byte[]> {
      * Applies all puts and then all deletes as a single atomic {@link WriteBatch}. A {@link Pair}
      * whose value is {@code null} is a delete within the batch; puts are applied in list order (so a
      * later put on the same key wins) and the {@code deletes} list is applied after all puts (so
-     * deleting a key that was just put removes it). Either the whole batch is written, or none of it.
+     * deleting a key that was just put removes it). Either the whole batch is written, or none of it;
+     * it is not synchronously durable (uses {@link WriteOptions} defaults, like {@link #put}).
      */
     @Override
     public void batchWrite(List<Pair<byte[], byte[]>> puts, List<byte[]> deletes) {
         resetDbLock.readLock().lock();
         try (WriteBatch batch = new WriteBatch(); WriteOptions options = new WriteOptions()) {
+            if (!alive) {
+                throw new IllegalStateException("db '" + name + "' is closed");
+            }
             for (Pair<byte[], byte[]> p : puts) {
                 if (p.getValue() == null) {
                     batch.delete(p.getKey());

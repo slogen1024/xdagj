@@ -24,7 +24,9 @@
 
 package io.xdag.lane;
 
+import com.google.common.primitives.UnsignedBytes;
 import io.xdag.db.rocksdb.KVSource;
+import io.xdag.utils.BytesUtils;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -34,12 +36,15 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.function.Function;
 import org.apache.commons.lang3.tuple.Pair;
-import org.apache.tuweni.bytes.Bytes;
 
-/** Sorted in-memory KVSource for unit tests. Keys and values are copied on the way in and out. */
+/**
+ * In-memory KVSource for unit tests, sorted by unsigned lexicographic byte order, matching
+ * RocksDB's default comparator; not thread-safe (tests run under the consensus lock or
+ * single-threaded). Keys and values are copied on the way in and out.
+ */
 public class InMemoryKVSource implements KVSource<byte[], byte[]> {
 
-    private final TreeMap<Bytes, byte[]> map = new TreeMap<>();
+    private final TreeMap<byte[], byte[]> map = new TreeMap<>(UnsignedBytes.lexicographicalComparator());
     private String name = "memory";
     private boolean alive;
 
@@ -71,33 +76,34 @@ public class InMemoryKVSource implements KVSource<byte[], byte[]> {
     @Override
     public void reset() {
         map.clear();
+        alive = true;
     }
 
     @Override
     public void put(byte[] key, byte[] val) {
         if (val == null) {
-            map.remove(Bytes.wrap(key));
+            map.remove(key);
         } else {
-            map.put(Bytes.wrap(Arrays.copyOf(key, key.length)), Arrays.copyOf(val, val.length));
+            map.put(Arrays.copyOf(key, key.length), Arrays.copyOf(val, val.length));
         }
     }
 
     @Override
     public byte[] get(byte[] key) {
-        byte[] v = map.get(Bytes.wrap(key));
+        byte[] v = map.get(key);
         return v == null ? null : Arrays.copyOf(v, v.length);
     }
 
     @Override
     public void delete(byte[] key) {
-        map.remove(Bytes.wrap(key));
+        map.remove(key);
     }
 
     @Override
     public Set<byte[]> keys() {
         Set<byte[]> out = new HashSet<>();
-        for (Bytes k : map.keySet()) {
-            out.add(k.toArray());
+        for (byte[] k : map.keySet()) {
+            out.add(k.clone());
         }
         return out;
     }
@@ -105,9 +111,9 @@ public class InMemoryKVSource implements KVSource<byte[], byte[]> {
     @Override
     public List<byte[]> prefixKeyLookup(byte[] prefix) {
         List<byte[]> out = new ArrayList<>();
-        for (Bytes k : map.keySet()) {
-            if (startsWith(k, prefix)) {
-                out.add(k.toArray());
+        for (byte[] k : map.keySet()) {
+            if (BytesUtils.keyStartsWith(k, prefix)) {
+                out.add(k.clone());
             }
         }
         return out;
@@ -115,8 +121,9 @@ public class InMemoryKVSource implements KVSource<byte[], byte[]> {
 
     @Override
     public void fetchPrefix(byte[] prefix, Function<Pair<byte[], byte[]>, Boolean> func) {
-        for (Map.Entry<Bytes, byte[]> e : map.entrySet()) {
-            if (startsWith(e.getKey(), prefix) && func.apply(Pair.of(e.getKey().toArray(), e.getValue().clone()))) {
+        for (Map.Entry<byte[], byte[]> e : map.entrySet()) {
+            if (BytesUtils.keyStartsWith(e.getKey(), prefix)
+                    && func.apply(Pair.of(e.getKey().clone(), e.getValue().clone()))) {
                 return;
             }
         }
@@ -125,8 +132,8 @@ public class InMemoryKVSource implements KVSource<byte[], byte[]> {
     @Override
     public List<byte[]> prefixValueLookup(byte[] prefix) {
         List<byte[]> out = new ArrayList<>();
-        for (Map.Entry<Bytes, byte[]> e : map.entrySet()) {
-            if (startsWith(e.getKey(), prefix)) {
+        for (Map.Entry<byte[], byte[]> e : map.entrySet()) {
+            if (BytesUtils.keyStartsWith(e.getKey(), prefix)) {
                 out.add(e.getValue().clone());
             }
         }
@@ -136,15 +143,11 @@ public class InMemoryKVSource implements KVSource<byte[], byte[]> {
     @Override
     public List<Pair<byte[], byte[]>> prefixKeyAndValueLookup(byte[] prefix) {
         List<Pair<byte[], byte[]>> out = new ArrayList<>();
-        for (Map.Entry<Bytes, byte[]> e : map.entrySet()) {
-            if (startsWith(e.getKey(), prefix)) {
-                out.add(Pair.of(e.getKey().toArray(), e.getValue().clone()));
+        for (Map.Entry<byte[], byte[]> e : map.entrySet()) {
+            if (BytesUtils.keyStartsWith(e.getKey(), prefix)) {
+                out.add(Pair.of(e.getKey().clone(), e.getValue().clone()));
             }
         }
         return out;
-    }
-
-    private static boolean startsWith(Bytes key, byte[] prefix) {
-        return key.size() >= prefix.length && key.slice(0, prefix.length).equals(Bytes.wrap(prefix));
     }
 }
