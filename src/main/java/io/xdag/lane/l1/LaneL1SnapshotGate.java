@@ -46,20 +46,29 @@ import org.apache.tuweni.bytes.Bytes32;
  * where the lane protocol is still unscheduled: such a snapshot is one {@code META} key plus the
  * hash, and a consumer below activation ignores it anyway.
  *
- * <p><b>One-shot, idempotent import.</b> {@link LaneL1Store#importSnapshot} copies the snapshot's
- * recorded hash into the local store under {@link LaneL1Keys#SNAPSHOT_HASH_KEY}, atomically with
- * the imported keys. That marker is the durable record that this LANE_L1 <em>is</em> a snapshot
- * import: {@link #checkAndImport} sees it on every later boot and returns without even opening the
- * snapshot directory (so the operator may delete {@code SNAPSHOT/LANE_L1} once the node has
- * started). The marker deliberately says nothing about what the node did <em>after</em> the
- * import — a store that has since applied blocks still carries it and is still accepted; the
- * marker answers "did this state come from the snapshot?", not "is this state still identical to
- * it?".
+ * <p><b>The import marker is a crash-window retry, not a licence to skip verification.</b>
+ * {@link LaneL1Store#importSnapshot} copies the snapshot's recorded hash into the local store under
+ * {@link LaneL1Keys#SNAPSHOT_HASH_KEY}, atomically with the imported keys, as the durable record
+ * that this LANE_L1 <em>is</em> that snapshot. The gate is only ever reached when the block store
+ * is about to be (re)seeded from a snapshot (see "Where the gate runs" below), so a marker found
+ * there means one thing only: an earlier attempt at <em>this same</em> re-seed already imported the
+ * lane state and the node died before it finished the rest. Such a retry must be a no-op, so
+ * {@link #checkAndImport} returns — but only after proving both halves of that claim: that
+ * {@code SNAPSHOT/LANE_L1} is present for this boot and records the very hash the marker names (so
+ * the operator is not re-bootstrapping from a <em>newer</em> snapshot while keeping a LANE_L1 that
+ * stops at the older one), and that the local {@link LaneL1Store#stateHash()} still equals the
+ * marker (so a LANE_L1 that has since applied blocks is not re-seeded under, and double-counted
+ * against, a block store that is about to replay them). Either mismatch is refused, naming the
+ * local LANE_L1 directory to delete. A node that simply restarts never reaches any of this: the
+ * snapshot-boot branch is entered only while {@code blockStore.isSnapshotBoot()} is still false.
  *
  * <p><b>Where the gate runs.</b> {@code BlockchainImpl}'s constructor calls it as the very first
  * statement of its snapshot-boot branch — before any stats are built and before the
  * {@code isSnapshotJ()} decision — so every snapshot boot passes through it, and it fails fast
- * ahead of the expensive block/address imports.
+ * ahead of the expensive block/address imports. That branch is guarded by
+ * {@code isSnapshotEnabled() && getSnapshotHeight() > 0 && !blockStore.isSnapshotBoot()}, and
+ * {@code Kernel} sets {@code setSnapshotBoot()} right after construction, so the gate runs on
+ * re-seed boots and on those only.
  *
  * <h3>Why no raw chunk bytes travel in the snapshot</h3>
  *
@@ -151,17 +160,20 @@ public final class LaneL1SnapshotGate {
      *   <li>{@code snapshotHeight < activation}: no-op, directory present or not.</li>
      *   <li>{@code store == null}: {@link IllegalStateException} — past activation the kernel must
      *       have wired LANE_L1 before {@code BlockchainImpl} runs.</li>
-     *   <li>the store carries the import marker ({@link LaneL1Store#importedSnapshotHash()}): the
-     *       import already happened on an earlier boot; return without opening the snapshot
-     *       directory, which may by now have been deleted.</li>
+     *   <li>the store carries the import marker ({@link LaneL1Store#importedSnapshotHash()}): a
+     *       previous attempt at this same re-seed already imported the lane state. Return only if
+     *       {@code SNAPSHOT/LANE_L1} is present and records exactly that hash, and the local state
+     *       hash still equals the marker; otherwise refuse (re-bootstrap from a different snapshot,
+     *       or a LANE_L1 that has moved on since the import).</li>
      *   <li>the store carries state but no marker ({@link LaneL1Store#hasState()}): refuse — that
      *       state cannot be verified against anything.</li>
      *   <li>the snapshot directory is missing: refuse, naming what to fetch.</li>
      *   <li>otherwise: import (hash- and schema-verified by {@link LaneL1Store#importSnapshot}).</li>
      * </ol>
      *
-     * @throws IllegalStateException in cases 2, 4 and 5 above, and when the snapshot itself is
-     *                               rejected (no recorded hash, wrong schema, hash mismatch)
+     * @throws IllegalStateException in cases 2, 3 (on either mismatch), 4 and 5 above, and when the
+     *                               snapshot itself is rejected (no recorded hash, wrong schema,
+     *                               hash mismatch)
      */
     public static void checkAndImport(Config config, long snapshotHeight, LaneL1Store store) {
         long activation = config.getLaneSpec().getLaneActivationHeight();
@@ -177,8 +189,7 @@ public final class LaneL1SnapshotGate {
         }
         Optional<Bytes32> alreadyImported = store.importedSnapshotHash();
         if (alreadyImported.isPresent()) {
-            report("LANE_L1 was already imported from a snapshot (snapshot state hash "
-                    + alreadyImported.get().toHexString() + "); nothing to import");
+            verifyMarker(config, alreadyImported.get(), store);
             return;
         }
         if (store.hasState()) {
@@ -206,6 +217,66 @@ public final class LaneL1SnapshotGate {
             }
             report("imported " + keyCount + " LANE_L1 keys from " + dir + ", state hash "
                     + store.stateHash().toHexString());
+        } finally {
+            source.close();
+        }
+    }
+
+    /**
+     * The marker path: this LANE_L1 already claims to be a snapshot import, and the gate only runs
+     * when the block store is about to be re-seeded, so the only benign reading is "the previous
+     * attempt at this very re-seed got as far as the lane import". Accept that — idempotently, the
+     * store is left untouched — but only once both halves are proven; refuse anything else with the
+     * directory to delete.
+     *
+     * @throws IllegalStateException if {@code SNAPSHOT/LANE_L1} is absent for this boot, records a
+     *                               different hash (re-bootstrap from another snapshot) or records
+     *                               none at all, or if the local state has drifted since the import
+     */
+    private static void verifyMarker(Config config, Bytes32 marker, LaneL1Store store) {
+        Path dir = snapshotDir(config);
+        if (!Files.isDirectory(dir)) {
+            throw new IllegalStateException("LANE_L1 was imported from a snapshot with hash "
+                    + marker.toHexString() + " but SNAPSHOT/LANE_L1 is missing for this boot (" + dir
+                    + "), which re-seeds the block store; place the same snapshot beside SNAPSHOT/BLOCKS "
+                    + "or remove the local LANE_L1 directory (" + laneDir(config) + ") and restart");
+        }
+        Optional<Bytes32> recorded = recordedSnapshotHash(config);
+        if (recorded.isEmpty()) {
+            throw new IllegalStateException("LANE_L1 was imported from a snapshot with hash "
+                    + marker.toHexString() + " but the snapshot at " + dir + " records no state hash; "
+                    + "place the same snapshot beside SNAPSHOT/BLOCKS or remove the local LANE_L1 directory ("
+                    + laneDir(config) + ") and restart");
+        }
+        if (!recorded.get().equals(marker)) {
+            throw new IllegalStateException("LANE_L1 was imported from a snapshot with hash "
+                    + marker.toHexString() + " but this boot seeds from a snapshot with hash "
+                    + recorded.get().toHexString() + "; remove the local LANE_L1 directory ("
+                    + laneDir(config) + ") and restart");
+        }
+        Bytes32 local = store.stateHash();
+        if (!local.equals(marker)) {
+            throw new IllegalStateException("LANE_L1 has moved past the snapshot it was imported from (hash "
+                    + local.toHexString() + " vs imported " + marker.toHexString() + "); this boot re-seeds "
+                    + "the block store, so remove the local LANE_L1 directory (" + laneDir(config)
+                    + ") and restart");
+        }
+        report("LANE_L1 already matches the snapshot at " + dir + " (state hash " + marker.toHexString()
+                + "); nothing to import");
+    }
+
+    /**
+     * The state hash recorded under {@link LaneL1Keys#SNAPSHOT_HASH_KEY} in {@code SNAPSHOT/LANE_L1},
+     * or empty if that snapshot records none (or a value that is not a 32-byte hash). Only called
+     * once the directory is known to exist, so opening it cannot create one.
+     */
+    private static Optional<Bytes32> recordedSnapshotHash(Config config) {
+        RocksdbKVSource source = new RocksdbKVSource(SNAPSHOT_DB_NAME);
+        source.setConfig(config);
+        try {
+            source.init();
+            byte[] v = source.get(LaneL1Keys.SNAPSHOT_HASH_KEY);
+            return v == null || v.length != Bytes32.SIZE ? Optional.empty() : Optional.of(Bytes32.wrap(v));
         } finally {
             source.close();
         }

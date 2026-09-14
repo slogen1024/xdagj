@@ -229,13 +229,14 @@ public class LaneL1SnapshotTest {
     }
 
     /**
-     * The marker makes the import one-shot: a later boot returns without touching the snapshot
-     * directory. It records where this LANE_L1 came from, not what it holds now — so a store that
-     * has since applied blocks (here, simulated by an extra lane) is still accepted. That is the
-     * contract: verifying the hash again would refuse every node that ever applied a block.
+     * The gate only runs while the block store is being re-seeded, so a second pass over it is a
+     * retry of that same re-seed (the node died in the crash window between the lane import and the
+     * end of bootstrap). Such a retry is a no-op — same snapshot, unchanged LANE_L1 — and leaves the
+     * store exactly as the import left it. A LANE_L1 that has moved on since the import is refused
+     * instead: re-seeding the block store under it would replay those blocks a second time.
      */
     @Test
-    public void restartAfterImportIsIdempotentAndDoesNotNeedTheSnapshot() throws Exception {
+    public void retryOfTheSameReseedIsIdempotentButDriftIsRefused() throws Exception {
         Path dirA = root.newFolder("g").toPath();
         Path dirB = root.newFolder("h").toPath();
         Config configA = configIn(dirA);
@@ -261,13 +262,9 @@ public class LaneL1SnapshotTest {
             b.stop();
         }
 
-        // the operator may now delete the snapshot directory: the marker answers on its own
-        FileUtils.deleteDirectory(new File(dirB.resolve(LaneL1SnapshotGate.SNAPSHOT_DB_NAME).toString()));
-        assertFalse(Files.exists(dirB.resolve(LaneL1SnapshotGate.SNAPSHOT_DB_NAME)));
-
         LaneL1Store restarted = openStore(configB);
         try {
-            LaneL1SnapshotGate.checkAndImport(configB, 100L, restarted);
+            LaneL1SnapshotGate.checkAndImport(configB, 100L, restarted); // same snapshot, no drift
             assertEquals(expected, restarted.stateHash());
             assertTrue(restarted.hasLane(LANE));
             assertEquals(Optional.of(expected), restarted.importedSnapshotHash());
@@ -275,17 +272,133 @@ public class LaneL1SnapshotTest {
             restarted.stop();
         }
 
-        // a LANE_L1 that has moved on from the snapshot it booted from is still accepted
+        // a LANE_L1 that has moved on from the snapshot it booted from cannot be re-seeded under
         LaneL1Store moved = openStore(configB);
         try {
             LaneL1Batch extra = new LaneL1Batch();
             extra.putLane(Bytes.random(20), lane(9L));
             moved.commit(extra);
-            LaneL1SnapshotGate.checkAndImport(configB, 100L, moved);
+            Bytes32 drifted = moved.stateHash();
+            assertFalse(expected.equals(drifted));
+
+            IllegalStateException e = assertThrows(IllegalStateException.class,
+                    () -> LaneL1SnapshotGate.checkAndImport(configB, 100L, moved));
+            assertTrue(e.getMessage().startsWith("LANE_L1 has moved past"));
+            assertTrue(e.getMessage().contains(drifted.toHexString()));
+            assertTrue(e.getMessage().contains(expected.toHexString()));
+            assertTrue(e.getMessage().contains(LaneL1SnapshotGate.laneDir(configB).toString()));
+            // refused, not repaired: the store is left exactly as it was
+            assertEquals(drifted, moved.stateHash());
             assertEquals(Optional.of(expected), moved.importedSnapshotHash());
-            assertFalse(expected.equals(moved.stateHash()));
         } finally {
             moved.stop();
+        }
+    }
+
+    /**
+     * Wiping INDEX/BLOCK/TIME and re-bootstrapping from a <em>newer</em> snapshot while keeping the
+     * LANE_L1 of the older one would leave the lane state short of everything in (H1, H2]. The
+     * marker names the snapshot it came from, so the mismatch is caught.
+     */
+    @Test
+    public void rebootstrapFromNewerSnapshotIsRefused() throws Exception {
+        Path dirA = root.newFolder("o").toPath();
+        Path dirB = root.newFolder("p").toPath();
+        Config configA = configIn(dirA);
+        Config configB = configIn(dirB);
+
+        Bytes32 first;
+        LaneL1Store a = openStore(configA);
+        try {
+            LaneL1Batch batch = new LaneL1Batch();
+            batch.putLane(LANE, lane(7L));
+            a.commit(batch);
+            first = a.stateHash();
+            LaneL1SnapshotGate.export(configA, a);
+        } finally {
+            a.stop();
+        }
+        ship(dirA, dirB);
+
+        LaneL1Store b = openStore(configB);
+        try {
+            LaneL1SnapshotGate.checkAndImport(configB, 100L, b);
+            assertEquals(Optional.of(first), b.importedSnapshotHash());
+        } finally {
+            b.stop();
+        }
+
+        // the operator ships a later snapshot over SNAPSHOT/LANE_L1 and re-bootstraps the node
+        Bytes32 later = Bytes32.random();
+        RocksdbKVSource snap = new RocksdbKVSource(LaneL1SnapshotGate.SNAPSHOT_DB_NAME);
+        snap.setConfig(configB);
+        snap.init();
+        try {
+            snap.put(LaneL1Keys.SNAPSHOT_HASH_KEY, later.toArray());
+        } finally {
+            snap.close();
+        }
+
+        LaneL1Store stale = openStore(configB);
+        try {
+            IllegalStateException e = assertThrows(IllegalStateException.class,
+                    () -> LaneL1SnapshotGate.checkAndImport(configB, 200L, stale));
+            assertTrue(e.getMessage().startsWith("LANE_L1 was imported from a snapshot with hash"));
+            assertTrue(e.getMessage().contains("but this boot seeds from a snapshot with hash"));
+            assertTrue(e.getMessage().contains(first.toHexString()));
+            assertTrue(e.getMessage().contains(later.toHexString()));
+            assertTrue(e.getMessage().contains(LaneL1SnapshotGate.laneDir(configB).toString()));
+            assertEquals(Optional.of(first), stale.importedSnapshotHash());
+        } finally {
+            stale.stop();
+        }
+    }
+
+    /**
+     * The marker is not a licence to skip the snapshot: a re-seed boot with no SNAPSHOT/LANE_L1 at
+     * all cannot tell which snapshot the block store is about to be filled from, so it refuses.
+     */
+    @Test
+    public void markerPathRequiresTheSnapshotDirectory() throws Exception {
+        Path dirA = root.newFolder("q").toPath();
+        Path dirB = root.newFolder("r").toPath();
+        Config configA = configIn(dirA);
+        Config configB = configIn(dirB);
+
+        Bytes32 expected;
+        LaneL1Store a = openStore(configA);
+        try {
+            LaneL1Batch batch = new LaneL1Batch();
+            batch.putLane(LANE, lane(7L));
+            a.commit(batch);
+            expected = a.stateHash();
+            LaneL1SnapshotGate.export(configA, a);
+        } finally {
+            a.stop();
+        }
+        ship(dirA, dirB);
+
+        LaneL1Store b = openStore(configB);
+        try {
+            LaneL1SnapshotGate.checkAndImport(configB, 100L, b);
+        } finally {
+            b.stop();
+        }
+
+        FileUtils.deleteDirectory(new File(dirB.resolve(LaneL1SnapshotGate.SNAPSHOT_DB_NAME).toString()));
+        assertFalse(Files.exists(dirB.resolve(LaneL1SnapshotGate.SNAPSHOT_DB_NAME)));
+
+        LaneL1Store restarted = openStore(configB);
+        try {
+            IllegalStateException e = assertThrows(IllegalStateException.class,
+                    () -> LaneL1SnapshotGate.checkAndImport(configB, 100L, restarted));
+            assertTrue(e.getMessage().startsWith("LANE_L1 was imported from a snapshot with hash"));
+            assertTrue(e.getMessage().contains("but SNAPSHOT/LANE_L1 is missing"));
+            assertTrue(e.getMessage().contains(expected.toHexString()));
+            assertTrue(e.getMessage().contains(LaneL1SnapshotGate.laneDir(configB).toString()));
+            assertEquals(expected, restarted.stateHash());
+        } finally {
+            restarted.stop();
         }
     }
 

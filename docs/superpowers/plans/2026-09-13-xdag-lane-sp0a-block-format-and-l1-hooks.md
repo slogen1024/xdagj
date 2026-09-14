@@ -127,7 +127,7 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6
 | `l1/LaneL1Keys.java`、`l1/LaneL1Batch.java`、`l1/LaneL1Store.java` | `LANE_L1` 键布局、批量写、存储 API、快照导出/导入/哈希 |
 | `l1/LaneIds.java` | laneId / contractId 派生，地址工具 |
 | `l1/LaneL1Hooks.java`、`l1/LaneKindHandler.java`、`l1/ApplyContext.java`、`l1/LaneL1Processor.java` | 钩子接口与处理器 |
-| `l1/LaneSnapshotGate.java` | 快照启动时的 `LANE_L1` 门控 |
+| `l1/LaneL1SnapshotGate.java` | 快照启动时的 `LANE_L1` 门控 |
 | `LaneActivation.java` | 激活判定 |
 | `config/spec/LaneSpec.java`（包 `io.xdag.config.spec`） | 配置接口 |
 
@@ -5153,10 +5153,10 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 
 ---
 
-### Task 17: 快照门控 `LaneSnapshotGate`、CLI 导出与 `initSnapshotJ` 接入
+### Task 17: 快照门控 `LaneL1SnapshotGate`、CLI 导出与 `initSnapshotJ` 接入
 
 **Files:**
-- Create: `src/main/java/io/xdag/lane/l1/LaneSnapshotGate.java`
+- Create: `src/main/java/io/xdag/lane/l1/LaneL1SnapshotGate.java`
 - Modify: `src/main/java/io/xdag/cli/XdagCli.java`
 - Modify: `src/main/java/io/xdag/core/BlockchainImpl.java`（`initSnapshotJ` 末尾）
 - Test: `src/test/java/io/xdag/lane/l1/LaneL1SnapshotTest.java`
@@ -5221,16 +5221,16 @@ public class LaneL1SnapshotTest {
         batch.putCode(CODE_HASH, 1L, Bytes.random(700));
         a.commit(batch);
         Bytes32 expected = a.stateHash();
-        LaneSnapshotGate.export(configA, a);
+        LaneL1SnapshotGate.export(configA, a);
         a.stop();
-        assertTrue(Files.isDirectory(dirA.resolve(LaneSnapshotGate.SNAPSHOT_DB_NAME)));
+        assertTrue(Files.isDirectory(dirA.resolve(LaneL1SnapshotGate.SNAPSHOT_DB_NAME)));
 
         // ship the snapshot directory to node B (what operators do with SNAPSHOT/BLOCKS today)
-        XdagCli.copyDir(dirA.resolve(LaneSnapshotGate.SNAPSHOT_DB_NAME).toString(),
-                dirB.resolve(LaneSnapshotGate.SNAPSHOT_DB_NAME).toString());
+        XdagCli.copyDir(dirA.resolve(LaneL1SnapshotGate.SNAPSHOT_DB_NAME).toString(),
+                dirB.resolve(LaneL1SnapshotGate.SNAPSHOT_DB_NAME).toString());
 
         LaneL1Store b = openStore(configB);
-        LaneSnapshotGate.checkAndImport(configB, 100L, b);
+        LaneL1SnapshotGate.checkAndImport(configB, 100L, b);
         assertEquals(expected, b.stateHash());
         assertTrue(b.hasLane(LANE));
         b.stop();
@@ -5243,7 +5243,7 @@ public class LaneL1SnapshotTest {
         LaneL1Store store = openStore(config);
         try {
             IllegalStateException e = assertThrows(IllegalStateException.class,
-                    () -> LaneSnapshotGate.checkAndImport(config, 100L, store));
+                    () -> LaneL1SnapshotGate.checkAndImport(config, 100L, store));
             assertTrue(e.getMessage().contains("LANE_L1 snapshot required"));
         } finally {
             store.stop();
@@ -5257,8 +5257,8 @@ public class LaneL1SnapshotTest {
         config.getLaneSpec().setLaneActivationHeight(1_000L);
         LaneL1Store store = openStore(config);
         try {
-            LaneSnapshotGate.checkAndImport(config, 999L, store); // no directory, no exception
-            assertFalse(Files.exists(dir.resolve(LaneSnapshotGate.SNAPSHOT_DB_NAME)));
+            LaneL1SnapshotGate.checkAndImport(config, 999L, store); // no directory, no exception
+            assertFalse(Files.exists(dir.resolve(LaneL1SnapshotGate.SNAPSHOT_DB_NAME)));
         } finally {
             store.stop();
         }
@@ -5272,21 +5272,21 @@ public class LaneL1SnapshotTest {
         LaneL1Batch batch = new LaneL1Batch();
         batch.putLane(LANE, new LaneRecord(7L, Bytes32.random(), 5L, 32L, 10_000_000L, 1L));
         a.commit(batch);
-        LaneSnapshotGate.export(config, a);
+        LaneL1SnapshotGate.export(config, a);
         a.stop();
 
-        RocksdbKVSource snap = new RocksdbKVSource(LaneSnapshotGate.SNAPSHOT_DB_NAME);
+        RocksdbKVSource snap = new RocksdbKVSource(LaneL1SnapshotGate.SNAPSHOT_DB_NAME);
         snap.setConfig(config);
         snap.init();
         snap.put(LaneL1Keys.lane(LANE), new LaneRecord(8L, Bytes32.random(), 5L, 32L, 10_000_000L, 1L).encode());
         snap.close();
 
         Config fresh = configIn(root.newFolder("f").toPath());
-        XdagCli.copyDir(dir.resolve(LaneSnapshotGate.SNAPSHOT_DB_NAME).toString(),
-                Paths.get(fresh.getNodeSpec().getStoreDir(), LaneSnapshotGate.SNAPSHOT_DB_NAME).toString());
+        XdagCli.copyDir(dir.resolve(LaneL1SnapshotGate.SNAPSHOT_DB_NAME).toString(),
+                Paths.get(fresh.getNodeSpec().getStoreDir(), LaneL1SnapshotGate.SNAPSHOT_DB_NAME).toString());
         LaneL1Store b = openStore(fresh);
         try {
-            assertThrows(IllegalStateException.class, () -> LaneSnapshotGate.checkAndImport(fresh, 100L, b));
+            assertThrows(IllegalStateException.class, () -> LaneL1SnapshotGate.checkAndImport(fresh, 100L, b));
         } finally {
             b.stop();
         }
@@ -5297,11 +5297,11 @@ public class LaneL1SnapshotTest {
 - [ ] **Step 2: 运行，确认失败**
 
 Run: `mvn -q -Dtest=io.xdag.lane.l1.LaneL1SnapshotTest -Dsurefire.failIfNoSpecifiedTests=false test`
-Expected: 编译错误 `cannot find symbol: class LaneSnapshotGate`。
+Expected: 编译错误 `cannot find symbol: class LaneL1SnapshotGate`。
 
-- [ ] **Step 3: 实现 `LaneSnapshotGate`**
+- [ ] **Step 3: 实现 `LaneL1SnapshotGate`**
 
-`src/main/java/io/xdag/lane/l1/LaneSnapshotGate.java`：
+`src/main/java/io/xdag/lane/l1/LaneL1SnapshotGate.java`：
 
 ```java
 package io.xdag.lane.l1;
@@ -5316,11 +5316,11 @@ import java.nio.file.Paths;
  * Snapshot bootstrap rule for LANE_L1: once the snapshot height is at or past the lane activation height, a node
  * booting from a snapshot must also import SNAPSHOT/LANE_L1 (hash-verified). Below activation the directory is ignored.
  */
-public final class LaneSnapshotGate {
+public final class LaneL1SnapshotGate {
 
     public static final String SNAPSHOT_DB_NAME = "SNAPSHOT/LANE_L1";
 
-    private LaneSnapshotGate() {
+    private LaneL1SnapshotGate() {
     }
 
     public static Path snapshotDir(Config config) {
@@ -5364,23 +5364,23 @@ public final class LaneSnapshotGate {
 
 - [ ] **Step 4: 接入 `XdagCli.makeSnapshot` 与 `BlockchainImpl.initSnapshotJ`**
 
-`XdagCli.makeSnapshot(boolean b)`：在 `copyDir(source.toString(),target.toString());` 之后追加（import `io.xdag.lane.l1.LaneL1Store`、`io.xdag.lane.l1.LaneSnapshotGate`）：
+`XdagCli.makeSnapshot(boolean b)`：在 `copyDir(source.toString(),target.toString());` 之后追加（import `io.xdag.lane.l1.LaneL1Store`、`io.xdag.lane.l1.LaneL1SnapshotGate`）：
 
 ```java
         RocksdbKVSource laneSource = new RocksdbKVSource(DatabaseName.LANE_L1.toString());
         laneSource.setConfig(getConfig());
         LaneL1Store laneStore = new LaneL1Store(laneSource);
         laneStore.start();
-        LaneSnapshotGate.export(getConfig(), laneStore);
+        LaneL1SnapshotGate.export(getConfig(), laneStore);
         laneStore.stop();
-        System.out.println("lane state snapshot written to " + LaneSnapshotGate.snapshotDir(getConfig()));
+        System.out.println("lane state snapshot written to " + LaneL1SnapshotGate.snapshotDir(getConfig()));
 ```
 
-`BlockchainImpl.initSnapshotJ()`：在 `XAmount allBalance = ...` 之前追加（import `io.xdag.lane.l1.LaneSnapshotGate`）：
+`BlockchainImpl.initSnapshotJ()`：在 `XAmount allBalance = ...` 之前追加（import `io.xdag.lane.l1.LaneL1SnapshotGate`）：
 
 ```java
         // Lane contracts: the LANE_L1 snapshot is mandatory once the snapshot height is past activation
-        LaneSnapshotGate.checkAndImport(kernel.getConfig(), snapshotHeight, kernel.getLaneL1Store());
+        LaneL1SnapshotGate.checkAndImport(kernel.getConfig(), snapshotHeight, kernel.getLaneL1Store());
 ```
 
 - [ ] **Step 5: 运行测试，确认通过**
@@ -5391,7 +5391,7 @@ Expected: `Tests run: 4, Failures: 0`
 - [ ] **Step 6: 提交**
 
 ```bash
-git add src/main/java/io/xdag/lane/l1/LaneSnapshotGate.java src/main/java/io/xdag/cli/XdagCli.java src/main/java/io/xdag/core/BlockchainImpl.java src/test/java/io/xdag/lane/l1/LaneL1SnapshotTest.java
+git add src/main/java/io/xdag/lane/l1/LaneL1SnapshotGate.java src/main/java/io/xdag/cli/XdagCli.java src/main/java/io/xdag/core/BlockchainImpl.java src/test/java/io/xdag/lane/l1/LaneL1SnapshotTest.java
 git commit -m "Carry LANE_L1 state in snapshots with a verified state hash
 
 Snapshot creation exports SNAPSHOT/LANE_L1 next to SNAPSHOT/BLOCKS and
@@ -5460,6 +5460,6 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 
 **规格覆盖**：§3 Block/EXT → Task 1；§3.4–3.6 编解码与分片链 → Task 2–8；`LaneBlockBuilder` → Task 9；§4 分类与归属 → Task 7、13；§5 存储与 `batchWrite` → Task 10–11；§6 钩子与调用点 → Task 13–14；§7 配置与激活 → Task 12；§8 快照 → Task 17；§9 测试矩阵 → Task 1–17 各自测试 + Task 18 回归（属性测试以 Task 15 的"apply→unwind→re-apply"等价断言实现，随机序列版本留待 SP0b 基准基础设施就绪后补充）；§10 总规格同步已在 spec 提交中完成；§11 文件清单与 §1 一致。
 
-**类型一致性**：`ExtResult<T>(value, error)`、`Classified(kind, value, error)`、`ChunkChain.RawBlockLookup.get(Bytes32)`、`LaneBlockBuilder.Built(block, chunks)`、`LaneL1Store` 的 `getCallCount/getInput/getReverse/getCodeRefCount/getCode/commit/exportSnapshot/importSnapshot/stateHash/sortedKeys/schemaVersion`、`LaneL1Batch` 的 `put*/delete*`、`LaneL1Hooks` 五方法、`LaneSpec` 六方法、`LaneSnapshotGate.export/checkAndImport/snapshotDir/SNAPSHOT_DB_NAME` 在所有任务中保持同名同签名。
+**类型一致性**：`ExtResult<T>(value, error)`、`Classified(kind, value, error)`、`ChunkChain.RawBlockLookup.get(Bytes32)`、`LaneBlockBuilder.Built(block, chunks)`、`LaneL1Store` 的 `getCallCount/getInput/getReverse/getCodeRefCount/getCode/commit/exportSnapshot/importSnapshot/stateHash/sortedKeys/schemaVersion`、`LaneL1Batch` 的 `put*/delete*`、`LaneL1Hooks` 五方法、`LaneSpec` 六方法、`LaneL1SnapshotGate.export/checkAndImport/snapshotDir/SNAPSHOT_DB_NAME` 在所有任务中保持同名同签名。
 
 **已知取舍**：(1) 测试伪主块的难度区间 `[2^46, 2^47)` 与分片块难度 `~2^33` 的分离依赖确定性内容，冲突时改 seed；(2) `TestnetConfig`/`MainnetConfig` 在测试类路径下若缺必填 conf 键，Task 12 的第二个用例按说明降级；(3) `unApplyBlock` 既有的 `allBalance` 回滚不对称不在本 SP 范围。
