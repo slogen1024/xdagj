@@ -453,7 +453,9 @@ public class LaneL1ProcessorTest {
         Bytes address = Bytes.random(20);
         Address output = new Address(BytesUtils.arrayToByte32(address.toArray()), XDAG_FIELD_OUTPUT, ONE, true);
         assertEquals(address, LaneIds.address20(output));
-        Address blockLink = new Address(Bytes32.random(), XDAG_FIELD_OUT, false);
+        // A hash-low-shaped link (first 8 bytes zero): Address.parse reads them as a u64 amount and a
+        // fully random value would overflow toLong() before address20's own check is reached.
+        Address blockLink = new Address(Bytes32.leftPad(Bytes.random(24)), XDAG_FIELD_OUT, false);
         assertThrows(IllegalArgumentException.class, () -> LaneIds.address20(blockLink));
         assertThrows(NullPointerException.class, () -> LaneIds.address20(null));
     }
