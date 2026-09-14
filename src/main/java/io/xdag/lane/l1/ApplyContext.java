@@ -34,21 +34,9 @@ import org.apache.tuweni.bytes.Bytes32;
  * <p>Immutable. {@code mainBlockHash} is not defensively copied because {@link Bytes32} is itself
  * immutable.
  */
-public final class ApplyContext {
+public record ApplyContext(long height, Bytes32 mainBlockHash) {
 
-    private final long height;
-    private final Bytes32 mainBlockHash;
-
-    public ApplyContext(long height, Bytes32 mainBlockHash) {
-        this.height = height;
-        this.mainBlockHash = Objects.requireNonNull(mainBlockHash, "mainBlockHash");
-    }
-
-    public long height() {
-        return height;
-    }
-
-    public Bytes32 mainBlockHash() {
-        return mainBlockHash;
+    public ApplyContext {
+        Objects.requireNonNull(mainBlockHash, "mainBlockHash");
     }
 }

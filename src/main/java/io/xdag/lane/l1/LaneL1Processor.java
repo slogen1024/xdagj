@@ -23,6 +23,8 @@
  */
 package io.xdag.lane.l1;
 
+import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUTPUT;
+
 import io.xdag.config.spec.LaneSpec;
 import io.xdag.core.Address;
 import io.xdag.core.Block;
@@ -43,7 +45,7 @@ import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.EnumSet;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -55,19 +57,23 @@ import org.apache.tuweni.bytes.Bytes32;
 /**
  * L1 semantics of lane blocks, evaluated in {@code applyBlock} DFS order after value settlement.
  * Only active while a context exists (main height at or above the lane activation height, per
- * {@link LaneActivation}); outside that, every hook is inert (SP0a principle P2). One
- * {@code LANE_L1} batch is committed per applied or unapplied block (principle P5), and every write
- * {@link #onBlockApplied} makes has its inverse in {@link #onBlockUnapplied} (principle P3).
+ * {@link LaneActivation}); outside that, every hook is inert except the handler dispatch in
+ * {@link #onBlockUnapplied} (SP0a principle P2). One {@code LANE_L1} batch is committed per applied
+ * or unapplied block (principle P5), and every write {@link #onBlockApplied} makes has its inverse
+ * in {@link #onBlockUnapplied} (principle P3).
  *
- * <p><b>What it records.</b> A block that pays into a lane vault (an address-type output whose
- * 20-byte address is a registered lane) or that creates a lane (a new-lane DEPLOY) produces one
- * {@link InputRecord} per attributed lane, indexed by {@code (laneId, height, index)} with
+ * <p><b>What it records.</b> A block that pays into a lane vault (an {@code XDAG_FIELD_OUTPUT}
+ * address-type output whose 20-byte address is a registered lane — never a {@code COINBASE} field,
+ * which {@code applyBlock} never settles as a payment even though {@code Block.parse} also adds it
+ * to {@code getOutputs()}) or that creates a lane (a new-lane DEPLOY) produces one
+ * {@link InputRecord} per attributed vault output, indexed by {@code (laneId, height, index)} with
  * {@code index} running from the lane's current {@link LaneL1Store#getCallCount} at that height.
  * The record's {@link InputStatus} is the L1 verdict; SP1's execution engine consumes this ordered
  * stream. A DEPLOY that passes every check also registers the lane, the contract and the code blob.
  * Payments into a vault that the block's extension does not explain — a plain transfer, a CALL to
- * an unknown contract, a malformed extension — are still recorded, as {@code INVALID_FORMAT}, so
- * the value that entered the vault is accounted for.
+ * an unknown contract, a malformed extension, or a second {@code OUTPUT} to the same vault in one
+ * block — are still recorded, as {@code INVALID_FORMAT}, so the value that entered the vault is
+ * accounted for.
  *
  * <p><b>Chunk-chain age rule.</b> Every chunk chain a paying block references is walked with
  * {@code minEpoch = XdagTime.getEpoch(payingBlock.getTimestamp()) - 1} — the PAYING block's epoch,
@@ -104,6 +110,12 @@ public final class LaneL1Processor implements LaneL1Hooks {
     private final ChunkChain.RawBlockLookup lookup;
     private final Map<ExtKind, LaneKindHandler> handlers = new EnumMap<>(ExtKind.class);
     private ApplyContext ctx;
+    /**
+     * Set on entry of every hook method; once true, {@link #registerHandler} is rejected. The
+     * dispatch table must be stable before consensus processing begins — registering a handler
+     * mid-stream would mean some already-applied blocks of that kind were never offered to it.
+     */
+    private boolean started;
 
     public LaneL1Processor(LaneL1Store store, LaneSpec spec, ChunkChain.RawBlockLookup lookup) {
         this.store = Objects.requireNonNull(store, "store");
@@ -113,28 +125,31 @@ public final class LaneL1Processor implements LaneL1Hooks {
     }
 
     /**
-     * Registers the SP2/SP3 semantics of one extension kind.
+     * Registers the SP2/SP3 semantics of one extension kind. Must be called before the first hook
+     * runs (any of {@link #onSetMainBegin}, {@link #onBlockApplied}, {@link #onSetMainEnd},
+     * {@link #onBlockUnapplied} or {@link #onUnsetMain}); registering later would leave already
+     * -processed blocks of that kind undispatched.
      *
      * @throws NullPointerException     if {@code kind} or {@code handler} is {@code null}
      * @throws IllegalArgumentException if {@code kind} is {@code CALL}, {@code DEPLOY} or
      *                                  {@code CHUNK} — those are built in and not pluggable
+     * @throws IllegalStateException    if a hook has already run
      */
     public void registerHandler(ExtKind kind, LaneKindHandler handler) {
         Objects.requireNonNull(kind, "kind");
         Objects.requireNonNull(handler, "handler");
+        if (started) {
+            throw new IllegalStateException("cannot register a handler after the first hook has run: " + kind);
+        }
         if (BUILT_IN.contains(kind)) {
             throw new IllegalArgumentException("built-in kind is not pluggable: " + kind);
         }
         handlers.put(kind, handler);
     }
 
-    /** Current apply context, null outside an activated setMain. Exposed for tests. */
-    public ApplyContext context() {
-        return ctx;
-    }
-
     @Override
     public void onSetMainBegin(long height, Block mainBlock) {
+        started = true;
         if (ctx != null) {
             // An unbalanced call from the caller (a missing onSetMainEnd), not a consensus event.
             log.warn("lane apply context already open at height {}, overwriting with height {}", ctx.height(), height);
@@ -142,18 +157,37 @@ public final class LaneL1Processor implements LaneL1Hooks {
         ctx = activation.isActive(height) ? new ApplyContext(height, mainBlock.getHash()) : null;
     }
 
+    /**
+     * Closes the apply context opened by {@link #onSetMainBegin} for this {@code height}. A
+     * recorded context whose height disagrees with this call's height indicates an unbalanced
+     * begin/end pair from the caller (a consensus-event bug, not a lane-layer one); logged rather
+     * than thrown, since the caller's {@code setMain} must still be allowed to finish.
+     */
     @Override
     public void onSetMainEnd(long height, Block mainBlock) {
+        started = true;
+        if (ctx != null && ctx.height() != height) {
+            log.warn("lane apply context height mismatch at onSetMainEnd: open context height {}, closing height {}",
+                    ctx.height(), height);
+        }
         ctx = null;
     }
 
+    /**
+     * Closes the apply context on the unwind path. Unlike {@link #onSetMainEnd} this is not paired
+     * with a specific {@link #onSetMainBegin} call for the same main block being unwound — the
+     * context being closed may belong to whatever {@code setMain} last opened one — so no height
+     * mismatch is checked here.
+     */
     @Override
     public void onUnsetMain(long height, Block mainBlock) {
+        started = true;
         ctx = null;
     }
 
     @Override
     public void onBlockApplied(Block block) {
+        started = true;
         if (ctx == null) {
             return;
         }
@@ -168,7 +202,8 @@ public final class LaneL1Processor implements LaneL1Hooks {
         List<InputRef> refs = new ArrayList<>();
         // Per-lane next input index within this block; because LaneL1Batch keeps only the last write
         // per key, the repeated putCallCount for one (lane, height) converges on the final count.
-        Map<Bytes, Long> counts = new HashMap<>();
+        // LinkedHashMap for deterministic iteration order below, matching LaneL1Batch's own ordering.
+        Map<Bytes, Long> counts = new LinkedHashMap<>();
         boolean vaultConsumed = false;
 
         if (c.kind() == ExtKind.DEPLOY && c.isOk()) {
@@ -193,69 +228,95 @@ public final class LaneL1Processor implements LaneL1Hooks {
         } else if (c.kind() != null && c.isOk()) {
             LaneKindHandler handler = handlers.get(c.kind());
             if (handler != null) {
-                handler.onApplied(block, c, ctx);
+                handler.onApplied(block, c, ctx, batch);
             }
         }
 
-        for (int i = 0; i < vaults.size(); i++) {
-            if (i == 0 && vaultConsumed) {
-                continue;
+        if (!vaultConsumed) {
+            for (Bytes v : vaults) {
+                record(batch, refs, counts, v, blockHash, null, InputStatus.INVALID_FORMAT, LaneIds.ZERO_ADDRESS);
             }
-            record(batch, refs, counts, vaults.get(i), blockHash, null, InputStatus.INVALID_FORMAT,
-                    LaneIds.ZERO_ADDRESS);
         }
-        if (refs.isEmpty()) {
-            // Nothing was attributed, so nothing was written either: record() is the only entry
-            // point that populates the batch. Never commit an empty batch.
+        if (refs.isEmpty() && batch.isEmpty()) {
+            // Nothing was attributed and no handler wrote anything either: record() is the only
+            // entry point that populates refs, but a handler may still have written to the batch
+            // directly. Never commit an empty batch.
             return;
         }
-        batch.putReverse(blockHash, refs);
+        if (!refs.isEmpty()) {
+            batch.putReverse(blockHash, refs);
+        }
         store.commit(batch);
         log.debug("lane inputs recorded: block={} height={} refs={}", blockHash, ctx.height(), refs.size());
     }
 
     /**
      * Undoes exactly what {@link #onBlockApplied} wrote for this block, reading the reverse index
-     * rather than re-deriving anything. It deliberately never consults {@link #ctx}: unwinding runs
-     * outside any {@code setMain}, so the height comes from the recorded {@link InputRef}s.
+     * rather than re-deriving anything, and dispatches the block's kind handler (if any) — see
+     * {@link LaneKindHandler} for why this dispatch, unlike {@link #onBlockApplied}'s, may fire for
+     * a block whose {@code onApplied} was never called. It deliberately never consults {@link #ctx}:
+     * unwinding runs outside any {@code setMain}, so the height comes from the recorded
+     * {@link InputRef}s.
+     *
+     * <p>The count arithmetic below is only correct when unapply runs in the exact reverse of apply
+     * order: the block being unapplied must own the top indices of each (lane, height) it touched,
+     * i.e. it must be the most recently applied block still standing at that (lane, height). See
+     * {@link #undoDeploy}'s canary and the clamp below for what happens when that invariant is
+     * violated instead of holding.
+     *
+     * <p>A corrupt {@code INPUT} record — {@link InputRecord#decode} or {@link InputStatus#fromCode}
+     * throwing — is a deliberate fail-stop: this method does not catch it, since unwinding cannot
+     * proceed correctly on a record it cannot even parse, and a silent skip would be worse than
+     * surfacing the DB corruption.
      */
     @Override
     public void onBlockUnapplied(Block block) {
+        started = true;
         Bytes32 blockHash = block.getHash();
         Classified c = LaneBlockClassifier.classify(block);
+        LaneL1Batch batch = new LaneL1Batch();
         if (c.kind() != null && c.isOk() && !BUILT_IN.contains(c.kind())) {
             LaneKindHandler handler = handlers.get(c.kind());
             if (handler != null) {
-                handler.onUnapplied(block, c);
+                handler.onUnapplied(block, c, batch);
             }
         }
         List<InputRef> refs = store.getReverse(blockHash);
-        if (refs.isEmpty()) {
-            return;
-        }
-        LaneL1Batch batch = new LaneL1Batch();
-        Map<Bytes, Long> counts = new HashMap<>();
-        long height = refs.get(0).height();
-        for (int i = refs.size() - 1; i >= 0; i--) {
-            InputRef r = refs.get(i);
-            InputRecord in = store.getInput(r.laneId(), r.height(), r.index());
-            batch.deleteInput(r.laneId(), r.height(), r.index());
-            long remaining = counts.computeIfAbsent(r.laneId(), l -> store.getCallCount(l, r.height())) - 1;
-            counts.put(r.laneId(), remaining);
-            if (in != null && in.kind() == ExtKind.DEPLOY && in.status() == InputStatus.OK) {
-                undoDeploy(blockHash, r.laneId(), in.contract(), batch);
+        if (!refs.isEmpty()) {
+            // LinkedHashMap for deterministic iteration order below, matching LaneL1Batch's own ordering.
+            Map<Bytes, Long> counts = new LinkedHashMap<>();
+            long height = refs.get(0).height();
+            for (int i = refs.size() - 1; i >= 0; i--) {
+                InputRef r = refs.get(i);
+                InputRecord in = store.getInput(r.laneId(), r.height(), r.index());
+                batch.deleteInput(r.laneId(), r.height(), r.index());
+                long remaining = counts.computeIfAbsent(r.laneId(), l -> store.getCallCount(l, r.height())) - 1;
+                counts.put(r.laneId(), remaining);
+                if (in != null && in.kind() == ExtKind.DEPLOY && in.status() == InputStatus.OK) {
+                    undoDeploy(blockHash, r.laneId(), in.contract(), batch);
+                }
             }
-        }
-        for (Map.Entry<Bytes, Long> e : counts.entrySet()) {
-            if (e.getValue() <= 0) {
-                batch.deleteCallCount(e.getKey(), height);
-            } else {
-                batch.putCallCount(e.getKey(), height, e.getValue());
+            for (Map.Entry<Bytes, Long> e : counts.entrySet()) {
+                long remaining = e.getValue();
+                if (remaining <= 0) {
+                    if (remaining < 0) {
+                        // Canary: unapply ran out of order (this block did not own the top indices
+                        // of this (lane, height)). Clamp to the floor rather than write a negative
+                        // count that could never have been produced by onBlockApplied.
+                        log.error("lane call count went negative for lane={} height={}: {} (unapply out of order?)",
+                                e.getKey(), height, remaining);
+                    }
+                    batch.deleteCallCount(e.getKey(), height);
+                } else {
+                    batch.putCallCount(e.getKey(), height, remaining);
+                }
             }
+            batch.deleteReverse(blockHash);
+            log.debug("lane inputs removed: block={} height={} refs={}", blockHash, height, refs.size());
         }
-        batch.deleteReverse(blockHash);
-        store.commit(batch);
-        log.debug("lane inputs removed: block={} height={} refs={}", blockHash, height, refs.size());
+        if (!batch.isEmpty()) {
+            store.commit(batch);
+        }
     }
 
     /**
@@ -279,7 +340,6 @@ public final class LaneL1Processor implements LaneL1Hooks {
         }
         if (status == InputStatus.OK) {
             if (d.codeByChain()) {
-                chunks += chainCount(d.codeChainHead(), minEpoch);
                 ExtResult<Bytes> assembled = ChunkChain.assemble(d.codeChainHead(), lookup,
                         spec.getLaneMaxChunksPerChain(), minEpoch);
                 if (!assembled.isOk()) {
@@ -290,6 +350,11 @@ public final class LaneL1Processor implements LaneL1Hooks {
                     status = InputStatus.INVALID_FORMAT;
                 } else {
                     code = assembled.value();
+                    // Only walk the chain a second time once assemble has actually accepted it:
+                    // countLenient == N for a chain assemble accepts (see chainCount's Javadoc), so
+                    // this is not merely an optimization — it makes the fee basis depend on assemble
+                    // having succeeded, not on the lenient walk alone.
+                    chunks += chainCount(d.codeChainHead(), minEpoch);
                 }
             } else if (!store.hasCode(d.codeHash())) {
                 status = InputStatus.INVALID_FORMAT;
@@ -315,10 +380,13 @@ public final class LaneL1Processor implements LaneL1Hooks {
             batch.putLane(laneId, lane.withContractCount(lane.contractCount() + 1));
         }
         batch.putContract(contract, new ContractRecord(laneId, d.codeHash(), ctx.height(), blockHash));
-        if (store.hasCode(d.codeHash())) {
+        long codeRefCount = store.getCodeRefCount(d.codeHash());
+        if (codeRefCount > 0) {
             // Bump the refcount only: content addressing (the sha256 match above) guarantees the
-            // stored blob already equals this block's code, so rewriting it would be pure cost.
-            batch.putCodeRef(d.codeHash(), store.getCodeRefCount(d.codeHash()) + 1);
+            // stored blob already equals this block's code, so rewriting it would be pure cost. A
+            // refcount of 0 is never written (LaneL1Store#getCodeRefCount), so codeRefCount > 0 is
+            // equivalent to store.hasCode(d.codeHash()) — one read instead of two.
+            batch.putCodeRef(d.codeHash(), codeRefCount + 1);
         } else {
             batch.putCode(d.codeHash(), 1L, code);
         }
@@ -340,9 +408,24 @@ public final class LaneL1Processor implements LaneL1Hooks {
         LaneRecord lane = store.getLane(laneId);
         if (lane != null) {
             if (lane.createBlockHash().equals(blockHash)) {
+                if (lane.contractCount() != 1) {
+                    // Canary: the lane's creating DEPLOY is being unwound, so no other DEPLOY into
+                    // it should still be standing (they must all have been unwound first, in exact
+                    // reverse apply order). A count other than 1 here means that ordering was
+                    // violated; logged rather than thrown so the unwind can still complete.
+                    log.error("lane {} contractCount={} != 1 when unapplying its creating block {} "
+                            + "(unapply out of order?)", laneId, lane.contractCount(), blockHash);
+                }
                 batch.deleteLane(laneId);
             } else {
-                batch.putLane(laneId, lane.withContractCount(lane.contractCount() - 1));
+                long newCount = lane.contractCount() - 1;
+                if (newCount < 0) {
+                    // Clamp instead of letting LaneRecord's u32 range check throw out of unSetMain.
+                    log.error("lane {} contractCount would go negative on unapply of {}; clamping to 0",
+                            laneId, blockHash);
+                    newCount = 0;
+                }
+                batch.putLane(laneId, lane.withContractCount(newCount));
             }
         }
     }
@@ -356,11 +439,18 @@ public final class LaneL1Processor implements LaneL1Hooks {
         refs.add(new InputRef(laneId, ctx.height(), index));
     }
 
-    /** Address-type outputs whose address is a registered lane vault, in field order. */
+    /**
+     * {@code XDAG_FIELD_OUTPUT} address-type outputs whose address is a registered lane vault, in
+     * field order. {@code Block.getOutputs()} also contains the block's {@code COINBASE} field (if
+     * any), parsed with {@code isAddress = true} by {@code Block.parse}; that field is deliberately
+     * excluded here because {@code applyBlock} only ever settles {@code XDAG_FIELD_INPUT} and
+     * {@code XDAG_FIELD_OUTPUT} value transfers, never a {@code COINBASE} field, so a COINBASE link
+     * to a lane vault must not be recorded as a payment into it.
+     */
     private List<Bytes> vaultOutputs(Block block) {
         List<Bytes> out = new ArrayList<>();
         for (Address o : block.getOutputs()) {
-            if (o.getIsAddress()) {
+            if (o.getIsAddress() && o.getType() == XDAG_FIELD_OUTPUT) {
                 Bytes a = LaneIds.address20(o);
                 if (store.hasLane(a)) {
                     out.add(a);
@@ -381,9 +471,22 @@ public final class LaneL1Processor implements LaneL1Hooks {
     /**
      * Number of chunk blocks the chunk fee is charged for: only chunks the network actually stores
      * under the age rule count, since {@link ChunkChain#countLenient} stops at the first missing,
-     * too-old or non-chunk hop. For a chain that {@link ChunkChain#assemble} accepted this is
-     * exactly the chain's length; on a chain assembly rejected it is an upper bound the fee check
-     * never reaches, because a rejected chain has already forced a non-OK status.
+     * too-old or non-chunk hop.
+     *
+     * <p>For a DEPLOY's code chain — the only chain L1 itself ever assembles — {@link #applyDeploy}
+     * only calls this after {@link ChunkChain#assemble} has already accepted the chain, at which
+     * point this returns exactly the chain's length; a chain assembly rejects never reaches this
+     * call at all, since the rejection has already forced a non-OK status.
+     *
+     * <p>For an args chain (a DEPLOY's init args, or a CALL's args) L1 never assembles it — SP1's
+     * execution engine does, later, and a chain that fails to assemble there simply fails that
+     * call/deploy in-lane with a refund. For those chains the lenient count returned here IS the
+     * fee basis, by design: the fee charges only for the chunk blocks the network actually stores
+     * under the age rule, whether or not the chain would ever assemble. This is a deliberate
+     * divergence from {@link ChunkChain}'s class-level warning that a fee check built on
+     * {@code countLenient} "must be evaluated together with, or strictly after," the
+     * {@code assemble} verdict — that warning is about a chain L1 itself assembles; an args chain
+     * has no L1 {@code assemble} verdict to evaluate against in the first place.
      */
     private int chainCount(Bytes32 head, long minEpoch) {
         return head == null ? 0 : ChunkChain.countLenient(head, lookup, spec.getLaneMaxChunksPerChain(), minEpoch);

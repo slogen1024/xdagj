@@ -23,6 +23,7 @@
  */
 package io.xdag.lane.l1;
 
+import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_COINBASE;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_INPUT;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUT;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUTPUT;
@@ -49,6 +50,7 @@ import io.xdag.crypto.hash.HashUtils;
 import io.xdag.crypto.keys.ECKeyPair;
 import io.xdag.lane.InMemoryKVSource;
 import io.xdag.lane.ext.BondExt;
+import io.xdag.lane.ext.CallExt;
 import io.xdag.lane.ext.ChunkChainBuilder;
 import io.xdag.lane.ext.Classified;
 import io.xdag.lane.ext.DeployExt;
@@ -86,11 +88,11 @@ public class LaneL1ProcessorTest {
     /** A handler that records nothing; used where only registration behaviour is under test. */
     private static final LaneKindHandler INERT = new LaneKindHandler() {
         @Override
-        public void onApplied(Block block, Classified classified, ApplyContext ctx) {
+        public void onApplied(Block block, Classified classified, ApplyContext ctx, LaneL1Batch batch) {
         }
 
         @Override
-        public void onUnapplied(Block block, Classified classified) {
+        public void onUnapplied(Block block, Classified classified, LaneL1Batch batch) {
         }
     };
 
@@ -321,16 +323,20 @@ public class LaneL1ProcessorTest {
     @Test
     public void handlersAreDispatchedForOtherKinds() {
         List<Classified> seen = new ArrayList<>();
+        Bytes marker = Bytes.random(20);
         proc.registerHandler(ExtKind.BOND, new LaneKindHandler() {
             @Override
-            public void onApplied(Block block, Classified classified, ApplyContext ctx) {
+            public void onApplied(Block block, Classified classified, ApplyContext ctx, LaneL1Batch batch) {
                 assertEquals(10L, ctx.height());
                 seen.add(classified);
+                // Any LaneL1Batch put: proves the processor commits the handler's own writes too.
+                batch.putCallCount(marker, 1, 7);
             }
 
             @Override
-            public void onUnapplied(Block block, Classified classified) {
+            public void onUnapplied(Block block, Classified classified, LaneL1Batch batch) {
                 seen.remove(classified);
+                batch.deleteCallCount(marker, 1);
             }
         });
         proc.onSetMainBegin(10, mainBlock);
@@ -339,9 +345,18 @@ public class LaneL1ProcessorTest {
         apply(bondBlock);
         assertEquals(1, seen.size());
         assertEquals(bond, seen.get(0).as(BondExt.class));
-        assertEquals(1, src.keys().size()); // stub handler writes nothing
+        assertEquals(7L, store.getCallCount(marker, 1));
+        assertEquals(2, src.keys().size()); // META + the handler's own key; the stub itself records nothing else
         proc.onBlockUnapplied(bondBlock);
         assertTrue(seen.isEmpty());
+        assertEquals(0L, store.getCallCount(marker, 1));
+        assertEquals(1, src.keys().size());
+    }
+
+    @Test
+    public void registerHandlerAfterFirstHookRunThrows() {
+        proc.onSetMainBegin(10, mainBlock);
+        assertThrows(IllegalStateException.class, () -> proc.registerHandler(ExtKind.BOND, INERT));
     }
 
     @Test
@@ -484,11 +499,89 @@ public class LaneL1ProcessorTest {
 
         // The undo halves the invariant the same way: blob survives the first undo, dies with the last.
         proc.onBlockUnapplied(second.block());
+        assertEquals(1L, store.getLane(laneId).contractCount());
         assertEquals(1L, store.getCodeRefCount(codeHash));
         assertEquals(marker, store.getCode(codeHash));
         proc.onBlockUnapplied(first.block());
         assertEquals(0L, store.getCodeRefCount(codeHash));
         assertFalse(store.hasCode(codeHash));
         assertNull(store.getCode(codeHash));
+    }
+
+    @Test
+    public void coinbaseFieldIsNotTreatedAsVaultPayment() {
+        proc.onSetMainBegin(10, mainBlock);
+        LaneBlockBuilder.Built deploy = deployNewLane(payload(600, 70));
+        apply(deploy);
+        Bytes laneId = LaneIds.laneIdOf(deploy.block().getHash());
+        long before = store.getCallCount(laneId, 10);
+
+        List<Address> links = List.of(
+                new Address(BytesUtils.arrayToByte32(laneId.toArray()), XDAG_FIELD_COINBASE, true));
+        Block coinbaseOnly = extBlockAt(TS, FEE, List.of(), links);
+        apply(coinbaseOnly);
+
+        // A COINBASE-only link is never settled by applyBlock, so it must record nothing at all.
+        assertEquals(before, store.getCallCount(laneId, 10));
+        assertTrue(store.getReverse(coinbaseOnly.getHash()).isEmpty());
+    }
+
+    @Test
+    public void callArgsChainAgeBoundExemptsFeeCheckWhenChainIsTooOld() {
+        proc.onSetMainBegin(10, mainBlock);
+        LaneBlockBuilder.Built deploy = deployNewLane(payload(600, 71));
+        apply(deploy);
+        Bytes laneId = LaneIds.laneIdOf(deploy.block().getHash());
+        Bytes contract = LaneIds.contractIdOf(deploy.block().getHash());
+
+        // Three epochs below the paying block: older than minEpoch = epoch(payingBlock) - 1, so the
+        // age-bounded lenient count is 0 even though the chain (one real chunk) exists.
+        List<Block> chain = ChunkChainBuilder.split(config, payload(20, 72), TS - 3 * EPOCH);
+        for (Block c : chain) {
+            dag.put(Bytes32.wrap(c.getHashLow().toArray()), c);
+        }
+        Bytes32 argsHead = Bytes32.wrap(chain.get(0).getHashLow().toArray());
+
+        CallExt call = new CallExt(CallExt.FLAG_ARGS_CHAIN, contract, 1, 100L, 0, Bytes.EMPTY, argsHead);
+        List<Bytes32> ext = new ArrayList<>();
+        ext.add(call.encodeHeader());
+        ext.addAll(call.encodePayload());
+        List<Address> links = List.of(
+                new Address(BytesUtils.arrayToByte32(laneId.toArray()), XDAG_FIELD_OUTPUT, ONE, true),
+                new Address(argsHead, XDAG_FIELD_OUT, false));
+        // A fee that would be INVALID_FEE for even a single real chunk (spec's chunk fee is 10
+        // mXDAG); OK here only because the age bound excludes the chunk from the count entirely.
+        Block callBlock = extBlockAt(TS, XAmount.of(1, XUnit.MILLI_XDAG), ext, links);
+        apply(callBlock);
+
+        InputRecord in = store.getInput(laneId, 10, 1);
+        assertEquals(ExtKind.CALL, in.kind());
+        assertEquals(InputStatus.OK, in.status());
+    }
+
+    @Test
+    public void duplicateVaultOutputsAreBothRecordedAsInvalidFormat() {
+        proc.onSetMainBegin(10, mainBlock);
+        LaneBlockBuilder.Built deploy = deployNewLane(payload(600, 73));
+        apply(deploy);
+        Bytes laneId = LaneIds.laneIdOf(deploy.block().getHash());
+        long n = store.getCallCount(laneId, 10);
+
+        List<Address> links = List.of(
+                new Address(BytesUtils.arrayToByte32(laneId.toArray()), XDAG_FIELD_OUTPUT, ONE, true),
+                new Address(BytesUtils.arrayToByte32(laneId.toArray()), XDAG_FIELD_OUTPUT, ONE, true));
+        Block dup = extBlockAt(TS, FEE, List.of(), links);
+        apply(dup);
+
+        assertEquals(InputStatus.INVALID_FORMAT, store.getInput(laneId, 10, n).status());
+        assertNull(store.getInput(laneId, 10, n).kind());
+        assertEquals(InputStatus.INVALID_FORMAT, store.getInput(laneId, 10, n + 1).status());
+        assertNull(store.getInput(laneId, 10, n + 1).kind());
+        assertEquals(n + 2, store.getCallCount(laneId, 10));
+
+        proc.onBlockUnapplied(dup);
+        assertEquals(n, store.getCallCount(laneId, 10));
+        assertNull(store.getInput(laneId, 10, n));
+        assertNull(store.getInput(laneId, 10, n + 1));
     }
 }

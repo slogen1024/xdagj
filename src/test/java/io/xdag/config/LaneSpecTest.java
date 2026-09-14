@@ -183,6 +183,24 @@ public class LaneSpecTest {
     }
 
     @Test
+    public void chunkFeeTimesMaxPerChainOverflowIsRejected() {
+        // feeMilliXdag=1e10 -> laneChunkFee = 1e16 nano, itself well within XAmount.of's range; but
+        // 1e16 x maxPerChain=2e9 overflows a long, which must be rejected at startup rather than
+        // silently wrapped by the consensus chunk-fee re-check later.
+        withProperty("lane.chunk.feeMilliXdag", "10000000000", () -> withProperty("lane.chunk.maxPerChain",
+                "2000000000", () -> {
+                    try {
+                        new DevnetConfig();
+                        fail("expected IllegalArgumentException");
+                    } catch (IllegalArgumentException e) {
+                        assertTrue(e.getMessage().contains("lane.chunk.feeMilliXdag"));
+                        assertTrue(e.getMessage().contains("lane.chunk.maxPerChain"));
+                    }
+                    return null;
+                }));
+    }
+
+    @Test
     public void inlineArgsBoundMatchesWireFormat() {
         assertEquals(CallExt.MAX_INLINE_ARGS, new DevnetConfig().getLaneMaxInlineArgs());
     }

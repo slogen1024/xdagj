@@ -39,10 +39,23 @@ import io.xdag.lane.ext.Classified;
  * and therefore gets no context. An implementation must be reorg-symmetric (SP0a principle P3) and
  * must depend only on the block's raw bytes, the {@code LANE_L1} state at that moment, and the
  * protocol parameters — never on wall-clock time or any node-local state.
+ *
+ * <p><b>{@code onUnapplied} may see a block {@code onApplied} never saw.</b> The processor
+ * dispatches {@link #onUnapplied} for any block whose classified kind is handled, unconditionally
+ * — the unwind path has no apply context and therefore no way to know whether this block's height
+ * was ever active, so it cannot tell whether the matching {@link #onApplied} actually ran. An
+ * implementation must therefore be undo-idempotent: {@link #onUnapplied} must be safe to call for
+ * a block it never applied, which means it must be keyed on its own recorded state — undoing only
+ * what a stored record proves it did — rather than assuming the pairing with {@link #onApplied} is
+ * exact.
+ *
+ * <p>Both methods receive the single {@code LANE_L1} batch the processor is building for this
+ * block (principle P5: one batch, one commit, per applied or unapplied block); an implementation
+ * writes its own state into that batch rather than committing anything itself.
  */
 public interface LaneKindHandler {
 
-    void onApplied(Block block, Classified classified, ApplyContext ctx);
+    void onApplied(Block block, Classified classified, ApplyContext ctx, LaneL1Batch batch);
 
-    void onUnapplied(Block block, Classified classified);
+    void onUnapplied(Block block, Classified classified, LaneL1Batch batch);
 }
