@@ -95,7 +95,7 @@
 - 哈希 32B、地址 20B 原样。
 - ext 头 byte0 = kind；byte1..31 按 kind 布局；未使用字节必须为 0，解码时非 0 → `ExtError.RESERVED_NONZERO`。
 - `decode(Bytes32 header, List<Bytes32> payload, List<Address> links)` 返回 `Result<T, ExtError>`。
-- `ExtError` 枚举（**只追加、不重排**）：`NO_EXT, UNKNOWN_KIND, RESERVED_NONZERO, BAD_LENGTH, MISSING_LINK, EXTRA_LINK, INLINE_ARGS_TOO_LONG, PAYLOAD_COUNT_MISMATCH, CHUNK_SEQ_GAP, CHUNK_TOTAL_MISMATCH, CHUNK_TOO_MANY, CHUNK_TAIL_HAS_LINK, CHUNK_CYCLE, NOT_A_CHUNK, CODE_TOO_LARGE, CODE_HASH_MISMATCH, CODE_UNKNOWN, CHUNK_TOO_OLD`。其中 `NOT_A_CHUNK` = 分片链走到一个"存在但不是 CHUNK"的块；`CODE_HASH_MISMATCH` / `CODE_UNKNOWN` 为 SP1 代码库预留，SP0a 的编解码器不产生；`CHUNK_TOO_OLD` 是 §3.6 的年龄规则，追加在最后一位。
+- `ExtError` 枚举（**只追加、不重排**）：`NO_EXT, UNKNOWN_KIND, RESERVED_NONZERO, BAD_LENGTH, MISSING_LINK, EXTRA_LINK, INLINE_ARGS_TOO_LONG, PAYLOAD_COUNT_MISMATCH, CHUNK_SEQ_GAP, CHUNK_TOTAL_MISMATCH, CHUNK_TOO_MANY, CHUNK_TAIL_HAS_LINK, CHUNK_CYCLE, NOT_A_CHUNK, CODE_TOO_LARGE, CODE_HASH_MISMATCH, CODE_UNKNOWN, CHUNK_TOO_OLD`。其中 `NOT_A_CHUNK` = 分片链走到一个"存在但不是 CHUNK"的块；`CODE_TOO_LARGE` / `CODE_HASH_MISMATCH` / `CODE_UNKNOWN` 三个都为 SP1 代码库预留，SP0a 的编解码器不产生（§4.2 的 `CODE_TOO_LARGE` 是 `InputStatus` 的同名常量，不是 `ExtError`）；`CHUNK_TOO_OLD` 是 §3.6 的年龄规则，追加在最后一位。
 - `ExtKind.fromCode(int)` 按**无符号**比较 kind 字节（`(k.code & 0xff) == code`）；未分配的码返回 `null` → `UNKNOWN_KIND`，不抛异常。
 
 ### 3.5 `ExtKind` 与记录
@@ -254,7 +254,7 @@ DEPLOY 的 `status == OK` 时额外写：新建通道 → `putLane(laneId, LaneR
 
 ## 5. `LANE_L1` 存储
 
-新增 `DatabaseName.LANE_L1`；`RocksdbFactory` 按需创建；`Kernel` 在 `addressStore` 之后构造 `LaneL1Store` 并 `start()`。
+新增 `DatabaseName.LANE_L1`；`RocksdbFactory` 按需创建；`Kernel` 在 `orphanBlockStore.start()` 之后、`new BlockchainImpl(this)` 之前构造 `LaneL1Store` 并 `start()`。
 
 ### 5.1 `KVSource.batchWrite`
 
@@ -385,7 +385,7 @@ public interface LaneL1Hooks {
 判定顺序：
 
 1. `snapshotHeight < activationHeight` → 直接返回（目录在不在都忽略，`store` 为 `null` 也不管）。
-2. 已到激活高度而 `store == null` → **抛**（节点没有 `LANE_L1` 实例，却要在激活后的高度上跑通道语义）。
+3. 本地 `LANE_L1` 已带 `0xFF` 标记（`importedSnapshotHash().isPresent()`）→ **只有在本次启动的 `SNAPSHOT/LANE_L1` 目录存在、它记录的 `0xFF` 哈希正好等于标记、且本地 `stateHash()` 仍等于标记**这三条同时成立时才幂等返回（同一次重新灌库的崩溃窗口重试）；任何一条不成立都**抛**，并提示删掉本地 `LANE_L1` 目录重启（目录缺失、快照未记录哈希、快照哈希 ≠ 标记 = "本次要用另一份快照灌库"、本地哈希 ≠ 标记 = "本地已经越过了导入时的状态"，各自一条消息）。`0xFF` 是**一次性的持久标记**：一次成功的导入会把快照里那份哈希写进本地库的 `LaneL1Keys.SNAPSHOT_HASH_KEY`，**与导入的全部 key 在同一个 `batchWrite` 里**原子落盘；它不计入 `stateHash()`，所以不影响状态哈希语义。它**不是**"跳过校验"的通行证：这道门只在块存储即将被快照重新灌库时才会到达（快照分支要求 `!blockStore.isSnapshotBoot()`，而 `Kernel` 构造完成后立即 `setSnapshotBoot()`），普通重启根本走不到这里；因此标记存在只可能意味着"上一次对**这同一份**快照的灌库已经导入过 lane 状态"，两半都要被证明。运维在节点成功启动之前**不要**删掉 `SNAPSHOT/LANE_L1`。
 3. 本地 `LANE_L1` 已带 `0xFF` 标记（`importedSnapshotHash().isPresent()`）→ **直接返回**，连快照目录都不打开。`0xFF` 是**一次性的持久标记**：一次成功的导入会把快照里那份哈希写进本地库的 `LaneL1Keys.SNAPSHOT_HASH_KEY`，**与导入的全部 key 在同一个 `batchWrite` 里**原子落盘。它不计入 `stateHash()`，所以不影响状态哈希语义。它回答的是"这份状态是不是从快照来的"，**而不是**"这份状态现在还等不等于快照"——之后正常 apply 了很多块的节点仍然带着它、仍然被接受。它的作用是让这道门幂等：节点起来之后运维可以把 `SNAPSHOT/LANE_L1` 目录删掉。
 4. 没有标记，但本地 `LANE_L1` 已有状态（`hasState()`：`META` 与标记之外还有 key）→ **抛**，并给出补救办法（删掉本地 `LANE_L1` 目录重启，或换用配套的快照）。这份状态的来源无从证明（另一条链遗留、写了一半的导入、手工拷贝），静默合并或静默信任都可能直接分叉。
 5. 没有标记且本地为空（只有 `start()` 写的 `META`）→ **导入**：校验快照带了 `0xFF`、schema 版本等于 1，**在写任何东西之前**先用快照内容重算哈希与 `0xFF` 比对（不等则抛，store 保持原样），一致则把全部 key 连同标记一次性提交——被拒绝或被中断的导入不会留下半填状态。快照目录缺失 → 抛，并指明"从发布 `SNAPSHOT/BLOCKS` 的同一来源取 `SNAPSHOT/LANE_L1`，放在它旁边再重启"。
@@ -415,7 +415,7 @@ public interface LaneL1Hooks {
 | 钩子端到端 | 真实 `Kernel` + RocksDB（`TemporaryFolder`）：DEPLOY(新通道) → CALL×N（含格式错、分片费不足）→ 出主块 → 确认；断言 0x01/0x02/0x03/0x07/0x0C/0x0D/0x0E 的内容与**每 (lane, height) 从 0 递增的 index**；再一笔向金库的普通转账 → INVALID_FORMAT 记录 |
 | 属性 | 随机 3–8 个高度的块序列，随机 unwind 深度：`apply→unwind→apply` 后 `LANE_L1` 全 KV 逐字节等于直接 apply；`AddressStore` 中涉及地址的余额与 nonce 相等（复用 `BlockchainTest` 的分叉制造方式；不比较 `AddressStore` 全 KV，避免被既有 L1 回滚的已知不对称项干扰） |
 | 激活门控 | `activationHeight = MAX`：同一序列后 `LANE_L1` 为空且 `BlockInfo`/余额/nonce/fee 逐字节等于用普通转账替换 CALL 的对照序列 |
-| 快照 | 导出→导入往返；篡改一个 value 后哈希不符拒绝；`snapshotHeight ≥ activation` 且目录缺失拒绝、`store == null` 拒绝；本地已有状态但无 `0xFF` 标记 → 拒绝；已有 `0xFF` 标记 → 幂等返回（目录可缺）；`< activation` 忽略 |
+| 快照 | 导出→导入往返；篡改一个 value 后哈希不符拒绝；`snapshotHeight ≥ activation` 且目录缺失拒绝、`store == null` 拒绝；本地已有状态但无 `0xFF` 标记 → 拒绝；已有 `0xFF` 标记：同一快照 + 本地未漂移 → 幂等返回（`retryOfTheSameReseedIsIdempotentButDriftIsRefused`），本地已漂移 → 拒绝，换了一份快照 → 拒绝（`rebootstrapFromNewerSnapshotIsRefused`），目录缺失 → 拒绝（`markerPathRequiresTheSnapshotDirectory`）；`< activation` 忽略 |
 | 回归 | 现有 50 个测试类全绿（JDK 21 + toolchains，见 build env 记忆） |
 
 ---
@@ -459,3 +459,6 @@ public interface LaneL1Hooks {
 | G4 | `Kernel` 以 `(INDEX, BLOCK, TIME, TXHISTORY)` 调 `BlockStoreImpl(index, time, block, txHistory)` | 参数顺序与构造器签名对不上（既有问题；进程内无害，但磁盘上目录名会误导） |
 | G5 | `BlockchainImpl` 在构造器里起了非 daemon 的 `rollBackLoop` / cleaner 线程，`stopCheckMain()` 从不停它 | 既有问题；测试基座每个测试泄漏一个线程 |
 | G6 | `onBlockUnapplied` 即使在完全没有 lane 活动的网络上，也会对每个被 unapply 的块做一次 classify + 反向索引点查 | 纯噪声（unwind 本来就罕见），不修 |
+| G7 | `XdagCli.copyFile` 把 `IOException` 吞成 `printStackTrace()`（既有） | `copyDir` 里一个文件拷贝失败/截断是静默的，运维可能分发一份不完整的 `SNAPSHOT/*`；`LANE_L1` 会在导入时被哈希校验拦住，但那已经是分发之后。应改为抛 `IllegalStateException` |
+| G8 | `RocksdbKVSource.init()` 打开失败时泄漏 native `ReadOptions`（既有） | `LaneL1SnapshotGate` 已把 `init()` 放进 `try`，但泄漏本身在 `RocksdbKVSource` 里 |
+| G9 | `XdagCli.makeSnapshot` 的 `LANE_L1` 导出接线没有端到端测试 | 只有 `LaneL1SnapshotTest` 直接测 `LaneL1SnapshotGate.export`；`makeSnapshot` 整体（含 BLOCKS/ADDRESS）无测试 |
