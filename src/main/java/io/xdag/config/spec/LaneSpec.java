@@ -39,6 +39,29 @@ import io.xdag.core.XAmount;
 public interface LaneSpec {
 
     /**
+     * Protocol default for {@code lane.chunk.maxPerChain}: the largest number of CHUNK
+     * blocks a single chunk chain (code chain or args chain) may hold, on every network,
+     * absent a conf-file override.
+     *
+     * <p>Shared with {@code io.xdag.lane.ext.LaneBlockBuilder#MAX_CHUNKS_PER_CHAIN} so the
+     * two never drift apart.
+     */
+    int DEFAULT_MAX_CHUNKS_PER_CHAIN = 4096;
+
+    /**
+     * The maximum size, in bytes, of the inline argument payload a CALL/DEPLOY ext may
+     * carry directly in its fixed block fields (larger argument sets must instead reference
+     * an off-block args chain via {@code argsChainHead}).
+     *
+     * <p>Fixed by the 512-byte block wire format, not configurable: mirrors
+     * {@code io.xdag.lane.ext.CallExt#MAX_INLINE_ARGS}, which is derived as
+     * {@code (XDAG_BLOCK_FIELDS - 8) * ExtCodec.FIELD = 256}. There is deliberately no
+     * {@code lane.args.maxInline} conf key — changing this value without changing the wire
+     * format would make blocks that fit one node's inline-args bound and not another's.
+     */
+    int LANE_MAX_INLINE_ARGS = 256;
+
+    /**
      * The main-block height at which the lane protocol activates.
      *
      * <p>Unit: main block height (same domain as {@link io.xdag.core.XdagStats#nmain}).
@@ -55,13 +78,16 @@ public interface LaneSpec {
     long getLaneActivationHeight();
 
     /**
-     * Overrides the activation height programmatically (e.g. via CLI flag or test setup).
+     * Overrides the activation height programmatically (e.g. from tests and tooling).
      *
      * <p>Unit: main block height. Calling this clears any conf-file-sourced override
      * captured by {@code AbstractConfig.getSetting()} at construction time, so the value
      * passed here always takes effect.
      *
-     * <p><b>Consensus-relevant:</b> yes (see {@link #getLaneActivationHeight()}).
+     * <p><b>Consensus-relevant:</b> yes (see {@link #getLaneActivationHeight()}). Production
+     * callers must set this before the kernel starts importing/validating blocks — flipping
+     * it while the node is running can make already-applied blocks retroactively disagree
+     * with newly applied ones.
      *
      * @param height the new activation height
      */
@@ -71,8 +97,10 @@ public interface LaneSpec {
      * The maximum number of CHUNK blocks a single chunk chain (code chain or args chain)
      * may hold.
      *
-     * <p>Unit: count of chunks. Protocol default: {@code 4096} (roughly 1.7 MB of payload
-     * at the chunk payload size used by the SP0a wire format), identical on every network.
+     * <p>Unit: count of chunks. Protocol default: {@link #DEFAULT_MAX_CHUNKS_PER_CHAIN}
+     * ({@code 4096}), identical on every network — 4096 chunks &times; 352 bytes/chunk
+     * ({@code io.xdag.lane.ext.ChunkExt#MAX_DATA_LEN}) &asymp; 1,441,792 bytes, i.e.
+     * about 1.44 MB (1.375 MiB) of payload at most.
      *
      * <p><b>Consensus-relevant:</b> yes. It bounds how large a DEPLOY's code chain or a
      * CALL's args chain may grow before assembly is rejected as {@code CODE_TOO_LARGE}/
@@ -89,9 +117,9 @@ public interface LaneSpec {
      * <p>Unit: bytes. Protocol default: {@code 1024 * 1024} (1 MiB), identical on every
      * network.
      *
-     * <p><b>Consensus-relevant:</b> yes. Code larger than this is rejected during
-     * {@code checkDeploy} with {@code CODE_TOO_LARGE}; every node must agree on this bound
-     * to agree on which DEPLOY inputs are valid.
+     * <p><b>Consensus-relevant:</b> yes. Code larger than this is rejected under the SP0a
+     * spec's checkDeploy rule with {@code CODE_TOO_LARGE}; every node must agree on this
+     * bound to agree on which DEPLOY inputs are valid.
      *
      * @return the maximum WASM code size in bytes
      */
@@ -102,12 +130,14 @@ public interface LaneSpec {
      * carry directly (larger argument sets must instead reference an off-block args chain
      * via {@code argsChainHead}).
      *
-     * <p>Unit: bytes. Protocol default: {@code 256}, identical on every network.
+     * <p>Unit: bytes. Always {@link #LANE_MAX_INLINE_ARGS} ({@code 256}) on every network:
+     * this bound is derived from the fixed 512-byte block layout, not a conf key — there is
+     * no {@code lane.args.maxInline} setting to override it.
      *
      * <p><b>Consensus-relevant:</b> yes. It is part of the wire-format/validity envelope
      * for CALL and DEPLOY exts that every node must agree on.
      *
-     * @return the maximum inline argument size in bytes
+     * @return the maximum inline argument size in bytes ({@link #LANE_MAX_INLINE_ARGS})
      */
     int getLaneMaxInlineArgs();
 
@@ -119,7 +149,8 @@ public interface LaneSpec {
      * {@code XAmount.of(10, XUnit.MILLI_XDAG)} (0.01 XDAG per chunk), identical on every
      * network.
      *
-     * <p><b>Consensus-relevant:</b> yes, at apply time. {@code checkFee} requires
+     * <p><b>Consensus-relevant:</b> yes, at apply time. The SP0a spec's checkFee rule
+     * (implemented as {@code feeCovers} in the L1 processor) requires
      * {@code header.fee >= chunkFee * (linked chunk count)}; a block that pays less is
      * classified with {@code InputStatus.INVALID_FEE} by every node applying the same
      * rule — it never affects raw L1 block validity ({@code tryToConnect}), only the

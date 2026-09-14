@@ -26,6 +26,7 @@ package io.xdag.lane;
 
 import io.xdag.config.spec.LaneSpec;
 import io.xdag.core.XdagStats;
+import java.util.Objects;
 
 /**
  * Single place that answers "is the lane protocol active at this main height".
@@ -36,9 +37,9 @@ import io.xdag.core.XdagStats;
  * no-op and {@code LANE_L1} stays empty; {@code tryToConnect} (raw L1 block validity)
  * is never affected either way (principle P1).
  *
- * <p>This class is the single source of truth for that activation check, used today by
- * the five lane hooks wired into {@code BlockchainImpl}, and intended for reuse by
- * RPC/wallet-level gating later (e.g. rejecting lane RPC calls before activation).
+ * <p>This class is the single consensus predicate for that activation check.
+ * {@code LaneL1Processor} (Task 13) gates {@code onSetMainBegin} through
+ * {@link #isActive(long)}; wiring into {@code BlockchainImpl} arrives in Task 14.
  */
 public final class LaneActivation {
 
@@ -48,12 +49,14 @@ public final class LaneActivation {
      * @param spec the lane protocol parameters to consult, notably the activation height
      */
     public LaneActivation(LaneSpec spec) {
-        this.spec = spec;
+        this.spec = Objects.requireNonNull(spec, "spec");
     }
 
     /**
      * @param mainHeight a confirmed main-block height
-     * @return {@code true} if {@code mainHeight >= spec.getLaneActivationHeight()}
+     * @return {@code true} if {@code mainHeight >= spec.getLaneActivationHeight()}, i.e.
+     *     the lane protocol is active at exactly the activation height and every height
+     *     after it
      */
     public boolean isActive(long mainHeight) {
         return mainHeight >= spec.getLaneActivationHeight();
@@ -62,6 +65,11 @@ public final class LaneActivation {
     /**
      * Convenience overload that reads the current confirmed main-block height off
      * {@link XdagStats#nmain}.
+     *
+     * <p>Not for apply/unwind paths — those must pass the height of the block being
+     * (un)confirmed to {@link #isActive(long)} (inside {@code setMain} the block being
+     * confirmed is {@code nmain + 1}); this overload gates RPC/wallet views against the
+     * current tip.
      *
      * @param stats the current chain stats
      * @return {@code true} if the lane protocol is active at {@code stats.nmain}

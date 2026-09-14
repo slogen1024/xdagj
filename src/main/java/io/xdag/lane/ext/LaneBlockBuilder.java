@@ -30,6 +30,7 @@ import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUTPUT;
 
 import io.xdag.config.Config;
 import io.xdag.config.Constants;
+import io.xdag.config.spec.LaneSpec;
 import io.xdag.core.Address;
 import io.xdag.core.Block;
 import io.xdag.core.XAmount;
@@ -135,7 +136,7 @@ public final class LaneBlockBuilder {
      * single chain built by this class may contain. A payload that would need more chunks than this
      * is reported as {@link ExtError#CHUNK_TOO_MANY} rather than built.
      */
-    public static final int MAX_CHUNKS_PER_CHAIN = 4096;
+    public static final int MAX_CHUNKS_PER_CHAIN = LaneSpec.DEFAULT_MAX_CHUNKS_PER_CHAIN;
 
     public record Built(Block block, List<Block> chunks, int chainLinks, int totalChunks) {
         public Built {

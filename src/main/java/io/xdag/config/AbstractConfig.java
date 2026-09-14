@@ -34,6 +34,7 @@ import io.xdag.core.XdagField;
 import io.xdag.net.Capability;
 import io.xdag.net.CapabilityTreeSet;
 import io.xdag.net.message.MessageCode;
+import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -147,11 +148,14 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected boolean isSnapshotJ;
 
     // Lane (DAG-native contracts) configuration
-    protected long laneActivationHeight = Long.MAX_VALUE;
-    protected Long laneActivationHeightOverride;
-    protected int laneMaxChunksPerChain = 4096;
+    // volatile: laneActivationHeight/laneActivationHeightOverride may be flipped by tests
+    // (see LaneSpec#setLaneActivationHeight) while another thread is importing blocks.
+    protected volatile long laneActivationHeight = Long.MAX_VALUE;
+    @Setter(AccessLevel.NONE)
+    @Getter(AccessLevel.NONE)
+    protected volatile Long laneActivationHeightOverride;
+    protected int laneMaxChunksPerChain = LaneSpec.DEFAULT_MAX_CHUNKS_PER_CHAIN;
     protected int laneMaxWasmBytes = 1024 * 1024;
-    protected int laneMaxInlineArgs = 256;
     protected XAmount laneChunkFee = XAmount.of(10, XUnit.MILLI_XDAG);
 
     // RandomX configuration
@@ -209,26 +213,12 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
 
     @Override
     public int getLaneMaxInlineArgs() {
-        return laneMaxInlineArgs;
+        return LaneSpec.LANE_MAX_INLINE_ARGS;
     }
 
     @Override
     public XAmount getLaneChunkFee() {
         return laneChunkFee;
-    }
-
-    /**
-     * Test-only hook: sets {@code laneActivationHeightOverride} directly, bypassing
-     * {@code getSetting()}'s conf-file parsing, so a unit test can pin down the intended
-     * semantics — namely that this override takes precedence over whatever network default
-     * a per-network subclass constructor assigns to {@code laneActivationHeight} afterwards,
-     * and that only {@link #setLaneActivationHeight(long)} (never a direct field assignment)
-     * clears it. Package-private: {@code io.xdag.config.LaneSpecTest} lives in this package.
-     *
-     * @param heightOverride the simulated conf-sourced override, or {@code null} to clear it
-     */
-    void setLaneActivationHeightOverrideForTest(Long heightOverride) {
-        this.laneActivationHeightOverride = heightOverride;
     }
 
     @Override
@@ -334,11 +324,52 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
         if (config.hasPath("lane.wasm.maxBytes")) {
             laneMaxWasmBytes = config.getInt("lane.wasm.maxBytes");
         }
-        if (config.hasPath("lane.args.maxInline")) {
-            laneMaxInlineArgs = config.getInt("lane.args.maxInline");
-        }
         if (config.hasPath("lane.chunk.feeMilliXdag")) {
-            laneChunkFee = XAmount.of(config.getLong("lane.chunk.feeMilliXdag"), XUnit.MILLI_XDAG);
+            long feeMilliXdag = config.getLong("lane.chunk.feeMilliXdag");
+            try {
+                laneChunkFee = XAmount.of(feeMilliXdag, XUnit.MILLI_XDAG);
+            } catch (ArithmeticException e) {
+                throw new IllegalArgumentException(
+                        "Invalid lane.chunk.feeMilliXdag: " + feeMilliXdag + " overflows XAmount", e);
+            }
+        }
+
+        // Fail fast on lane parameters that would silently fork the node: every node must
+        // agree on these values (see LaneSpec), so a bad conf value is rejected at startup
+        // rather than producing divergent consensus state later.
+        if (laneActivationHeightOverride != null) {
+            if (laneActivationHeightOverride < 0) {
+                throw new IllegalArgumentException(
+                        "Invalid lane.activation.height: " + laneActivationHeightOverride
+                                + " (must be >= 0; 0 means active from genesis)");
+            }
+            log.warn("Lane activation height overridden by configuration to {} (network default suppressed)",
+                    laneActivationHeightOverride);
+        }
+        if (laneMaxChunksPerChain <= 0) {
+            throw new IllegalArgumentException(
+                    "Invalid lane.chunk.maxPerChain: " + laneMaxChunksPerChain + " (must be > 0)");
+        }
+        if (laneMaxWasmBytes <= 0) {
+            throw new IllegalArgumentException(
+                    "Invalid lane.wasm.maxBytes: " + laneMaxWasmBytes + " (must be > 0)");
+        }
+        if (laneChunkFee.isNegative()) {
+            throw new IllegalArgumentException(
+                    "Invalid lane.chunk.feeMilliXdag: " + laneChunkFee + " (must not be negative)");
+        }
+        // A chunk chain carries at most maxPerChain chunks, each holding at most
+        // CHUNK_DATA_LEN bytes of payload (mirrors io.xdag.lane.ext.ChunkExt.MAX_DATA_LEN;
+        // not imported here to keep io.xdag.config free of a dependency on the lane.ext
+        // wire-format package). A WASM bound above that ceiling could never be satisfied by
+        // any chunk chain.
+        final int CHUNK_DATA_LEN = 352;
+        long maxChainCapacity = (long) laneMaxChunksPerChain * CHUNK_DATA_LEN;
+        if (laneMaxWasmBytes > maxChainCapacity) {
+            throw new IllegalArgumentException(
+                    "Invalid lane.wasm.maxBytes: " + laneMaxWasmBytes
+                            + " exceeds what any chunk chain could carry (lane.chunk.maxPerChain=" + laneMaxChunksPerChain
+                            + " x " + CHUNK_DATA_LEN + " bytes/chunk = " + maxChainCapacity + " bytes max)");
         }
     }
 
