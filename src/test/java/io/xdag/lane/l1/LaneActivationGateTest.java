@@ -82,61 +82,57 @@ public class LaneActivationGateTest extends LaneL1TestBase {
         assertEquals(UInt64.valueOf(3), addressStore.getExecutedNonceNum(poolKey.toAddress().toArray()));
     }
 
+    /** Main blocks mined before the boundary under test, so it is not right at genesis. */
+    private static final int RUNWAY = 5;
+
     /**
      * Same activation predicate ({@code height >= spec.getLaneActivationHeight()}), but here the
-     * height is reachable rather than {@code Long.MAX_VALUE}: a DEPLOY that confirms below the
-     * configured activation height must stay unrecorded, and the very next DEPLOY, which confirms
-     * exactly at that height, must be recorded — pinning the gate open at exactly the configured
-     * height, not one block early or late.
+     * height is reachable rather than {@code Long.MAX_VALUE}: a DEPLOY that confirms at exactly
+     * {@code h - 1} must stay unrecorded, and the DEPLOY that confirms at exactly {@code h} must be
+     * recorded - pinning the gate open at exactly the configured height, one block early and one
+     * block late both being observable (the {@code >} and {@code >= h - 1} mutants of
+     * {@code LaneActivation.isActive} each fail here).
      *
-     * <p>The exact confirming heights below are not guessed: in this fixture's fake-PoW chain
-     * (verified empirically against {@link LaneL1TestBase#mineMain}), the main block produced by the
-     * k-th {@code mineMain()} call made in a test (0-indexed) is confirmed at main height k + 2, once
-     * exactly one further {@code mineMain()} call has run afterward ({@code checkNewMain}'s constant
-     * one-block confirmation lag). {@code confirm(...)} supplies exactly that one further call here
-     * (the target block is not yet applied when it returns from being mined), so every height below
-     * follows deterministically from the call index alone; {@link #heightOf} is still used to assert
-     * it rather than trusting the arithmetic blindly.
+     * <p>Heights are chain positions ({@code setMain} assigns {@code nmain + 1} in order), so in this
+     * fixture the main block produced by the k-th {@code mineMain()} call of a test (0-indexed, the
+     * address block holding height 1) always takes height k + 2 - independent of how many filler
+     * calls {@code confirm(...)} has to burn before {@code checkNewMain} promotes it. The two DEPLOY
+     * main blocks are therefore mined back to back (calls {@code RUNWAY} and {@code RUNWAY + 1}) so
+     * they occupy {@code h - 1} and {@code h} with nothing in between, and one {@code confirm} of the
+     * later block settles both. {@link #heightOf} asserts the arithmetic rather than trusting it.
      */
     @Test
     public void gateOpensAtExactlyTheConfiguredHeight() {
-        // A little runway so the boundary under test is not right at genesis (calls 0..4).
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < RUNWAY; i++) {
             mineMain(List.of());
         }
-        int kBefore = 5; // this test's 6th mineMain() call
-        long expectedHeightBefore = kBefore + 2L;
-        // The after-DEPLOY's own mineMain() call is kBefore + 2 (one for confirm()'s before-filler,
-        // one for the after-DEPLOY itself), so it confirms at (kBefore + 2) + 2 == expectedHeightBefore + 2.
-        long h = expectedHeightBefore + 2;
+        long h = RUNWAY + 3L; // call RUNWAY -> height RUNWAY + 2 == h - 1; call RUNWAY + 1 -> height h
         config.getLaneSpec().setLaneActivationHeight(h);
 
         LaneBlockBuilder.Built before = deployNewLane(payload(2_000, 51), payload(10, 52));
         importBuilt(before);
-        Block mBefore = mineMain(List.of(hashLow(before.block()))); // call kBefore
-        confirm(before.block()); // call kBefore + 1 (filler)
-        long heightBefore = heightOf(mBefore);
-        assertEquals("confirming height did not match the predicted call-index arithmetic",
-                expectedHeightBefore, heightBefore);
-        assertTrue(heightBefore < h);
-        Bytes laneIdBefore = LaneIds.laneIdOf(before.block().getHash());
-        assertFalse("a DEPLOY confirming below the activation height must not register a lane",
-                laneStore.hasLane(laneIdBefore));
-        assertEquals("nothing but the schema META key should exist below activation",
-                1, laneStore.sortedKeys().size());
-
+        Block mBefore = mineMain(List.of(hashLow(before.block()))); // call RUNWAY
         LaneBlockBuilder.Built after = deployNewLane(payload(2_000, 53), payload(10, 54));
         importBuilt(after);
-        Block mAfter = mineMain(List.of(hashLow(after.block()))); // call kBefore + 2
-        confirm(after.block()); // call kBefore + 3 (filler)
-        long heightAfter = heightOf(mAfter);
-        assertEquals("expected the post-activation DEPLOY to confirm at exactly the activation height",
-                h, heightAfter);
+        Block mAfter = mineMain(List.of(hashLow(after.block()))); // call RUNWAY + 1
+        confirm(after.block()); // settles mBefore (promoted first) and mAfter
+
+        assertEquals("the pre-activation DEPLOY must confirm exactly one height below activation",
+                h - 1, heightOf(mBefore));
+        assertEquals("the post-activation DEPLOY must confirm at exactly the activation height",
+                h, heightOf(mAfter));
+
+        Bytes laneIdBefore = LaneIds.laneIdOf(before.block().getHash());
         Bytes laneIdAfter = LaneIds.laneIdOf(after.block().getHash());
-        assertTrue("a DEPLOY confirming at or above the activation height must register a lane",
+        assertFalse("a DEPLOY confirming one height below activation must not register a lane",
+                laneStore.hasLane(laneIdBefore));
+        assertTrue("a DEPLOY confirming at the activation height must register a lane",
                 laneStore.hasLane(laneIdAfter));
-        assertEquals(heightAfter, laneStore.getLane(laneIdAfter).createdHeight());
-        assertTrue("sortedKeys must grow only once the gate opens",
-                laneStore.sortedKeys().size() > 1);
+        assertEquals(h, laneStore.getLane(laneIdAfter).createdHeight());
+        assertTrue(laneStore.getReverse(before.block().getHash()).isEmpty());
+        assertEquals(1, laneStore.getReverse(after.block().getHash()).size());
+        assertEquals("only the post-activation DEPLOY may contribute keys beyond META",
+                0L, laneStore.getCallCount(laneIdBefore, h - 1));
+        assertEquals(1L, laneStore.getCallCount(laneIdAfter, h));
     }
 }
