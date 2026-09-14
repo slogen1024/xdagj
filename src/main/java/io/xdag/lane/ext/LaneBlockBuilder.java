@@ -99,8 +99,9 @@ import org.apache.tuweni.units.bigints.UInt64;
  * imported last, after every chunk it (transitively) references.
  *
  * <p><b>Error contract.</b> Payload-shape problems are reported as an {@link ExtResult} failure,
- * never thrown: an empty {@code wasm}, a chain that would need more than
- * {@link #MAX_CHUNKS_PER_CHAIN} chunks ({@link ExtError#CHUNK_TOO_MANY}), or (for
+ * never thrown: an empty {@code wasm}, a chain that would need more chunks than {@code config}'s
+ * configured {@link LaneSpec#getLaneMaxChunksPerChain()} allows (defaulting to
+ * {@link #MAX_CHUNKS_PER_CHAIN}) ({@link ExtError#CHUNK_TOO_MANY}), or (for
  * {@link #deployIntoLane}) neither a {@code wasm} nor a {@code codeHash} given
  * ({@link ExtError#BAD_LENGTH} in both other cases). Programmer errors throw instead: {@link
  * Objects#requireNonNull} on {@code config}/{@code sender}/{@code nonce} and the method's payload
@@ -132,9 +133,10 @@ public final class LaneBlockBuilder {
     // constants never need to additionally clamp against it.
 
     /**
-     * Protocol default for {@code lane.chunk.maxPerChain}: the largest number of chunk blocks any
-     * single chain built by this class may contain. A payload that would need more chunks than this
-     * is reported as {@link ExtError#CHUNK_TOO_MANY} rather than built.
+     * Protocol default for {@code lane.chunk.maxPerChain}. Callers of this class are actually
+     * capped against {@code config}'s configured {@link LaneSpec#getLaneMaxChunksPerChain()} (which
+     * falls back to this default when not overridden): a payload that would need more chunks than
+     * that is reported as {@link ExtError#CHUNK_TOO_MANY} rather than built.
      */
     public static final int MAX_CHUNKS_PER_CHAIN = LaneSpec.DEFAULT_MAX_CHUNKS_PER_CHAIN;
 
@@ -328,14 +330,16 @@ public final class LaneBlockBuilder {
     /**
      * Splits {@code payload} into a chunk chain rooted at {@link #chunkHeadTimestamp(long)}.
      * Payload-shape problems are reported as an {@link ExtResult} failure rather than thrown: an
-     * empty payload ({@link ExtError#BAD_LENGTH}) or one that would need more than
-     * {@link #MAX_CHUNKS_PER_CHAIN} chunks ({@link ExtError#CHUNK_TOO_MANY}).
+     * empty payload ({@link ExtError#BAD_LENGTH}) or one that would need more chunks than
+     * {@code config}'s configured {@link LaneSpec#getLaneMaxChunksPerChain()} allows
+     * ({@link ExtError#CHUNK_TOO_MANY}; {@link #MAX_CHUNKS_PER_CHAIN} is only the protocol
+     * default {@code config} falls back to when not overridden).
      */
     private static ExtResult<List<Block>> splitChain(Config config, Bytes payload, long timestamp) {
         if (payload.isEmpty()) {
             return ExtResult.fail(ExtError.BAD_LENGTH);
         }
-        if (chunksFor(payload.size()) > MAX_CHUNKS_PER_CHAIN) {
+        if (chunksFor(payload.size()) > config.getLaneSpec().getLaneMaxChunksPerChain()) {
             return ExtResult.fail(ExtError.CHUNK_TOO_MANY);
         }
         return ExtResult.ok(ChunkChainBuilder.split(config, payload, chunkHeadTimestamp(timestamp)));

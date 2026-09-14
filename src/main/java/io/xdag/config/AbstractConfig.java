@@ -154,8 +154,11 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     @Setter(AccessLevel.NONE)
     @Getter(AccessLevel.NONE)
     protected volatile Long laneActivationHeightOverride;
+    @Setter(AccessLevel.NONE)
     protected int laneMaxChunksPerChain = LaneSpec.DEFAULT_MAX_CHUNKS_PER_CHAIN;
+    @Setter(AccessLevel.NONE)
     protected int laneMaxWasmBytes = 1024 * 1024;
+    @Setter(AccessLevel.NONE)
     protected XAmount laneChunkFee = XAmount.of(10, XUnit.MILLI_XDAG);
 
     // RandomX configuration
@@ -326,6 +329,10 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
         }
         if (config.hasPath("lane.chunk.feeMilliXdag")) {
             long feeMilliXdag = config.getLong("lane.chunk.feeMilliXdag");
+            if (feeMilliXdag < 0) {
+                throw new IllegalArgumentException(
+                        "Invalid lane.chunk.feeMilliXdag: " + feeMilliXdag + " (must not be negative)");
+            }
             try {
                 laneChunkFee = XAmount.of(feeMilliXdag, XUnit.MILLI_XDAG);
             } catch (ArithmeticException e) {
@@ -354,10 +361,10 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
             throw new IllegalArgumentException(
                     "Invalid lane.wasm.maxBytes: " + laneMaxWasmBytes + " (must be > 0)");
         }
-        if (laneChunkFee.isNegative()) {
-            throw new IllegalArgumentException(
-                    "Invalid lane.chunk.feeMilliXdag: " + laneChunkFee + " (must not be negative)");
-        }
+        // laneChunkFee can only be negative here if the conf-read path above admitted a negative
+        // feeMilliXdag, which it now rejects before XAmount.of ever runs; the default is a
+        // non-negative literal. Kept as a defensive assertion against that invariant drifting.
+        assert !laneChunkFee.isNegative() : "laneChunkFee must not be negative: " + laneChunkFee;
         // A chunk chain carries at most maxPerChain chunks, each holding at most
         // CHUNK_DATA_LEN bytes of payload (mirrors io.xdag.lane.ext.ChunkExt.MAX_DATA_LEN;
         // not imported here to keep io.xdag.config free of a dependency on the lane.ext

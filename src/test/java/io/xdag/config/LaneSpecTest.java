@@ -29,11 +29,13 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import com.typesafe.config.ConfigFactory;
 import io.xdag.core.XAmount;
 import io.xdag.core.XUnit;
 import io.xdag.lane.LaneActivation;
 import io.xdag.lane.ext.CallExt;
 import io.xdag.lane.ext.ChunkExt;
+import java.util.function.Supplier;
 import org.junit.Test;
 
 public class LaneSpecTest {
@@ -41,17 +43,17 @@ public class LaneSpecTest {
     /**
      * Sets a JVM system property, invalidates Typesafe's config caches so the next
      * {@code ConfigFactory.load(...)} overlays it above the resource file, runs {@code body},
-     * then always restores the previous state (property cleared, caches invalidated again) —
-     * even if {@code body} throws.
+     * then always clears the property afterwards (and invalidates the caches again) — even if
+     * {@code body} throws.
      */
-    private static <T> T withProperty(String key, String value, java.util.function.Supplier<T> body) {
+    private static <T> T withProperty(String key, String value, Supplier<T> body) {
         System.setProperty(key, value);
-        com.typesafe.config.ConfigFactory.invalidateCaches();
+        ConfigFactory.invalidateCaches();
         try {
             return body.get();
         } finally {
             System.clearProperty(key);
-            com.typesafe.config.ConfigFactory.invalidateCaches();
+            ConfigFactory.invalidateCaches();
         }
     }
 
@@ -139,7 +141,7 @@ public class LaneSpecTest {
     @Test
     public void negativeChunkFeeIsRejected() {
         try {
-            withProperty("lane.chunk.feeMilliXdag", "-5", (java.util.function.Supplier<Config>) DevnetConfig::new);
+            withProperty("lane.chunk.feeMilliXdag", "-5", DevnetConfig::new);
             fail("expected IllegalArgumentException");
         } catch (IllegalArgumentException e) {
             assertTrue(e.getMessage().contains("lane.chunk.feeMilliXdag"));
@@ -147,9 +149,20 @@ public class LaneSpecTest {
     }
 
     @Test
+    public void chunkFeeOverflowIsRejected() {
+        try {
+            withProperty("lane.chunk.feeMilliXdag", String.valueOf(Long.MAX_VALUE), DevnetConfig::new);
+            fail("expected IllegalArgumentException");
+        } catch (IllegalArgumentException e) {
+            assertTrue(e.getMessage().contains("lane.chunk.feeMilliXdag"));
+            assertTrue(e.getCause() instanceof ArithmeticException);
+        }
+    }
+
+    @Test
     public void negativeActivationHeightIsRejected() {
         try {
-            withProperty("lane.activation.height", "-1", (java.util.function.Supplier<Config>) DevnetConfig::new);
+            withProperty("lane.activation.height", "-1", DevnetConfig::new);
             fail("expected IllegalArgumentException");
         } catch (IllegalArgumentException e) {
             assertTrue(e.getMessage().contains("lane.activation.height"));

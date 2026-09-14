@@ -364,6 +364,34 @@ public class LaneBlockBuilderTest {
         }
     }
 
+    /**
+     * {@link LaneBlockBuilder#splitChain} must cap chain length against {@code config}'s
+     * configured {@link io.xdag.config.spec.LaneSpec#getLaneMaxChunksPerChain()}, not the
+     * protocol-default {@link LaneBlockBuilder#MAX_CHUNKS_PER_CHAIN} constant. The setters for
+     * this construction-time parameter are gone (it is set-once via conf/subclass), so the shrunk
+     * config is built as an anonymous {@link DevnetConfig} subclass overriding the getter.
+     */
+    @Test
+    public void deployNewLaneHonorsConfiguredMaxChunksPerChain() {
+        Config shrunk = new DevnetConfig() {
+            @Override
+            public int getLaneMaxChunksPerChain() {
+                return 2;
+            }
+        };
+
+        Bytes threeChunkWasm = payload(3 * ChunkExt.MAX_DATA_LEN, 1201);
+        ExtResult<LaneBlockBuilder.Built> tooMany = LaneBlockBuilder.deployNewLane(shrunk, TS, sender, UInt64.ONE,
+                FEE, threeChunkWasm, CFG, payload(10, 1202), 1L);
+        assertEquals(ExtError.CHUNK_TOO_MANY, tooMany.error());
+
+        Bytes twoChunkWasm = payload(2 * ChunkExt.MAX_DATA_LEN, 1203);
+        ExtResult<LaneBlockBuilder.Built> ok = LaneBlockBuilder.deployNewLane(shrunk, TS, sender, UInt64.ONE, FEE,
+                twoChunkWasm, CFG, payload(10, 1204), 1L);
+        assertTrue(String.valueOf(ok.error()), ok.isOk());
+        assertEquals(2, ok.value().totalChunks());
+    }
+
     @Test
     public void requiredValueHelper() {
         assertEquals(FEE.add(XAmount.of(100, XUnit.MILLI_XDAG)), LaneBlockBuilder.requiredValue(FEE, 0));
