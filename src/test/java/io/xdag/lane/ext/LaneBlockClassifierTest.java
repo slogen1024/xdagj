@@ -55,7 +55,7 @@ public class LaneBlockClassifierTest {
     private final Config config = new DevnetConfig();
 
     /** Builds an unsigned block carrying the given extension fields and block links, re-parsed from bytes. */
-    static Block extBlock(Config config, List<Bytes32> ext, List<Address> links) {
+    public static Block extBlock(Config config, List<Bytes32> ext, List<Address> links) {
         Block b = new Block(config, XdagTime.getCurrentTimestamp(), null, links.isEmpty() ? null : links, false,
                 null, null, -1, XAmount.ZERO, null, ext);
         return new Block(new XdagBlock(b.toBytes()));

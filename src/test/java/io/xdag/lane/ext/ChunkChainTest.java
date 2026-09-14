@@ -53,7 +53,7 @@ public class ChunkChainTest {
     private final Config config = new DevnetConfig();
     private static final long TS = 0x16a00000000L; // any timestamp after the devnet era
 
-    static Bytes payload(int len, long seed) {
+    public static Bytes payload(int len, long seed) {
         byte[] b = new byte[len];
         new Random(seed).nextBytes(b);
         return Bytes.wrap(b);
