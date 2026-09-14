@@ -50,8 +50,9 @@
 | **P1** | EXT 不影响 L1 有效性 | `tryToConnect` 不读 EXT；旧节点与新节点对同一块的值结算逐字节相同；格式错误的扩展块仍是合法 L1 块 |
 | **P2** | 通道语义只在 `setMain` 内按主块高度激活 | `mainNumber ≥ activationHeight` 才建立上下文；激活前五个钩子全部 no-op |
 | **P3** | 每个写有成对的反写 | `apply → unwind → apply` 的 `LANE_L1` 逐字节等于直接 `apply`；属性测试锁死 |
-| **P4** | 解码永不抛异常 | 所有 `decode` 返回 `Result`；错误进入输入记录的 `status`，不进入日志以外的控制流 |
-| **P5** | 存储写入原子 | 一个块的全部 `LANE_L1` 变更用一次 `batchWrite` 提交 |
+| **P4** | 解码永不抛异常 | 所有 `decode` 返回 `ExtResult`；错误进入输入记录的 `status`，不进入日志以外的控制流。例外是**构造期的编程错误**：记录的紧凑构造器对越界/长度不符抛 `IllegalArgumentException`，`Classified.as(Class)` 在分类失败时抛 `IllegalStateException`（调用方必须先 `isOk()`），二者都不在解码路径上 |
+| **P5** | 存储写入原子 | 一个块的全部 `LANE_L1` 变更用一次 `batchWrite` 提交（apply 一次、unapply 一次；空批次不落盘） |
+| **P6** | 钩子只吃 raw 块 | `onBlockApplied` / `onBlockUnapplied` 与分片链 `lookup` 必须拿到从 512 字节解析出来的块（`new Block(XdagBlock)` 或 `getBlockByHash(hash, true)`）。仅由 `BlockInfo` 构造的块没有 ext 字段、没有 link、没有 output，会被静默判为"什么都不是"——这是共识分歧而不是可见错误。这是**调用点前置条件**，当前 `BlockchainImpl` 的五处调用都满足 |
 
 ---
 
@@ -61,15 +62,18 @@
 
 `XDAG_FIELD_RESERVE6(0x0F)` 更名为 `XDAG_FIELD_EXT(0x0F)`。值不变，`fromByte` 行为不变。
 
+> **码点冲突（合入 `develop` 之前必须解决）**：`dev-evm` 分支把同一个 `0x0F` 用作 `XDAG_FIELD_EVM_TX_REF`（原始 32B EVM 交易哈希，字段写在 remark **之前**；本分支的 EXT 字段写在 remark **之后**）。两条分支都还没合进 `develop`，先合的那条占住 0x0F，另一条必须改码点或改语义。按总规格 D3 的决定 dev-evm 归档，但这件事必须在**任一分支合入 `develop` 之前**显式定夺，不能靠"先到先得"。
+
 ### 3.2 `Block`
 
-- 新字段 `private List<Bytes32> extFields = new CopyOnWriteArrayList<>()`（与 inputs/outputs 同风格）。
+- 新字段 `private List<Bytes32> extFields = new CopyOnWriteArrayList<>()`（与 inputs/outputs 同风格）。**只有 raw 块才有内容**：由 `BlockInfo` 构造的块（`getBlockByHash(hash, false)`）这里恒为空，`getBlockLinks()` 同理（见原则 P6）。
 - `parse()`：`switch` 新增 `case XDAG_FIELD_EXT -> extFields.add(Bytes32.wrap(field.getData()))`。**EXT 字段不做 `reverse()`**：块内字节即逻辑字节（Address / nonce 字段有历史遗留的反转，EXT 不继承）。
 - 主构造器新增重载：`Block(config, timestamp, links, pendings, mining, keys, remark, defKeyIndex, fee, txNonce, List<Bytes32> extFields)`；旧签名委托新签名并传 `null`。类型掩码写入位置：**remark 之后、公钥之前**，每个 ext 字段 `setType(XDAG_FIELD_EXT, len++)`。
 - `getEncodedBody()`：在 remark 之后、公钥之前依次 `encoder.writeField(ext.toArray())`。
 - 签名覆盖无需改动：`getSubRawData` 已包含所有非 SIGN 字段；`verifiedKeys` / `checkMineAndAdd` 不变。
-- 新方法 `List<Address> getBlockLinks()`：按 `outputs` 顺序返回 `!isAddress && type == XDAG_FIELD_OUT` 的引用（link[0..n]）。
+- 新方法 `List<Address> getBlockLinks()`：按 `outputs` 顺序返回 `!isAddress && type == XDAG_FIELD_OUT` 的引用（link[0..n]）。不校验 link 上的 amount——OUT link 的金额规则仍然只在 `tryToConnect` 里。
 - 新方法 `List<Bytes32> getExtFields()`。
+- `setType(type, n)` 增加字段预算断言：`n >= XdagBlock.XDAG_BLOCK_FIELDS` 抛 `IllegalArgumentException("block field budget exceeded: field index n")`。原先超出 16 个字段会把类型 nibble 静默移出 64 位掩码（悄悄覆盖低位字段的类型），现在在构造期直接失败。
 - `Block.clone()` 已是浅拷贝语义，`extFields` 随之；无需改。
 
 **哈希与旧节点**：EXT 字段参与 `calcHash` 与签名摘要（本来就参与，因为它们是块字节的一部分）；旧节点解析走 `default -> {}`，块哈希、签名验证结果一致。
@@ -91,44 +95,93 @@
 - 哈希 32B、地址 20B 原样。
 - ext 头 byte0 = kind；byte1..31 按 kind 布局；未使用字节必须为 0，解码时非 0 → `ExtError.RESERVED_NONZERO`。
 - `decode(Bytes32 header, List<Bytes32> payload, List<Address> links)` 返回 `Result<T, ExtError>`。
-- `ExtError` 枚举：`NO_EXT, UNKNOWN_KIND, RESERVED_NONZERO, BAD_LENGTH, MISSING_LINK, EXTRA_LINK, INLINE_ARGS_TOO_LONG, PAYLOAD_COUNT_MISMATCH, CHUNK_SEQ_GAP, CHUNK_TOTAL_MISMATCH, CHUNK_TOO_MANY, CHUNK_TAIL_HAS_LINK, CHUNK_CYCLE, CODE_TOO_LARGE`。
+- `ExtError` 枚举（**只追加、不重排**）：`NO_EXT, UNKNOWN_KIND, RESERVED_NONZERO, BAD_LENGTH, MISSING_LINK, EXTRA_LINK, INLINE_ARGS_TOO_LONG, PAYLOAD_COUNT_MISMATCH, CHUNK_SEQ_GAP, CHUNK_TOTAL_MISMATCH, CHUNK_TOO_MANY, CHUNK_TAIL_HAS_LINK, CHUNK_CYCLE, NOT_A_CHUNK, CODE_TOO_LARGE, CODE_HASH_MISMATCH, CODE_UNKNOWN, CHUNK_TOO_OLD`。其中 `NOT_A_CHUNK` = 分片链走到一个"存在但不是 CHUNK"的块；`CODE_HASH_MISMATCH` / `CODE_UNKNOWN` 为 SP1 代码库预留，SP0a 的编解码器不产生；`CHUNK_TOO_OLD` 是 §3.6 的年龄规则，追加在最后一位。
+- `ExtKind.fromCode(int)` 按**无符号**比较 kind 字节（`(k.code & 0xff) == code`）；未分配的码返回 `null` → `UNKNOWN_KIND`，不抛异常。
 
 ### 3.5 `ExtKind` 与记录
 
 ```
 enum ExtKind { CALL(1), DEPLOY(2), CHUNK(3), ANCHOR(4), BOND(5), CHALLENGE(6), CLAIM(7) }
 
-record CallExt(byte flags, Bytes contract20, int selector, long gasLimitU32, int argsLen, Bytes inlineArgs, Address argsChainHead /*nullable*/)
-record DeployExt(byte flags, Bytes laneId20 /*newLane 时忽略*/, long gasLimitU32, int argsLen, Bytes32 codeHash,
-                 LaneConfigExt config /*newLane 时非空*/, Bytes inlineArgs, Address codeChainHead, Address argsChainHead)
+record CallExt(int flags, Bytes contract /*20B*/, int selector, long gasLimit /*u32*/, int argsLen,
+               Bytes inlineArgs, Bytes32 argsChainHead /*nullable*/)
+record DeployExt(int flags, Bytes laneId /*20B；newLane 时线上必须全零*/, long gasLimit /*u32*/, int argsLen,
+                 Bytes32 codeHash, LaneConfigExt config /*newLane 时非空，否则必须为 null*/, Bytes inlineArgs,
+                 Bytes32 codeChainHead /*nullable*/, Bytes32 argsChainHead /*nullable*/)
 record LaneConfigExt(long gasPriceNano, long deliveryDelayD, long maxCallGas)
-record ChunkExt(long seq, long totalLen, int dataLen, Address next /*nullable*/, Bytes data)
-record AnchorExt(...)  record BondExt(...)  record ChallengeExt(...)  record ClaimExt(...)   // 按总规格 §5.2，SP0a 只编解码
+record ChunkExt(long seq, long totalLen, int dataLen, Bytes32 next /*nullable = 尾片*/, Bytes data)
+record AnchorExt(Bytes laneId, long seq, Bytes32 stateRoot, Bytes32 outboxMapRoot, long prevSeq, long inputCount,
+                 long segmentCount, Bytes32 prevAnchor, Bytes32 mainBlock, Bytes32 commitmentHead)
+record BondExt(boolean unbond, Bytes laneId, long amount)
+record ChallengeExt(long inputIndex, long deposit, Bytes32 anchor, Bytes32 witnessHead)
+record ClaimExt(boolean toLaneVault, Bytes srcLane, long seq, long index, long amount, Bytes recipient,
+                Bytes32 anchor, Bytes32 proofHead)
 ```
+
+记录里的链接一律是 `Bytes32`（hashLow）而不是 `Address`：`decode` 收 `List<Address>`，但只取其 `getAddress()`。
+
+**紧凑构造器只保证"能按线格式往返"**（非空、20B/32B 长度、u16/u32 范围、flag 与可空字段一致），**不做协议级范围检查**（例如 `0 < dataLen ≤ 352`、`argsLen ≤ 256`）——那些由 `decode` 负责，好让负例测试能构造越界记录再喂给 `decode`。所有 `Bytes` / `Bytes32` 成员在构造器里防御性复制。
 
 CALL/DEPLOY 的 link 角色：CALL link[0] = 参数链（仅 flags.bit0）；DEPLOY link[0] = 代码链（flags.bit1）、link[1] = 参数链（flags.bit2；若无代码链则参数链是 link[0]）。多余 link → `EXTRA_LINK`；缺失 → `MISSING_LINK`。
 
 ### 3.6 分片链
 
 ```
-ChunkChain.assemble(Address head, Function<Bytes32, Block> lookupRaw, int maxChunks) -> Result<Bytes, ExtError>
-  visited = {}; expectSeq = 0; total = null; out = []
-  cur = head
+ChunkChain.assemble(Bytes32 head, RawBlockLookup lookup, int maxChunks, long minEpoch) -> ExtResult<Bytes>
+  visited = {}; expectSeq = 0; total = -1; out = []
+  cur = head                              // head == null 立即 MISSING_LINK
   while cur != null:
-    if visited.contains(cur) -> CHUNK_CYCLE
-    b = lookupRaw(cur.hash); c = ChunkExt.decode(b) (kind 必须为 CHUNK)
-    if c.seq != expectSeq -> CHUNK_SEQ_GAP
-    if total == null: total = c.totalLen  else if c.totalLen != total -> CHUNK_TOTAL_MISMATCH
-    out += c.data[0..dataLen]; expectSeq++
-    if expectSeq > maxChunks -> CHUNK_TOO_MANY
-    cur = c.next
-  if out.length != total -> CHUNK_TOTAL_MISMATCH
+    if !visited.add(cur)                     -> CHUNK_CYCLE
+    if visited.size() > maxChunks            -> CHUNK_TOO_MANY
+    b = lookup.get(cur);  if b == null       -> MISSING_LINK
+    if epoch(b.timestamp) < minEpoch         -> CHUNK_TOO_OLD        // 年龄规则，见下
+    c = classify(b);  if c.kind != CHUNK     -> NOT_A_CHUNK
+    if !c.isOk()                             -> c.error              // 编解码错误原样透传，不折叠成 NOT_A_CHUNK
+    if c.seq != expectSeq                    -> CHUNK_SEQ_GAP
+    if total < 0:
+        total = c.totalLen
+        if total > maxChunks * 352           -> CHUNK_TOO_MANY       // 伪造头片的快速失败
+    else if c.totalLen != total              -> CHUNK_TOTAL_MISMATCH
+    out += c.data
+    if out.size > total                      -> CHUNK_TOTAL_MISMATCH
+    if out.size == total && c.next != null   -> CHUNK_TAIL_HAS_LINK
+    expectSeq++;  cur = c.next
+  if out.size != total                       -> CHUNK_TOTAL_MISMATCH
   return out
-ChunkChain.count(head, lookupRaw, maxChunks) -> 片数或错误（费用复核用，不拼接）
-ChunkChainBuilder.split(Bytes payload, long baseTimestamp, ECKeyPair unusedOrNull) -> List<Block>（尾片 baseTimestamp，逐片 +1 tick，头片最晚）
+
+ChunkChain.countLenient(Bytes32 head, RawBlockLookup lookup, int maxChunks, long minEpoch) -> int
+  只统计"查得到 + 够新 + 能解码成 CHUNK"的块，遇到第一个缺失/过旧/非 CHUNK 就停；永不失败、永不抛异常、环安全、上限 maxChunks。
+
+ChunkChainBuilder.split(Config config, Bytes payload, long headTimestamp) -> List<Block>   // 按 seq 升序返回，index 0 = 头片
 ```
 
-`lookupRaw` 由 `BlockchainImpl.getBlockByHash(hash, true)` 提供；分片块在 DEPLOY/CALL 导入前必然已落盘（`NO_PARENT` 规则）。
+`assemble` / `countLenient` 各有一个 3 参重载，等价于 `minEpoch = Long.MIN_VALUE`（无年龄下界），**共识路径一律不得使用**。`total > maxChunks × 352` 这条在头片解出来的当下就触发，早于任何后续跳转与缓冲：否则一个伪造头片声明一个天文数字的 `totalLen`，就能逼调用方一路找一条永远拼不完的链，或者去开一个荒谬大的重组缓冲区。
+
+**年龄规则（共识）**：链上每一片都必须满足 `epoch(chunk) ≥ epoch(payingBlock) − 1`，即"与付费块同 epoch，或紧邻的前一个 epoch"，否则 `CHUNK_TOO_OLD`。理由：`tryToConnect` 的 `NO_PARENT` 只要求父块的 `BlockInfo` 存在，而**快照启动的节点没有快照时间之前的块的原始字节**（`getBlockByHash(h, true)` 恰好在原始字节缺失时返回 `null`）；没有年龄下界时，同一条内容寻址的老分片链会在全量节点上装配成功、在快照节点上 `MISSING_LINK`——同一个块在两类节点上得到两种裁决。年龄规则让两类节点都只需要保留最近两个 epoch 的原始字节，裁决就必然一致。`minEpoch` 取自**付费块自己的时间戳**，不是主块的（决定论：只依赖被 apply 的那个块的字节）。
+
+**`assemble` 与 `countLenient` 的费用契约**：`assemble` 在一条 N 片链上成功时，同参数的 `countLenient` 恰好返回 N；`assemble` 拒绝的链上 `countLenient` 可能多数（它会数到第一个问题之前的每一个合法 CHUNK，包括那个让 `assemble` 失败的片本身），但绝不会少数。因此凡是 L1 自己会装配的链（DEPLOY 的代码链），费用基数必须在 `assemble` 通过**之后**才取；参数链 L1 从不装配，见 §4.2。
+
+**`split` 的 epoch 吸附**：按 `ChunkExt.MAX_DATA_LEN = 352` 字节切片，尾片先建（好让每片的 `link[0]` 指向已建好的下一片），返回时头片在前。头片时间戳默认就是 `headTimestamp`；若这条链会跨 epoch（`(headTimestamp & 0xffff) < n − 1`），整条链吸附进前一个 epoch：`head = (headTimestamp & ~0xffff) − 2`。用 `−2` 而非 `−1`，是因为低 16 位为 `0xffff` 的时间戳被 `XdagTime.isEndOfEpoch` 认作 epoch 末，会让这个无 INPUT 的块走 `calculateCurrentBlockDiff` 的 RandomX 难度分支；65535 个 tick 的容量足够协议允许的任何链（`maxPerChain = 4096`）。**一条链不跨 epoch**本身就是年龄规则的前提：尾片最老、也是年龄规则的约束点，跨 epoch 的链只能在头片自己那个 epoch 内被付费，窗口可短到 0 tick。
+
+**导入顺序**：头片最新、尾片最老，而 XDAG 要求块的时间戳不得晚于它引用的任何块，所以**分片必须尾片先导入、头片最后，付费块再最后**。分片块以 `keys == null, defKeyIndex == -1, mining == false` 构造，因此天然带两个全零 `SIGN_OUT`、`getNonce()` 恒为 `null`（永远不会被标成 `BI_EXTRA`，即使时间戳落在 epoch 末），正常落盘。
+
+`lookup` 由 `BlockchainImpl.getBlockByHash(hash, true)` 提供；付费块可导入 ⇔ 整条链已在本地（`NO_PARENT` 规则）。
+
+### 3.7 付费块的 L1 金额与两层费用（`LaneBlockBuilder`）
+
+`BlockchainImpl.outPutNum` / `getTxFee` 把 `Block.getOutputs()` 里的每一项都算作 "output"，**不区分**真正的支付（`XDAG_FIELD_OUTPUT`）和分片链头引用（`XDAG_FIELD_OUT`）；L1 既有的费用规则是 `input ≥ headerFee + MIN_GAS × outputs`。因此每个 CALL / DEPLOY 块的 INPUT 金额必须满足
+
+```
+requiredValue(headerFee, chainLinks) = headerFee + MIN_GAS × (1 + chainLinks)
+```
+
+其中 `1` 是那一笔真正的 OUTPUT（CALL 打给金库，新建通道的 DEPLOY 自转），`chainLinks` 是这个块实际携带的分片链头 link 数（CALL 0 或 1；DEPLOY 1 或 2）。`deployNewLane` 自己按这个式子算自转金额（**在决定有没有参数链之后**算，因为代码链总是存在）；`call` / `deployIntoLane` 把 `value` 留给调用方，调用方必须用同一个式子定，否则块在 `tryToConnect` 就被拒。
+
+这与 §4.2 的**分片费**是两回事，两层都要满足：`headerFee` 还必须至少是 `minHeaderFee(chunkFee, chunks) = chunkFee × chunks`，其中 `chunks` 是该块 link 的**所有链的片数之和**（不是链数）。前者是既有的 L1 有效性规则（不满足 → 块无效），后者是激活之后的通道语义（不满足 → 输入记为 `INVALID_FEE`，块仍然有效）。
+
+**link 字段顺序**：`Block` 构造器按 `links` 列表顺序写类型 nibble，而 `getEncodedBody()` 总是先写全部 `INPUT`/`IN`、再写全部 `OUTPUT`/`OUT`/`COINBASE`。要让 nibble 序列与实际字段字节一致，builder 里每个 refs 列表必须**先 INPUT、再 OUTPUT、最后 OUT（分片链头）**，不能是别的顺序。
+
+**分片链头的时间戳**：每条链都根植于 `timestamp − 1`（若那一 tick 的低 16 位恰是 `0xffff` 则再退一 tick，理由同 §3.6），代码链与参数链**各自独立**根植，不把另一条链的长度叠上去——叠上去可能把第二条链的头推早一个 epoch，违反年龄规则。两条链可以共享同一个头时间戳；内容也恰好相同时切出来的分片块逐字节相同，`finish` 按 hashLow 去重（保留第一次出现、保持顺序），否则导入方会把第二份看成 `EXIST`。
 
 ---
 
@@ -137,43 +190,63 @@ ChunkChainBuilder.split(Bytes payload, long baseTimestamp, ECKeyPair unusedOrNul
 ### 4.1 `LaneBlockClassifier.classify(Block) -> Classified`
 
 ```
-record Classified(ExtKind kind /*NONE 表示无 EXT*/, Object record /*解码结果或 null*/, ExtError error /*null 表示成功*/)
+record Classified(ExtKind kind /*null = 无 EXT，或 kind 字节未分配*/, Object value /*解码结果*/, ExtError error)
+  Classified.NONE = (null, null, ExtError.NO_EXT)     // 块根本没有 ext 字段
+  紧凑构造器要求 value / error 恰好一个非空
+  <T> T as(Class<T>)  在 error != null 时抛 IllegalStateException（不是返回 null 的强转）
 ```
 
-- `extFields` 为空 → `NONE`。
-- 取 `extFields[0]` 为 ext 头，`extFields[1..]` 为 payload，`getBlockLinks()` 为 links，分派到对应 `decode`。
-- 分类器**纯函数**、不访问存储、不抛异常。
+- `extFields` 为空 → `Classified.NONE`（kind = `null`，error = `NO_EXT`）。
+- 取 `extFields[0]` 为 ext 头，`extFields[1..]` 为 payload，`getBlockLinks()` 为 links，按头字节 0 经 `ExtKind.fromCode` 分派到对应 `decode`；未分配的 kind 字节 → `(null, null, UNKNOWN_KIND)`。
+- 分类器**纯函数**、不访问存储、不抛异常（`block == null` 除外：`NullPointerException`，编程错误）。调用方必须先 `isOk()` 再 `as(...)`。
+- 传进来的块必须是 raw 块（原则 P6）：`isRaw = false` 的块既无 ext 字段也无 link，会被判成 `NONE`。
 
 ### 4.2 归属判定（在 `LaneL1Processor.onBlockApplied` 内，需要注册表）
 
 ```
-vaultOutputs = [o for o in block.outputs if o.isAddress && registry.hasLane(o.address20)]
+vaultOutputs = [o for o in block.getOutputs()
+                if o.isAddress && o.type == XDAG_FIELD_OUTPUT && registry.hasLane(addr20(o))]   // 按字段顺序，可重复
 c = classify(block)
-consumed = ∅
+minEpoch = XdagTime.getEpoch(block.timestamp) - 1        // 付费块自己的 epoch（§3.6）
+vaultConsumed = false
 
-case c.kind == DEPLOY && c.flags.newLane:
+case c.kind == DEPLOY && c.isOk() && c.flags.newLane:
     laneId = LaneIds.laneIdOf(block.hash);  contract = LaneIds.contractIdOf(block.hash)
-    status = checkDeploy(c)   // 代码链装配 / 长度 / 费用
-    record(laneId, DEPLOY, status, contract)
-    if status == OK: registry.create(laneId, ...); contracts.put(contract, laneId, codeHash); code.incRef(codeHash, bytes)
-case c.kind == DEPLOY && !c.flags.newLane:
-    if vaultOutputs.size() == 1 && vaultOutputs[0] == c.laneId: consumed = {vaultOutputs[0]}; 同上但 laneId = c.laneId
-    else: 落到兜底规则
-case c.kind == CALL:
-    if vaultOutputs.size() == 1 && contracts.laneOf(c.contract) == vaultOutputs[0]:
-        consumed = {vaultOutputs[0]}; status = checkFee(block) ; record(lane, CALL, status, c.contract)
-    else: 落到兜底规则
-case c.kind ∈ {BOND, ANCHOR, CHALLENGE, CLAIM}:
-    handlers[kind].onApplied(block, c, ctx)     // SP0a：no-op 桩
-兜底：for v in vaultOutputs \ consumed: record(v, NONE, INVALID_FORMAT, ∅)
+    applyDeploy(laneId, newLane = true)          // 不消费 vaultOutputs：新通道此刻还不在注册表里
+case c.kind == DEPLOY && c.isOk() && !c.flags.newLane:
+    if vaultOutputs.size() == 1 && vaultOutputs[0] == c.laneId:
+        vaultConsumed = true;  applyDeploy(c.laneId, newLane = false)
+case c.kind == CALL && c.isOk():
+    if vaultOutputs.size() == 1 && contracts.get(c.contract)?.laneId == vaultOutputs[0]:
+        vaultConsumed = true
+        chunks = countLenient(c.argsChainHead, minEpoch)
+        record(vaultOutputs[0], CALL, feeCovers(block, chunks) ? OK : INVALID_FEE, c.contract)
+case c.kind ∈ {ANCHOR, BOND, CHALLENGE, CLAIM} && c.isOk():
+    handlers[kind]?.onApplied(block, c, ctx, batch)      // SP0a 不注册任何 handler
+兜底：if !vaultConsumed: for v in vaultOutputs: record(v, kind = null, INVALID_FORMAT, 全零地址)
 ```
 
-`LaneIds.laneIdOf(h) = sha256("xdag-lane" ‖ h)[0..20]`，`contractIdOf(h) = sha256("xdag-contract" ‖ h)[0..20]`。
+`LaneIds.laneIdOf(h) = sha256("xdag-lane" ‖ h)[0..20]`，`contractIdOf(h) = sha256("xdag-contract" ‖ h)[0..20]`；两个 tag 与截断长度都是协议常量，改动即硬分叉。
 
-`checkDeploy`：`flags.bit1` 时装配代码链，长度 > `maxWasmBytes` → `CODE_TOO_LARGE`；否则 `codeHash` 必须已在代码库，否则 `INVALID_FORMAT`；装配结果的 `sha256` 必须等于 `payload[0].codeHash`，否则 `INVALID_FORMAT`；再做 `checkFee`。
-`checkFee`：`header.fee ≥ chunkFee × (该块直接 link 的所有分片链片数之和)`，否则 `INVALID_FEE`。
+**只有 `XDAG_FIELD_OUTPUT` 地址链接算金库支付。** `Block.parse` 也会把 `XDAG_FIELD_COINBASE` 放进 `getOutputs()`，但 `applyBlock` 从不结算 COINBASE 字段的值，所以它绝不能被记成对金库的支付。这取代了原开放问题 Q3（"主块 coinbase 恰好指向某金库时会误记 `INVALID_FORMAT`，接受"）：现在不会。
 
-`InputStatus { OK, INVALID_FORMAT, INVALID_FEE, CODE_TOO_LARGE }`。所有状态都产生输入记录（value 的通道内退款由 SP1 按状态处理）。
+**每一个被归属的金库 OUTPUT 产生一条输入记录**：同一个块向同一个金库出两笔 OUTPUT，就是两条 `INVALID_FORMAT` 记录（`vaultOutputs.size() != 1`，不会被 CALL/DEPLOY 消费），进金库的每一分钱都有账可对。
+
+`applyDeploy` 的检查顺序（**先便宜后昂贵，且顺序决定最终 status**）：
+
+1. **新建通道的配置边界**：`1 ≤ maxCallGas ≤ 10_000_000`（`LaneL1Processor.MAX_CALL_GAS_CAP`，总规格 §17 的 `maxCallGas` 初值，只能下调），否则 `INVALID_FORMAT`。`0` 的通道永远跑不了一次调用，超上限的通道会让欺诈证明仲裁无界。`gasPriceNano` 与 `D` 不设限。此检查**先于**代码链检查：只看块自己的字节就能定，注定失败的通道不值得去装配一条代码链。
+2. **代码**：`flags.bit1` 时按年龄规则装配代码链，装配失败 → `INVALID_FORMAT`；长度 > `maxWasmBytes` → `CODE_TOO_LARGE`；`sha256(装配结果) != payload[0].codeHash` → `INVALID_FORMAT`。无代码链时 `codeHash` 必须已在代码库（`hasCode`），否则 `INVALID_FORMAT`。
+3. **费用**：`chunks` = 代码链片数（**仅在 `assemble` 已通过之后**再用 `countLenient` 数一遍）+ 参数链的 `countLenient`；`headerFee < chunkFee × chunks` → `INVALID_FEE`。
+
+因此 `INVALID_FORMAT` / `CODE_TOO_LARGE` 优先于 `INVALID_FEE`；`INVALID_FEE` 只可能出现在其余都合法的块上。
+
+**费用规则（共识复核）**：`headerFee ≥ chunkFee × 该块直接 link 的所有分片链片数之和`；`chunks == 0` 时直接通过。`headerFee` 必须从**原始 512 字节的 header 字段**读（`BlockInfo.fee` 在 apply 期间会被改写成"收到的手续费"，`Block.getFee()` 答的不是"这个块声明了多少"）。
+
+**参数链的费用基数就是 `countLenient` 本身，这是有意为之**：L1 从不装配参数链（CALL 的参数、DEPLOY 的 init 参数），SP1 的执行引擎才装配，装不出来就在通道内失败并退款。分片费收的是"全网确实要存的分片块"，与这条链将来能不能装配无关。只有 DEPLOY 的代码链是 L1 自己装配的，所以它的片数必须在 `assemble` 通过之后才数（§3.6 的费用契约）。
+
+`InputStatus { OK, INVALID_FORMAT, INVALID_FEE, CODE_TOO_LARGE }`，编码为 u8 `0..3`。所有状态都产生输入记录（value 的通道内退款由 SP1 按状态处理）。
+
+DEPLOY 的 `status == OK` 时额外写：新建通道 → `putLane(laneId, LaneRecord(height, blockHash, gasPriceNano, D, maxCallGas, contractCount = 1))`；加入已有通道 → `putLane(laneId, lane.withContractCount(+1))`；总是 `putContract(contract, ContractRecord(laneId, codeHash, height, blockHash))`；代码库按 `getCodeRefCount(codeHash)` 决定是 `putCodeRef(+1)`（已存在，**绝不重写 blob**——内容寻址已经保证存的就是这份代码）还是 `putCode(refCount = 1, bytes)`。
 
 注册表查询用 DFS 当前时刻的状态：同一高度先 DEPLOY 后 CALL 可见，顺序全网一致。向未注册地址的转账不产生记录。
 
@@ -192,19 +265,34 @@ default void batchWrite(List<Pair<K,V>> puts, List<K> deletes) { puts.forEach(pu
 
 ### 5.2 前缀布局（值定长手工编码，小端）
 
-| 前缀 | key | value | SP0a |
-|------|-----|-------|------|
-| 0x00 | `0x00` | schemaVersion u32 = 1 | ✓ |
-| 0x01 | laneId(20) | createdHeight u64 ‖ createBlockHash 32 ‖ gasPriceNano u64 ‖ D u32 ‖ maxCallGas u32 ‖ contractCount u32 | ✓ |
-| 0x02 | contract(20) | laneId 20 ‖ codeHash 32 ‖ deployHeight u64 ‖ deployBlockHash 32 | ✓ |
-| 0x03 | codeHash(32) | refCount u32 ‖ len u32 ‖ bytes | ✓（refCount 到 0 删除） |
-| 0x07 | laneId(20) ‖ height u64 | callCount u32 | ✓ |
-| 0x0C | laneId(20) ‖ height u64 ‖ index u32 | blockHash 32 ‖ kind u8 ‖ status u8 ‖ contract 20 | ✓ |
-| 0x0E | blockHash(32) | laneId 20 ‖ height u64 ‖ index u32 | ✓ |
-| 0x04 0x05 0x06 0x08 0x09 0x0A 0x0B | 保证金 / 锚定头 / 锚定索引 / 已认领 / 高度触发器 / 挑战 / 段游标 | 常量预留 | SP2/SP3 |
+每个 key 都是"1 字节前缀 + 定长后缀"，没有分隔符，因此共享前缀的 key 不可能互相碰撞。
 
-`LaneL1Store` API（全部同步、无缓存，除 `codeBytes` 外都是点查）：
-`hasLane / getLane / putLane / deleteLane`，`getContract / putContract / deleteContract`，`codeIncRef(hash, bytes) / codeDecRef(hash) / hasCode / getCode`，`getCallCount / putCallCount`，`putInput / getInput / deleteInput`，`getReverse / putReverse / deleteReverse`，`batch(LaneL1Batch)`（收集 puts/deletes 后一次提交），`exportAll(KVSource) / importAll(KVSource) / stateHash()`。
+| 前缀 | 名字 | key | value | SP0a |
+|------|------|-----|-------|------|
+| 0x00 | `META` | `0x00` | schemaVersion u32 = 1 | ✓ |
+| 0x01 | `LANE` | laneId(20) | createdHeight u64 ‖ createBlockHash 32 ‖ gasPriceNano u64 ‖ D u32 ‖ maxCallGas u32 ‖ contractCount u32（60B） | ✓ |
+| 0x02 | `CONTRACT` | contract(20) | laneId 20 ‖ codeHash 32 ‖ deployHeight u64 ‖ deployBlockHash 32（92B） | ✓ |
+| 0x03 | `CODE` | codeHash(32) | **原始代码字节**（只有 blob，不含计数） | ✓ |
+| 0x07 | `CALL_COUNT` | laneId(20) ‖ height u64 | callCount u32 | ✓ |
+| 0x0C | `INPUT` | laneId(20) ‖ height u64 ‖ index u32 | blockHash 32 ‖ kind u8（0 = 未分类）‖ status u8 ‖ contract 20（54B） | ✓ |
+| 0x0D | `CODE_REF` | codeHash(32) | refCount u32 | ✓ |
+| 0x0E | `REVERSE` | blockHash(32) | `InputRef`（laneId 20 ‖ height u64 ‖ index u32 = 32B）的定长数组 | ✓ |
+| 0x04 0x05 0x06 0x08 0x09 0x0A 0x0B | 保证金 / 锚定头 / 锚定索引 / 已认领 / 高度触发器 / 挑战 / 段游标 | | 常量预留 | SP2/SP3 |
+| 0xFF | `SNAPSHOT_HASH` | `0xFF` | 状态哈希 32 | 快照库里是导出的哈希；本地库里是"已从快照导入过"的一次性标记（§8）。**不计入 `stateHash()`** |
+
+**`CODE` 与 `CODE_REF` 拆开**（原设计是 `refCount ‖ len ‖ bytes` 一条 value）：共享同一份代码的第二个 DEPLOY 只需要重写 4 字节的计数，而不是整份（最多 1 MB）blob。由此确定：
+
+- `hasCode(codeHash)` ⇔ **`CODE_REF` 存在**（一次点查 4 字节，从不读 blob）；`getCodeRefCount` 对不存在的 key 返回 0，且**refCount 为 0 时永远不写这条 key**（删除而不是写 0），这样"代码库里有没有这份代码"的判定全网一致，unwind 之后也一致。
+- 引用计数增减永不重写 blob；降到 0 时 `CODE` 与 `CODE_REF` 一起删。
+- `getCallCount` 同理：不存在即 0，归 0 时删 key 而不是写 0。
+
+`LaneL1Store` API：
+
+- **写只有一条路径**：调用方构造 `LaneL1Batch`（`putLane / deleteLane`、`putContract / deleteContract`、`putCode / putCodeRef / deleteCode`、`putCallCount / deleteCallCount`、`putInput / deleteInput`、`putReverse / deleteReverse`），`store.commit(batch)` 一次 `batchWrite` 原子落盘；空批次不触底层。批次对同一个 key 只保留最后一次写。
+- **读全是点查**：`hasLane / getLane`、`getContract`、`hasCode / getCodeRefCount / getCode`、`getCallCount`、`getInput`、`getReverse`；读 API 里没有范围扫描。
+- **快照边界操作（O(N) 时间与堆，每块从不调用）**：`sortedKeys()`、`stateHash()`、`exportSnapshot(KVSource)`、`importSnapshot(KVSource)`。
+- `stateHash()` = 按 key 的无符号字典序遍历，每对序列化为 `u32(len(key)) ‖ key ‖ u32(len(value)) ‖ value`（小端 u32）喂给 SHA-256；**`META` 计入，`0xFF` 自身排除**。它是内容的纯函数：RocksDB 与内存实现算出同一个值。
+- 线程安全只到"共识锁"这一层：调用方（`BlockchainImpl` 的钩子）必须像串行化块应用一样串行化访问。
 
 ---
 
@@ -227,23 +315,30 @@ public interface LaneL1Hooks {
 
 | 钩子 | 位置 |
 |------|------|
-| `onSetMainBegin(mainNumber, block)` | `setMain`：`updateBlockFlag(block, BI_MAIN, true)` 之后、`applyBlock(true, block)` 之前 |
-| `onBlockApplied(block)` | `applyBlock`：`updateBlockFlag(block, BI_APPLIED, true)` 紧随其后（无论 `flag` 真假；主块自身也会到达此处，处理器按 kind 判定，主块无 EXT 直接返回） |
-| `onSetMainEnd(mainNumber, block)` | `setMain`：方法末尾；**`mainBlockFee < 0` 的提前 `return` 分支之前也必须调用** |
-| `onBlockUnapplied(block)` | `unApplyBlock`：`updateBlockFlag(block, BI_APPLIED, false)` 之前（此时 `BI_APPLIED` 仍为真，处理器据此判断是否有记录） |
-| `onUnsetMain(height, block)` | `unSetMain`：`unApplyBlock(block, true)` 之前调用（先关上下文语义，再逆序反写），高度用 `block.getInfo().getHeight()` |
+| `onSetMainBegin(mainNumber, block)` | `setMain`：`updateBlockFlag(block, BI_MAIN, true)` 之后、包住整个 apply 过程的 `try` 之前 |
+| `onBlockApplied(block)` | `applyBlock`：紧跟 `updateBlockFlag(block, BI_APPLIED, true)`，**两处调用点**——无 link 的提前 `return` 分支，以及正常出口（无论 `flag` 真假）。主块自身也会到达此处，处理器按 kind 判定，主块无 EXT 直接返回 |
+| `onSetMainEnd(mainNumber, block)` | `setMain`：包住整个 apply 过程的 **`finally` 块**里——正常结束、`mainBlockFee < 0` 的提前 `return`、以及从 `applyBlock` DFS 里抛出来，三条出口都走它。（原设计只要求"方法末尾 + 提前 return 之前"，`finally` 把第三条出口也覆盖了） |
+| `onBlockUnapplied(block)` | `unApplyBlock`：`updateBlockFlag(block, BI_APPLIED, false)` 之前（此时 `BI_APPLIED` 仍为真） |
+| `onUnsetMain(height, block)` | `unSetMain`：方法开头、`unApplyBlock(block, true)` 之前（先关上下文语义，再逆序反写），高度用 `block.getInfo().getHeight()`（此时还没被清零） |
+
+**处理器的安装位置是一条接线不变量**：`LaneL1Processor` 在 **`BlockchainImpl` 构造器里**用 `kernel.getLaneL1Store()` 建好并装上，且**在 `startCheckMain` 之前**。checkMain 循环的初始延迟是 0，构造器的调用方拿回控制权之前它的第一次 `checkNewMain → setMain` 就可能已经跑完；从外面（像 `Kernel` 原先那样）接线，会让那个主块在钩子还是 `NOOP` 时被确认，它的通道输入就永久丢在 `LANE_L1` 之外了。`kernel.getLaneL1Store()` 为 `null`（不带 lane 存储的测试）时保持 `NOOP`。`BlockchainImpl.setLaneHooks` 保留给"自己装钩子"的测试，生产路径不再调用它。
 
 ### 6.3 `LaneL1Processor` 行为
 
-- `onSetMainBegin`：`if height < activationHeight: ctx = null; return`；否则 `ctx = new ApplyContext(height, mainBlock.hash, dfsIndex = 0, batch = new LaneL1Batch())`。
-- `onBlockApplied`：`if ctx == null: return`；按 §4.2 判定；每条 `record(...)` 写 0x0C（index = ctx.dfsIndex++）、0x0E、0x07 递增；DEPLOY 成功再写 0x01/0x02/0x03；全部进入 `ctx.batch`。**每个块结束时立即 `store.batch(ctx.batch)` 并清空**（一个块一批，而非一个主块一批：`applyBlock` 递归中后续块的注册表查询要看到前面块的写入）。
-- `onSetMainEnd`：SP0a 无高度触发器；`ctx = null`。
-- `onBlockUnapplied`：`if height(block.ref) < activationHeight: return`（用反向索引是否存在判断更简单：`rev = store.getReverse(block.hash)`，为空直接返回）；删除 0x0C/0x0E，`callCount--`；若记录 kind == DEPLOY 且 status == OK：`contracts.delete`、`code.decRef`、新建通道则 `deleteLane` 否则 `contractCount--`；一次 `batch`。**unApplyBlock 已对 links 逆序，处理器不再排序**。
-- `onUnsetMain`：`ctx = null`（防御性）。
+- `onSetMainBegin`：`ctx = LaneActivation.isActive(height) ? new ApplyContext(height, mainBlock.hash) : null`。`ApplyContext` **只有 height 与主块哈希**，没有 DFS 计数器、也不持有批次。进来时 `ctx` 非空说明调用方 begin/end 不配对，记 `warn` 并覆盖。
+- `onBlockApplied`：`if ctx == null: return`；按 §4.2 判定；每条 `record(...)` 写 0x0C（**index = 该 (lane, height) 的当前 callCount，即每通道每高度从 0 递增，执行者按 `0..callCount−1` 枚举**）、把 `InputRef` 追加到本块的 0x0E 列表、并把 0x07 置为 `index + 1`；DEPLOY 成功再写 0x01/0x02 与 0x03/0x0D。**同一块的所有写入组成一个 batch，块结束时立即 `store.commit(batch)`**（一个块一批，而不是一个主块一批：`applyBlock` 递归中后续块的注册表查询要看到前面块的写入）。一个块可以有多条记录（每个被归属的金库 OUTPUT 一条），块内 index 在内存 map 里递增，同一个 (lane, height) 的多次 `putCallCount` 靠批次"同 key 只留最后一次写"收敛到最终值。什么都没归属、handler 也没写东西时**不提交空批次**。若该块的 0x0E 已存在（被 apply 了两次而中间没有 unapply），记 `error` 但仍然写入——在这里让块应用失败更糟。
+- `onSetMainEnd`：SP0a 无高度触发器；`ctx = null`。`ctx.height != height` 时记 `warn`（调用方 begin/end 不配对）。
+- `onBlockUnapplied`：**完全不看 `ctx`**（unwind 跑在任何 `setMain` 之外），高度从记录下来的 `InputRef` 里取。先分派非内建 kind 的 handler，再读 0x0E：为空就只剩 handler 的写入。有记录时**按 refs 逆序**逐条删 0x0C、`callCount--`；记录 kind == DEPLOY 且 status == OK 时 `undoDeploy`（删 0x02；`refCount ≤ 1` 则删 0x03+0x0D，否则 `putCodeRef(−1)`；创建块自己被回滚则 `deleteLane`，否则 `contractCount--`）；最后删 0x0E，一次 `commit`。`callCount` 归 0 时**删 key 而不是写 0**。记录损坏（`InputRecord.decode` / `InputStatus.fromCode` 抛）是**故意的 fail-stop**：不 catch——连记录都解析不了就无法正确回滚，静默跳过比暴露 DB 损坏更糟。**`unApplyBlock` 已对 links 逆序，处理器不再排序**。
+- `onUnsetMain`：`ctx = null`（防御性）。与 `onSetMainEnd` 不同，它不与某一次 `onSetMainBegin` 配对，因此不做高度一致性检查。
+- **`registerHandler` 必须在第一个钩子跑之前**：任何一个钩子方法进入时都会把 `started` 置真，之后 `registerHandler` 抛 `IllegalStateException`（否则同 kind 的已处理块就漏掉了它的分派）；`CALL / DEPLOY / CHUNK` 是内建的，注册它们抛 `IllegalArgumentException`。由于处理器现在是在 `BlockchainImpl` 构造器里建的，**SP2/SP3 必须在构造之后立刻注册**，不能再指望一个"事后的外部窗口"（那会把上面那条接线不变量重新破坏掉）。
+- `LaneKindHandler` 的签名是 **4 参 / 3 参**：`onApplied(Block block, Classified classified, ApplyContext ctx, LaneL1Batch batch)` 与 `onUnapplied(Block block, Classified classified, LaneL1Batch batch)`。handler **写进处理器递给它的那个批次**，不自己提交（P5：一个块一批一次提交）。`onUnapplied` **可能为一个从未 apply 过的块触发**（unwind 路径没有上下文，无从知道那个高度当时是否已激活），因此 handler 必须**撤销幂等**：只撤销"自己存下来的记录能证明它做过"的事，不能假设与 `onApplied` 严格配对。
+- **unapply 必须是 apply 的严格逆序**：`callCount` 的算术只有在"被 unapply 的块占据它碰过的每个 (lane, height) 的最高那几个 index"时才正确。`BlockchainImpl` 保证了这一点（`unApplyBlock` 先本块、再按逆序遍历 links）。真的被违反时，处理器用**金丝雀 + 钳制**兜底而不是抛异常：`callCount` 变负 → 记 `error` 并删 key；创建块被回滚时 `contractCount != 1` → 记 `error`；`contractCount` 会变负 → 记 `error` 并钳到 0（否则 `LaneRecord` 的 u32 范围检查会从 `unSetMain` 里抛出来）。
 
-### 6.4 DFS 索引的确定性
+### 6.4 输入索引的确定性
 
-`applyBlock` 的递归顺序 = link 顺序 = 全网一致；`onBlockApplied` 只在 `BI_APPLIED` 成功路径被调用，`syncTxStatus` 导致的拒绝在所有节点一致（既有共识）。因此 `(laneId, height, index)` 全网一致。
+`index` 是**每 (lane, height) 内从 0 递增的序号**，不是主块级的全局 DFS 序号：执行者读到 0x07 的 `callCount` 就能按 `0..callCount−1` 枚举该通道该高度的全部输入。它的确定性来自 `applyBlock` 的递归顺序 = link 顺序 = 全网一致；`onBlockApplied` 只在 `BI_APPLIED` 成功路径被调用，`syncTxStatus` 导致的拒绝在所有节点一致（既有共识）。因此 `(laneId, height, index)` 全网一致。
+
+处理器的每一个判定都只依赖：被 apply 的那个块的原始字节、DFS 走到此刻的 `LANE_L1` 状态、`LaneSpec` 参数、以及块查找。没有任何一处读墙上时钟（年龄规则用的是块自己的时间戳），也不依赖无关块到达网络的先后。
 
 ### 6.5 Reorg 备注
 
@@ -258,22 +353,52 @@ public interface LaneL1Hooks {
 | 键 | 类型 | devnet | testnet | mainnet | conf 键 |
 |----|------|--------|---------|---------|---------|
 | activationHeight | long | 0 | `Long.MAX_VALUE` | `Long.MAX_VALUE` | `lane.activation.height` |
-| maxChunksPerChain | int | 4096 | 4096 | 4096 | `lane.chunk.maxPerChain` |
+| maxChunksPerChain | int | 4096 | 同 | 同 | `lane.chunk.maxPerChain` |
 | maxWasmBytes | int | 1,048,576 | 同 | 同 | `lane.wasm.maxBytes` |
-| maxInlineArgs | int | 256 | 同 | 同 | `lane.args.maxInline` |
-| chunkFee | XAmount | 0.01 XDAG | 同 | 同 | `lane.chunk.fee` |
+| chunkFee | XAmount | 0.01 XDAG | 同 | 同 | `lane.chunk.feeMilliXdag`（milli-XDAG 整数） |
+| maxInlineArgs | int | 256 | 同 | 同 | **无**——线格式常量 |
 
-`AbstractConfig.getSetting()` 读取 conf 覆盖；`Config` 接口暴露 `getLaneSpec()`。
-`LaneActivation.isActive(long height)`，`isActiveAt(XdagStats)`（用 `nmain`）供 SP5 门控。
+`maxInlineArgs` **没有 conf 键**（原设计的 `lane.args.maxInline` 已删）：它是 `LaneSpec.LANE_MAX_INLINE_ARGS = 256`，由 512 字节块布局推导（`(16 − 8) × 32`），与 `CallExt.MAX_INLINE_ARGS` 同源。可配置化意味着"同一个块在一个节点上装得下、在另一个节点上装不下"。同理 `maxChunksPerChain` 的协议默认值 `LaneSpec.DEFAULT_MAX_CHUNKS_PER_CHAIN = 4096` 与 `LaneBlockBuilder.MAX_CHUNKS_PER_CHAIN` 同源，且 **builder 按 config 里实际配置的值**限制切片数（超出 → `CHUNK_TOO_MANY`），而不是按常量。4096 × 352 B ≈ 1,441,792 B ≈ 1.44 MB。
+
+`AbstractConfig.getSetting()` 读 conf 覆盖，并在**启动时 fail-fast**（这些值不一致就是静默分叉）：
+
+- `lane.activation.height ≥ 0`；给了覆盖值就打一条 `warn`（网络默认被压过）。
+- `lane.chunk.maxPerChain > 0`、`lane.wasm.maxBytes > 0`、`lane.chunk.feeMilliXdag ≥ 0`（负值与 `XAmount` 溢出都直接拒）。
+- `maxWasmBytes ≤ maxChunksPerChain × 352`——超过这个天花板的 WASM 上限，任何分片链都够不着。
+- `chunkFee × 2 × maxChunksPerChain` 必须不溢出 long：共识复核会把片数乘上去，DEPLOY 最坏情况是代码链 + 参数链两条；溢出会从 `setMain` 里抛出来，所以在启动时就拒。
+
+`Config` 接口暴露 `getLaneSpec()`；`setLaneActivationHeight(long)` 会清掉 conf 来源的覆盖值，所以测试/工具设的值一定生效。
+`LaneActivation.isActive(long height)`（`height >= activationHeight`）；`isActiveNow(XdagStats)` 用 `nmain` 供 SP5/RPC/钱包按当前链顶门控，**不得用于 apply/unwind 路径**——那里必须传正在被确认的块的高度（`setMain` 里是 `nmain + 1`）。
+
+**绝不往任何 conf 文件里加 `lane.*` 键**：`src/test/resources/xdag-devnet.conf` 是主配置的影子副本且优先级更高，两份文件一旦不同步就会出现"测试通过、生产分叉"。一律用代码默认值 + `setLaneActivationHeight`。
 
 ---
 
 ## 8. 快照扩展
 
-- `SnapshotStoreImpl.makeSnapshot`：新增 `SNAPSHOT/LANE_L1`（`RocksdbKVSource("LANE_L1")` 于快照目录下）：`laneStore.exportAll(target)` + 写 `0xFF → laneStateHash`。
-- `laneStateHash = sha256( concat over keys in lexicographic order of len(key) u32 ‖ key ‖ len(val) u32 ‖ val )`，不含 `0xFF` 自身。
-- `BlockchainImpl.initSnapshotJ`：若 `snapshotHeight ≥ activationHeight`：目录缺失 → `IllegalStateException("LANE_L1 snapshot required at height …")`；存在 → `importAll` 后重算哈希与 `0xFF` 比对，不等 → 异常。若 `snapshotHeight < activationHeight`：忽略。
-- 幂等闸门沿用 `isSnapshotBoot`。
+**导出**（`XdagCli.makeSnapshot`）：快照从此有**三个目录**——`SNAPSHOT/BLOCKS`、`SNAPSHOT/ADDRESS`、`SNAPSHOT/LANE_L1`（节点 store 目录下的独立 `RocksdbKVSource`）。`LANE_L1` **无条件导出**（没有 `shouldExport` 之类的开关）：`store.exportSnapshot(target)` 复制全部 key，再写 `0xFF → stateHash()`；`LANE_L1` 为空时导出的就是"`META` + 哈希"，激活高度之前的节点导入时会忽略它。目标目录非空 → 抛（二次导出会与上一次合并，记录的哈希就对不上内容了）。导出失败被 `makeSnapshot` 捕获并打印，**不影响它继续打印高度/下一帧摘要**。快照目录结构本身记在 `docs/XDAGJ_SNAPSHOT_zh.md` 与 `.claude/docs/snapshot-and-storage.md`。
+
+`laneStateHash` 的定义见 §5：按 key 无符号字典序的 `u32(len(k)) ‖ k ‖ u32(len(v)) ‖ v` 的 SHA-256，含 `META`、不含 `0xFF` 自身。
+
+**导入**（`LaneL1SnapshotGate.checkAndImport(config, snapshotHeight, store)`）：调用点是 **`BlockchainImpl` 构造器里快照启动分支的第一条语句**——即 `isSnapshotEnabled() && snapshotHeight > 0 && !blockStore.isSnapshotBoot()` 这一支的最前面，**在块/地址导入之前，且与 `snapshot.isSnapshotJ()` 开关无关**。这样每一次快照启动都会过这道门，并且是 fail-fast：缺 `LANE_L1` 的节点在动任何其它状态之前就停下来。
+
+判定顺序：
+
+1. `snapshotHeight < activationHeight` → 直接返回（目录在不在都忽略，`store` 为 `null` 也不管）。
+2. 已到激活高度而 `store == null` → **抛**（节点没有 `LANE_L1` 实例，却要在激活后的高度上跑通道语义）。
+3. 本地 `LANE_L1` 已带 `0xFF` 标记（`importedSnapshotHash().isPresent()`）→ **直接返回**，连快照目录都不打开。`0xFF` 是**一次性的持久标记**：一次成功的导入会把快照里那份哈希写进本地库的 `LaneL1Keys.SNAPSHOT_HASH_KEY`，**与导入的全部 key 在同一个 `batchWrite` 里**原子落盘。它不计入 `stateHash()`，所以不影响状态哈希语义。它回答的是"这份状态是不是从快照来的"，**而不是**"这份状态现在还等不等于快照"——之后正常 apply 了很多块的节点仍然带着它、仍然被接受。它的作用是让这道门幂等：节点起来之后运维可以把 `SNAPSHOT/LANE_L1` 目录删掉。
+4. 没有标记，但本地 `LANE_L1` 已有状态（`hasState()`：`META` 与标记之外还有 key）→ **抛**，并给出补救办法（删掉本地 `LANE_L1` 目录重启，或换用配套的快照）。这份状态的来源无从证明（另一条链遗留、写了一半的导入、手工拷贝），静默合并或静默信任都可能直接分叉。
+5. 没有标记且本地为空（只有 `start()` 写的 `META`）→ **导入**：校验快照带了 `0xFF`、schema 版本等于 1，**在写任何东西之前**先用快照内容重算哈希与 `0xFF` 比对（不等则抛，store 保持原样），一致则把全部 key 连同标记一次性提交——被拒绝或被中断的导入不会留下半填状态。快照目录缺失 → 抛，并指明"从发布 `SNAPSHOT/BLOCKS` 的同一来源取 `SNAPSHOT/LANE_L1`，放在它旁边再重启"。
+
+**§A（Task 17）：快照里不带任何原始分片字节。** 年龄规则允许快照之后的付费块往回够两个 epoch，可能够到快照时间之前；那些 CHUNK 块不在快照里，也不需要在，理由三条：
+
+1. `SnapshotStoreImpl.makeSnapshot` 只保留"有公钥（`snapshotInfo != null`）或余额非零"的块，CHUNK 块金额为 0、无公钥，因此**在快照节点上整块都不存在**——连 `BlockInfo` 都没有，不是"只有 `BlockInfo` 没有原始字节"。
+2. `tryToConnect` 只因"时间戳超前 `now + MAIN_CHAIN_PERIOD/4` / 早于 `xdagEra`"拒块，**没有任何以快照高度为界的拒绝规则**。指向一个连 `BlockInfo` 都没有的块的 link 得到 `NO_PARENT`，`SyncManager` 对 `NO_PARENT` 的回应就是向所有活跃 channel `sendGetBlock`，按需递归拉取父块；拉回来的块走正常导入路径，`saveBlock` 会写原始字节、`BlockInfo` 与时间索引。
+3. 因此付费块在整条分片链被拉齐并落盘之前根本连不上；等到某个主块确认它时，快照节点上的 `getBlockByHash(h, true)` 对每一片都成功，与全量节点的裁决完全一致。
+
+**残余暴露（接受；纯节点本地活性，永不产生状态分歧）**：如果没有任何 peer 能提供那些老分片，付费块在这个节点上就一直连不上，link 它的主块也一直 `NO_PARENT`。`SyncManager` 的重请求还带节流（同一个 hash 64 s 内不重复请求）并在 pending 集合到 `MAX_SIZE` 时随机淘汰条目，所以"最终会拉到"是尽力而为而非保证——但失败的后果只是这个节点跟不上，不是两个节点对同一个块给出不同裁决。这与"快照节点遇到任何一个引用了被丢弃的快照前块的新块"是同一种活性依赖。
+
+幂等闸门沿用 `isSnapshotBoot`（构造器只在它还是 false 时进入快照分支）+ 上面那条 `0xFF` 标记。
 
 ---
 
@@ -283,14 +408,14 @@ public interface LaneL1Hooks {
 |----|------|
 | 编解码 | 七种记录 encode→decode 往返；每字段边界（u16/u32 极值、argsLen 256/257）；保留字节非 0；随机 32B decode 只返回错误不抛 |
 | Block | 带 EXT 的块 `toBytes()`→`new Block(new XdagBlock(bytes))` 往返：`extFields` 顺序、类型掩码位置、hash 稳定、`signOut`+`verifiedKeys` 通过；`getBlockLinks()` 顺序；旧构造器签名行为不变 |
-| 分片链 | 1 片；352B 整除；非整除；4096 片；4097 → TOO_MANY；seq 断裂；totalLen 不符；末片带 link；环（A→B→A）；`count` 与 `assemble` 一致 |
+| 分片链 | 1 片；352B 整除；非整除；4096 片；4097 → TOO_MANY；seq 断裂；totalLen 不符；末片带 link；环（A→B→A）；非 CHUNK 块 → `NOT_A_CHUNK`；过旧分片 → `CHUNK_TOO_OLD`；`countLenient` 与 `assemble` 的费用契约 |
 | 分类器 | 每 kind 一正例；`NONE`；EXTRA_LINK / MISSING_LINK；内联参数超长 |
 | Builder | CALL 内联 256B 恰好装下、257B 拒绝；DEPLOY 新建/加入两种；字段预算超 16 返回错误 |
-| 存储 | CRUD；`batchWrite` 原子（用注入异常的 KVSource 验证无半写）；codeIncRef/DecRef 到 0 删除；`exportAll/importAll/stateHash` 往返 |
-| 钩子端到端 | 真实 `Kernel` + RocksDB（`TemporaryFolder`）：DEPLOY(新通道，代码 300 片) → CALL×3（含 1 笔格式错、1 笔分片费不足）→ 出主块 → 确认；断言 0x01/0x02/0x03/0x07/0x0C/0x0E 内容与 DFS 顺序；再一笔向金库的普通转账 → INVALID_FORMAT 记录 |
+| 存储 | 点查 CRUD；`batchWrite` 原子（用注入异常的 KVSource 验证无半写）；`CODE`/`CODE_REF` 拆分后引用计数到 0 时两条 key 一起删、计数增减不重写 blob；`exportSnapshot` / `importSnapshot` / `stateHash` 往返 |
+| 钩子端到端 | 真实 `Kernel` + RocksDB（`TemporaryFolder`）：DEPLOY(新通道) → CALL×N（含格式错、分片费不足）→ 出主块 → 确认；断言 0x01/0x02/0x03/0x07/0x0C/0x0D/0x0E 的内容与**每 (lane, height) 从 0 递增的 index**；再一笔向金库的普通转账 → INVALID_FORMAT 记录 |
 | 属性 | 随机 3–8 个高度的块序列，随机 unwind 深度：`apply→unwind→apply` 后 `LANE_L1` 全 KV 逐字节等于直接 apply；`AddressStore` 中涉及地址的余额与 nonce 相等（复用 `BlockchainTest` 的分叉制造方式；不比较 `AddressStore` 全 KV，避免被既有 L1 回滚的已知不对称项干扰） |
 | 激活门控 | `activationHeight = MAX`：同一序列后 `LANE_L1` 为空且 `BlockInfo`/余额/nonce/fee 逐字节等于用普通转账替换 CALL 的对照序列 |
-| 快照 | 导出→导入往返；篡改一个 value 后哈希不符拒绝；`snapshotHeight ≥ activation` 且目录缺失拒绝；`< activation` 忽略 |
+| 快照 | 导出→导入往返；篡改一个 value 后哈希不符拒绝；`snapshotHeight ≥ activation` 且目录缺失拒绝、`store == null` 拒绝；本地已有状态但无 `0xFF` 标记 → 拒绝；已有 `0xFF` 标记 → 幂等返回（目录可缺）；`< activation` 忽略 |
 | 回归 | 现有 50 个测试类全绿（JDK 21 + toolchains，见 build env 记忆） |
 
 ---
@@ -298,24 +423,39 @@ public interface LaneL1Hooks {
 ## 10. 总规格同步（与本文同一提交）
 
 1. §5.2 CHUNK：13 字段/416B → **11 字段/352B**，须带 2 个全零 `SIGN_OUT`；100KB WASM ≈ 291 片。
-2. §5.1 新增原则"EXT 不影响 L1 有效性"；§5.4 费用规则改为"导入期节点策略（SP0b）+ `applyBlock` 共识复核（不足 → `INVALID_FEE` 输入）"；§5.5 硬分叉点收窄为系统划账与快照。
-3. §6.1 增加 0x0C/0x0E，代码库加引用计数；§6.2 钩子表改为五钩子。
-4. §18 SP0 拆为 SP0a / SP0b。
+2. §5.1 新增原则"EXT 不影响 L1 有效性"；§5.3 补分片链的**年龄规则**，并把 `maxChunksPerChain` 的容量更正为 ≈ 1.44 MB；§5.4 费用规则改为"导入期节点策略（SP0b）+ `applyBlock` 共识复核（不足 → `INVALID_FEE` 输入）"，并补"OUT 分片链 link 在 `getTxFee` 里算 output"导致的 `requiredValue` 规则；§5.5 硬分叉点收窄为系统划账与快照。
+3. §6.1 增加 0x0C/0x0D/0x0E，代码库拆成 blob + 引用计数两条 key；§6.2 钩子表改为五钩子。
+4. §12 与 §17：`maxCallGas` 补上 L1 DEPLOY 处强制的 `[1, 10_000_000]` 边界；§17 `maxChunksPerChain` 的容量数字更正为 ≈ 1.44 MB。
+5. §18 SP0 拆为 SP0a / SP0b。
+6. §20 新增三条：dev-evm 的 0x0F 码点冲突；快照节点按需拉取老分片的活性依赖；P3 的已知缺口（`unApplyBlock` 跳过 `ref == null` 的块、`BI_APPLIED` 与 LANE_L1 提交之间的崩溃窗口）。
 
 ---
 
 ## 11. 文件清单
 
-**改动**：`core/XdagField.java`、`core/Block.java`、`core/BlockchainImpl.java`（五处钩子 + `initSnapshotJ`）、`db/rocksdb/{DatabaseName, KVSource, RocksdbKVSource, SnapshotStoreImpl}.java`、`config/{Config, AbstractConfig, DevnetConfig, TestnetConfig, MainnetConfig}.java`、`Kernel.java`、`src/main/resources/xdag-*.conf`。
-**新增**：`lane/ext/{ExtKind, ExtError, ExtCodec, CallExt, DeployExt, LaneConfigExt, ChunkExt, AnchorExt, BondExt, ChallengeExt, ClaimExt, ChunkChain, ChunkChainBuilder, LaneBlockBuilder, LaneBlockClassifier, Classified}.java`、`lane/l1/{LaneL1Hooks, LaneL1Processor, LaneL1Store, LaneL1Batch, LaneIds, InputStatus, ApplyContext, LaneKindHandler}.java`、`lane/LaneActivation.java`、`config/spec/LaneSpec.java`；测试镜像目录。
+**改动**：`core/XdagField.java`、`core/Block.java`（ext 字段、`getBlockLinks`、`setType` 预算断言）、`core/BlockchainImpl.java`（构造器装处理器 + 五处钩子 + 快照门）、`db/rocksdb/{DatabaseName, KVSource, RocksdbKVSource}.java`（`batchWrite`）、`config/{Config, AbstractConfig, DevnetConfig, TestnetConfig, MainnetConfig}.java`、`Kernel.java`（`LaneL1Store` 生命周期，且**必须在 `new BlockchainImpl(this)` 之前**建好）、`cli/XdagCli.java`（`makeSnapshot` 导出 `SNAPSHOT/LANE_L1`）。**不改任何 `src/main/resources/xdag-*.conf`**（§7 末尾）。
+**新增**：`lane/ext/{ExtKind, ExtError, ExtResult, ExtCodec, Classified, CallExt, DeployExt, LaneConfigExt, ChunkExt, AnchorExt, BondExt, ChallengeExt, ClaimExt, ChunkChain, ChunkChainBuilder, LaneBlockBuilder, LaneBlockClassifier}.java`、`lane/l1/{LaneL1Hooks, LaneL1Processor, LaneL1Store, LaneL1Batch, LaneL1Keys, LaneIds, LaneKindHandler, ApplyContext, InputStatus, InputRecord, InputRef, LaneRecord, ContractRecord, LaneL1SnapshotGate}.java`、`lane/LaneActivation.java`、`config/spec/LaneSpec.java`；测试镜像目录（含 `lane/l1/LaneL1TestBase.java` 真实 `BlockchainImpl` + RocksDB 基座）。
 
 ---
 
-## 12. 开放问题
+## 12. 开放问题与已知缺口
+
+### 12.1 开放问题
 
 | # | 问题 | 处理 |
 |---|------|------|
 | Q1 | `addAmount` 对不存在的 OUTPUT 地址是否自动建档 | 计划首个任务确认；若否，DEPLOY(新通道) 时建档并在 unwind 时删除"由本 DEPLOY 创建"的档 |
 | Q2 | `Block` 主构造器参数已有 10 个 | 新增重载即可；不引入 builder 以免扩大改动面 |
-| Q3 | 主块自身经过 `onBlockApplied` | 主块无 EXT → `NONE` → 若 coinbase 输出恰好是某金库（概率可忽略）会记 INVALID_FORMAT；接受 |
-| Q4 | 既有 L1 回滚存在已知不对称（`unApplyBlock` 中 `allBalance` 回滚 try/catch） | 属性测试只比较通道相关地址的余额/nonce；若 SP0a 期间发现影响通道语义的 L1 不对称，单独记 issue，不在本 SP 修 |
+| Q3 | 主块自身经过 `onBlockApplied` | **已关闭**：金库支付只认 `XDAG_FIELD_OUTPUT`，`COINBASE` 字段永远不算（§4.2）。主块的 coinbase 即使恰好指向某金库也不会产生记录 |
+| Q4 | 既有 L1 回滚存在已知不对称（`unApplyBlock` 中 `allBalance` 回滚 try/catch） | 属性测试只比较通道相关地址的余额/nonce；SP0a 期间确实发现了一处影响 P3 的不对称，见 12.2 的 G1，不在本 SP 修 |
+
+### 12.2 已知缺口与后续工单（SP0a 不修）
+
+| # | 缺口 | 影响与现状 |
+|---|------|-----------|
+| G1 | `BlockchainImpl.unApplyBlock` 会**跳过** `BI_MAIN_REF` 已置而 `ref == null` 的块（`setMain` 在 DFS 里抛异常、或走了 `mainBlockFee < 0` 的提前 `return` 时会留下这种块） | 该主块子块已提交的 `LANE_L1` 记录**永远不会被撤销**，滞留在一个不再确认它们的高度上。这是既有的**值结算不对称**（同样这些块的余额也保留着），不是 lane 层引入的；后果是 **SP1 不能无条件假设 P3 成立**。记为跟踪工单 |
+| G2 | 崩溃一致性：`BI_APPLIED` 在 `LANE_L1` 提交**之前**就已急切落盘，两个库之间没有原子性，也没有启动时重放 | 两者之间崩溃会丢掉那个块的 lane 记录，而块仍被标为已应用，除非深度 reorg 把它 unapply 再 apply，否则不会重新触发 `onBlockApplied`。这与 `ADDRESS` / `BLOCK` 两个库之间本来就不原子是同一档次的问题，**接受**；SP0b 或快照工具可以在启动时加一道 `LANE_L1` vs `BLOCK` 的一致性检查 |
+| G3 | `Kernel.testStart` 没有 try/catch | `LANE_L1` 打开之后如果构造失败会泄漏这个列族——与其它每一个存储一样，既有问题 |
+| G4 | `Kernel` 以 `(INDEX, BLOCK, TIME, TXHISTORY)` 调 `BlockStoreImpl(index, time, block, txHistory)` | 参数顺序与构造器签名对不上（既有问题；进程内无害，但磁盘上目录名会误导） |
+| G5 | `BlockchainImpl` 在构造器里起了非 daemon 的 `rollBackLoop` / cleaner 线程，`stopCheckMain()` 从不停它 | 既有问题；测试基座每个测试泄漏一个线程 |
+| G6 | `onBlockUnapplied` 即使在完全没有 lane 活动的网络上，也会对每个被 unapply 的块做一次 classify + 反向索引点查 | 纯噪声（unwind 本来就罕见），不修 |

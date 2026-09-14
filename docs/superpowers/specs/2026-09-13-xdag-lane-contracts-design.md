@@ -254,11 +254,22 @@ payload[0] = `index u64 ‖ amount u64 ‖ 保留 16B`；payload[1] = `recipient
 
 - 付费块 link 首片，首片 link 次片，……链尾无 link。`tryToConnect` 的 `NO_PARENT` 规则保证：付费块可导入 ⇔ 整条链已在本地。
 - 分片块本身是 EXTRA/孤块，未被任何付费块引用时可被孤块池按现有规则淘汰；被主块直接 link 的"裸分片"只是无意义的 link block，不进入任何通道语义。
-- 单条链上限 `lane.maxChunksPerChain`（初始 4096 片 ≈ 1.7MB）。
+- 单条链上限 `lane.maxChunksPerChain`（初始 4096 片 × 352 B ≈ 1,441,792 B ≈ 1.44 MB）。
+- **年龄规则（共识，SP0a 决策 2026-09-14）**：付费块引用的分片链上每一片都必须满足 `epoch(chunk) ≥ epoch(payingBlock) − 1`，即"与付费块同 epoch，或紧邻的前一个 epoch"，否则该输入被记为格式错（`ExtError.CHUNK_TOO_OLD`）。理由：`NO_PARENT` 只要求父块的 `BlockInfo` 存在，而**快照启动的节点没有快照时间之前的块的原始字节**；没有年龄下界时，同一条内容寻址的老分片链会在全量节点上装配成功、在快照节点上失败——同一个块在两类节点上得到两种裁决。年龄规则让两类节点都只需保留最近两个 epoch 的原始字节。客户端切链工具因此保证一条链不跨 epoch（跨 epoch 的链只能在头片自己那个 epoch 内被付费，窗口可短到 0 tick）。
 
 ### 5.4 费用规则（L1 层）
 
-扩展块的 header fee 字段必须满足：`header.fee ≥ chunkFee × 该块直接 link 的所有分片链总片数`（`MIN_GAS × outputs` 部分由现有 `getTxFee` 规则已经保证）。`chunkFee` 为协议参数（初始 0.01 XDAG/片）。两层执行：导入期作为节点本地策略拒绝（SP0b，可配置）；`applyBlock` 时作为共识复核，不足者记为 `INVALID_FEE` 输入（value 退回通道内余额，分片链不被使用）。这笔费用与现有交易费一样归 PoW 主块矿工，覆盖排序与 DA 成本。
+扩展块的 header fee 字段必须满足：`header.fee ≥ chunkFee × 该块直接 link 的所有分片链总片数`。`chunkFee` 为协议参数（初始 0.01 XDAG/片）。两层执行：导入期作为节点本地策略拒绝（SP0b，可配置）；`applyBlock` 时作为共识复核，不足者记为 `INVALID_FEE` 输入（value 退回通道内余额，分片链不被使用）。这笔费用与现有交易费一样归 PoW 主块矿工，覆盖排序与 DA 成本。复核时 `header.fee` 必须从**原始 512 字节的 header 字段**读：`BlockInfo.fee` 在 apply 期间会被改写成"这个块收到的手续费"，不再是"这个块声明了多少"。
+
+**分片链头 link 也算 output（SP0a 决策 2026-09-14）**：`outPutNum` / `getTxFee` 不区分真正的支付（`XDAG_FIELD_OUTPUT`）与分片链头引用（`XDAG_FIELD_OUT`），两者都计入 `input ≥ headerFee + MIN_GAS × outputs`。因此构造 CALL / DEPLOY 块时，INPUT 金额必须是
+
+```
+requiredValue(headerFee, chainLinks) = headerFee + MIN_GAS × (1 + chainLinks)
+```
+
+（`1` = 那一笔真正的 OUTPUT，`chainLinks` = 该块实际携带的分片链头数：CALL 0 或 1，DEPLOY 1 或 2）。这是既有的 L1 有效性规则，与上面的分片费是**两层独立约束**：金额不够块直接无效，分片费不够块仍然有效、只是输入记为 `INVALID_FEE`。
+
+**参数链的费用基数是宽松计数（SP0a 决策 2026-09-14）**：L1 只装配 DEPLOY 的代码链，它的片数必须在装配通过之后再数；CALL 的参数链与 DEPLOY 的 init 参数链 L1 **从不装配**（SP1 的执行引擎才装配，装不出来就在通道内失败并退款），它们的费用基数就是"查得到 + 够新 + 能解码成 CHUNK 的片数"这个宽松计数。分片费收的是全网确实要存的分片块，与这条链将来能不能装配无关。
 
 ### 5.5 兼容性与硬分叉点
 
@@ -276,7 +287,7 @@ payload[0] = `index u64 ‖ amount u64 ‖ 保留 16B`；payload[1] = `recipient
 |------|-----|-------|------|
 | 0x01 | laneId | 配置（gasPrice, D, maxCallGas）、创建高度、创建块 hash | 通道注册表 |
 | 0x02 | contract(20) | laneId ‖ codeHash ‖ 部署高度 | 合约 → 通道 |
-| 0x03 | codeHash | refCount ‖ 原始 WASM 字节 | 代码库（全网保存，仲裁需要；引用计数到 0 删除，保证 unwind 后"codeHash 已存在"判定全网一致） |
+| 0x03 | codeHash | 原始 WASM 字节（只有 blob） | 代码库（全网保存，仲裁需要） |
 | 0x04 | attester(20) ‖ laneId | 保证金额 ‖ 解锁申请高度 | 保证金账本 |
 | 0x05 | laneId | 规范头 seq ‖ 锚定块 hash | 锚定链头 |
 | 0x06 | laneId ‖ seq | 锚定记录：hash、stateRoot、outboxMapRoot、inputCount、确认高度、状态（canonical/final/voided） | 锚定索引 |
@@ -286,7 +297,10 @@ payload[0] = `index u64 ‖ amount u64 ‖ 保留 16B`；payload[1] = `recipient
 | 0x0A | challengeHash | 仲裁结果 | 挑战记录 |
 | 0x0B | dstLane ‖ srcLane | 已消费游标 `to`、已消费到的 srcAnchorSeq | 段消费游标（§7.5） |
 | 0x0C | laneId ‖ height ‖ index | blockHash ‖ kind ‖ status ‖ contract | 输入索引（执行者按此重建输入流） |
-| 0x0E | blockHash | laneId ‖ height ‖ index | unapply 反向索引 |
+| 0x0D | codeHash | refCount u32 | 代码引用计数（与 blob 分开：共享代码的第二次部署只重写 4 字节，不重写最大 1 MB 的 blob）。"代码库里有没有这份代码"以**本条 key 是否存在**为准；计数到 0 时 0x03 与 0x0D 一起删（从不写 0），保证 unwind 后判定全网一致 |
+| 0x0E | blockHash | laneId ‖ height ‖ index 的定长数组 | unapply 反向索引（一个块可以有多条输入记录） |
+
+`index` 是**每 (lane, height) 内从 0 递增的序号**（0x07 的 `callCount` 就是下一个 index），不是主块级的全局 DFS 序号：执行者按 `0..callCount−1` 枚举该通道该高度的输入流。
 
 ### 6.2 钩子位置
 
@@ -294,14 +308,16 @@ payload[0] = `index u64 ‖ amount u64 ‖ 保留 16B`；payload[1] = `recipient
 |------|------|---------|
 | `tryToConnect` | **不读 EXT**（原则：EXT 不影响 L1 有效性）；SP0b 的导入期策略在锁外做分片费率/配额过滤 | 无状态 |
 | `onSetMainBegin(h)` | `setMain` 中 `BI_MAIN` 置位后、`applyBlock` 前：`h ≥ activationHeight` 才建立 DFS 上下文 | `onUnsetMain` 清上下文 |
-| `onBlockApplied`（`applyBlock` 置 `BI_APPLIED` 后，DFS 序） | CALL/DEPLOY：登记通道输入（0x0C/0x0E/0x07；DEPLOY 更新注册表/合约表/代码库）；BOND/UNBOND：更新保证金账本；ANCHOR：有效性检查 → 规范链；CHALLENGE：仲裁（§10）；CLAIM：证明校验 → 系统划账 | `onBlockUnapplied`（`unApplyBlock` 逆序）逐项反向 |
+| `onBlockApplied`（`applyBlock` 置 `BI_APPLIED` 后，DFS 序） | CALL/DEPLOY：登记通道输入（0x0C/0x0E/0x07；DEPLOY 更新注册表/合约表/代码库 0x01/0x02/0x03/0x0D）；BOND/UNBOND：更新保证金账本；ANCHOR：有效性检查 → 规范链；CHALLENGE：仲裁（§10）；CLAIM：证明校验 → 系统划账 | `onBlockUnapplied`（`unApplyBlock` 逆序）逐项反向 |
 | `onSetMainEnd(h)` | 按固定顺序处理高度 h 的到期项：① 仲裁本高度确认的 CHALLENGE ② 锚定终局 ③ UNBOND 归还 ④ 消息段变为可交付 ⑤ 本高度成为规范的锚定产生本高度的"锚定奖励"系统输入（§7.1） | `onUnsetMain` 反向 |
 
 **规则**：每个新增写操作必须有成对的反操作，并在 SP0 中用"随机 unwind/replay 后状态相等"的属性测试锁死。
 
 ### 6.3 快照扩展（SP0 范围）
 
-XDAG 主网节点通常从快照启动。`LANE_L1` 的全部内容（注册表、合约→通道、代码库、保证金账本、锚定链头与索引、每高度输入计数、已认领集合、高度触发器、段游标）必须随快照一起导出/导入，并在快照中附带一个 `laneStateHash = sha256(LANE_L1 全部 KV 的规范序列化)` 供校验；快照启动的节点若缺少该段则拒绝启动到激活高度之后。理由：dev-evm 曾因 alloc 标记未进快照导致快照节点与全量节点状态分歧，本设计的 L1 小状态直接影响锚定有效性判定与系统划账，缺失即分叉。
+XDAG 主网节点通常从快照启动。`LANE_L1` 的全部内容（注册表、合约→通道、代码库、保证金账本、锚定链头与索引、每高度输入计数、已认领集合、高度触发器、段游标）必须随快照一起导出/导入，并在快照中附带一个 `laneStateHash = sha256(LANE_L1 全部 KV 的规范序列化)` 供校验；快照启动的节点若在激活高度之后缺少该段则拒绝启动。理由：dev-evm 曾因 alloc 标记未进快照导致快照节点与全量节点状态分歧，本设计的 L1 小状态直接影响锚定有效性判定与系统划账，缺失即分叉。
+
+SP0a 的落地形态（细节见 SP0a 规格 §8）：快照从此有**三个目录** `SNAPSHOT/BLOCKS`、`SNAPSHOT/ADDRESS`、`SNAPSHOT/LANE_L1`，导出无条件进行（空的 `LANE_L1` 导出的就是"元数据 + 哈希"）；导入闸门是快照启动分支的第一条语句，与 SnapshotJ 开关无关，fail-fast；一次成功的导入会在本地库里留下一个**一次性持久标记**（`0xFF`，不计入状态哈希），重启时凭它幂等返回，本地有状态却没有标记则拒绝启动。**快照里不携带任何原始分片字节**：年龄规则允许付费块往回够两个 epoch，可能够到快照之前，那些分片块由 `NO_PARENT` 触发的按需拉取补齐（见 §20.2 E11）。
 
 ---
 
@@ -592,6 +608,7 @@ verify(challenge):
 | Chicory 解释器与编译器分歧 | 仲裁只用解释器；执行者分歧只产生可挑战锚定 |
 | WASM 非确定性 | §8.1 白名单 + 插桩；部署期拒绝 |
 | 资源耗尽（内存/栈/gas） | 硬上限 + trap；仲裁有界 |
+| 部署者把通道 `maxCallGas` 设得过大（或为 0），使仲裁无界 / 通道永远跑不了调用 | L1 在 DEPLOY（新建通道）处强制 `1 ≤ maxCallGas ≤ 10,000,000`（= §17 的 `maxCallGas` 初值，只能下调；实现为 `LaneL1Processor.MAX_CALL_GAS_CAP`），越界记 `INVALID_FORMAT`，通道不注册。该检查先于代码链装配。`gasPriceNano` 与 `D` 由部署者自定，不设上下界 |
 
 **信任假设汇总**：PoW 主链诚实多数（不变）；每条通道在任意 W 窗口内至少一个诚实观察者在线；出主块的矿池是事实上的排序者，其抢跑与短期审查能力与今天 XDAG 交易的情况相同，本设计不消除它（§20.1 S3）。
 
@@ -682,12 +699,12 @@ verify(challenge):
 | `minChallengeDeposit` | minBond / 10 | |
 | `slashSplit` | 50% 挑战者 / 50% 销毁 | |
 | `D`（通道默认） | W | 部署时可设 0..W |
-| `maxCallGas` | 10,000,000（待校准，只能下调） | 单次调用与单次仲裁上限 |
+| `maxCallGas` | 10,000,000（待校准，只能下调） | 单次调用与单次仲裁上限。同时是**每通道配置的硬上界**：L1 在新建通道的 DEPLOY 处强制 `1 ≤ maxCallGas ≤ 10,000,000`，越界 → `INVALID_FORMAT`（§12） |
 | `gasPerWitnessByte` | 10 | 见证比例计费系数，须满足 §8.3 不等式 |
 | `maxWitnessBytes` | 1 MB（1,048,576 B） | 与 maxCallGas / gasPerWitnessByte 满足 §8.3 不等式 |
 | `maxChallengesPerHeight` | 4 | |
-| `maxInlineArgs` | 256 B | |
-| `maxChunksPerChain` | 4096 | ≈ 1.7 MB |
+| `maxInlineArgs` | 256 B | 由 512 B 块布局推导（`(16 − 8) × 32`），**不可配置**——没有对应的 conf 键 |
+| `maxChunksPerChain` | 4096 | 4096 × 352 B ≈ 1.44 MB |
 | `chunkFee` | 0.01 XDAG/片 | 归 PoW 矿工 |
 | `maxWasmBytes` | 1 MB | |
 | `maxMemoryPages` | 64（4 MB） | |
@@ -764,6 +781,9 @@ verify(challenge):
 | E8 | L1 导入带宽是"无上限"的最后瓶颈 | §15.2 流水线；BATCH 密度块；v2 DA 采样 |
 | E9 | 保证金经济：`minBond` 与通道可提现额的关系 | SP3 经济分析；S2 的提现限速默认开启 |
 | E10 | SMT 哈希 SHA-256 vs blake3（开放问题 O1） | SP1 基准后在激活前定死 |
+| E11 | **字段码 0x0F 与 dev-evm 冲突**：`dev-evm` 分支把 `0x0F` 用作 `XDAG_FIELD_EVM_TX_REF`（原始 32B EVM 交易哈希，字段写在 remark **之前**），本方向把同一个码点用作 `XDAG_FIELD_EXT`（写在 remark **之后**）。两条分支都还没合进 `develop` | **必须在任一分支合入 `develop` 之前显式定夺**，不能靠"先到先得"：先合的那条占住 0x0F，另一条要么改码点、要么改语义。按 D3 的决定 dev-evm 归档，但归档动作本身必须落实并记录 |
+| E12 | 快照节点缺少激活前后的老分片原始字节，付费块引用的分片链可能在本地拿不到 | 年龄规则（§5.3）把窗口限制在两个 epoch；缺失的分片块在快照节点上**连 `BlockInfo` 都不存在**（快照只保留有公钥或余额非零的块），因此 link 它的付费块得到 `NO_PARENT`，由 `SyncManager` 按需递归拉取补齐。`tryToConnect` 没有任何以快照高度为界的拒绝规则，所以两类节点的裁决必然一致。**残余风险是纯活性**：`SyncManager` 对同一个 hash 有 64 s 的重请求节流，pending 集合满时随机淘汰，"最终会拉到"是尽力而为；拉不到的后果只是这个节点跟不上，不是分叉 |
+| E13 | **P3（写必有成对反写）存在两处已知缺口**，SP1 不能无条件假设它成立 | (a) `BlockchainImpl.unApplyBlock` 会跳过 `BI_MAIN_REF` 已置而 `ref == null` 的块（`setMain` 在 DFS 里抛异常、或走 `mainBlockFee < 0` 的提前 `return` 时会留下这种块），其子块已提交的 `LANE_L1` 记录永不撤销——这是既有的值结算不对称（同样这些块的余额也保留着），不是通道层引入的；(b) `BI_APPLIED` 在 `LANE_L1` 提交之前就已落盘，两个库之间没有原子性也没有启动重放，崩在中间会丢掉那个块的通道记录。(b) 与 `ADDRESS`/`BLOCK` 两库本来就不原子是同一档次，**接受**；SP0b 或快照工具可加一道启动时的 `LANE_L1` vs `BLOCK` 一致性检查 |
 
 ### 20.3 生态与交付风险
 
@@ -771,7 +791,7 @@ verify(challenge):
 |---|------|------|
 | D1 | **冷启动**：无 Hardhat/MetaMask/Etherscan，只有 Rust SDK；NEAR、Polkadot 最终都补回了 EVM 层 | 通道抽象与 VM 无关：v2 可以引入"EVM 通道"（把 dev-evm 的执行器装进一条通道），不违背 L1 设计；v1 先做 Rust SDK + AssemblyScript |
 | D2 | **交付风险**："一步到位分片"让 v1 覆盖 SP0–SP5，任一子项目卡住整个方向无法上线 | **已决定（2026-09-13）纳入 v1**：SP4 提供 `lane.subscribeAll` 配置，节点订阅全部通道时行为退化为"全复制并行执行"，可作为过渡模式先上 testnet；分片订阅、认证与仲裁在同一代码路径上逐步启用 |
-| D3 | 硬分叉治理与 dev-evm 归档；若主网仍有非 xdagj 实现需同步实现 EXT 语义 | 与社区沟通；确认主网节点实现构成 |
+| D3 | 硬分叉治理与 dev-evm 归档；若主网仍有非 xdagj 实现需同步实现 EXT 语义 | 与社区沟通；确认主网节点实现构成。**归档必须在合入 `develop` 之前落实**：两条分支占用同一个字段码 0x0F，见 §20.2 E11 |
 | D4 | 参数编码规范（borsh 风格）细节（O2）；事件索引与浏览器（O3） | SP5 ABI 附录；后续生态项目 |
 
 
