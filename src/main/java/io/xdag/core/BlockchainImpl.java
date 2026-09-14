@@ -44,6 +44,8 @@ import io.xdag.db.*;
 import io.xdag.db.rocksdb.RocksdbKVSource;
 import io.xdag.db.rocksdb.SnapshotStoreImpl;
 import io.xdag.lane.l1.LaneL1Hooks;
+import io.xdag.lane.l1.LaneL1Processor;
+import io.xdag.lane.l1.LaneL1Store;
 import io.xdag.listener.BlockMessage;
 import io.xdag.listener.Listener;
 import io.xdag.listener.PretopMessage;
@@ -148,7 +150,17 @@ public class BlockchainImpl implements Blockchain {
     @Getter
     private byte[] preSeed;
 
-    // Lane contracts (SP0a): hooks invoked from setMain/applyBlock; NOOP until Kernel wires the processor
+    /**
+     * Lane contracts (SP0a): hooks invoked from setMain/applyBlock. Installed by this class's own
+     * constructor from {@code kernel.getLaneL1Store()}, before {@link #startCheckMain(long)} is
+     * called: the check-main loop is scheduled with an initial delay of zero, so its very first
+     * {@code checkNewMain -> setMain} can run before the constructor's caller gets control back.
+     * Wiring the processor from outside (as the kernel used to) would therefore let a main block be
+     * confirmed while these hooks were still {@link LaneL1Hooks#NOOP}, and that block's lane inputs
+     * would be missing from LANE_L1 forever. Stays NOOP when the kernel has no lane store (tests
+     * that build a blockchain without one); {@link #setLaneHooks} remains for tests that install
+     * their own.
+     */
     private volatile LaneL1Hooks laneHooks = LaneL1Hooks.NOOP;
 
     public void setLaneHooks(LaneL1Hooks hooks) {
@@ -214,6 +226,13 @@ public class BlockchainImpl implements Blockchain {
         randomx = kernel.getRandomx();
         if (randomx != null) {
             randomx.setBlockchain(this);
+        }
+
+        // Lane contracts (SP0a): install the hooks before the check-main loop can confirm anything.
+        LaneL1Store laneStore = kernel.getLaneL1Store();
+        if (laneStore != null) {
+            this.laneHooks = new LaneL1Processor(laneStore, kernel.getConfig().getLaneSpec(),
+                    hash -> getBlockByHash(hash, true));
         }
 
         // Start main chain checking
@@ -1289,28 +1308,32 @@ public class BlockchainImpl implements Blockchain {
             updateBlockFlag(block, BI_MAIN, true);
             laneHooks.onSetMainBegin(mainNumber, block);
 
-            // Accept reward
-            acceptAmount(block, reward);
-            xdagStats.nmain++;
+            try {
+                // Accept reward
+                acceptAmount(block, reward);
+                xdagStats.nmain++;
 
-            // Recursively execute blocks referenced by main block and get fees
-            XAmount mainBlockFee = applyBlock(true, block); //the mainBlock may have tx, return the fee to itself.
-            if (mainBlockFee.compareTo(XAmount.ZERO) < 0) {// normal mainBlock will not go into this
+                // Recursively execute blocks referenced by main block and get fees
+                XAmount mainBlockFee = applyBlock(true, block); //the mainBlock may have tx, return the fee to itself.
+                if (mainBlockFee.compareTo(XAmount.ZERO) < 0) {// normal mainBlock will not go into this
+                    return;
+                } else {
+                    acceptAmount(block, mainBlockFee); //add the fee
+                    block.getInfo().setFee(mainBlockFee);
+                    blockStore.saveBlockInfo(block.getInfo());
+                }
+                // Main block REF points to itself
+                // TODO: Add fee
+                updateBlockRef(block, new Address(block));
+
+                if (randomx != null) {
+                    randomx.randomXSetForkTime(block);
+                }
+            } finally {
+                // Closes the apply context on every exit: the early return above, a normal finish,
+                // and a throw out of the applyBlock DFS.
                 laneHooks.onSetMainEnd(mainNumber, block);
-                return;
-            } else {
-                acceptAmount(block, mainBlockFee); //add the fee
-                block.getInfo().setFee(mainBlockFee);
-                blockStore.saveBlockInfo(block.getInfo());
             }
-            // Main block REF points to itself
-            // TODO: Add fee
-            updateBlockRef(block, new Address(block));
-
-            if (randomx != null) {
-                randomx.randomXSetForkTime(block);
-            }
-            laneHooks.onSetMainEnd(mainNumber, block);
         }
 
     }

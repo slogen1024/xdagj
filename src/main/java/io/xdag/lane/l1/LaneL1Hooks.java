@@ -38,6 +38,24 @@ import io.xdag.core.Block;
  * deliberately NOT bracketed by any begin/end pair: an implementation must be able to undo a block
  * knowing only the block itself and the state recorded when it was applied.
  *
+ * <p><b>Where P3 stops holding.</b> Symmetry is only as good as the caller's own unwind: P3 assumes
+ * {@code unApplyBlock} actually reaches every block {@code applyBlock} reached. It does not always.
+ * A throw out of the {@code applyBlock} DFS, or the {@code mainBlockFee < 0} early return in
+ * {@code setMain}, leaves the main block with {@code BI_MAIN_REF} set but {@code ref == null}, and
+ * {@code unApplyBlock} skips exactly those blocks — so LANE_L1 records already committed for that
+ * main block's children are never undone and are stranded at a height that no longer confirms them.
+ * This is inherited from {@code BlockchainImpl}'s pre-existing value-settlement asymmetry (the same
+ * blocks keep their settled amounts), not introduced by the lane layer; it is a tracked follow-up
+ * and deliberately not fixed in SP0a.
+ *
+ * <p><b>Crash consistency.</b> {@code BI_APPLIED} is persisted eagerly for stored blocks before the
+ * lane records for the same block are committed, and the two stores are written independently, so a
+ * crash in between loses that block's lane records: the block stays flagged applied and is never
+ * re-offered to {@link #onBlockApplied} unless a deep reorg unapplies and re-applies it. This is on
+ * a par with the ADDRESS and BLOCK stores, which are likewise not atomic with each other, and there
+ * is no boot-time replay that would repair it. An accepted gap, recorded here so it is not mistaken
+ * for a lane-layer invariant.
+ *
  * <p><b>Raw blocks required.</b> {@link #onBlockApplied} and {@link #onBlockUnapplied} must be
  * handed blocks parsed from their 512 bytes ({@code new Block(XdagBlock)} or
  * {@code getBlockByHash(hash, true)}). A {@link Block} built from a {@code BlockInfo} alone

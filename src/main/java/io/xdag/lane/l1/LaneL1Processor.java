@@ -185,6 +185,12 @@ public final class LaneL1Processor implements LaneL1Hooks {
         ctx = null;
     }
 
+    /**
+     * Records this block's lane inputs. A pre-existing reverse-index entry for the same block means
+     * it was applied twice with no unapply in between (a caller-side bookkeeping bug, since the
+     * second apply's indices orphan the first's), which is logged as an error rather than thrown:
+     * the write itself is still well-formed, and failing block application here would be worse.
+     */
     @Override
     public void onBlockApplied(Block block) {
         started = true;
@@ -244,6 +250,10 @@ public final class LaneL1Processor implements LaneL1Hooks {
             return;
         }
         if (!refs.isEmpty()) {
+            if (!store.getReverse(blockHash).isEmpty()) {
+                log.error("lane block {} applied twice without an intervening unapply; previous inputs at that height"
+                        + " are now orphaned", blockHash);
+            }
             batch.putReverse(blockHash, refs);
         }
         store.commit(batch);

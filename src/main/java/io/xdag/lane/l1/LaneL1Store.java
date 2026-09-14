@@ -89,9 +89,17 @@ public final class LaneL1Store implements XdagLifecycle {
         running = true;
     }
 
+    /**
+     * Closes the underlying source and marks this store stopped. Idempotent, and safe to call after
+     * the source has already been closed elsewhere (the kernel closes every database by name in its
+     * own shutdown loop), so callers may stop the store first purely to keep {@link #isRunning()}
+     * truthful.
+     */
     @Override
     public void stop() {
-        source.close();
+        if (source.isAlive()) {
+            source.close();
+        }
         running = false;
     }
 

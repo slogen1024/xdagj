@@ -40,7 +40,6 @@ import io.xdag.crypto.keys.ECKeyPair;
 import io.xdag.db.*;
 import io.xdag.db.mysql.TransactionHistoryStoreImpl;
 import io.xdag.db.rocksdb.*;
-import io.xdag.lane.l1.LaneL1Processor;
 import io.xdag.lane.l1.LaneL1Store;
 import io.xdag.net.*;
 import io.xdag.net.message.MessageQueue;
@@ -155,8 +154,9 @@ public class Kernel {
         orphanBlockStore = new OrphanBlockStoreImpl(dbFactory.getDB(DatabaseName.ORPHANIND) , this);
         orphanBlockStore.start();
 
-        // Lane contracts (SP0a): LANE_L1 index consumed by the lane hooks below.
-        // Closed with every other database in stop(), so no laneL1Store.stop() there.
+        // Lane contracts (SP0a): LANE_L1 index consumed by the lane hooks. Must exist before
+        // new BlockchainImpl(this) below, whose constructor installs the LaneL1Processor from it.
+        // Stopped in testStop() before the databases are closed, so isRunning() stays truthful.
         laneL1Store = new LaneL1Store(dbFactory.getDB(DatabaseName.LANE_L1));
         laneL1Store.start();
 
@@ -174,9 +174,7 @@ public class Kernel {
         randomx.start();
 
         // Initialize blockchain
-        BlockchainImpl chain = new BlockchainImpl(this);
-        chain.setLaneHooks(new LaneL1Processor(laneL1Store, config.getLaneSpec(), hash -> chain.getBlockByHash(hash, true)));
-        blockchain = chain;
+        blockchain = new BlockchainImpl(this);
         XdagStats xdagStats = blockchain.getXdagStats();
         
         // Create genesis block if first startup
@@ -292,6 +290,11 @@ public class Kernel {
 
         // Stop data layer
         blockchain.stopCheckMain();
+
+        // Stop the lane store before its database is closed below
+        if (laneL1Store != null) {
+            laneL1Store.stop();
+        }
 
         // Close all databases
         for (DatabaseName name : DatabaseName.values()) {

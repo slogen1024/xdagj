@@ -28,6 +28,7 @@ import static io.xdag.config.Constants.BI_APPLIED;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_COINBASE;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUT;
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -159,9 +160,9 @@ public abstract class LaneL1TestBase {
         kernel.setWallet(wallet);
         kernel.setLaneL1Store(laneStore);
 
+        // No setLaneHooks() here: kernel.setLaneL1Store(laneStore) above precedes construction, and
+        // BlockchainImpl's constructor installs the LaneL1Processor from the kernel's store itself.
         blockchain = new MockBlockchain(kernel);
-        blockchain.setLaneHooks(new LaneL1Processor(laneStore, config.getLaneSpec(),
-                hash -> blockchain.getBlockByHash(hash, true)));
 
         Block addressBlock = BlockBuilder.generateAddressBlock(config, poolKey, generateTime);
         addressStore.updateBalance(poolKey.toAddress().toArray(), XAmount.of(1000, XUnit.XDAG));
@@ -178,6 +179,9 @@ public abstract class LaneL1TestBase {
                 // already gone
             }
         }
+        if (laneStore != null) {
+            laneStore.stop();
+        }
         if (dbFactory != null) {
             dbFactory.close();
         }
@@ -191,7 +195,13 @@ public abstract class LaneL1TestBase {
         return Bytes32.wrap(b.getHashLow().toArray());
     }
 
-    /** Timestamp for a transaction or chunk block: a few seconds into the epoch the next mined main block closes. */
+    /**
+     * Timestamp for a transaction or chunk block: a few seconds into the epoch the next mined main
+     * block closes. Only valid for a block that the very next {@link #mineMain} links: the chunks
+     * and the block paying for them must share that one epoch, and every {@link #confirm} advances
+     * {@code generateTime} (it mines main blocks), so a timestamp taken before a confirm belongs to
+     * an epoch that has already closed.
+     */
     protected long txTime() {
         return XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime + 64000L)) - 60000L;
     }
@@ -230,6 +240,11 @@ public abstract class LaneL1TestBase {
     /**
      * Fake PoW: a main block linking topRef, the coinbase and extraRefs, with nonce searched until the raw-hash
      * difficulty is in [2^46, 2^47). expectBest=false is for competing branches that have not overtaken yet.
+     *
+     * <p>{@code extraRefs} must be in ascending tx-nonce order: {@code applyBlock} walks the links in
+     * list order and enforces strict nonce sequencing per sender, so a link whose nonce arrives out
+     * of order is rejected rather than applied. That failure is silent here and surfaces later as
+     * {@code confirm()}'s "block not applied after 6 main blocks".
      */
     protected Block mineMain(List<Bytes32> extraRefs, boolean expectBest) {
         generateTime += 64000L;
@@ -275,7 +290,9 @@ public abstract class LaneL1TestBase {
     /** Mines empty main blocks until the block has been applied (settled by a confirmed main block). */
     protected void confirm(Block block) {
         for (int i = 0; i < 6; i++) {
-            if ((blockchain.getBlockByHash(block.getHashLow(), false).getInfo().getFlags() & BI_APPLIED) != 0) {
+            Block stored = blockchain.getBlockByHash(block.getHashLow(), false);
+            assertNotNull("block was never stored: " + block.getHashLow(), stored);
+            if ((stored.getInfo().getFlags() & BI_APPLIED) != 0) {
                 return;
             }
             mineMain(List.of());
@@ -284,7 +301,9 @@ public abstract class LaneL1TestBase {
     }
 
     protected long heightOf(Block main) {
-        return blockchain.getBlockByHash(main.getHashLow(), false).getInfo().getHeight();
+        Block stored = blockchain.getBlockByHash(main.getHashLow(), false);
+        assertNotNull("main block was never stored: " + main.getHashLow(), stored);
+        return stored.getInfo().getHeight();
     }
 
     protected XAmount balanceOf(Bytes address20) {

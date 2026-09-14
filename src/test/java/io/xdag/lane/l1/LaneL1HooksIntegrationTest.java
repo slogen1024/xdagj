@@ -103,13 +103,27 @@ public class LaneL1HooksIntegrationTest extends LaneL1TestBase {
         assertEquals(ok.block().getHash(), laneStore.getInput(laneId, h, 0).blockHash());
         assertEquals(contract, laneStore.getInput(laneId, h, 0).contract());
         assertEquals(InputStatus.INVALID_FORMAT, laneStore.getInput(laneId, h, 1).status());
+        assertEquals(badContract.block().getHash(), laneStore.getInput(laneId, h, 1).blockHash());
         assertEquals(InputStatus.INVALID_FEE, laneStore.getInput(laneId, h, 2).status());
+        assertEquals(lowFee.block().getHash(), laneStore.getInput(laneId, h, 2).blockHash());
         assertEquals(InputStatus.OK, laneStore.getInput(laneId, h, 3).status());
+        assertEquals(goodFee.block().getHash(), laneStore.getInput(laneId, h, 3).blockHash());
         assertEquals(InputStatus.INVALID_FORMAT, laneStore.getInput(laneId, h, 4).status());
+        assertEquals(plain.getHash(), laneStore.getInput(laneId, h, 4).blockHash());
         assertNull(laneStore.getInput(laneId, h, 5));
 
-        // value settled by the unchanged L1 rules: five deposits of 1 XDAG minus their fee shares
-        assertTrue(balanceOf(laneId).greaterThan(XAmount.of(4, XUnit.XDAG)));
+        // Value settled by the unchanged L1 rules: each of the five 1-XDAG deposits credits the vault
+        // 1 XDAG - outPutLimit(block), where outPutLimit = max(MIN_GAS, getTxFee/outPutNum),
+        // getTxFee = headerFee + MIN_GAS * outputs.size() and MIN_GAS = 0.1 XDAG. OUT chain links
+        // count as outputs, so lowFee and goodFee (1000-byte args, one args-chain link each) have
+        // two outputs while ok, badContract and plain have one:
+        //   ok:          fee 0.1 + 0.1*1 = 0.2 over 1 output -> limit 0.2   -> 0.8
+        //   badContract: fee 0.1 + 0.1*1 = 0.2 over 1 output -> limit 0.2   -> 0.8
+        //   lowFee:      fee 0.02 + 0.1*2 = 0.22 over 2 outputs -> limit 0.11  -> 0.89
+        //   goodFee:     fee 0.03 + 0.1*2 = 0.23 over 2 outputs -> limit 0.115 -> 0.885
+        //   plain:       fee 0.1 + 0.1*1 = 0.2 over 1 output -> limit 0.2   -> 0.8
+        // 0.8 + 0.8 + 0.89 + 0.885 + 0.8 = 4.175 XDAG.
+        assertEquals(XAmount.of(4_175_000_000L, XUnit.NANO_XDAG), balanceOf(laneId));
         assertEquals(UInt64.valueOf(6), addressStore.getExecutedNonceNum(poolKey.toAddress().toArray()));
     }
 }
