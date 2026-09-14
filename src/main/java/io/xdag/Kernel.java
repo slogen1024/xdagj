@@ -40,6 +40,8 @@ import io.xdag.crypto.keys.ECKeyPair;
 import io.xdag.db.*;
 import io.xdag.db.mysql.TransactionHistoryStoreImpl;
 import io.xdag.db.rocksdb.*;
+import io.xdag.lane.l1.LaneL1Processor;
+import io.xdag.lane.l1.LaneL1Store;
 import io.xdag.net.*;
 import io.xdag.net.message.MessageQueue;
 import io.xdag.net.node.NodeManager;
@@ -71,6 +73,7 @@ public class Kernel {
     protected BlockStore blockStore;
     protected OrphanBlockStore orphanBlockStore;
     protected TransactionHistoryStore txHistoryStore;
+    protected LaneL1Store laneL1Store;
 
     protected SnapshotStore snapshotStore;
     protected Blockchain blockchain;
@@ -152,6 +155,11 @@ public class Kernel {
         orphanBlockStore = new OrphanBlockStoreImpl(dbFactory.getDB(DatabaseName.ORPHANIND) , this);
         orphanBlockStore.start();
 
+        // Lane contracts (SP0a): LANE_L1 index consumed by the lane hooks below.
+        // Closed with every other database in stop(), so no laneL1Store.stop() there.
+        laneL1Store = new LaneL1Store(dbFactory.getDB(DatabaseName.LANE_L1));
+        laneL1Store.start();
+
         if (config.getEnableTxHistory()) {
             long txPageSizeLimit = config.getTxPageSizeLimit();
             txHistoryStore = new TransactionHistoryStoreImpl(txPageSizeLimit);
@@ -166,7 +174,9 @@ public class Kernel {
         randomx.start();
 
         // Initialize blockchain
-        blockchain = new BlockchainImpl(this);
+        BlockchainImpl chain = new BlockchainImpl(this);
+        chain.setLaneHooks(new LaneL1Processor(laneL1Store, config.getLaneSpec(), hash -> chain.getBlockByHash(hash, true)));
+        blockchain = chain;
         XdagStats xdagStats = blockchain.getXdagStats();
         
         // Create genesis block if first startup

@@ -43,6 +43,7 @@ import io.xdag.crypto.keys.Signer;
 import io.xdag.db.*;
 import io.xdag.db.rocksdb.RocksdbKVSource;
 import io.xdag.db.rocksdb.SnapshotStoreImpl;
+import io.xdag.lane.l1.LaneL1Hooks;
 import io.xdag.listener.BlockMessage;
 import io.xdag.listener.Listener;
 import io.xdag.listener.PretopMessage;
@@ -146,6 +147,13 @@ public class BlockchainImpl implements Blockchain {
 
     @Getter
     private byte[] preSeed;
+
+    // Lane contracts (SP0a): hooks invoked from setMain/applyBlock; NOOP until Kernel wires the processor
+    private volatile LaneL1Hooks laneHooks = LaneL1Hooks.NOOP;
+
+    public void setLaneHooks(LaneL1Hooks hooks) {
+        this.laneHooks = hooks == null ? LaneL1Hooks.NOOP : hooks;
+    }
 
     // Constructor initializes all components and starts main chain checking
     public BlockchainImpl(Kernel kernel) {
@@ -1033,6 +1041,7 @@ public class BlockchainImpl implements Blockchain {
         List<Address> links = block.getLinks();
         if (links == null || links.isEmpty()) {
             updateBlockFlag(block, BI_APPLIED, true);
+            laneHooks.onBlockApplied(block);
             return XAmount.ZERO;
         }
 
@@ -1150,6 +1159,7 @@ public class BlockchainImpl implements Blockchain {
 
 
         updateBlockFlag(block, BI_APPLIED, true);
+        laneHooks.onBlockApplied(block);
 
 //        XAmount totalFee = gasCollected.add(blockGas);
 //        block.getInfo().setFee(totalFee);
@@ -1210,6 +1220,10 @@ public class BlockchainImpl implements Blockchain {
 
             }
 
+            // Unapply visits blocks in the exact reverse of the apply DFS order (this block first,
+            // then its links in reversed order), which the lane processor's per-(lane,height) index
+            // bookkeeping relies on.
+            laneHooks.onBlockUnapplied(block);
             updateBlockFlag(block, BI_APPLIED, false);
         } else {
             //When rolling back, the unaccepted transactions in the main block need to be processed, which is the number of confirmed transactions sent corresponding to their account addresses, nonce, needs to be reduced by one
@@ -1273,6 +1287,7 @@ public class BlockchainImpl implements Blockchain {
             XAmount reward = getReward(mainNumber);
             block.getInfo().setHeight(mainNumber);
             updateBlockFlag(block, BI_MAIN, true);
+            laneHooks.onSetMainBegin(mainNumber, block);
 
             // Accept reward
             acceptAmount(block, reward);
@@ -1281,6 +1296,7 @@ public class BlockchainImpl implements Blockchain {
             // Recursively execute blocks referenced by main block and get fees
             XAmount mainBlockFee = applyBlock(true, block); //the mainBlock may have tx, return the fee to itself.
             if (mainBlockFee.compareTo(XAmount.ZERO) < 0) {// normal mainBlock will not go into this
+                laneHooks.onSetMainEnd(mainNumber, block);
                 return;
             } else {
                 acceptAmount(block, mainBlockFee); //add the fee
@@ -1294,6 +1310,7 @@ public class BlockchainImpl implements Blockchain {
             if (randomx != null) {
                 randomx.randomXSetForkTime(block);
             }
+            laneHooks.onSetMainEnd(mainNumber, block);
         }
 
     }
@@ -1307,6 +1324,8 @@ public class BlockchainImpl implements Blockchain {
         synchronized (this) {
 
             log.debug("UnSet main,{}, mainnumber = {}", block.getHash().toHexString(), xdagStats.nmain);
+            // Height is still the confirmed height here; it is zeroed at the end of this method.
+            laneHooks.onUnsetMain(block.getInfo().getHeight(), block);
 
             XAmount reward = getReward(block.getInfo().getHeight());
             updateBlockFlag(block, BI_MAIN, false);
