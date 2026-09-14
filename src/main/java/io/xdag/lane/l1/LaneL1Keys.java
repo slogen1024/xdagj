@@ -49,7 +49,7 @@ import org.apache.tuweni.bytes.Bytes32;
  * 0x0C INPUT          -&gt; laneId 20 | height u64 | index u32 -&gt; {@link InputRecord}
  * 0x0D CODE_REF       -&gt; codeHash 32                       -&gt; refCount u32
  * 0x0E REVERSE        -&gt; block hash 32                     -&gt; {@link InputRef} list
- * 0xFF SNAPSHOT_HASH  -&gt; state hash 32                      (snapshot-database only)
+ * 0xFF SNAPSHOT_HASH  -&gt; state hash 32                      (snapshot database / import marker)
  * </pre>
  *
  * <p>{@code CODE} and {@code CODE_REF} are split so that bumping a shared contract's reference
@@ -58,9 +58,12 @@ import org.apache.tuweni.bytes.Bytes32;
  * <p>Prefixes {@code 0x04}..{@code 0x0B} are reserved for SP2/SP3 lane features (bonds, anchors,
  * claims, height triggers, challenges, segment cursors) so this task does not allocate them; SP0a
  * only writes {@code META}, {@code LANE}, {@code CONTRACT}, {@code CODE}, {@code CODE_REF},
- * {@code CALL_COUNT}, {@code INPUT} and {@code REVERSE}. {@code SNAPSHOT_HASH} only ever appears
- * inside a standalone snapshot {@link io.xdag.db.rocksdb.KVSource}, never in the live LANE_L1
- * database.
+ * {@code CALL_COUNT}, {@code INPUT} and {@code REVERSE}. {@code SNAPSHOT_HASH} is written by
+ * {@link LaneL1Store#exportSnapshot} into a standalone snapshot {@link io.xdag.db.rocksdb.KVSource}
+ * and copied by {@link LaneL1Store#importSnapshot} into the live LANE_L1 database as the one-shot
+ * import marker read back by {@link LaneL1Store#importedSnapshotHash()}; it is the one key the
+ * state hash never covers, so a node that imported a snapshot and one that replayed the same
+ * history still hash identically.
  */
 public final class LaneL1Keys {
 
@@ -79,7 +82,7 @@ public final class LaneL1Keys {
     public static final byte INPUT = 0x0C;
     public static final byte CODE_REF = 0x0D;
     public static final byte REVERSE = 0x0E;
-    /** Only inside a snapshot database: the state hash of everything else. */
+    /** The state hash of everything else: recorded in a snapshot, then kept as the import marker. */
     public static final byte SNAPSHOT_HASH = (byte) 0xFF;
 
     public static final byte[] META_KEY = {META};

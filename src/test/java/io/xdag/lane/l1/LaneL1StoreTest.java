@@ -41,6 +41,7 @@ import io.xdag.lane.ext.ExtCodec;
 import io.xdag.lane.ext.ExtKind;
 import java.security.MessageDigest;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.tuweni.bytes.Bytes;
@@ -165,6 +166,9 @@ public class LaneL1StoreTest {
         assertEquals(hashA, b.stateHash());
         assertTrue(b.hasLane(LANE));
         assertEquals(2L, b.getCodeRefCount(CODE_HASH));
+        // the import records the snapshot's hash as a durable marker, outside the state hash
+        assertEquals(Optional.of(hashA), b.importedSnapshotHash());
+        assertTrue(b.hasState());
 
         // tampering is detected
         snap.put(LaneL1Keys.code(CODE_HASH), new byte[]{1, 2, 3, 4, 5, 6, 7, 8});
@@ -346,6 +350,9 @@ public class LaneL1StoreTest {
     @Test
     public void emptyStoreSnapshotRoundTrip() {
         LaneL1Store a = memStore();
+        assertEquals(Optional.empty(), a.importedSnapshotHash());
+        assertFalse(a.hasState());
+
         InMemoryKVSource snap = new InMemoryKVSource();
         a.exportSnapshot(snap);
 
@@ -353,7 +360,9 @@ public class LaneL1StoreTest {
         b.importSnapshot(snap);
 
         assertEquals(a.stateHash(), b.stateHash());
-        assertEquals(1, b.sortedKeys().size());
+        assertEquals(2, b.sortedKeys().size()); // META plus the import marker
+        assertEquals(Optional.of(a.stateHash()), b.importedSnapshotHash());
+        assertFalse(b.hasState()); // the marker is not state
     }
 
     @Test

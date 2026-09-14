@@ -39,7 +39,7 @@ import io.xdag.db.rocksdb.DatabaseName;
 import io.xdag.db.rocksdb.RocksdbKVSource;
 import io.xdag.db.rocksdb.SnapshotStoreImpl;
 import io.xdag.lane.l1.LaneL1Store;
-import io.xdag.lane.l1.LaneSnapshotGate;
+import io.xdag.lane.l1.LaneL1SnapshotGate;
 import io.xdag.utils.BytesUtils;
 import io.xdag.utils.XdagTime;
 import org.apache.commons.cli.CommandLine;
@@ -524,18 +524,22 @@ public class XdagCli extends Launcher {
         Path target = Paths.get(getConfig().getRootDir() + "/rocksdb/xdagdb/SNAPSHOT/ADDRESS");
         copyDir(source.toString(),target.toString());
 
-        // Lane contracts (SP0a): carry LANE_L1 alongside SNAPSHOT/BLOCKS and SNAPSHOT/ADDRESS
+        // Lane contracts (SP0a): carry LANE_L1 alongside SNAPSHOT/BLOCKS and SNAPSHOT/ADDRESS.
+        // Always exported: an "empty" LANE_L1 snapshot is one META key plus its hash, and a node
+        // below the lane activation height ignores the directory anyway.
         RocksdbKVSource laneSource = new RocksdbKVSource(DatabaseName.LANE_L1.toString());
         laneSource.setConfig(getConfig());
         LaneL1Store laneStore = new LaneL1Store(laneSource);
-        laneStore.start();
+        String laneFailure = null;
         try {
-            if (LaneSnapshotGate.shouldExport(getConfig(), laneStore)) {
-                LaneSnapshotGate.export(getConfig(), laneStore);
-                System.out.println("lane state snapshot written to " + LaneSnapshotGate.snapshotDir(getConfig()));
-            } else {
-                System.out.println("lane protocol unscheduled and LANE_L1 empty: no lane state snapshot written");
-            }
+            laneStore.start();
+            LaneL1SnapshotGate.export(getConfig(), laneStore);
+            System.out.println("lane state snapshot written to " + LaneL1SnapshotGate.snapshotDir(getConfig()));
+        } catch (IllegalStateException e) {
+            // The block/address snapshot is already written: report the lane failure but still
+            // print the height and next start frame the operator needs.
+            laneFailure = "lane state snapshot NOT written: " + e.getMessage();
+            System.out.println(laneFailure);
         } finally {
             laneStore.stop();
         }
@@ -545,6 +549,10 @@ public class XdagCli extends Launcher {
         System.out.println("time：" + (end - start) + "ms");
         System.out.println("snapshot height: " + snapshotStore.getHeight());
         System.out.println("next start frame: " + Long.toHexString(XdagTime.getEndOfEpoch(snapshotStore.getNextTime()) + 1));
+        if (laneFailure != null) {
+            System.out.println(laneFailure + " -- this snapshot cannot boot a node at or past the lane "
+                    + "activation height; fix the cause and export SNAPSHOT/LANE_L1 again");
+        }
     }
 
     /**
@@ -554,8 +562,12 @@ public class XdagCli extends Launcher {
         File start = new File(sourcePath);
         File end = new File(newPath);
         String[] filePath = start.list();  // Get all files and directories under this folder
+        if (filePath == null) {
+            throw new IllegalStateException("cannot copy " + sourcePath
+                    + ": it is not an existing, readable directory");
+        }
         if(!end.exists()) {
-            end.mkdir();
+            end.mkdirs();
         }
         for(String temp:filePath) {
             // Check if each item is a file or directory

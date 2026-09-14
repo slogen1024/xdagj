@@ -46,7 +46,7 @@ import io.xdag.db.rocksdb.SnapshotStoreImpl;
 import io.xdag.lane.l1.LaneL1Hooks;
 import io.xdag.lane.l1.LaneL1Processor;
 import io.xdag.lane.l1.LaneL1Store;
-import io.xdag.lane.l1.LaneSnapshotGate;
+import io.xdag.lane.l1.LaneL1SnapshotGate;
 import io.xdag.listener.BlockMessage;
 import io.xdag.listener.Listener;
 import io.xdag.listener.PretopMessage;
@@ -187,6 +187,14 @@ public class BlockchainImpl implements Blockchain {
                 && kernel.getConfig().getSnapshotSpec().getSnapshotHeight() > 0
                 && !blockStore.isSnapshotBoot()) {
 
+            // Lane contracts (SP0a): LANE_L1 travels with the snapshot and is mandatory once the
+            // snapshot height is at or past the lane activation height (hash-verified on import).
+            // This runs first, on EVERY snapshot boot: the isSnapshotJ() branch below is not the
+            // only way in (--enablesnapshot false H T boots from a snapshot too, and the kernel
+            // records setSnapshotBoot() either way), and failing here is also cheaper than failing
+            // after the block/address imports.
+            LaneL1SnapshotGate.checkAndImport(kernel.getConfig(), snapshotHeight, kernel.getLaneL1Store());
+
             this.xdagStats = new XdagStats();
             this.xdagTopStatus = new XdagTopStatus();
 
@@ -288,10 +296,6 @@ public class BlockchainImpl implements Blockchain {
         xdagTopStatus.setTop(lastBlock.getHashLow().toArray());
         xdagTopStatus.setTopDiff(lastBlock.getInfo().getDifficulty());
         xdagTopStatus.setPreTopDiff(lastBlock.getInfo().getDifficulty());
-
-        // Lane contracts (SP0a): LANE_L1 travels with the snapshot and is mandatory once the
-        // snapshot height is at or past the lane activation height (hash-verified on import).
-        LaneSnapshotGate.checkAndImport(kernel.getConfig(), snapshotHeight, kernel.getLaneL1Store());
 
         // Calculate total balance
         XAmount allBalance = snapshotStore.getAllBalance().add(snapshotAddressStore.getAllBalance());

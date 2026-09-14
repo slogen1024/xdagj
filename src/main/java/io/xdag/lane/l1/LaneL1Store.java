@@ -32,6 +32,8 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 
@@ -53,9 +55,10 @@ import org.apache.tuweni.bytes.Bytes32;
  *
  * <p><b>State hash.</b> {@link #stateHash()} is defined as the SHA-256 digest of every key/value
  * pair in the store (the {@code META} entry included, the reserved
- * {@link LaneL1Keys#SNAPSHOT_HASH} entry excluded), visited in ascending unsigned lexicographic
- * byte order of the key, each pair serialized as {@code u32(len(key)) || key || u32(len(value)) ||
- * value} (little-endian u32, per {@link ExtCodec#putU32}) and fed to the digest in that order. This
+ * {@link LaneL1Keys#SNAPSHOT_HASH} entry excluded — see {@link #importedSnapshotHash()}), visited
+ * in ascending unsigned lexicographic byte order of the key, each pair serialized as
+ * {@code u32(len(key)) || key || u32(len(value)) || value} (little-endian u32, per
+ * {@link ExtCodec#putU32}) and fed to the digest in that order. This
  * is a pure function of content: two stores with the same key/value pairs — RocksDB or in-memory —
  * always produce the same hash, and it changes whenever any pair is added, removed or modified.
  * {@link #exportSnapshot} and {@link #importSnapshot} use this hash to detect corruption or
@@ -272,12 +275,18 @@ public final class LaneL1Store implements XdagLifecycle {
     }
 
     /**
-     * Copies every key from the snapshot and verifies the recorded state hash. O(N); snapshot-only.
+     * Copies every key from the snapshot, verifies the recorded state hash, and records that hash
+     * in this store under {@link LaneL1Keys#SNAPSHOT_HASH_KEY} as a durable, one-shot import
+     * marker (see {@link #importedSnapshotHash()}). The hash is checked <em>before</em> anything is
+     * written, and the imported keys and the marker go in as a single atomic
+     * {@link KVSource#batchWrite}, so a refused or interrupted import leaves the store untouched
+     * rather than half-filled. O(N); snapshot-only.
      *
      * @throws IllegalStateException if the snapshot carries no recorded hash, if this store is not
      *                                empty (any key other than {@code META}), if the snapshot's
      *                                schema version does not match {@link #SCHEMA_VERSION}, or if
-     *                                the hash of the copied content does not match the recorded one
+     *                                the hash of the snapshot's content does not match the recorded
+     *                                one
      */
     public void importSnapshot(KVSource<byte[], byte[]> from) {
         byte[] expected = from.get(LaneL1Keys.SNAPSHOT_HASH_KEY);
@@ -294,16 +303,45 @@ public final class LaneL1Store implements XdagLifecycle {
         if (snapshotSchema != SCHEMA_VERSION) {
             throw new IllegalStateException("LANE_L1 snapshot schema " + snapshotSchema + " != " + SCHEMA_VERSION);
         }
-        for (byte[] k : sortedKeysOf(from)) {
-            if (isSnapshotHashKey(k)) {
-                continue;
-            }
-            source.put(k, from.get(k));
-        }
-        Bytes32 actual = stateHash();
+        // stateHashOf(from) is the hash this store will have once the copy lands: the definition
+        // skips the recorded-hash key itself, and every other key is copied verbatim.
+        Bytes32 actual = stateHashOf(from);
         if (!actual.equals(Bytes32.wrap(expected))) {
             throw new IllegalStateException("LANE_L1 snapshot hash mismatch: expected " + Bytes32.wrap(expected)
                     + " actual " + actual);
         }
+        List<Pair<byte[], byte[]>> puts = new ArrayList<>();
+        for (byte[] k : sortedKeysOf(from)) {
+            if (isSnapshotHashKey(k)) {
+                continue;
+            }
+            puts.add(Pair.of(k, from.get(k)));
+        }
+        puts.add(Pair.of(LaneL1Keys.SNAPSHOT_HASH_KEY, expected));
+        source.batchWrite(puts, List.of());
+    }
+
+    /**
+     * The state hash of the snapshot this store was imported from, or empty if it was never
+     * imported from one. Written by {@link #importSnapshot} and never touched again: it records
+     * where this LANE_L1 came from, not what it holds now (a store that has since applied blocks
+     * still carries it, and its {@link #stateHash()} no longer matches it).
+     */
+    public Optional<Bytes32> importedSnapshotHash() {
+        byte[] v = source.get(LaneL1Keys.SNAPSHOT_HASH_KEY);
+        return v == null ? Optional.empty() : Optional.of(Bytes32.wrap(v));
+    }
+
+    /**
+     * True if this store holds any lane state, i.e. any key besides the {@code META} entry and the
+     * import marker of {@link #importedSnapshotHash()}. O(N); snapshot-only.
+     */
+    public boolean hasState() {
+        for (byte[] k : sortedKeys()) {
+            if (!isMetaKey(k) && !isSnapshotHashKey(k)) {
+                return true;
+            }
+        }
+        return false;
     }
 }
