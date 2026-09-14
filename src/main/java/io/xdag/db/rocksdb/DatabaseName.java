@@ -50,5 +50,8 @@ public enum DatabaseName {
 
     ADDRESS,
 
-    TXHISTORY
+    TXHISTORY,
+
+    /** Lane contracts: global L1 state (registry, code store, input index, bonds, anchors). */
+    LANE_L1
 }

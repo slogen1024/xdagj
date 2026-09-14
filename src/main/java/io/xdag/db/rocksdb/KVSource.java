@@ -59,4 +59,20 @@ public interface KVSource<K, V> {
 
     List<Pair<byte[], byte[]>> prefixKeyAndValueLookup(byte[] key);
 
+    /**
+     * Applies all puts and then all deletes. A {@link Pair} whose value is {@code null} is a delete;
+     * puts are applied in list order (so a later put on the same key wins), and deletes are applied
+     * after all puts (so deleting a key that was just put removes it). The default implementation
+     * applies them one by one and is not atomic; transactional backends override it so the whole
+     * batch commits as a single atomic write.
+     */
+    default void batchWrite(List<Pair<K, V>> puts, List<K> deletes) {
+        for (Pair<K, V> p : puts) {
+            put(p.getKey(), p.getValue());
+        }
+        for (K k : deletes) {
+            delete(k);
+        }
+    }
+
 }

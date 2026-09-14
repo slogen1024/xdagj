@@ -57,6 +57,8 @@ import org.rocksdb.RestoreOptions;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.RocksIterator;
+import org.rocksdb.WriteBatch;
+import org.rocksdb.WriteOptions;
 
 @Slf4j
 @Setter
@@ -267,6 +269,36 @@ public class RocksdbKVSource implements KVSource<byte[], byte[]> {
             }
         } catch (RocksDBException e) {
             log.error("Failed to delete from db '{}'", name, e);
+            throw new RuntimeException(e);
+        } finally {
+            resetDbLock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Applies all puts and then all deletes as a single atomic {@link WriteBatch}. A {@link Pair}
+     * whose value is {@code null} is a delete within the batch; puts are applied in list order (so a
+     * later put on the same key wins) and the {@code deletes} list is applied after all puts (so
+     * deleting a key that was just put removes it). Either the whole batch is written, or none of it.
+     */
+    @Override
+    public void batchWrite(List<Pair<byte[], byte[]>> puts, List<byte[]> deletes) {
+        resetDbLock.readLock().lock();
+        try (WriteBatch batch = new WriteBatch(); WriteOptions options = new WriteOptions()) {
+            for (Pair<byte[], byte[]> p : puts) {
+                if (p.getValue() == null) {
+                    batch.delete(p.getKey());
+                } else {
+                    batch.put(p.getKey(), p.getValue());
+                }
+            }
+            for (byte[] k : deletes) {
+                batch.delete(k);
+            }
+            db.write(options, batch);
+        } catch (RocksDBException e) {
+            log.error("Failed to batch write into db '{}'", name, e);
+            hintOnTooManyOpenFiles(e);
             throw new RuntimeException(e);
         } finally {
             resetDbLock.readLock().unlock();
