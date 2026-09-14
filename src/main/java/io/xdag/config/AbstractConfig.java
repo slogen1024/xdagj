@@ -29,6 +29,7 @@ import com.typesafe.config.ConfigFactory;
 import io.xdag.Network;
 import io.xdag.config.spec.*;
 import io.xdag.core.XAmount;
+import io.xdag.core.XUnit;
 import io.xdag.core.XdagField;
 import io.xdag.net.Capability;
 import io.xdag.net.CapabilityTreeSet;
@@ -44,7 +45,7 @@ import java.util.*;
 @Slf4j
 @Getter
 @Setter
-public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, RPCSpec, SnapshotSpec, RandomxSpec, FundSpec {
+public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, RPCSpec, SnapshotSpec, RandomxSpec, FundSpec, LaneSpec {
 
     protected String configName;
 
@@ -145,6 +146,14 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected long snapshotTime;
     protected boolean isSnapshotJ;
 
+    // Lane (DAG-native contracts) configuration
+    protected long laneActivationHeight = Long.MAX_VALUE;
+    protected Long laneActivationHeightOverride;
+    protected int laneMaxChunksPerChain = 4096;
+    protected int laneMaxWasmBytes = 1024 * 1024;
+    protected int laneMaxInlineArgs = 256;
+    protected XAmount laneChunkFee = XAmount.of(10, XUnit.MILLI_XDAG);
+
     // RandomX configuration
     protected boolean flag;
 
@@ -170,6 +179,56 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     @Override
     public SnapshotSpec getSnapshotSpec() {
         return this;
+    }
+
+    @Override
+    public LaneSpec getLaneSpec() {
+        return this;
+    }
+
+    @Override
+    public long getLaneActivationHeight() {
+        return laneActivationHeightOverride != null ? laneActivationHeightOverride : laneActivationHeight;
+    }
+
+    @Override
+    public void setLaneActivationHeight(long height) {
+        this.laneActivationHeightOverride = null;
+        this.laneActivationHeight = height;
+    }
+
+    @Override
+    public int getLaneMaxChunksPerChain() {
+        return laneMaxChunksPerChain;
+    }
+
+    @Override
+    public int getLaneMaxWasmBytes() {
+        return laneMaxWasmBytes;
+    }
+
+    @Override
+    public int getLaneMaxInlineArgs() {
+        return laneMaxInlineArgs;
+    }
+
+    @Override
+    public XAmount getLaneChunkFee() {
+        return laneChunkFee;
+    }
+
+    /**
+     * Test-only hook: sets {@code laneActivationHeightOverride} directly, bypassing
+     * {@code getSetting()}'s conf-file parsing, so a unit test can pin down the intended
+     * semantics — namely that this override takes precedence over whatever network default
+     * a per-network subclass constructor assigns to {@code laneActivationHeight} afterwards,
+     * and that only {@link #setLaneActivationHeight(long)} (never a direct field assignment)
+     * clears it. Package-private: {@code io.xdag.config.LaneSpecTest} lives in this package.
+     *
+     * @param heightOverride the simulated conf-sourced override, or {@code null} to clear it
+     */
+    void setLaneActivationHeightOverrideForTest(Long heightOverride) {
+        this.laneActivationHeightOverride = heightOverride;
     }
 
     @Override
@@ -267,6 +326,20 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
         }
         flag = config.hasPath("randomx.flags.fullmem") && config.getBoolean("randomx.flags.fullmem");
 
+        // Lane configuration overrides (defaults live in the per-network constructors)
+        laneActivationHeightOverride = config.hasPath("lane.activation.height") ? config.getLong("lane.activation.height") : null;
+        if (config.hasPath("lane.chunk.maxPerChain")) {
+            laneMaxChunksPerChain = config.getInt("lane.chunk.maxPerChain");
+        }
+        if (config.hasPath("lane.wasm.maxBytes")) {
+            laneMaxWasmBytes = config.getInt("lane.wasm.maxBytes");
+        }
+        if (config.hasPath("lane.args.maxInline")) {
+            laneMaxInlineArgs = config.getInt("lane.args.maxInline");
+        }
+        if (config.hasPath("lane.chunk.feeMilliXdag")) {
+            laneChunkFee = XAmount.of(config.getLong("lane.chunk.feeMilliXdag"), XUnit.MILLI_XDAG);
+        }
     }
 
     @Override

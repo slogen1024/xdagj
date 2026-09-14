@@ -60,6 +60,7 @@ public class DevnetConfig extends AbstractConfig {
         this.xdagFieldHeader = XDAG_FIELD_HEAD_TEST;
         this.walletKeyFile = this.rootDir + "/wallet-devnet.dat";
         this.walletFilePath = this.rootDir + "/wallet/" + Constants.WALLET_FILE_NAME;
+        this.laneActivationHeight = 0;
     }
 
 }
