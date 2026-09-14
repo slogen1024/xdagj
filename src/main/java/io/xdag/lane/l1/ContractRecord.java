@@ -64,7 +64,15 @@ public record ContractRecord(Bytes laneId, Bytes32 codeHash, long deployHeight, 
         return a;
     }
 
+    /**
+     * Decodes a value previously produced by {@link #encode()}.
+     *
+     * @throws IllegalStateException if {@code a.length != SIZE} (a corrupt or truncated record)
+     */
     public static ContractRecord decode(byte[] a) {
+        if (a.length != SIZE) {
+            throw new IllegalStateException("corrupt contract record: expected " + SIZE + " bytes, got " + a.length);
+        }
         return new ContractRecord(Bytes.wrap(Arrays.copyOfRange(a, 0, 20)), Bytes32.wrap(Arrays.copyOfRange(a, 20, 52)),
                 ExtCodec.u64(a, 52), Bytes32.wrap(Arrays.copyOfRange(a, 60, 92)));
     }

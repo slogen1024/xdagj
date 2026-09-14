@@ -63,9 +63,25 @@ public record InputRecord(Bytes32 blockHash, ExtKind kind, InputStatus status, B
         return a;
     }
 
+    /**
+     * Decodes a value previously produced by {@link #encode()}.
+     *
+     * @throws IllegalStateException if {@code a.length != SIZE} (a corrupt or truncated record), or
+     *                                if the kind byte is non-zero and not a known {@link ExtKind} code
+     */
     public static InputRecord decode(byte[] a) {
+        if (a.length != SIZE) {
+            throw new IllegalStateException("corrupt input record: expected " + SIZE + " bytes, got " + a.length);
+        }
         int kindCode = a[32] & 0xff;
-        return new InputRecord(Bytes32.wrap(Arrays.copyOfRange(a, 0, 32)), kindCode == 0 ? null : ExtKind.fromCode(kindCode),
+        ExtKind kind = null;
+        if (kindCode != 0) {
+            kind = ExtKind.fromCode(kindCode);
+            if (kind == null) {
+                throw new IllegalStateException("corrupt input record: unknown kind code " + kindCode);
+            }
+        }
+        return new InputRecord(Bytes32.wrap(Arrays.copyOfRange(a, 0, 32)), kind,
                 InputStatus.fromCode(a[33] & 0xff), Bytes.wrap(Arrays.copyOfRange(a, 34, 54)));
     }
 }

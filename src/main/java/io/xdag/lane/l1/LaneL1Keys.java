@@ -37,7 +37,7 @@ import org.apache.tuweni.bytes.Bytes32;
  * 0x00 META           -&gt; schema version u32                              (singleton, {@link #META_KEY})
  * 0x01 LANE           -&gt; laneId 20                       -&gt; {@link LaneRecord}
  * 0x02 CONTRACT       -&gt; contract address 20              -&gt; {@link ContractRecord}
- * 0x03 CODE           -&gt; codeHash 32                       -&gt; refCount u32 | len u32 | code bytes
+ * 0x03 CODE           -&gt; codeHash 32                       -&gt; raw code bytes (blob only)
  * 0x04 BOND           -&gt; reserved for SP2/SP3
  * 0x05 ANCHOR_HEAD    -&gt; reserved for SP2/SP3
  * 0x06 ANCHOR         -&gt; reserved for SP2/SP3
@@ -47,16 +47,20 @@ import org.apache.tuweni.bytes.Bytes32;
  * 0x0A CHALLENGE      -&gt; reserved for SP2/SP3
  * 0x0B SEGMENT_CURSOR -&gt; reserved for SP2/SP3
  * 0x0C INPUT          -&gt; laneId 20 | height u64 | index u32 -&gt; {@link InputRecord}
+ * 0x0D CODE_REF       -&gt; codeHash 32                       -&gt; refCount u32
  * 0x0E REVERSE        -&gt; block hash 32                     -&gt; {@link InputRef} list
  * 0xFF SNAPSHOT_HASH  -&gt; state hash 32                      (snapshot-database only)
  * </pre>
  *
+ * <p>{@code CODE} and {@code CODE_REF} are split so that bumping a shared contract's reference
+ * count only ever rewrites four bytes, never the (possibly large) code blob itself.
+ *
  * <p>Prefixes {@code 0x04}..{@code 0x0B} are reserved for SP2/SP3 lane features (bonds, anchors,
  * claims, height triggers, challenges, segment cursors) so this task does not allocate them; SP0a
- * only writes {@code META}, {@code LANE}, {@code CONTRACT}, {@code CODE}, {@code CALL_COUNT},
- * {@code INPUT} and {@code REVERSE}. {@code 0x0D} is likewise held back as a gap before
- * {@code REVERSE} for the same reason. {@code SNAPSHOT_HASH} only ever appears inside a standalone
- * snapshot {@link io.xdag.db.rocksdb.KVSource}, never in the live LANE_L1 database.
+ * only writes {@code META}, {@code LANE}, {@code CONTRACT}, {@code CODE}, {@code CODE_REF},
+ * {@code CALL_COUNT}, {@code INPUT} and {@code REVERSE}. {@code SNAPSHOT_HASH} only ever appears
+ * inside a standalone snapshot {@link io.xdag.db.rocksdb.KVSource}, never in the live LANE_L1
+ * database.
  */
 public final class LaneL1Keys {
 
@@ -73,6 +77,7 @@ public final class LaneL1Keys {
     public static final byte CHALLENGE = 0x0A;
     public static final byte SEGMENT_CURSOR = 0x0B;
     public static final byte INPUT = 0x0C;
+    public static final byte CODE_REF = 0x0D;
     public static final byte REVERSE = 0x0E;
     /** Only inside a snapshot database: the state hash of everything else. */
     public static final byte SNAPSHOT_HASH = (byte) 0xFF;
@@ -84,10 +89,12 @@ public final class LaneL1Keys {
     }
 
     public static byte[] lane(Bytes laneId) {
+        require20(laneId);
         return BytesUtils.merge(LANE, laneId.toArray());
     }
 
     public static byte[] contract(Bytes contract) {
+        require20(contract);
         return BytesUtils.merge(CONTRACT, contract.toArray());
     }
 
@@ -95,13 +102,19 @@ public final class LaneL1Keys {
         return BytesUtils.merge(CODE, codeHash.toArray());
     }
 
+    public static byte[] codeRef(Bytes32 codeHash) {
+        return BytesUtils.merge(CODE_REF, codeHash.toArray());
+    }
+
     public static byte[] callCount(Bytes laneId, long height) {
+        require20(laneId);
         byte[] h = new byte[8];
         ExtCodec.putU64(h, 0, height);
         return BytesUtils.merge(new byte[]{CALL_COUNT}, laneId.toArray(), h);
     }
 
     public static byte[] input(Bytes laneId, long height, long index) {
+        require20(laneId);
         byte[] tail = new byte[12];
         ExtCodec.putU64(tail, 0, height);
         ExtCodec.putU32(tail, 8, index);
@@ -110,5 +123,12 @@ public final class LaneL1Keys {
 
     public static byte[] reverse(Bytes32 blockHash) {
         return BytesUtils.merge(REVERSE, blockHash.toArray());
+    }
+
+    private static void require20(Bytes id) {
+        if (id == null || id.size() != 20) {
+            throw new IllegalArgumentException(
+                    "expected a 20-byte id, got " + (id == null ? "null" : id.size() + " bytes"));
+        }
     }
 }

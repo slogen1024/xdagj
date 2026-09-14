@@ -266,12 +266,119 @@ public class LaneL1StoreTest {
         InMemoryKVSource src = new InMemoryKVSource();
         LaneL1Store s = new LaneL1Store(src);
         s.start();
-        byte[] v = new byte[8 + 4];
-        ExtCodec.putU32(v, 0, 1);
-        ExtCodec.putU32(v, 4, 1000); // declares 1000 bytes but only 4 are actually stored
-        src.put(LaneL1Keys.code(CODE_HASH), v);
+        src.put(LaneL1Keys.codeRef(CODE_HASH), new byte[]{1, 2, 3}); // must be exactly 4 bytes
+        src.put(LaneL1Keys.code(CODE_HASH), new byte[]{9, 9, 9}); // blob key is independent of the ref
 
-        assertEquals(1L, s.getCodeRefCount(CODE_HASH));
-        assertThrows(IllegalStateException.class, () -> s.getCode(CODE_HASH));
+        assertThrows(IllegalStateException.class, () -> s.getCodeRefCount(CODE_HASH));
+        assertEquals(Bytes.of((byte) 9, (byte) 9, (byte) 9), s.getCode(CODE_HASH));
+    }
+
+    @Test
+    public void lastWritePerKeyWinsInABatch() {
+        LaneL1Store s = memStore();
+
+        LaneL1Batch deleteThenPut = new LaneL1Batch();
+        deleteThenPut.deleteCallCount(LANE, 7L);
+        deleteThenPut.putCallCount(LANE, 7L, 9L);
+        s.commit(deleteThenPut);
+        assertEquals(9L, s.getCallCount(LANE, 7L));
+
+        LaneL1Batch putThenDelete = new LaneL1Batch();
+        putThenDelete.putCallCount(LANE, 7L, 9L);
+        putThenDelete.deleteCallCount(LANE, 7L);
+        s.commit(putThenDelete);
+        assertEquals(0L, s.getCallCount(LANE, 7L));
+
+        LaneL1Batch codeThenRef = new LaneL1Batch();
+        codeThenRef.putCode(CODE_HASH, 1L, Bytes.of((byte) 1, (byte) 2, (byte) 3));
+        codeThenRef.putCodeRef(CODE_HASH, 2L);
+        s.commit(codeThenRef);
+        assertEquals(2L, s.getCodeRefCount(CODE_HASH));
+        assertEquals(Bytes.of((byte) 1, (byte) 2, (byte) 3), s.getCode(CODE_HASH));
+
+        LaneL1Batch collapsed = new LaneL1Batch();
+        collapsed.putCallCount(LANE, 8L, 1L);
+        collapsed.putCallCount(LANE, 8L, 2L);
+        collapsed.deleteInput(LANE, 8L, 0L);
+        assertEquals(1, collapsed.puts().size());
+        assertEquals(1, collapsed.deletes().size());
+    }
+
+    @Test
+    public void snapshotWithWrongSchemaIsRefused() {
+        LaneL1Store a = memStore();
+        InMemoryKVSource snap = new InMemoryKVSource();
+        a.exportSnapshot(snap);
+
+        byte[] wrongMeta = new byte[4];
+        ExtCodec.putU32(wrongMeta, 0, 99);
+        snap.put(LaneL1Keys.META_KEY, wrongMeta);
+        snap.put(LaneL1Keys.SNAPSHOT_HASH_KEY, LaneL1Store.stateHashOf(snap).toArray());
+
+        LaneL1Store b = memStore();
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> b.importSnapshot(snap));
+        assertTrue(e.getMessage().contains("schema"));
+    }
+
+    @Test
+    public void resetLeavesOnlyMeta() throws Exception {
+        Config config = new DevnetConfig();
+        config.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
+        RocksdbKVSource rocks = new RocksdbKVSource(DatabaseName.LANE_L1.toString());
+        rocks.setConfig(config);
+        LaneL1Store s = new LaneL1Store(rocks);
+        s.start();
+        try {
+            LaneL1Batch batch = new LaneL1Batch();
+            batch.putLane(LANE, new LaneRecord(7L, BLOCK, 5L, 32L, 10_000_000L, 1L));
+            s.commit(batch);
+
+            s.reset();
+
+            assertEquals(1, s.sortedKeys().size());
+            assertEquals(LaneL1Store.SCHEMA_VERSION, s.schemaVersion());
+            assertFalse(s.hasLane(LANE));
+        } finally {
+            s.stop();
+        }
+    }
+
+    @Test
+    public void emptyStoreSnapshotRoundTrip() {
+        LaneL1Store a = memStore();
+        InMemoryKVSource snap = new InMemoryKVSource();
+        a.exportSnapshot(snap);
+
+        LaneL1Store b = memStore();
+        b.importSnapshot(snap);
+
+        assertEquals(a.stateHash(), b.stateHash());
+        assertEquals(1, b.sortedKeys().size());
+    }
+
+    @Test
+    public void absentCodeIsNull() {
+        LaneL1Store s = memStore();
+        Bytes32 randomHash = Bytes32.random();
+        assertNull(s.getCode(randomHash));
+        assertEquals(0L, s.getCodeRefCount(randomHash));
+        assertFalse(s.hasCode(randomHash));
+
+        InMemoryKVSource nonEmptyTarget = new InMemoryKVSource();
+        nonEmptyTarget.put(new byte[]{0x7F}, new byte[]{1});
+        assertThrows(IllegalStateException.class, () -> s.exportSnapshot(nonEmptyTarget));
+    }
+
+    @Test
+    public void truncatedReverseIndexIsReported() {
+        InMemoryKVSource src = new InMemoryKVSource();
+        LaneL1Store s = new LaneL1Store(src);
+        s.start();
+
+        src.put(LaneL1Keys.reverse(BLOCK), new byte[61]); // not a multiple of InputRef.SIZE (32)
+        assertThrows(IllegalStateException.class, () -> s.getReverse(BLOCK));
+
+        src.put(LaneL1Keys.lane(LANE), new byte[59]); // LaneRecord.SIZE is 60
+        assertThrows(IllegalStateException.class, () -> s.getLane(LANE));
     }
 }

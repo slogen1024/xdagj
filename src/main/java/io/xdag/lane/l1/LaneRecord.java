@@ -70,7 +70,15 @@ public record LaneRecord(long createdHeight, Bytes32 createBlockHash, long gasPr
         return a;
     }
 
+    /**
+     * Decodes a value previously produced by {@link #encode()}.
+     *
+     * @throws IllegalStateException if {@code a.length != SIZE} (a corrupt or truncated record)
+     */
     public static LaneRecord decode(byte[] a) {
+        if (a.length != SIZE) {
+            throw new IllegalStateException("corrupt lane record: expected " + SIZE + " bytes, got " + a.length);
+        }
         return new LaneRecord(ExtCodec.u64(a, 0), Bytes32.wrap(Arrays.copyOfRange(a, 8, 40)), ExtCodec.u64(a, 40),
                 ExtCodec.u32(a, 48), ExtCodec.u32(a, 52), ExtCodec.u32(a, 56));
     }

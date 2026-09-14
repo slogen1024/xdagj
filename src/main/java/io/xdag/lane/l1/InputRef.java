@@ -75,7 +75,17 @@ public record InputRef(Bytes laneId, long height, long index) {
         return a;
     }
 
+    /**
+     * Decodes a value previously produced by {@link #encodeList}.
+     *
+     * @throws IllegalStateException if {@code a.length} is not a multiple of {@code SIZE} (a
+     *                                corrupt or truncated list)
+     */
     public static List<InputRef> decodeList(byte[] a) {
+        if (a.length % SIZE != 0) {
+            throw new IllegalStateException(
+                    "corrupt input ref list: length " + a.length + " is not a multiple of " + SIZE);
+        }
         List<InputRef> out = new ArrayList<>(a.length / SIZE);
         for (int off = 0; off + SIZE <= a.length; off += SIZE) {
             out.add(decode(a, off));

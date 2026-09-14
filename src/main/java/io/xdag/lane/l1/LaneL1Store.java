@@ -31,15 +31,14 @@ import io.xdag.lane.ext.ExtCodec;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 
 /**
  * Global (every node) lane state: registry, contracts, code store, input index. Backed by a single
- * {@link KVSource} (RocksDB in production, {@link io.xdag.lane.InMemoryKVSource} in tests) keyed
- * per {@link LaneL1Keys}.
+ * {@link KVSource} (RocksDB in production, an in-memory implementation in tests) keyed per
+ * {@link LaneL1Keys}.
  *
  * <p><b>Writes.</b> All writes go through a {@link LaneL1Batch} built by the caller and applied by
  * {@link #commit(LaneL1Batch)} as a single atomic {@link KVSource#batchWrite}; there is no other
@@ -47,7 +46,10 @@ import org.apache.tuweni.bytes.Bytes32;
  *
  * <p><b>Reads.</b> Every read ({@link #getLane}, {@link #getContract}, {@link #getCode} and
  * friends) is a point lookup by exact key; there is no range scan or iteration in the read API
- * (snapshot export is the only place that walks every key, see below).
+ * (snapshot export is the only place that walks every key, see below). {@link #getCallCount} and
+ * {@link #getCodeRefCount} return {@code 0} for a key that was never written (or was deleted); a
+ * caller wanting to represent "no calls" or "no references" again must issue a delete, not a put
+ * of an explicit zero, since the two are otherwise indistinguishable to these readers.
  *
  * <p><b>State hash.</b> {@link #stateHash()} is defined as the SHA-256 digest of every key/value
  * pair in the store (the {@code META} entry included, the reserved
@@ -58,6 +60,11 @@ import org.apache.tuweni.bytes.Bytes32;
  * always produce the same hash, and it changes whenever any pair is added, removed or modified.
  * {@link #exportSnapshot} and {@link #importSnapshot} use this hash to detect corruption or
  * mismatch between a snapshot and the state it claims to represent.
+ *
+ * <p><b>Snapshot cost.</b> {@link #sortedKeys()}, {@link #stateHash()}, {@link #exportSnapshot} and
+ * {@link #importSnapshot} are O(N) in both time and heap, where N is the number of keys in the
+ * store: each materializes every key (and, for the hash and the snapshot copy, every value) into
+ * memory at once. These are snapshot-boundary operations only — never invoked per block.
  *
  * <p><b>Concurrency.</b> Not thread-safe beyond the consensus lock: callers (the SP0a hooks in
  * {@code BlockchainImpl}) must serialize all access the same way they serialize block application.
@@ -134,35 +141,36 @@ public final class LaneL1Store implements XdagLifecycle {
 
     // ---- code store reads ----
 
+    /** Cheap presence check: looks at the (4-byte) reference count, never the blob. */
     public boolean hasCode(Bytes32 codeHash) {
-        return source.get(LaneL1Keys.code(codeHash)) != null;
-    }
-
-    public long getCodeRefCount(Bytes32 codeHash) {
-        byte[] v = source.get(LaneL1Keys.code(codeHash));
-        return v == null ? 0 : ExtCodec.u32(v, 0);
+        return source.get(LaneL1Keys.codeRef(codeHash)) != null;
     }
 
     /**
-     * Returns the stored code bytes.
+     * Returns the code's reference count, or 0 if it was never written (or was deleted).
      *
-     * @throws IllegalStateException if the record's declared length does not fit within the stored
-     *                                value (a corrupt record) rather than reading past the array
+     * @throws IllegalStateException if the stored value is not exactly 4 bytes (a corrupt record)
      */
+    public long getCodeRefCount(Bytes32 codeHash) {
+        byte[] v = source.get(LaneL1Keys.codeRef(codeHash));
+        if (v == null) {
+            return 0;
+        }
+        if (v.length != 4) {
+            throw new IllegalStateException("corrupt code ref record");
+        }
+        return ExtCodec.u32(v, 0);
+    }
+
+    /** Returns the stored raw code bytes, or null if there is no blob under this hash. */
     public Bytes getCode(Bytes32 codeHash) {
         byte[] v = source.get(LaneL1Keys.code(codeHash));
-        if (v == null) {
-            return null;
-        }
-        int len = (int) ExtCodec.u32(v, 4);
-        if (len < 0 || 8 + len > v.length) {
-            throw new IllegalStateException("corrupt code record");
-        }
-        return Bytes.wrap(Arrays.copyOfRange(v, 8, 8 + len));
+        return v == null ? null : Bytes.wrap(v);
     }
 
     // ---- call count / input index reads ----
 
+    /** Returns the call count for (laneId, height), or 0 if it was never written (or was deleted). */
     public long getCallCount(Bytes laneId, long height) {
         byte[] v = source.get(LaneL1Keys.callCount(laneId, height));
         return v == null ? 0 : ExtCodec.u32(v, 0);
@@ -191,7 +199,7 @@ public final class LaneL1Store implements XdagLifecycle {
 
     // ---- snapshot support ----
 
-    /** All keys in unsigned lexicographic byte order (RocksDB's own key order). */
+    /** All keys in unsigned lexicographic byte order (RocksDB's own key order). O(N); snapshot-only. */
     public List<byte[]> sortedKeys() {
         return sortedKeysOf(source);
     }
@@ -210,7 +218,7 @@ public final class LaneL1Store implements XdagLifecycle {
         return key.length == 1 && key[0] == LaneL1Keys.META;
     }
 
-    /** See the class-level "State hash" section for the exact definition. */
+    /** See the class-level "State hash" section for the exact definition. O(N); snapshot-only. */
     public Bytes32 stateHash() {
         return stateHashOf(source);
     }
@@ -239,8 +247,16 @@ public final class LaneL1Store implements XdagLifecycle {
         return Bytes32.wrap(md.digest());
     }
 
-    /** Copies every key (this store's own state hash included) into {@code target}. */
+    /**
+     * Copies every key (this store's own state hash included) into {@code target}. O(N);
+     * snapshot-only.
+     *
+     * @throws IllegalStateException if {@code target} already holds any key
+     */
     public void exportSnapshot(KVSource<byte[], byte[]> target) {
+        if (!sortedKeysOf(target).isEmpty()) {
+            throw new IllegalStateException("snapshot target must be empty");
+        }
         for (byte[] k : sortedKeys()) {
             target.put(k, source.get(k));
         }
@@ -248,11 +264,12 @@ public final class LaneL1Store implements XdagLifecycle {
     }
 
     /**
-     * Copies every key from the snapshot and verifies the recorded state hash.
+     * Copies every key from the snapshot and verifies the recorded state hash. O(N); snapshot-only.
      *
-     * @throws IllegalStateException if this store is not empty (any key other than {@code META}),
-     *                                if the snapshot carries no recorded hash, or if the hash of the
-     *                                copied content does not match the recorded one
+     * @throws IllegalStateException if the snapshot carries no recorded hash, if this store is not
+     *                                empty (any key other than {@code META}), if the snapshot's
+     *                                schema version does not match {@link #SCHEMA_VERSION}, or if
+     *                                the hash of the copied content does not match the recorded one
      */
     public void importSnapshot(KVSource<byte[], byte[]> from) {
         byte[] expected = from.get(LaneL1Keys.SNAPSHOT_HASH_KEY);
@@ -263,6 +280,11 @@ public final class LaneL1Store implements XdagLifecycle {
             if (!isMetaKey(k)) {
                 throw new IllegalStateException("LANE_L1 must be empty before import");
             }
+        }
+        byte[] metaValue = from.get(LaneL1Keys.META_KEY);
+        int snapshotSchema = metaValue == null ? -1 : (int) ExtCodec.u32(metaValue, 0);
+        if (snapshotSchema != SCHEMA_VERSION) {
+            throw new IllegalStateException("LANE_L1 snapshot schema " + snapshotSchema + " != " + SCHEMA_VERSION);
         }
         for (byte[] k : sortedKeysOf(from)) {
             if (isSnapshotHashKey(k)) {
