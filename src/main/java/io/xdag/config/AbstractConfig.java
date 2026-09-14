@@ -379,15 +379,16 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
                             + " x " + CHUNK_DATA_LEN + " bytes/chunk = " + maxChainCapacity + " bytes max)");
         }
         // The consensus chunk-fee re-check (LaneL1Processor.feeCovers) multiplies the configured
-        // chunk fee (in nano-XDAG) by up to laneMaxChunksPerChain chunks for a single chain; an
-        // overflow there would silently wrap in production, so the combination is rejected here
-        // instead, at startup.
+        // chunk fee (in nano-XDAG) by the chunk count of every chain a paying block links: a DEPLOY
+        // may carry a code chain AND an args chain, so the worst case is 2 x laneMaxChunksPerChain.
+        // An overflow there would throw inside setMain, so the combination is rejected here instead,
+        // at startup.
         try {
-            laneChunkFee.multiply(laneMaxChunksPerChain);
+            laneChunkFee.multiply(2L * laneMaxChunksPerChain);
         } catch (ArithmeticException e) {
             throw new IllegalArgumentException(
                     "Invalid combination of lane.chunk.feeMilliXdag and lane.chunk.maxPerChain: " + laneChunkFee
-                            + " x " + laneMaxChunksPerChain + " overflows a long", e);
+                            + " x 2 x " + laneMaxChunksPerChain + " overflows a long", e);
         }
     }
 

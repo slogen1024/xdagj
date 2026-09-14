@@ -183,6 +183,11 @@ public class LaneL1ProcessorTest {
      * {@code chainHeadTs}; the chain's blocks are registered in the fake DAG.
      */
     private Block deployWithCodeChain(Bytes wasm, long chainHeadTs, long payingTs) {
+        return deployWithCodeChain(wasm, chainHeadTs, payingTs, FEE);
+    }
+
+    /** Same as {@link #deployWithCodeChain(Bytes, long, long)} with an explicit header fee. */
+    private Block deployWithCodeChain(Bytes wasm, long chainHeadTs, long payingTs, XAmount headerFee) {
         List<Block> chain = ChunkChainBuilder.split(config, wasm, chainHeadTs);
         for (Block c : chain) {
             dag.put(Bytes32.wrap(c.getHashLow().toArray()), c);
@@ -193,7 +198,7 @@ public class LaneL1ProcessorTest {
         List<Bytes32> ext = new ArrayList<>();
         ext.add(d.encodeHeader());
         ext.addAll(d.encodePayload());
-        return extBlockAt(payingTs, FEE, ext, List.of(new Address(head, XDAG_FIELD_OUT, false)));
+        return extBlockAt(payingTs, headerFee, ext, List.of(new Address(head, XDAG_FIELD_OUT, false)));
     }
 
     @Test
@@ -583,5 +588,30 @@ public class LaneL1ProcessorTest {
         assertEquals(n, store.getCallCount(laneId, 10));
         assertNull(store.getInput(laneId, 10, n));
         assertNull(store.getInput(laneId, 10, n + 1));
+    }
+
+    /**
+     * Guards the code-chain fee basis: a new-lane DEPLOY whose two-chunk code chain assembles fine
+     * but whose header fee covers only one chunk must be INVALID_FEE, not OK. (Every other deploy in
+     * this class pays exactly the minimum, which cannot distinguish "count the code chunks" from
+     * "count nothing".)
+     */
+    @Test
+    public void underpaidCodeChainDeployIsInvalidFee() {
+        proc.onSetMainBegin(10, mainBlock);
+        Bytes wasm = payload(600, 74); // 2 chunks -> minimum header fee 20 mXDAG
+        Block block = deployWithCodeChain(wasm, CHAIN_TS, TS, XAmount.of(10, XUnit.MILLI_XDAG));
+        apply(block);
+        Bytes laneId = LaneIds.laneIdOf(block.getHash());
+        assertEquals(InputStatus.INVALID_FEE, store.getInput(laneId, 10, 0).status());
+        assertEquals(ExtKind.DEPLOY, store.getInput(laneId, 10, 0).kind());
+        assertFalse(store.hasLane(laneId));
+        assertFalse(store.hasCode(HashUtils.sha256(wasm)));
+        assertEquals(1L, store.getCallCount(laneId, 10));
+
+        // exactly the minimum is accepted
+        Block paid = deployWithCodeChain(payload(600, 75), CHAIN_TS, TS, XAmount.of(20, XUnit.MILLI_XDAG));
+        apply(paid);
+        assertEquals(InputStatus.OK, store.getInput(LaneIds.laneIdOf(paid.getHash()), 10, 0).status());
     }
 }
