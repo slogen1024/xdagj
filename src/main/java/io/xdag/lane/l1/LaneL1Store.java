@@ -282,16 +282,19 @@ public final class LaneL1Store implements XdagLifecycle {
      * {@link KVSource#batchWrite}, so a refused or interrupted import leaves the store untouched
      * rather than half-filled. O(N); snapshot-only.
      *
-     * @throws IllegalStateException if the snapshot carries no recorded hash, if this store is not
-     *                                empty (any key other than {@code META}), if the snapshot's
-     *                                schema version does not match {@link #SCHEMA_VERSION}, or if
-     *                                the hash of the snapshot's content does not match the recorded
-     *                                one
+     * @throws IllegalStateException if the snapshot carries no recorded hash or one that is not 32
+     *                                bytes, if this store is not empty (any key other than
+     *                                {@code META}), if the snapshot's schema version does not match
+     *                                {@link #SCHEMA_VERSION}, or if the hash of the snapshot's
+     *                                content does not match the recorded one
      */
     public void importSnapshot(KVSource<byte[], byte[]> from) {
         byte[] expected = from.get(LaneL1Keys.SNAPSHOT_HASH_KEY);
-        if (expected == null) {
-            throw new IllegalStateException("LANE_L1 snapshot has no state hash");
+        // Length-checked here rather than left to Bytes32.wrap below: that would throw an
+        // IllegalArgumentException carrying nothing about LANE_L1, out of a call site whose whole
+        // contract is "a rejected import throws IllegalStateException and changes nothing".
+        if (expected == null || expected.length != Bytes32.SIZE) {
+            throw new IllegalStateException("LANE_L1 snapshot has no valid state hash");
         }
         for (byte[] k : sortedKeys()) {
             if (!isMetaKey(k)) {

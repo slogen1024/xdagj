@@ -40,6 +40,8 @@ import io.xdag.crypto.keys.ECKeyPair;
 import io.xdag.db.*;
 import io.xdag.db.mysql.TransactionHistoryStoreImpl;
 import io.xdag.db.rocksdb.*;
+import io.xdag.lane.ext.ExtKind;
+import io.xdag.lane.l1.LaneKindHandler;
 import io.xdag.lane.l1.LaneL1Store;
 import io.xdag.net.*;
 import io.xdag.net.message.MessageQueue;
@@ -54,6 +56,8 @@ import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.tuweni.bytes.Bytes;
 
+import java.util.EnumMap;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -73,6 +77,17 @@ public class Kernel {
     protected OrphanBlockStore orphanBlockStore;
     protected TransactionHistoryStore txHistoryStore;
     protected LaneL1Store laneL1Store;
+    /**
+     * Lane extension-kind semantics, keyed by kind. Handlers SP2/SP3 register BEFORE the kernel
+     * constructs {@code BlockchainImpl}; consulted once in the {@code BlockchainImpl} constructor,
+     * never afterwards — that constructor creates the {@code LaneL1Processor} and hands it every
+     * entry of this map before the check-main loop can confirm anything, and the processor refuses
+     * a registration once its first hook has run. Putting a handler in here after construction
+     * therefore has no effect at all. Never null; empty in SP0a, which ships no handlers.
+     *
+     * @see io.xdag.lane.l1.LaneKindHandler
+     */
+    protected final Map<ExtKind, LaneKindHandler> laneKindHandlers = new EnumMap<>(ExtKind.class);
 
     protected SnapshotStore snapshotStore;
     protected Blockchain blockchain;

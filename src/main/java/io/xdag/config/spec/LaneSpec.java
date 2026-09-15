@@ -35,6 +35,14 @@ import io.xdag.core.XAmount;
  * is untouched by lane semantics, per principle P1) — they only affect whether/how the
  * lane hooks classify and index extension fields (field code {@code 0x0F}) once a block
  * is confirmed as main.
+ *
+ * <p><b>Never set these on a shared network.</b> The three conf keys
+ * {@code lane.chunk.maxPerChain}, {@code lane.wasm.maxBytes} and
+ * {@code lane.chunk.feeMilliXdag} — and the activation height {@code lane.activation.height}
+ * — are consensus parameters, not node-local tuning knobs: a node running a non-default
+ * value computes different LANE_L1 verdicts from everyone else and silently forks the lane
+ * state, with no error of its own to show for it. They exist for devnet and tests only;
+ * {@code AbstractConfig.getSetting()} logs a warning whenever a conf file supplies one.
  */
 public interface LaneSpec {
 

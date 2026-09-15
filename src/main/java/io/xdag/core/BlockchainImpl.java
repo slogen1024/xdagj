@@ -159,14 +159,9 @@ public class BlockchainImpl implements Blockchain {
      * Wiring the processor from outside (as the kernel used to) would therefore let a main block be
      * confirmed while these hooks were still {@link LaneL1Hooks#NOOP}, and that block's lane inputs
      * would be missing from LANE_L1 forever. Stays NOOP when the kernel has no lane store (tests
-     * that build a blockchain without one); {@link #setLaneHooks} remains for tests that install
-     * their own.
+     * that build a blockchain without one).
      */
     private volatile LaneL1Hooks laneHooks = LaneL1Hooks.NOOP;
-
-    public void setLaneHooks(LaneL1Hooks hooks) {
-        this.laneHooks = hooks == null ? LaneL1Hooks.NOOP : hooks;
-    }
 
     // Constructor initializes all components and starts main chain checking
     public BlockchainImpl(Kernel kernel) {
@@ -238,10 +233,16 @@ public class BlockchainImpl implements Blockchain {
         }
 
         // Lane contracts (SP0a): install the hooks before the check-main loop can confirm anything.
+        // kernel.getLaneKindHandlers() is THE registration point for the SP2/SP3 per-kind semantics:
+        // it is read exactly here, once, before any hook can run (the processor rejects a handler
+        // registered after its first hook), so a handler must be in the kernel's map before
+        // new BlockchainImpl(kernel).
         LaneL1Store laneStore = kernel.getLaneL1Store();
         if (laneStore != null) {
-            this.laneHooks = new LaneL1Processor(laneStore, kernel.getConfig().getLaneSpec(),
+            LaneL1Processor processor = new LaneL1Processor(laneStore, kernel.getConfig().getLaneSpec(),
                     hash -> getBlockByHash(hash, true));
+            kernel.getLaneKindHandlers().forEach(processor::registerHandler);
+            this.laneHooks = processor;
         }
 
         // Start main chain checking

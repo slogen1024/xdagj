@@ -189,6 +189,24 @@ public class LaneL1StoreTest {
     }
 
     @Test
+    public void snapshotWithATruncatedStateHashIsRefused() {
+        LaneL1Store a = memStore();
+        LaneL1Batch batch = new LaneL1Batch();
+        batch.putLane(LANE, new LaneRecord(7L, BLOCK, 5L, 32L, 10_000_000L, 1L));
+        a.commit(batch);
+        InMemoryKVSource snap = new InMemoryKVSource();
+        a.exportSnapshot(snap);
+
+        // A value that is not a 32-byte hash must be rejected the same way a missing one is - as an
+        // IllegalStateException naming LANE_L1 - not as an IllegalArgumentException out of Bytes32.wrap.
+        snap.put(new byte[]{LaneL1Keys.SNAPSHOT_HASH}, new byte[]{-1, -1, -1, -1, -1});
+        LaneL1Store b = memStore();
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> b.importSnapshot(snap));
+        assertTrue(e.getMessage(), e.getMessage().contains("no valid state hash"));
+        assertFalse("a refused import must leave the store untouched", b.hasState());
+    }
+
+    @Test
     public void rocksAndMemoryProduceTheSameHashForTheSameContent() throws Exception {
         Config config = new DevnetConfig();
         config.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());

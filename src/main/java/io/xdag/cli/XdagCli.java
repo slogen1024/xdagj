@@ -535,10 +535,13 @@ public class XdagCli extends Launcher {
             laneStore.start();
             LaneL1SnapshotGate.export(getConfig(), laneStore);
             System.out.println("lane state snapshot written to " + LaneL1SnapshotGate.snapshotDir(getConfig()));
-        } catch (IllegalStateException e) {
+        } catch (RuntimeException e) {
+            // Every runtime failure, not just IllegalStateException: laneStore.start() opens a
+            // RocksDB column family and surfaces a failure to do so as a plain RuntimeException.
             // The block/address snapshot is already written: report the lane failure but still
             // print the height and next start frame the operator needs.
-            laneFailure = "lane state snapshot NOT written: " + e.getMessage();
+            // e, not e.getMessage(): a RocksDB failure may carry no message at all.
+            laneFailure = "lane state snapshot NOT written: " + e;
             System.out.println(laneFailure);
         } finally {
             laneStore.stop();

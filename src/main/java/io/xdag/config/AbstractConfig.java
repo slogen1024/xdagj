@@ -322,10 +322,14 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
         // Lane configuration overrides (defaults live in the per-network constructors)
         laneActivationHeightOverride = config.hasPath("lane.activation.height") ? config.getLong("lane.activation.height") : null;
         if (config.hasPath("lane.chunk.maxPerChain")) {
-            laneMaxChunksPerChain = config.getInt("lane.chunk.maxPerChain");
+            int overridden = config.getInt("lane.chunk.maxPerChain");
+            warnLaneConsensusOverride("lane.chunk.maxPerChain", overridden, laneMaxChunksPerChain);
+            laneMaxChunksPerChain = overridden;
         }
         if (config.hasPath("lane.wasm.maxBytes")) {
-            laneMaxWasmBytes = config.getInt("lane.wasm.maxBytes");
+            int overridden = config.getInt("lane.wasm.maxBytes");
+            warnLaneConsensusOverride("lane.wasm.maxBytes", overridden, laneMaxWasmBytes);
+            laneMaxWasmBytes = overridden;
         }
         if (config.hasPath("lane.chunk.feeMilliXdag")) {
             long feeMilliXdag = config.getLong("lane.chunk.feeMilliXdag");
@@ -334,7 +338,9 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
                         "Invalid lane.chunk.feeMilliXdag: " + feeMilliXdag + " (must not be negative)");
             }
             try {
-                laneChunkFee = XAmount.of(feeMilliXdag, XUnit.MILLI_XDAG);
+                XAmount overridden = XAmount.of(feeMilliXdag, XUnit.MILLI_XDAG);
+                warnLaneConsensusOverride("lane.chunk.feeMilliXdag", overridden, laneChunkFee);
+                laneChunkFee = overridden;
             } catch (ArithmeticException e) {
                 throw new IllegalArgumentException(
                         "Invalid lane.chunk.feeMilliXdag: " + feeMilliXdag + " overflows XAmount", e);
@@ -390,6 +396,17 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
                     "Invalid combination of lane.chunk.feeMilliXdag and lane.chunk.maxPerChain: " + laneChunkFee
                             + " x 2 x " + laneMaxChunksPerChain + " overflows a long", e);
         }
+    }
+
+    /**
+     * Warns that a lane consensus parameter was taken from the conf file instead of the protocol
+     * default. These are not node-local tuning knobs: every node must compute the same LANE_L1
+     * verdicts, so a node running a non-default value simply forks, silently and without any error
+     * of its own. Mirrors the {@code lane.activation.height} warning above.
+     */
+    private static void warnLaneConsensusOverride(String key, Object value, Object protocolDefault) {
+        log.warn("{} overridden by configuration to {} (protocol default {}); this is a consensus "
+                + "parameter, never set it on testnet/mainnet", key, value, protocolDefault);
     }
 
     @Override

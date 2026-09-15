@@ -160,8 +160,10 @@ public abstract class LaneL1TestBase {
         kernel.setWallet(wallet);
         kernel.setLaneL1Store(laneStore);
 
-        // No setLaneHooks() here: kernel.setLaneL1Store(laneStore) above precedes construction, and
-        // BlockchainImpl's constructor installs the LaneL1Processor from the kernel's store itself.
+        // The kernel is fully wired before construction: BlockchainImpl's constructor installs the
+        // LaneL1Processor from kernel.getLaneL1Store() itself and drains kernel.getLaneKindHandlers()
+        // into it, and neither is consulted again afterwards.
+        beforeBlockchain(kernel);
         blockchain = new MockBlockchain(kernel);
 
         Block addressBlock = BlockBuilder.generateAddressBlock(config, poolKey, generateTime);
@@ -185,6 +187,15 @@ public abstract class LaneL1TestBase {
         if (dbFactory != null) {
             dbFactory.close();
         }
+    }
+
+    /**
+     * Last chance to touch the kernel before {@code new MockBlockchain(kernel)}. Overridden by a
+     * subclass that needs a {@link LaneKindHandler} in {@code kernel.getLaneKindHandlers()}: that
+     * map is read once, by the constructor, and a handler put there later never reaches the
+     * processor at all.
+     */
+    protected void beforeBlockchain(Kernel kernel) {
     }
 
     protected UInt64 nextNonce() {

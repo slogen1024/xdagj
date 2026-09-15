@@ -28,8 +28,16 @@ import io.xdag.lane.ext.Classified;
 
 /**
  * Per-kind L1 semantics for {@code ANCHOR} / {@code BOND} / {@code CHALLENGE} / {@code CLAIM}. SP0a
- * ships no implementations; SP2/SP3 register theirs with
- * {@link LaneL1Processor#registerHandler(io.xdag.lane.ext.ExtKind, LaneKindHandler)}.
+ * ships no implementations; SP2/SP3 supply theirs.
+ *
+ * <p><b>Where to register.</b> The one registration point is {@code Kernel.getLaneKindHandlers()}:
+ * put the handler into that map <em>before</em> {@code new BlockchainImpl(kernel)}. That
+ * constructor creates the {@link LaneL1Processor} and hands it every entry of the map
+ * ({@link LaneL1Processor#registerHandler(io.xdag.lane.ext.ExtKind, LaneKindHandler)}) before it
+ * starts the check-main loop, which is the only moment at which registration is both safe and
+ * effective: the loop's first {@code checkNewMain -> setMain} can run before the constructor's
+ * caller gets control back, and the processor rejects any handler offered after its first hook has
+ * run. There is deliberately no post-construction window to register in.
  *
  * <p>{@code CALL}, {@code DEPLOY} and {@code CHUNK} are built into {@link LaneL1Processor} and are
  * not pluggable; registering a handler for them is rejected.

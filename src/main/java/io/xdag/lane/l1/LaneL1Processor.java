@@ -88,6 +88,18 @@ import org.apache.tuweni.bytes.Bytes32;
  * lookup. Nothing reads wall-clock time (the age rule uses the block's own timestamp) and nothing
  * depends on the order in which unrelated blocks arrived over the network.
  *
+ * <p>The one node-local structure the lookup transits is the in-memory orphan pool
+ * ({@code BlockchainImpl.getBlockByHash} consults {@code memOrphanPool} before the block store):
+ * a block still sitting there can be evicted by {@code ORPHAN_REMOVE_REUSE} without ever being
+ * persisted, so "is this chunk still retrievable" is not on its own a network-wide constant. It
+ * is nonetheless safe here, because the processor only ever walks the chains of a block that is
+ * being applied — and a block is only applied once it is linked. Connecting the paying block calls
+ * {@code removeOrphan} on each of its links with {@code ORPHAN_REMOVE_NORMAL} (or
+ * {@code ORPHAN_REMOVE_EXTRA} when the linking block is itself still extra); every action except
+ * {@code ORPHAN_REMOVE_REUSE} writes the block out with {@code saveBlock} and then recurses into
+ * that block's own links, so the whole chunk chain is persisted, on every node, before any main
+ * block can confirm the block that pays for it.
+ *
  * <p><b>Raw blocks required.</b> Both hooks and the {@code lookup} must be handed blocks parsed
  * from their 512 bytes — see {@link LaneL1Hooks}.
  */
@@ -129,6 +141,11 @@ public final class LaneL1Processor implements LaneL1Hooks {
      * runs (any of {@link #onSetMainBegin}, {@link #onBlockApplied}, {@link #onSetMainEnd},
      * {@link #onBlockUnapplied} or {@link #onUnsetMain}); registering later would leave already
      * -processed blocks of that kind undispatched.
+     *
+     * <p>In production this is called from one place only: the {@code BlockchainImpl} constructor,
+     * which drains {@code Kernel.getLaneKindHandlers()} into the processor it has just built,
+     * before starting the check-main loop. See {@link LaneKindHandler} for why there is no other
+     * window.
      *
      * @throws NullPointerException     if {@code kind} or {@code handler} is {@code null}
      * @throws IllegalArgumentException if {@code kind} is {@code CALL}, {@code DEPLOY} or
@@ -231,7 +248,10 @@ public final class LaneL1Processor implements LaneL1Hooks {
                     record(batch, refs, counts, vaults.get(0), blockHash, ExtKind.CALL, status, call.contract());
                 }
             }
-        } else if (c.kind() != null && c.isOk()) {
+        } else if (c.kind() != null && c.isOk() && !BUILT_IN.contains(c.kind())) {
+            // The BUILT_IN guard mirrors onBlockUnapplied's; registerHandler already rejects those
+            // kinds, so it can only ever be redundant here — which is exactly why both sides state
+            // it, rather than one side relying on the other's invariant.
             LaneKindHandler handler = handlers.get(c.kind());
             if (handler != null) {
                 handler.onApplied(block, c, ctx, batch);
@@ -295,12 +315,22 @@ public final class LaneL1Processor implements LaneL1Hooks {
         if (!refs.isEmpty()) {
             // LinkedHashMap for deterministic iteration order below, matching LaneL1Batch's own ordering.
             Map<Bytes, Long> counts = new LinkedHashMap<>();
+            // Every ref of one block was written by a single onBlockApplied, hence at a single
+            // height; the count bookkeeping below keys on the lane alone and writes back at this
+            // one height, so a ref claiming another height would have its count read at one height
+            // and written at another. That cannot happen unless the reverse index is corrupt, so it
+            // is reported and the stray entry left alone rather than half-undone.
             long height = refs.get(0).height();
             for (int i = refs.size() - 1; i >= 0; i--) {
                 InputRef r = refs.get(i);
-                InputRecord in = store.getInput(r.laneId(), r.height(), r.index());
-                batch.deleteInput(r.laneId(), r.height(), r.index());
-                long remaining = counts.computeIfAbsent(r.laneId(), l -> store.getCallCount(l, r.height())) - 1;
+                if (r.height() != height) {
+                    log.error("lane reverse index of block {} mixes heights {} and {} (lane={} index={}); "
+                            + "skipping the stray entry", blockHash, height, r.height(), r.laneId(), r.index());
+                    continue;
+                }
+                InputRecord in = store.getInput(r.laneId(), height, r.index());
+                batch.deleteInput(r.laneId(), height, r.index());
+                long remaining = counts.computeIfAbsent(r.laneId(), l -> store.getCallCount(l, height)) - 1;
                 counts.put(r.laneId(), remaining);
                 if (in != null && in.kind() == ExtKind.DEPLOY && in.status() == InputStatus.OK) {
                     undoDeploy(blockHash, r.laneId(), in.contract(), batch);
@@ -514,6 +544,12 @@ public final class LaneL1Processor implements LaneL1Hooks {
      * The fee field of the block header, read from the raw 512 bytes exactly as {@code Block.parse}
      * does. {@code BlockInfo.fee} is overwritten with the collected fees while the block is applied,
      * so {@code Block.getFee()} would not answer "what did this block declare".
+     *
+     * <p><b>Requires a raw block</b> (SP0a principle P6: the hooks are handed blocks parsed from
+     * their 512 bytes). This reads {@code block.getXdagBlock()}, which for a block that carries no
+     * raw bytes is re-encoded from the very {@code info} whose {@code fee} was just overwritten —
+     * the declared fee would then be indistinguishable from the collected one, and the consensus
+     * fee check would silently use the wrong number.
      */
     static XAmount headerFee(Block block) {
         XdagBlock raw = block.getXdagBlock();
