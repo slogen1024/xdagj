@@ -704,7 +704,7 @@ verify(challenge):
 | `maxWitnessBytes` | 1 MB（1,048,576 B） | 与 maxCallGas / gasPerWitnessByte 满足 §8.3 不等式 |
 | `maxChallengesPerHeight` | 4 | |
 | `maxInlineArgs` | 256 B | 由 512 B 块布局推导（`(16 − 8) × 32`），**不可配置**——没有对应的 conf 键 |
-| `maxChunksPerChain` | 4096 | 4096 × 352 B ≈ 1.44 MB |
+| `maxChunksPerChain` | 4096 | 4096 × 352 B ≈ 1.44 MB。与 `maxWasmBytes`、`chunkFee`、`activationHeight` 一样是**共识参数**：SP0a 给了 conf 键（`lane.chunk.maxPerChain` / `lane.wasm.maxBytes` / `lane.chunk.feeMilliXdag` / `lane.activation.height`）只为 devnet 与测试，**共享网络上绝不设置**——非默认值不会报错，只会静默分叉 `LANE_L1`；被覆盖时启动打 `warn` |
 | `chunkFee` | 0.01 XDAG/片 | 归 PoW 矿工 |
 | `maxWasmBytes` | 1 MB | |
 | `maxMemoryPages` | 64（4 MB） | |
@@ -783,7 +783,7 @@ verify(challenge):
 | E10 | SMT 哈希 SHA-256 vs blake3（开放问题 O1） | SP1 基准后在激活前定死 |
 | E11 | **字段码 0x0F 与 dev-evm 冲突**：`dev-evm` 分支把 `0x0F` 用作 `XDAG_FIELD_EVM_TX_REF`（原始 32B EVM 交易哈希，字段写在 remark **之前**），本方向把同一个码点用作 `XDAG_FIELD_EXT`（写在 remark **之后**）。两条分支都还没合进 `develop` | **必须在任一分支合入 `develop` 之前显式定夺**，不能靠"先到先得"：先合的那条占住 0x0F，另一条要么改码点、要么改语义。按 D3 的决定 dev-evm 归档，但归档动作本身必须落实并记录 |
 | E12 | 快照节点缺少激活前后的老分片原始字节，付费块引用的分片链可能在本地拿不到 | 年龄规则（§5.3）把窗口限制在两个 epoch；缺失的分片块在快照节点上**连 `BlockInfo` 都不存在**（快照只保留有公钥或余额非零的块），因此 link 它的付费块得到 `NO_PARENT`，由 `SyncManager` 按需递归拉取补齐。`tryToConnect` 没有任何以快照高度为界的拒绝规则，所以两类节点的裁决必然一致。**残余风险是纯活性**：`SyncManager` 对同一个 hash 有 64 s 的重请求节流，pending 集合满时随机淘汰，"最终会拉到"是尽力而为；拉不到的后果只是这个节点跟不上，不是分叉 |
-| E13 | **P3（写必有成对反写）存在两处已知缺口**，SP1 不能无条件假设它成立 | (a) `BlockchainImpl.unApplyBlock` 会跳过 `BI_MAIN_REF` 已置而 `ref == null` 的块（`setMain` 在 DFS 里抛异常、或走 `mainBlockFee < 0` 的提前 `return` 时会留下这种块），其子块已提交的 `LANE_L1` 记录永不撤销——这是既有的值结算不对称（同样这些块的余额也保留着），不是通道层引入的；(b) `BI_APPLIED` 在 `LANE_L1` 提交之前就已落盘，两个库之间没有原子性也没有启动重放，崩在中间会丢掉那个块的通道记录。(b) 与 `ADDRESS`/`BLOCK` 两库本来就不原子是同一档次，**接受**；SP0b 或快照工具可加一道启动时的 `LANE_L1` vs `BLOCK` 一致性检查 |
+| E13 | **P3（写必有成对反写）存在两处已知缺口**，SP1 不能无条件假设它成立 | (a) `BlockchainImpl.unApplyBlock` 会跳过 `BI_MAIN_REF` 已置而 `ref == null` 的块（`setMain` 在 DFS 里抛异常、或走 `mainBlockFee < 0` 的提前 `return` 时会留下这种块），其子块已提交的 `LANE_L1` 记录永不撤销——这是既有的值结算不对称（同样这些块的余额也保留着），不是通道层引入的，但 SP0a **放大了它的触发面**：`LANE_L1` 是第二个 RocksDB，`applyBlock` 的 DFS 里会 `commit` 它，且记录损坏是故意的 fail-stop，DFS 里因此多了一类抛出点；`checkMain` 吞掉异常，留下的主块 `BI_MAIN`/高度/奖励/`nmain++` 都已做完而 `updateBlockRef` 没走到，永远 unwind 不了。SP0b 负责启动一致性检查与让这个跳过可修复；(b) `BI_APPLIED` 在 `LANE_L1` 提交之前就已落盘，两个库之间没有原子性也没有启动重放，崩在中间会丢掉那个块的通道记录。(b) 与 `ADDRESS`/`BLOCK` 两库本来就不原子是同一档次，**接受**；SP0b 或快照工具可加一道启动时的 `LANE_L1` vs `BLOCK` 一致性检查 |
 
 ### 20.3 生态与交付风险
 

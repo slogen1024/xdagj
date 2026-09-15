@@ -321,7 +321,7 @@ public interface LaneL1Hooks {
 | `onBlockUnapplied(block)` | `unApplyBlock`：`updateBlockFlag(block, BI_APPLIED, false)` 之前（此时 `BI_APPLIED` 仍为真） |
 | `onUnsetMain(height, block)` | `unSetMain`：方法开头、`unApplyBlock(block, true)` 之前（先关上下文语义，再逆序反写），高度用 `block.getInfo().getHeight()`（此时还没被清零） |
 
-**处理器的安装位置是一条接线不变量**：`LaneL1Processor` 在 **`BlockchainImpl` 构造器里**用 `kernel.getLaneL1Store()` 建好并装上，且**在 `startCheckMain` 之前**。checkMain 循环的初始延迟是 0，构造器的调用方拿回控制权之前它的第一次 `checkNewMain → setMain` 就可能已经跑完；从外面（像 `Kernel` 原先那样）接线，会让那个主块在钩子还是 `NOOP` 时被确认，它的通道输入就永久丢在 `LANE_L1` 之外了。`kernel.getLaneL1Store()` 为 `null`（不带 lane 存储的测试）时保持 `NOOP`。`BlockchainImpl.setLaneHooks` 保留给"自己装钩子"的测试，生产路径不再调用它。
+**处理器的安装位置是一条接线不变量**：`LaneL1Processor` 在 **`BlockchainImpl` 构造器里**用 `kernel.getLaneL1Store()` 建好并装上，且**在 `startCheckMain` 之前**。checkMain 循环的初始延迟是 0，构造器的调用方拿回控制权之前它的第一次 `checkNewMain → setMain` 就可能已经跑完；从外面（像 `Kernel` 原先那样）接线，会让那个主块在钩子还是 `NOOP` 时被确认，它的通道输入就永久丢在 `LANE_L1` 之外了。`kernel.getLaneL1Store()` 为 `null`（不带 lane 存储的测试）时保持 `NOOP`。构造器紧接着把 `kernel.getLaneKindHandlers()` 里的每一项 `registerHandler` 进去（见 §6.3），然后才 `startCheckMain`。`BlockchainImpl.setLaneHooks` 已删除（没有任何调用方；测试读 `getLaneHooks()` 拿到构造器装的那个处理器）。
 
 ### 6.3 `LaneL1Processor` 行为
 
@@ -330,7 +330,7 @@ public interface LaneL1Hooks {
 - `onSetMainEnd`：SP0a 无高度触发器；`ctx = null`。`ctx.height != height` 时记 `warn`（调用方 begin/end 不配对）。
 - `onBlockUnapplied`：**完全不看 `ctx`**（unwind 跑在任何 `setMain` 之外），高度从记录下来的 `InputRef` 里取。先分派非内建 kind 的 handler，再读 0x0E：为空就只剩 handler 的写入。有记录时**按 refs 逆序**逐条删 0x0C、`callCount--`；记录 kind == DEPLOY 且 status == OK 时 `undoDeploy`（删 0x02；`refCount ≤ 1` 则删 0x03+0x0D，否则 `putCodeRef(−1)`；创建块自己被回滚则 `deleteLane`，否则 `contractCount--`）；最后删 0x0E，一次 `commit`。`callCount` 归 0 时**删 key 而不是写 0**。记录损坏（`InputRecord.decode` / `InputStatus.fromCode` 抛）是**故意的 fail-stop**：不 catch——连记录都解析不了就无法正确回滚，静默跳过比暴露 DB 损坏更糟。**`unApplyBlock` 已对 links 逆序，处理器不再排序**。
 - `onUnsetMain`：`ctx = null`（防御性）。与 `onSetMainEnd` 不同，它不与某一次 `onSetMainBegin` 配对，因此不做高度一致性检查。
-- **`registerHandler` 必须在第一个钩子跑之前**：任何一个钩子方法进入时都会把 `started` 置真，之后 `registerHandler` 抛 `IllegalStateException`（否则同 kind 的已处理块就漏掉了它的分派）；`CALL / DEPLOY / CHUNK` 是内建的，注册它们抛 `IllegalArgumentException`。由于处理器现在是在 `BlockchainImpl` 构造器里建的，**SP2/SP3 必须在构造之后立刻注册**，不能再指望一个"事后的外部窗口"（那会把上面那条接线不变量重新破坏掉）。
+- **`registerHandler` 必须在第一个钩子跑之前**：任何一个钩子方法进入时都会把 `started` 置真，之后 `registerHandler` 抛 `IllegalStateException`（否则同 kind 的已处理块就漏掉了它的分派）；`CALL / DEPLOY / CHUNK` 是内建的，注册它们抛 `IllegalArgumentException`。由于处理器是在 `BlockchainImpl` 构造器里建的，**注册点只有一个：`Kernel.getLaneKindHandlers()`**——SP2/SP3 把 handler 放进这张 `EnumMap`，**在 `new BlockchainImpl(kernel)` 之前**；构造器建完处理器就把整张表 `forEach(processor::registerHandler)` 灌进去，再 `startCheckMain`。**不存在"构造之后立刻注册"这个窗口**：checkMain 的初始延迟是 0，构造器返回之前第一个 `setMain` 就可能已经跑完，那时 `started` 已为真，事后注册只会拿到 `IllegalStateException`。这张表构造之后不再被读，往里放东西没有任何效果。
 - `LaneKindHandler` 的签名是 **4 参 / 3 参**：`onApplied(Block block, Classified classified, ApplyContext ctx, LaneL1Batch batch)` 与 `onUnapplied(Block block, Classified classified, LaneL1Batch batch)`。handler **写进处理器递给它的那个批次**，不自己提交（P5：一个块一批一次提交）。`onUnapplied` **可能为一个从未 apply 过的块触发**（unwind 路径没有上下文，无从知道那个高度当时是否已激活），因此 handler 必须**撤销幂等**：只撤销"自己存下来的记录能证明它做过"的事，不能假设与 `onApplied` 严格配对。
 - **unapply 必须是 apply 的严格逆序**：`callCount` 的算术只有在"被 unapply 的块占据它碰过的每个 (lane, height) 的最高那几个 index"时才正确。`BlockchainImpl` 保证了这一点（`unApplyBlock` 先本块、再按逆序遍历 links）。真的被违反时，处理器用**金丝雀 + 钳制**兜底而不是抛异常：`callCount` 变负 → 记 `error` 并删 key；创建块被回滚时 `contractCount != 1` → 记 `error`；`contractCount` 会变负 → 记 `error` 并钳到 0（否则 `LaneRecord` 的 u32 范围检查会从 `unSetMain` 里抛出来）。
 
@@ -367,6 +367,8 @@ public interface LaneL1Hooks {
 - `maxWasmBytes ≤ maxChunksPerChain × 352`——超过这个天花板的 WASM 上限，任何分片链都够不着。
 - `chunkFee × 2 × maxChunksPerChain` 必须不溢出 long：共识复核会把片数乘上去，DEPLOY 最坏情况是代码链 + 参数链两条；溢出会从 `setMain` 里抛出来，所以在启动时就拒。
 
+**`lane.chunk.maxPerChain`、`lane.wasm.maxBytes`、`lane.chunk.feeMilliXdag` 这三个键与 `lane.activation.height` 都是共识参数，绝不要在共享网络（testnet / mainnet）上设置。** 它们不是节点本地的调优旋钮：一个节点用了非默认值，就会对同一批块算出与全网不同的 LANE_L1 裁决——**静默分叉 LANE_L1**，本地没有任何报错可看。它们的存在只为 devnet 与测试。因此 `AbstractConfig.getSetting()` 对这四个键里被 conf 覆盖的每一个都打一条 `warn`（`<key> overridden by configuration to <value> (protocol default <default>); this is a consensus parameter, never set it on testnet/mainnet`），`LaneSpec` 的类注释里记了同一条。
+
 `Config` 接口暴露 `getLaneSpec()`；`setLaneActivationHeight(long)` 会清掉 conf 来源的覆盖值，所以测试/工具设的值一定生效。
 `LaneActivation.isActive(long height)`（`height >= activationHeight`）；`isActiveNow(XdagStats)` 用 `nmain` 供 SP5/RPC/钱包按当前链顶门控，**不得用于 apply/unwind 路径**——那里必须传正在被确认的块的高度（`setMain` 里是 `nmain + 1`）。
 
@@ -384,11 +386,12 @@ public interface LaneL1Hooks {
 
 判定顺序：
 
-1. `snapshotHeight < activationHeight` → 直接返回（目录在不在都忽略，`store` 为 `null` 也不管）。
+1. `snapshotHeight < activationHeight` → **跳过**（no-op，什么都不碰：目录在不在都忽略，`store` 为 `null` 也不管）。
+2. `store == null` → **抛**：到了激活高度，内核必须在 `BlockchainImpl` 之前就把 `LANE_L1` 接好，没接好不是"降级运行"而是"这个节点算不出正确的通道状态"。
 3. 本地 `LANE_L1` 已带 `0xFF` 标记（`importedSnapshotHash().isPresent()`）→ **只有在本次启动的 `SNAPSHOT/LANE_L1` 目录存在、它记录的 `0xFF` 哈希正好等于标记、且本地 `stateHash()` 仍等于标记**这三条同时成立时才幂等返回（同一次重新灌库的崩溃窗口重试）；任何一条不成立都**抛**，并提示删掉本地 `LANE_L1` 目录重启（目录缺失、快照未记录哈希、快照哈希 ≠ 标记 = "本次要用另一份快照灌库"、本地哈希 ≠ 标记 = "本地已经越过了导入时的状态"，各自一条消息）。`0xFF` 是**一次性的持久标记**：一次成功的导入会把快照里那份哈希写进本地库的 `LaneL1Keys.SNAPSHOT_HASH_KEY`，**与导入的全部 key 在同一个 `batchWrite` 里**原子落盘；它不计入 `stateHash()`，所以不影响状态哈希语义。它**不是**"跳过校验"的通行证：这道门只在块存储即将被快照重新灌库时才会到达（快照分支要求 `!blockStore.isSnapshotBoot()`，而 `Kernel` 构造完成后立即 `setSnapshotBoot()`），普通重启根本走不到这里；因此标记存在只可能意味着"上一次对**这同一份**快照的灌库已经导入过 lane 状态"，两半都要被证明。运维在节点成功启动之前**不要**删掉 `SNAPSHOT/LANE_L1`。
-3. 本地 `LANE_L1` 已带 `0xFF` 标记（`importedSnapshotHash().isPresent()`）→ **直接返回**，连快照目录都不打开。`0xFF` 是**一次性的持久标记**：一次成功的导入会把快照里那份哈希写进本地库的 `LaneL1Keys.SNAPSHOT_HASH_KEY`，**与导入的全部 key 在同一个 `batchWrite` 里**原子落盘。它不计入 `stateHash()`，所以不影响状态哈希语义。它回答的是"这份状态是不是从快照来的"，**而不是**"这份状态现在还等不等于快照"——之后正常 apply 了很多块的节点仍然带着它、仍然被接受。它的作用是让这道门幂等：节点起来之后运维可以把 `SNAPSHOT/LANE_L1` 目录删掉。
 4. 没有标记，但本地 `LANE_L1` 已有状态（`hasState()`：`META` 与标记之外还有 key）→ **抛**，并给出补救办法（删掉本地 `LANE_L1` 目录重启，或换用配套的快照）。这份状态的来源无从证明（另一条链遗留、写了一半的导入、手工拷贝），静默合并或静默信任都可能直接分叉。
-5. 没有标记且本地为空（只有 `start()` 写的 `META`）→ **导入**：校验快照带了 `0xFF`、schema 版本等于 1，**在写任何东西之前**先用快照内容重算哈希与 `0xFF` 比对（不等则抛，store 保持原样），一致则把全部 key 连同标记一次性提交——被拒绝或被中断的导入不会留下半填状态。快照目录缺失 → 抛，并指明"从发布 `SNAPSHOT/BLOCKS` 的同一来源取 `SNAPSHOT/LANE_L1`，放在它旁边再重启"。
+5. 快照目录 `SNAPSHOT/LANE_L1` 缺失 → **抛**，并指明补救办法："从发布 `SNAPSHOT/BLOCKS` 的同一来源取 `SNAPSHOT/LANE_L1`，放在它旁边再重启"。
+6. 其余情况（没有标记、本地只有 `start()` 写的 `META`、目录也在）→ **导入**：校验快照带了 `0xFF`（且是 32 字节）、schema 版本等于 1，**在写任何东西之前**先用快照内容重算哈希与 `0xFF` 比对（不等则抛，store 保持原样），一致则把全部 key 连同标记在**一个原子批次**里提交——被拒绝或被中断的导入不会留下半填状态。
 
 **§A（Task 17）：快照里不带任何原始分片字节。** 年龄规则允许快照之后的付费块往回够两个 epoch，可能够到快照时间之前；那些 CHUNK 块不在快照里，也不需要在，理由三条：
 
@@ -413,7 +416,7 @@ public interface LaneL1Hooks {
 | Builder | CALL 内联 256B 恰好装下、257B 拒绝；DEPLOY 新建/加入两种；字段预算超 16 返回错误 |
 | 存储 | 点查 CRUD；`batchWrite` 原子（用注入异常的 KVSource 验证无半写）；`CODE`/`CODE_REF` 拆分后引用计数到 0 时两条 key 一起删、计数增减不重写 blob；`exportSnapshot` / `importSnapshot` / `stateHash` 往返 |
 | 钩子端到端 | 真实 `Kernel` + RocksDB（`TemporaryFolder`）：DEPLOY(新通道) → CALL×N（含格式错、分片费不足）→ 出主块 → 确认；断言 0x01/0x02/0x03/0x07/0x0C/0x0D/0x0E 的内容与**每 (lane, height) 从 0 递增的 index**；再一笔向金库的普通转账 → INVALID_FORMAT 记录 |
-| 属性 | 随机 3–8 个高度的块序列，随机 unwind 深度：`apply→unwind→apply` 后 `LANE_L1` 全 KV 逐字节等于直接 apply；`AddressStore` 中涉及地址的余额与 nonce 相等（复用 `BlockchainTest` 的分叉制造方式；不比较 `AddressStore` 全 KV，避免被既有 L1 回滚的已知不对称项干扰） |
+| 回滚对称（P3） | **一个确定性的分叉场景**（`LaneL1UnwindTest.reorgRemovesLaneStateAndReapplyRestoresIt`）：主链上确认 DEPLOY + CALL，再从第 8 个主块处分出一条 24 块的更重分支把它们全部 unwind → `LANE_L1` 只剩 `META` 这一个 key、反向索引为空、**金库余额回到 0**；同样两个块在新分支上重新被 link/确认 → 在新高度上产生等价记录，key 数与回滚前逐个对上。外加 `LaneL1ProcessorTest.unapplyRestoresAnEmptyStore` 在处理器层直接验证 apply→unapply 之后 store 为空。**没有随机高度/深度的 reorg 属性测试**——原设计里那条（随机 3–8 个高度的块序列 + 随机 unwind 深度，逐字节比对全 KV）没有实现，记为 §12.2 G10 |
 | 激活门控 | `activationHeight = MAX`：同一序列后 `LANE_L1` 为空且 `BlockInfo`/余额/nonce/fee 逐字节等于用普通转账替换 CALL 的对照序列 |
 | 快照 | 导出→导入往返；篡改一个 value 后哈希不符拒绝；`snapshotHeight ≥ activation` 且目录缺失拒绝、`store == null` 拒绝；本地已有状态但无 `0xFF` 标记 → 拒绝；已有 `0xFF` 标记：同一快照 + 本地未漂移 → 幂等返回（`retryOfTheSameReseedIsIdempotentButDriftIsRefused`），本地已漂移 → 拒绝，换了一份快照 → 拒绝（`rebootstrapFromNewerSnapshotIsRefused`），目录缺失 → 拒绝（`markerPathRequiresTheSnapshotDirectory`）；`< activation` 忽略 |
 | 回归 | 现有 50 个测试类全绿（JDK 21 + toolchains，见 build env 记忆） |
@@ -433,7 +436,7 @@ public interface LaneL1Hooks {
 
 ## 11. 文件清单
 
-**改动**：`core/XdagField.java`、`core/Block.java`（ext 字段、`getBlockLinks`、`setType` 预算断言）、`core/BlockchainImpl.java`（构造器装处理器 + 五处钩子 + 快照门）、`db/rocksdb/{DatabaseName, KVSource, RocksdbKVSource}.java`（`batchWrite`）、`config/{Config, AbstractConfig, DevnetConfig, TestnetConfig, MainnetConfig}.java`、`Kernel.java`（`LaneL1Store` 生命周期，且**必须在 `new BlockchainImpl(this)` 之前**建好）、`cli/XdagCli.java`（`makeSnapshot` 导出 `SNAPSHOT/LANE_L1`）。**不改任何 `src/main/resources/xdag-*.conf`**（§7 末尾）。
+**改动**：`core/XdagField.java`、`core/Block.java`（ext 字段、`getBlockLinks`、`setType` 预算断言）、`core/BlockchainImpl.java`（构造器装处理器 + 五处钩子 + 快照门）、`db/rocksdb/{DatabaseName, KVSource, RocksdbKVSource}.java`（`batchWrite`）、`config/{Config, AbstractConfig, DevnetConfig, TestnetConfig, MainnetConfig}.java`、`Kernel.java`（`LaneL1Store` 生命周期 + `laneKindHandlers` 注册表，二者都**必须在 `new BlockchainImpl(this)` 之前**就位）、`cli/XdagCli.java`（`makeSnapshot` 导出 `SNAPSHOT/LANE_L1`）。**不改任何 `src/main/resources/xdag-*.conf`**（§7 末尾）。
 **新增**：`lane/ext/{ExtKind, ExtError, ExtResult, ExtCodec, Classified, CallExt, DeployExt, LaneConfigExt, ChunkExt, AnchorExt, BondExt, ChallengeExt, ClaimExt, ChunkChain, ChunkChainBuilder, LaneBlockBuilder, LaneBlockClassifier}.java`、`lane/l1/{LaneL1Hooks, LaneL1Processor, LaneL1Store, LaneL1Batch, LaneL1Keys, LaneIds, LaneKindHandler, ApplyContext, InputStatus, InputRecord, InputRef, LaneRecord, ContractRecord, LaneL1SnapshotGate}.java`、`lane/LaneActivation.java`、`config/spec/LaneSpec.java`；测试镜像目录（含 `lane/l1/LaneL1TestBase.java` 真实 `BlockchainImpl` + RocksDB 基座）。
 
 ---
@@ -453,7 +456,7 @@ public interface LaneL1Hooks {
 
 | # | 缺口 | 影响与现状 |
 |---|------|-----------|
-| G1 | `BlockchainImpl.unApplyBlock` 会**跳过** `BI_MAIN_REF` 已置而 `ref == null` 的块（`setMain` 在 DFS 里抛异常、或走了 `mainBlockFee < 0` 的提前 `return` 时会留下这种块） | 该主块子块已提交的 `LANE_L1` 记录**永远不会被撤销**，滞留在一个不再确认它们的高度上。这是既有的**值结算不对称**（同样这些块的余额也保留着），不是 lane 层引入的；后果是 **SP1 不能无条件假设 P3 成立**。记为跟踪工单 |
+| G1 | `BlockchainImpl.unApplyBlock` 会**跳过** `BI_MAIN_REF` 已置而 `ref == null` 的块（`setMain` 在 DFS 里抛异常、或走了 `mainBlockFee < 0` 的提前 `return` 时会留下这种块） | 该主块子块已提交的 `LANE_L1` 记录**永远不会被撤销**，滞留在一个不再确认它们的高度上。这是既有的**值结算不对称**（同样这些块的余额也保留着），不是 lane 层引入的；后果是 **SP1 不能无条件假设 P3 成立**。**SP0a 放大了它的触发面**：`LANE_L1` 是第二个 RocksDB，`applyBlock` 的 DFS 里现在会调 `store.commit`，而记录损坏是**故意的 fail-stop**（`InputRecord.decode` / `InputStatus.fromCode` 不 catch，见 §6.3），于是 DFS 里多了一类新的抛出点；`checkMain` 把这个异常吞掉，留下的主块已经是 `BI_MAIN` + 高度 + 奖励 + `nmain++` 全做完、但 `updateBlockRef` 没走到 → `ref == null` → **永远 unwind 不了**。SP0b 负责两件事：启动时的 `LANE_L1` vs `BLOCK` 一致性检查（见 G2），以及把 `ref == null` 这个跳过改成可修复的 |
 | G2 | 崩溃一致性：`BI_APPLIED` 在 `LANE_L1` 提交**之前**就已急切落盘，两个库之间没有原子性，也没有启动时重放 | 两者之间崩溃会丢掉那个块的 lane 记录，而块仍被标为已应用，除非深度 reorg 把它 unapply 再 apply，否则不会重新触发 `onBlockApplied`。这与 `ADDRESS` / `BLOCK` 两个库之间本来就不原子是同一档次的问题，**接受**；SP0b 或快照工具可以在启动时加一道 `LANE_L1` vs `BLOCK` 的一致性检查 |
 | G3 | `Kernel.testStart` 没有 try/catch | `LANE_L1` 打开之后如果构造失败会泄漏这个列族——与其它每一个存储一样，既有问题 |
 | G4 | `Kernel` 以 `(INDEX, BLOCK, TIME, TXHISTORY)` 调 `BlockStoreImpl(index, time, block, txHistory)` | 参数顺序与构造器签名对不上（既有问题；进程内无害，但磁盘上目录名会误导） |
@@ -462,3 +465,4 @@ public interface LaneL1Hooks {
 | G7 | `XdagCli.copyFile` 把 `IOException` 吞成 `printStackTrace()`（既有） | `copyDir` 里一个文件拷贝失败/截断是静默的，运维可能分发一份不完整的 `SNAPSHOT/*`；`LANE_L1` 会在导入时被哈希校验拦住，但那已经是分发之后。应改为抛 `IllegalStateException` |
 | G8 | `RocksdbKVSource.init()` 打开失败时泄漏 native `ReadOptions`（既有） | `LaneL1SnapshotGate` 已把 `init()` 放进 `try`，但泄漏本身在 `RocksdbKVSource` 里 |
 | G9 | `XdagCli.makeSnapshot` 的 `LANE_L1` 导出接线没有端到端测试 | 只有 `LaneL1SnapshotTest` 直接测 `LaneL1SnapshotGate.export`；`makeSnapshot` 整体（含 BLOCKS/ADDRESS）无测试 |
+| G10 | reorg 只有 `LaneL1UnwindTest` 那一个确定性场景（24 块分叉）覆盖，**没有随机高度/深度的 reorg 属性测试** | 原设计的属性测试（随机 3–8 个高度的块序列 + 随机 unwind 深度，`apply→unwind→apply` 后 `LANE_L1` 全 KV 逐字节等于直接 apply，并比对涉及地址的余额与 nonce）留给 SP0b：确定性场景只能证明"这一条路径对称"，证不了"任意深度都对称"，而 P3 正是 SP1 要依赖的前提（另见 G1：P3 本身已知有缺口） |
