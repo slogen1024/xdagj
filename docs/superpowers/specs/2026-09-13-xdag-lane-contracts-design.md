@@ -734,6 +734,8 @@ verify(challenge):
 
 顺序：SP0a → SP1 → SP2 / SP3（SP1 后可并行）→ SP4 → SP5；SP0b 与 SP1 并行。
 
+**实施级总体设计与路线图**（各子项目的接口、数据结构、算法、测试、切片与里程碑）见 `2026-09-17-xdag-lane-contracts-program-design-and-roadmap.md`；SP0b 拆为 SP0b-1（基准 + 加固工单）→ SP0b-2（锁外预验证流水线）→ SP0b-3（孤块池分队列/配额/TTL + 导入期费率策略）。
+
 每个子项目：brainstorming（细化 spec）→ writing-plans → TDD 实施 → 代码评审 → 合入 `dev-dag-contract`。
 
 ---
