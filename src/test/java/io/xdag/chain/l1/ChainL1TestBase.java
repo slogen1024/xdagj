@@ -41,6 +41,7 @@ import io.xdag.chain.ext.ChainConfigExt;
 import io.xdag.chain.ext.ExtCodec;
 import io.xdag.config.AbstractConfig;
 import io.xdag.config.Config;
+import io.xdag.config.Constants;
 import io.xdag.config.DevnetConfig;
 import io.xdag.core.Address;
 import io.xdag.core.Block;
@@ -139,10 +140,15 @@ public abstract class ChainL1TestBase {
     @Before
     public void setUpChain() throws Exception {
         String rootDir = root.newFolder("node").getAbsolutePath();
-        // Cast: setRootDir is a Lombok setter on AbstractConfig, not part of the Config interface.
-        ((AbstractConfig) config).setRootDir(rootDir);                  // XdagCli.makeSnapshot derives paths from it
-        config.getNodeSpec().setStoreDir(rootDir + "/rocksdb/xdagdb"); // RocksdbKVSource derives paths from this
-        config.getNodeSpec().setStoreBackupDir(root.newFolder().getAbsolutePath());
+        // Cast: these are Lombok setters on AbstractConfig, not part of the Config interface.
+        AbstractConfig paths = (AbstractConfig) config;
+        paths.setRootDir(rootDir); // XdagCli.makeSnapshot derives its paths from it
+        // setDir() re-derives storeDir (what RocksdbKVSource opens) and storeBackupDir from rootDir,
+        // exactly as the config constructor did from the default root, so the two can never drift.
+        paths.setDir();
+        // The wallet too: DevnetConfig fixed walletFilePath from the DEFAULT root in its constructor,
+        // so without this every fixture wallet lands in <cwd>/devnet/wallet instead of the temp root.
+        paths.setWalletFilePath(rootDir + "/wallet/" + Constants.WALLET_FILE_NAME);
         // Explicit, not inherited from the devnet default: another test in this JVM may have left a
         // chain.activation.height system-property override behind (ChainSpecTest), and Task 16 flips it.
         config.getChainSpec().setChainActivationHeight(0);
@@ -197,6 +203,21 @@ public abstract class ChainL1TestBase {
         if (dbFactory != null) {
             dbFactory.close();
         }
+    }
+
+    /**
+     * Hands the store directory over to a command that opens it itself ({@code --repairchain},
+     * {@code --makesnapshot}): RocksDB is single-writer per directory, so the fixture's own handles
+     * have to be gone first. Stops the blockchain's threads as well, since nothing may confirm a
+     * block on a store the command is working on. Nulled out because {@link #tearDownChain} closes
+     * whatever is left and tolerates nulls.
+     */
+    protected void releaseStores() {
+        blockchain.stopCheckMain();
+        chainStore.stop();
+        dbFactory.close();
+        dbFactory = null;
+        chainStore = null;
     }
 
     /**

@@ -541,52 +541,64 @@ public class XdagCli extends Launcher {
         // is opened with none, which is irrelevant to the point gets the snapshot performs.
         RocksdbKVSource blockSource = new RocksdbKVSource(DatabaseName.TIME.toString());
         blockSource.setConfig(getConfig());
-        blockSource.init();
         RocksdbKVSource snapshotSource = new RocksdbKVSource("SNAPSHOT/BLOCKS");
         snapshotSource.setConfig(getConfig());
-        snapshotSource.init();
         RocksdbKVSource indexSource = new RocksdbKVSource(DatabaseName.INDEX.toString());
         indexSource.setConfig(getConfig());
-        indexSource.init();
-        SnapshotStore snapshotStore = new SnapshotStoreImpl(snapshotSource);
-
-        snapshotStore.makeSnapshot(blockSource,indexSource,b);
-
-        Path source = Paths.get(getConfig().getRootDir() + "/rocksdb/xdagdb/ADDRESS");
-        Path target = Paths.get(getConfig().getRootDir() + "/rocksdb/xdagdb/SNAPSHOT/ADDRESS");
-        copyDir(source.toString(),target.toString());
-
-        // Chain contracts (SP0a): carry CHAIN_L1 alongside SNAPSHOT/BLOCKS and SNAPSHOT/ADDRESS.
-        // Always exported: an "empty" CHAIN_L1 snapshot is one META key plus its hash, and a node
-        // below the chain activation height ignores the directory anyway.
-        RocksdbKVSource chainSource = new RocksdbKVSource(DatabaseName.CHAIN_L1.toString());
-        chainSource.setConfig(getConfig());
-        ChainL1Store chainStore = new ChainL1Store(chainSource);
-        String chainFailure = null;
         try {
-            chainStore.start();
-            ChainL1SnapshotGate.export(getConfig(), chainStore);
-            System.out.println("chain state snapshot written to " + ChainL1SnapshotGate.snapshotDir(getConfig()));
-        } catch (RuntimeException e) {
-            // Every runtime failure, not just IllegalStateException: chainStore.start() opens a
-            // RocksDB column family and surfaces a failure to do so as a plain RuntimeException.
-            // The block/address snapshot is already written: report the chain failure but still
-            // print the height and next start frame the operator needs.
-            // e, not e.getMessage(): a RocksDB failure may carry no message at all.
-            chainFailure = "chain state snapshot NOT written: " + e;
-            System.out.println(chainFailure);
-        } finally {
-            chainStore.stop();
-        }
+            blockSource.init();
+            snapshotSource.init();
+            indexSource.init();
+            SnapshotStore snapshotStore = new SnapshotStoreImpl(snapshotSource);
 
-        long end = System.currentTimeMillis();
-        System.out.println("make snapshot done");
-        System.out.println("time：" + (end - start) + "ms");
-        System.out.println("snapshot height: " + snapshotStore.getHeight());
-        System.out.println("next start frame: " + Long.toHexString(XdagTime.getEndOfEpoch(snapshotStore.getNextTime()) + 1));
-        if (chainFailure != null) {
-            System.out.println(chainFailure + " -- this snapshot cannot boot a node at or past the chain "
-                    + "activation height; fix the cause and export SNAPSHOT/CHAIN_L1 again");
+            snapshotStore.makeSnapshot(blockSource,indexSource,b);
+
+            Path source = Paths.get(getConfig().getRootDir() + "/rocksdb/xdagdb/ADDRESS");
+            Path target = Paths.get(getConfig().getRootDir() + "/rocksdb/xdagdb/SNAPSHOT/ADDRESS");
+            copyDir(source.toString(),target.toString());
+
+            // Chain contracts (SP0a): carry CHAIN_L1 alongside SNAPSHOT/BLOCKS and SNAPSHOT/ADDRESS.
+            // Always exported: an "empty" CHAIN_L1 snapshot is one META key plus its hash, and a node
+            // below the chain activation height ignores the directory anyway.
+            RocksdbKVSource chainSource = new RocksdbKVSource(DatabaseName.CHAIN_L1.toString());
+            chainSource.setConfig(getConfig());
+            ChainL1Store chainStore = new ChainL1Store(chainSource);
+            String chainFailure = null;
+            try {
+                chainStore.start();
+                ChainL1SnapshotGate.export(getConfig(), chainStore);
+                System.out.println("chain state snapshot written to " + ChainL1SnapshotGate.snapshotDir(getConfig()));
+            } catch (RuntimeException e) {
+                // Every runtime failure, not just IllegalStateException: chainStore.start() opens a
+                // RocksDB column family and surfaces a failure to do so as a plain RuntimeException.
+                // The block/address snapshot is already written: report the chain failure but still
+                // print the height and next start frame the operator needs.
+                // e, not e.getMessage(): a RocksDB failure may carry no message at all.
+                chainFailure = "chain state snapshot NOT written: " + e;
+                System.out.println(chainFailure);
+            } finally {
+                chainStore.stop();
+            }
+
+            long end = System.currentTimeMillis();
+            System.out.println("make snapshot done");
+            System.out.println("time：" + (end - start) + "ms");
+            // Read while snapshotSource is still open: the getters are plain fields, but the point
+            // is that nothing below the finally needs the store any more.
+            System.out.println("snapshot height: " + snapshotStore.getHeight());
+            System.out.println("next start frame: " + Long.toHexString(XdagTime.getEndOfEpoch(snapshotStore.getNextTime()) + 1));
+            if (chainFailure != null) {
+                System.out.println(chainFailure + " -- this snapshot cannot boot a node at or past the chain "
+                        + "activation height; fix the cause and export SNAPSHOT/CHAIN_L1 again");
+            }
+        } finally {
+            // Never closed before this: the process kept SNAPSHOT/BLOCKS, INDEX and TIME locked until
+            // it exited, so nothing in the same JVM (a test, an embedding tool) could open them
+            // again. close() is a no-op on a source whose init() failed, so the order of the three
+            // init() calls above does not matter here.
+            indexSource.close();
+            snapshotSource.close();
+            blockSource.close();
         }
     }
 

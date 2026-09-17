@@ -65,19 +65,6 @@ public class RepairChainCommandTest extends ChainL1TestBase {
         return cli;
     }
 
-    /**
-     * Hands the store directory over to the command: RocksDB is single-writer per directory, so the
-     * fixture's own handles have to be gone before {@code repairChain} can open them. Nulled out
-     * because {@code tearDownChain} closes whatever is left and tolerates nulls.
-     */
-    private void releaseStores() {
-        blockchain.stopCheckMain();
-        chainStore.stop();
-        dbFactory.close();
-        dbFactory = null;
-        chainStore = null;
-    }
-
     /** Reads the store back the way a later boot would, on handles of its own. */
     private <T> T readStore(Function<BlockStore, T> read) {
         DatabaseFactory factory = new RocksdbFactory(config);
