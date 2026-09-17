@@ -132,11 +132,12 @@ public class RocksdbKVSource implements KVSource<byte[], byte[]> {
                 tableCfg.setPinL0FilterAndIndexBlocksInCache(true);
                 tableCfg.setFilterPolicy(new BloomFilter(10, false));
 
-                // read options
-                readOpts = new ReadOptions();
-                readOpts = readOpts.setPrefixSameAsStart(true).setVerifyChecksums(false);
-
                 try {
+                    // read options: created inside the try so that the finally below owns the
+                    // native handle from the moment it exists.
+                    readOpts = new ReadOptions();
+                    readOpts = readOpts.setPrefixSameAsStart(true).setVerifyChecksums(false);
+
                     log.debug("Opening database");
                     final Path dbPath = getPath();
                     if (!Files.isSymbolicLink(dbPath.getParent())) {

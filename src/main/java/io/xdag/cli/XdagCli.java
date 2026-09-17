@@ -573,9 +573,10 @@ public class XdagCli extends Launcher {
             String addressFailure = null;
             try {
                 copyDir(source.toString(),target.toString());
-            } catch (IllegalStateException e) {
+            } catch (RuntimeException e) {
                 // copyDir stops at the first file it cannot read or write and leaves a partial
-                // SNAPSHOT/ADDRESS behind. Same shape as the CHAIN_L1 failure below: report it,
+                // SNAPSHOT/ADDRESS behind. Same shape as the CHAIN_L1 failure below (which also
+                // catches every runtime failure, not just IllegalStateException): report it,
                 // still export CHAIN_L1 and print the height and frame, and end with what to do.
                 addressFailure = "address snapshot NOT written: " + e;
                 System.out.println(addressFailure);
@@ -609,17 +610,29 @@ public class XdagCli extends Launcher {
             System.out.println("time：" + (end - start) + "ms");
             // Read while snapshotSource is still open: the getters are plain fields, but the point
             // is that nothing below the finally needs the store any more.
-            System.out.println("snapshot height: " + snapshotStore.getHeight());
+            long snapshotHeight = snapshotStore.getHeight();
+            System.out.println("snapshot height: " + snapshotHeight);
             System.out.println("next start frame: " + Long.toHexString(XdagTime.getEndOfEpoch(snapshotStore.getNextTime()) + 1));
-            if (addressFailure != null) {
-                System.out.println(addressFailure + " -- this snapshot cannot boot a node; delete " + target
+            // SnapshotStoreImpl.makeSnapshot swallows every exception inside its scan, so a block
+            // snapshot that wrote nothing still returns normally with height 0. A node boots by
+            // dereferencing getBlockByHeight(snapshotHeight) unguarded, so height 0 is never bootable.
+            String blocksFailure = snapshotHeight > 0 ? null
+                    : "block snapshot NOT written: no main block reached SNAPSHOT/BLOCKS (see the log)";
+            if (blocksFailure != null) {
+                System.out.println(blocksFailure);
+            }
+            // A rerun must start from an empty SNAPSHOT directory: the CHAIN_L1 export refuses a
+            // non-empty target, and neither the block scan nor copyDir clears stale rows first.
+            Path snapshotRoot = Paths.get(getConfig().getRootDir() + "/rocksdb/xdagdb/SNAPSHOT");
+            if (addressFailure != null || blocksFailure != null) {
+                System.out.println("this snapshot cannot boot a node; delete " + snapshotRoot
                         + " and run --makesnapshot again");
             }
             if (chainFailure != null) {
                 System.out.println(chainFailure + " -- this snapshot cannot boot a node at or past the chain "
                         + "activation height; fix the cause and export SNAPSHOT/CHAIN_L1 again");
             }
-            return addressFailure == null && chainFailure == null;
+            return addressFailure == null && blocksFailure == null && chainFailure == null;
         } finally {
             // Never closed before this: the process kept SNAPSHOT/BLOCKS, INDEX and TIME locked until
             // it exited, so nothing in the same JVM (a test, an embedding tool) could open them

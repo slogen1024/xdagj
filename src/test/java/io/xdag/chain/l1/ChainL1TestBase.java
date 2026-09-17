@@ -213,11 +213,17 @@ public abstract class ChainL1TestBase {
      * whatever is left and tolerates nulls.
      */
     protected void releaseStores() {
-        blockchain.stopCheckMain();
-        chainStore.stop();
-        dbFactory.close();
-        dbFactory = null;
-        chainStore = null;
+        if (blockchain != null) {
+            blockchain.stopCheckMain();
+        }
+        if (chainStore != null) {
+            chainStore.stop();
+            chainStore = null;
+        }
+        if (dbFactory != null) {
+            dbFactory.close();
+            dbFactory = null;
+        }
     }
 
     /**

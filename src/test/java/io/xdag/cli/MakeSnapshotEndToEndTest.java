@@ -118,7 +118,7 @@ public class MakeSnapshotEndToEndTest extends ChainL1TestBase {
         // Mirrors the command's own formula over the tip's timestamp, since the snapshot's nextTime is
         // the timestamp of the highest block it walked.
         assertTrue(printed, printed.contains("next start frame: "
-                + Long.toHexString(XdagTime.getEndOfEpoch(tip.getInfo().getTimestamp()) + 1)));
+                + Long.toHexString(XdagTime.getEndOfEpoch(tip.getInfo().getTimestamp()) + 1) + System.lineSeparator()));
         assertTrue(printed, printed.contains("chain state snapshot written to"));
 
         Path snap = Paths.get(config.getNodeSpec().getStoreDir(), "SNAPSHOT");
@@ -217,8 +217,11 @@ public class MakeSnapshotEndToEndTest extends ChainL1TestBase {
         assertTrue("CHAIN_L1 is still exported:\n" + printed, printed.contains("chain state snapshot written to"));
         assertTrue("the height is still printed:\n" + printed,
                 printed.contains("snapshot height: " + height + System.lineSeparator()));
+        // The whole SNAPSHOT directory, not just ADDRESS: the CHAIN_L1 export refuses a non-empty
+        // target on the rerun, and neither the block scan nor copyDir clears stale rows first.
         assertTrue("the operator is told what to delete and rerun:\n" + printed, printed.contains(
-                "this snapshot cannot boot a node; delete " + clash.getParent() + " and run --makesnapshot again"));
+                "this snapshot cannot boot a node; delete " + clash.getParent().getParent()
+                        + " and run --makesnapshot again"));
     }
 
     /** A second node's config over its own temp root, past the chain activation height. */
