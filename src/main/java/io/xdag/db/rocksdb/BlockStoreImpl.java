@@ -650,7 +650,7 @@ public class BlockStoreImpl implements BlockStore {
             return 0;
         }
         if (data.length == 8) {
-            return IN_FLIGHT_SET_MAIN; // legacy record: only setMain ever wrote one
+            return IN_FLIGHT_SET_MAIN; // legacy record: no op byte, so assume setMain (see the interface Javadoc)
         }
         if (data.length != 9) {
             return 0;

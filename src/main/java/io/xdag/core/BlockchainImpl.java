@@ -1096,6 +1096,49 @@ public class BlockchainImpl implements Blockchain {
         }
     }
 
+    /**
+     * SP0b-1 offline repair: unwinds every main block above {@code height} exactly the way a fork
+     * does, then re-flags the surviving branch so the ordinary check-main loop can confirm those
+     * same blocks again once the node is restarted normally.
+     *
+     * <p>Two steps, in this order. {@link #unWindMain} walks the top down to {@code height},
+     * clearing {@code BI_MAIN_CHAIN} and running {@code unSetMain} on every main block it passes —
+     * which is what actually reverses state and moves {@code nmain} and the completion marker back.
+     * {@link #updateNewChain}{@code (top, true)} then re-marks that branch as main-chain candidates,
+     * because {@code checkNewMain} only ever promotes a {@code BI_MAIN_CHAIN} block: without it the
+     * unwound heights would never be re-confirmed and the node would stall at {@code height}. The
+     * walk stops at the first block that still carries the flag, i.e. at {@code height} itself, so
+     * it re-flags exactly the range that was just unwound. When the unwind had nothing to do the
+     * top still carries {@code BI_MAIN_CHAIN}, and {@code updateNewChain}'s loop would not execute
+     * at all; the walk then starts one link down, where it is equally harmless.
+     *
+     * <p>Only meaningful in repair mode, where the check-main loop is not running and nothing can
+     * confirm a block behind the repair tool's back. Stats and top status are persisted here; the
+     * caller is responsible for the completion marker and the in-flight record.
+     *
+     * @param height the last main height to keep; {@code 0} unwinds the whole main chain
+     * @throws IllegalStateException if no main block is stored at {@code height}
+     */
+    public void repairUnwindTo(long height) {
+        synchronized (this) {
+            Block target = height <= 0 ? null : blockStore.getBlockByHeight(height);
+            if (height > 0 && target == null) {
+                throw new IllegalStateException("no main block stored at height " + height);
+            }
+            unWindMain(target);
+            Block top = xdagTopStatus.getTop() == null ? null
+                    : getBlockByHash(Bytes32.wrap(xdagTopStatus.getTop()), true);
+            if (top != null && (top.getInfo().flags & BI_MAIN_CHAIN) != 0) {
+                top = getMaxDiffLink(top, true);
+            }
+            if (top != null) {
+                updateNewChain(top, true);
+            }
+            blockStore.saveXdagStatus(xdagStats);
+            blockStore.saveXdagTopStatus(xdagTopStatus);
+        }
+    }
+
     private boolean blockEqual(Block block1, Block block2) {
         if (block1 == null) {
             return block2 == null;
