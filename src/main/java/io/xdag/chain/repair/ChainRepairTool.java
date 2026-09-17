@@ -39,7 +39,7 @@ import org.apache.tuweni.bytes.Bytes32;
  * tip the store carries but the stats do not, give every stuck main block the self reference
  * {@code setMain} would have written, unwind to the last complete height with the ordinary fork
  * machinery, then re-check. No block is ever deleted — the node re-confirms the same blocks at the
- * same heights on its own once it is restarted normally.
+ * same heights once new blocks from its peers push the top back above them (see below).
  *
  * <p>Runs against a {@code BlockchainImpl} built by a kernel in
  * {@link Kernel#enterRepairMode() repair mode}, so nothing can confirm a block behind this class's
@@ -68,12 +68,12 @@ import org.apache.tuweni.bytes.Bytes32;
  * (the first boot after upgrading) has one initialized to its tip by that constructor, before this
  * class is ever called. Nothing else is written on a dry run.
  *
- * <p><b>After a repair the node needs its peers.</b> The unwind re-flags the blocks above the target
- * as main-chain candidates, but {@code checkNewMain} promotes a candidate only once it has seen more
- * than one of them above the confirmed tip — so the node cannot walk its own chain back up from
- * local state alone. It moves again when new blocks arrive from peers and push the top back above
- * those heights, which is also when the unwound heights are confirmed again. A node repaired in
- * isolation stays at the target.
+ * <p><b>After a repair the node needs its peers.</b> The next boot pins the top to the block at
+ * {@code nmain}, i.e. the target, which is itself main — so {@code checkNewMain}, which walks from
+ * the top through NON-main candidates, never enters its loop and cannot see the unwound blocks
+ * above. The node moves again only when genuinely new blocks arrive from peers and build on the
+ * old head (re-sent copies of stored blocks return EXIST and never move the top); that is when the
+ * unwound heights are confirmed again. A node repaired in isolation stays at the target.
  */
 @Slf4j
 public final class ChainRepairTool {
@@ -214,7 +214,7 @@ public final class ChainRepairTool {
             return new Outcome(Status.REFUSED, reason, target, report);
         }
         if (options.dryRun()) {
-            say(out, dryRunNote(report));
+            say(out, dryRunNote(kernel));
             return new Outcome(Status.PLANNED, null, target, report);
         }
 
@@ -273,7 +273,7 @@ public final class ChainRepairTool {
         say(out, "repair plan: finish the interrupted unwind of the main block at height " + height
                 + ", then re-check");
         if (options.dryRun()) {
-            say(out, dryRunNote(report));
+            say(out, dryRunNote(kernel));
             return new Outcome(Status.PLANNED, null, target, report);
         }
         // Raw: unApplyBlock reverses the block's links, and a block loaded as BlockInfo alone has none.
@@ -405,9 +405,14 @@ public final class ChainRepairTool {
         return new Outcome(Status.UNREPAIRABLE, STILL_INCONSISTENT_REASON, target, after);
     }
 
-    /** M7: what a dry run did not write, and the one thing the boot before it may have. */
-    private static String dryRunNote(ChainConsistencyCheck.Report report) {
-        return "dry run: nothing was written" + (report.markerInitialized()
+    /**
+     * M7: what a dry run did not write, and the one thing the boot before it may have. The
+     * initialization flag must come from the BOOT report (the constructor already wrote the marker,
+     * so the entry re-scan can never report it), hence the kernel's copy is consulted.
+     */
+    private static String dryRunNote(Kernel kernel) {
+        ChainConsistencyCheck.Report boot = kernel.getConsistencyReport();
+        return "dry run: nothing was written" + (boot != null && boot.markerInitialized()
                 ? ", except the completion marker this boot initialized to nmain because the store carried none"
                 : "");
     }

@@ -103,8 +103,9 @@ public class Kernel {
 
     /**
      * SP0b-1: the startup consistency report of the most recent {@code BlockchainImpl} construction.
-     * Always filed by that constructor, clean or not, through {@link #recordConsistencyReport};
-     * the repair tool reads it instead of scanning the store a second time. Null before the
+     * Always filed by that constructor, clean or not, through {@link #recordConsistencyReport}.
+     * The repair tool re-scans the stores at entry and files its own reports here too; it reads the
+     * boot copy only for what the constructor already did (marker initialization). Null before the
      * blockchain has been built.
      */
     @Setter(AccessLevel.NONE)

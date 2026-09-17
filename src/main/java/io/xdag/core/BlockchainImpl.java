@@ -1157,38 +1157,33 @@ public class BlockchainImpl implements Blockchain {
      * which is what actually reverses state and moves {@code nmain} and the completion marker back.
      * The result is then verified: that walk fetches raw blocks and ends silently at the first one
      * whose bytes are missing, so "the unwind returned" is not the same as "the unwind arrived", and
-     * only {@code nmain == height} proves it did. {@link #updateNewChain}{@code (top, true)} finally
-     * re-marks the unwound branch as main-chain candidates, because {@code checkNewMain} only ever
-     * promotes a {@code BI_MAIN_CHAIN} block: without it those heights could never be confirmed
-     * again. It runs only when something really was unwound, which is also the case in which
-     * {@code unWindMain} is guaranteed to have cleared the flag off the top itself (its walk starts
-     * there), so the loop has the range it needs.
+     * only {@code nmain == height} proves it did.
      *
-     * <p>The top is deliberately left where the unwind left it — pointing at a block that is no
-     * longer main — and is not persisted here (M6). The alternative, moving it down to
-     * {@code height}, is actively wrong: the ordinary fork path answers a better branch with
-     * {@code unWindMain(findAncestor(block))}, and that walk only ever goes DOWN from the top, so a
-     * top sitting BELOW the ancestor never meets it and unwinds the entire chain to genesis. That is
-     * exactly the shape here, because the branch this method re-flags lies above {@code height}: the
-     * first block a peer sends would take the whole main chain with it. Nothing is lost by leaving
-     * the top alone either — the in-memory and the persisted top already agree ({@code unWindMain}
-     * never touches it), and the next boot re-derives the top from {@code getBlockByHeight(nmain)}
-     * regardless of what is stored.
+     * <p>The unwound branch is deliberately NOT re-flagged as main-chain candidates here, and the
+     * top is neither moved nor persisted. Both would be pointless and the first is hazardous: the
+     * next boot re-derives the top from {@code getBlockByHeight(nmain)} regardless of what is stored,
+     * i.e. it pins the top to the {@code height} block, which carries {@code BI_MAIN} — so
+     * {@code checkNewMain} (which walks from the top through non-main {@code BI_MAIN_CHAIN} blocks)
+     * never even enters its loop and cannot see anything above the target. A branch re-flagged by
+     * this method would therefore sit ABOVE the boot top, and the ordinary fork path answers a new
+     * peer block with {@code unWindMain(findAncestor(block))}: an ancestor above the top is never met
+     * by that downward walk, which then unwinds the whole main chain to genesis. Left un-flagged,
+     * the same new block resolves its ancestor to the target itself, the unwind is a no-op, and
+     * {@code updateNewChain} re-flags the branch as part of the normal fork handling.
      *
-     * <p>What the node cannot do afterwards is walk its own chain back up: {@code checkNewMain}
-     * promotes a candidate only when it has seen more than one above the confirmed tip, so a node
-     * repaired in isolation stays at {@code height} until new blocks from its peers push the top
-     * back above those heights — which is when the unwound heights are confirmed again.
+     * <p>What the node cannot do afterwards is walk its own chain back up from local state: it
+     * moves again only when genuinely new blocks arrive from peers and build on the old head
+     * (re-sent copies of stored blocks return EXIST and never move the top). A node repaired in
+     * isolation stays at {@code height}.
      *
      * <p>Only meaningful in repair mode, where the check-main loop is not running and nothing can
      * confirm a block behind the repair tool's back. The stats are persisted here; the caller is
      * responsible for the completion marker and the in-flight record.
      *
      * @param height the last main height to keep; {@code 0} unwinds the whole main chain
-     * @throws IllegalStateException if {@code height} carries no main block of its own; if the
+     * @throws IllegalStateException if {@code height} carries no main block of its own, or if the
      *                               unwind did not reach {@code height}, i.e. the block data is
-     *                               incomplete; or if the raw bytes of the top are missing when the
-     *                               unwound branch has to be re-flagged. Whatever the unwind did
+     *                               incomplete. Whatever the unwind did
      *                               reach stays reversed — each of those heights is an ordinary
      *                               completed {@code unSetMain} — but the completion marker and the
      *                               in-flight record are the caller's business and are untouched, so
@@ -1204,22 +1199,12 @@ public class BlockchainImpl implements Blockchain {
                     || (target.getInfo().flags & BI_MAIN) == 0)) {
                 throw new IllegalStateException("no main block stored at height " + height);
             }
-            long before = xdagStats.nmain;
             unWindMain(target);
             // C3: checked before the caller writes the completion marker, so an unwind that stopped
             // short can never be recorded as a completed repair.
             if (xdagStats.nmain != height) {
                 throw new IllegalStateException("unwind stopped at nmain=" + xdagStats.nmain + ", expected "
                         + height + "; block data is incomplete (raw bytes missing?)");
-            }
-            if (xdagStats.nmain < before) {
-                Block top = xdagTopStatus.getTop() == null ? null
-                        : getBlockByHash(Bytes32.wrap(xdagTopStatus.getTop()), true);
-                if (top == null) {
-                    throw new IllegalStateException(
-                            "cannot re-flag the unwound branch: raw block data for the top is missing");
-                }
-                updateNewChain(top, true);
             }
             blockStore.saveXdagStatus(xdagStats);
         }
