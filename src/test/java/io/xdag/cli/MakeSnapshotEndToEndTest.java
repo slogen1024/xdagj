@@ -26,6 +26,7 @@ package io.xdag.cli;
 
 import static io.xdag.chain.ext.ChunkChainTest.payload;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static uk.org.webcompere.systemstubs.SystemStubs.tapSystemOut;
@@ -108,7 +109,9 @@ public class MakeSnapshotEndToEndTest extends ChainL1TestBase {
 
         XdagCli cli = new XdagCli();
         cli.setConfig(config);
-        String printed = tapSystemOut(() -> cli.makeSnapshot(false));
+        boolean[] bootable = new boolean[1];
+        String printed = tapSystemOut(() -> bootable[0] = cli.makeSnapshot(false));
+        assertTrue("all three directories were written, so the snapshot is bootable:\n" + printed, bootable[0]);
 
         // Anchored on the line end: "snapshot height: 7" must not pass on a printed 70.
         assertTrue(printed, printed.contains("snapshot height: " + height + System.lineSeparator()));
@@ -184,6 +187,38 @@ public class MakeSnapshotEndToEndTest extends ChainL1TestBase {
         } finally {
             otherStore.stop();
         }
+    }
+
+    /**
+     * A copy failure inside {@code SNAPSHOT/ADDRESS} must not abort the command half-way: it is
+     * reported, CHAIN_L1 is still exported, the height and frame are still printed and the last
+     * line says what to delete — and the command returns false, which the dispatch turns into exit
+     * 1, because a snapshot without ADDRESS cannot boot a node.
+     */
+    @Test
+    public void anAddressCopyFailureIsReportedAndMakesTheSnapshotNotBootable() throws Exception {
+        for (int i = 0; i < 3; i++) {
+            mineMain(List.of());
+        }
+        long height = blockchain.getXdagStats().nmain;
+        releaseStores();
+        // RocksDB always writes a CURRENT file; a directory in its place makes copyFile fail on it.
+        Path clash = Paths.get(config.getNodeSpec().getStoreDir(), "SNAPSHOT", "ADDRESS", "CURRENT");
+        Files.createDirectories(clash);
+
+        XdagCli cli = new XdagCli();
+        cli.setConfig(config);
+        boolean[] bootable = new boolean[1];
+        String printed = tapSystemOut(() -> bootable[0] = cli.makeSnapshot(false));
+
+        assertFalse("a snapshot without ADDRESS is not bootable:\n" + printed, bootable[0]);
+        assertTrue(printed, printed.contains("address snapshot NOT written"));
+        assertTrue("the failing file is named:\n" + printed, printed.contains(clash.toString()));
+        assertTrue("CHAIN_L1 is still exported:\n" + printed, printed.contains("chain state snapshot written to"));
+        assertTrue("the height is still printed:\n" + printed,
+                printed.contains("snapshot height: " + height + System.lineSeparator()));
+        assertTrue("the operator is told what to delete and rerun:\n" + printed, printed.contains(
+                "this snapshot cannot boot a node; delete " + clash.getParent() + " and run --makesnapshot again"));
     }
 
     /** A second node's config over its own temp root, past the chain activation height. */

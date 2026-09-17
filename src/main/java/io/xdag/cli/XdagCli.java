@@ -216,7 +216,11 @@ public class XdagCli extends Launcher {
             if (action != null && action.trim().equals("convertxamount")) {
                 convertXAmount = true;
             }
-            makeSnapshot(convertXAmount);
+            // A snapshot that cannot boot a node (a directory it ships was not written) exits 1
+            // through the same seam --repairchain uses, so an operator's script notices.
+            if (!makeSnapshot(convertXAmount)) {
+                exit(1);
+            }
         } else if (cmd.hasOption(XdagOption.REPAIR_CHAIN.toString())) {
             // Never falls through to start(): the whole point of the command is that the node must
             // not run on this store until the repair has been accepted.
@@ -530,7 +534,18 @@ public class XdagCli extends Launcher {
         return new String(console.readPassword(prompt));
     }
 
-    public void makeSnapshot(boolean b) {
+    /**
+     * Writes {@code SNAPSHOT/BLOCKS}, {@code SNAPSHOT/ADDRESS} and {@code SNAPSHOT/CHAIN_L1} under
+     * the store directory. A failure to write ADDRESS or CHAIN_L1 does not abort the command: it is
+     * reported, the rest is still written, the height and next start frame are still printed, and
+     * the last line says what to delete and rerun — but the result is {@code false}, because a node
+     * cannot boot from a snapshot missing either directory.
+     *
+     * @param b convert the block amounts from the pre-XAmount encoding while snapshotting
+     * @return whether the snapshot is complete, i.e. bootable; the dispatch turns {@code false}
+     *         into exit 1
+     */
+    public boolean makeSnapshot(boolean b) {
         System.out.println("make snapshot start");
         System.out.println("convertXAmount = " + b);
         long start = System.currentTimeMillis();
@@ -555,7 +570,16 @@ public class XdagCli extends Launcher {
 
             Path source = Paths.get(getConfig().getRootDir() + "/rocksdb/xdagdb/ADDRESS");
             Path target = Paths.get(getConfig().getRootDir() + "/rocksdb/xdagdb/SNAPSHOT/ADDRESS");
-            copyDir(source.toString(),target.toString());
+            String addressFailure = null;
+            try {
+                copyDir(source.toString(),target.toString());
+            } catch (IllegalStateException e) {
+                // copyDir stops at the first file it cannot read or write and leaves a partial
+                // SNAPSHOT/ADDRESS behind. Same shape as the CHAIN_L1 failure below: report it,
+                // still export CHAIN_L1 and print the height and frame, and end with what to do.
+                addressFailure = "address snapshot NOT written: " + e;
+                System.out.println(addressFailure);
+            }
 
             // Chain contracts (SP0a): carry CHAIN_L1 alongside SNAPSHOT/BLOCKS and SNAPSHOT/ADDRESS.
             // Always exported: an "empty" CHAIN_L1 snapshot is one META key plus its hash, and a node
@@ -587,10 +611,15 @@ public class XdagCli extends Launcher {
             // is that nothing below the finally needs the store any more.
             System.out.println("snapshot height: " + snapshotStore.getHeight());
             System.out.println("next start frame: " + Long.toHexString(XdagTime.getEndOfEpoch(snapshotStore.getNextTime()) + 1));
+            if (addressFailure != null) {
+                System.out.println(addressFailure + " -- this snapshot cannot boot a node; delete " + target
+                        + " and run --makesnapshot again");
+            }
             if (chainFailure != null) {
                 System.out.println(chainFailure + " -- this snapshot cannot boot a node at or past the chain "
                         + "activation height; fix the cause and export SNAPSHOT/CHAIN_L1 again");
             }
+            return addressFailure == null && chainFailure == null;
         } finally {
             // Never closed before this: the process kept SNAPSHOT/BLOCKS, INDEX and TIME locked until
             // it exited, so nothing in the same JVM (a test, an embedding tool) could open them
@@ -653,6 +682,7 @@ public class XdagCli extends Launcher {
             // command documents as REFUSED.
             System.out.println("--repairchain could not open the wallet (no console for the password prompt? "
                     + "pass --password): " + e);
+            log.error("--repairchain could not open the wallet", e);
             return 3;
         }
 

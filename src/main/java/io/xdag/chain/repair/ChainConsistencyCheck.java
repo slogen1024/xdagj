@@ -67,7 +67,7 @@ import org.apache.tuweni.bytes.Bytes32;
 public final class ChainConsistencyCheck {
 
     public static final String REPAIR_HINT =
-            "; the node refuses to start. Run `xdag.sh --repairchain --dry-run` to see the repair plan and "
+            "; the node refuses to start. Run `xdag.sh --repairchain dry-run` to see the repair plan and "
                     + "`xdag.sh --repairchain` to unwind to the last complete height";
 
     /** How far above the persisted tip stored main blocks are looked for. */

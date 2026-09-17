@@ -23,7 +23,9 @@
  */
 package io.xdag.db.rocksdb;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 
 import io.xdag.config.DevnetConfig;
@@ -48,8 +50,12 @@ public class RocksdbInitFailureTest {
         Files.writeString(new File(storeDir, "BROKEN").toPath(), "not a db", StandardCharsets.UTF_8);
         RocksdbKVSource src = new RocksdbKVSource("BROKEN");
         src.setConfig(config);
-        assertThrows(RuntimeException.class, src::init);
+        RuntimeException e = assertThrows(RuntimeException.class, src::init);
+        assertEquals("Failed to initialize database", e.getMessage());
         assertFalse(src.isAlive());
+        // Without this the test is green on a source that leaks the handle: close() below is a
+        // no-op on a dead source, so init() itself is the only place the ReadOptions can be freed.
+        assertNull("init() must release the ReadOptions native handle", src.getReadOpts());
         src.close(); // must be a no-op, not a crash, after a failed init
         assertFalse(src.isAlive());
     }

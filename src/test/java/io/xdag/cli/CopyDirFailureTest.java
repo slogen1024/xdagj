@@ -28,6 +28,7 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import org.junit.Rule;
@@ -40,7 +41,7 @@ public class CopyDirFailureTest {
     public TemporaryFolder tmp = new TemporaryFolder();
 
     @Test
-    public void unreadableSourceFileFails() throws Exception {
+    public void unwritableDestinationFails() throws Exception {
         File src = tmp.newFolder("src");
         File f = new File(src, "a.sst");
         Files.writeString(f.toPath(), "x", StandardCharsets.UTF_8);
@@ -50,7 +51,10 @@ public class CopyDirFailureTest {
         assertTrue(clash.mkdir());
         IllegalStateException e = assertThrows(IllegalStateException.class,
                 () -> XdagCli.copyDir(src.getAbsolutePath(), dstDir.getAbsolutePath()));
-        assertTrue(e.getMessage(), e.getMessage().contains("a.sst"));
+        // The message names the destination that could not be written, and the IOException that
+        // says why is kept as the cause rather than swallowed.
+        assertTrue(e.getMessage(), e.getMessage().contains(clash.getAbsolutePath()));
+        assertTrue(String.valueOf(e.getCause()), e.getCause() instanceof IOException);
     }
 
     @Test

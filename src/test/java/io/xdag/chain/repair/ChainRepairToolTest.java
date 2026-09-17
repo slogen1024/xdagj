@@ -362,6 +362,27 @@ public class ChainRepairToolTest extends ChainL1TestBase {
     }
 
     /**
+     * The in-flight record is what a later repair reads to finish the unwind or to refuse it, so a
+     * dry run over one — which writes nothing — must leave both its height and its op exactly as it
+     * found them. Asserted on its own because the command-level dry-run test runs on a store with
+     * no record at all.
+     */
+    @Test
+    public void dryRunKeepsTheInFlightRecord() {
+        mine(6);
+        long tip = blockchain.getXdagStats().nmain;
+        kernel.getBlockStore().saveMainInFlight(tip, BlockStore.IN_FLIGHT_UNSET_MAIN);
+
+        MockBlockchain repair = restartInRepairMode();
+        ChainRepairTool.Outcome dry = repair(repair, true, false);
+
+        assertEquals(ChainRepairTool.Status.PLANNED, dry.status());
+        assertEquals("a dry run writes nothing", tip, repair.getXdagStats().nmain);
+        assertEquals("the in-flight height survives the dry run", tip, kernel.getBlockStore().getMainInFlight());
+        assertEquals("and so does its op", BlockStore.IN_FLIGHT_UNSET_MAIN, kernel.getBlockStore().getMainInFlightOp());
+    }
+
+    /**
      * The same interrupted unwind, on the legacy shape whose ref was never written. {@code
      * unApplyBlock} returns immediately on a null ref, so finishing the unwind without patching it
      * first would clear {@code BI_MAIN}, drop {@code nmain} — and reverse none of the height's

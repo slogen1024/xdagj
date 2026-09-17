@@ -163,7 +163,6 @@ public class RocksdbKVSource implements KVSource<byte[], byte[]> {
                         db = RocksDB.open(options, dbPath.toString());
                     } catch (RocksDBException e) {
                         log.error(e.getMessage(), e);
-                        releaseReadOpts();
                         throw new RuntimeException("Failed to initialize database", e);
                     }
 
@@ -171,8 +170,16 @@ public class RocksdbKVSource implements KVSource<byte[], byte[]> {
 
                 } catch (IOException ioe) {
                     log.error(ioe.getMessage(), ioe);
-                    releaseReadOpts();
                     throw new RuntimeException("Failed to initialize database", ioe);
+                } finally {
+                    // One release for every way out that is not a successful open: the two
+                    // RuntimeExceptions above, but also an NPE out of getPath()/backupPath() (no
+                    // config set) and anything other than RocksDBException out of RocksDB.open.
+                    // alive is only set after a successful open, and init() early-returns when
+                    // already alive, so !alive here means this very init() failed.
+                    if (!alive) {
+                        releaseReadOpts();
+                    }
                 }
 
                 log.debug("<~ RocksdbKVSource.init(): {}", name);

@@ -33,6 +33,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.atLeastOnce;
@@ -577,4 +578,42 @@ public class XdagCliTest {
         verify(xdagCLI, never()).startKernel(any(), any());
     }
 
+    /**
+     * SP0b-1: {@code --makesnapshot} reaches {@link XdagCli#makeSnapshot(boolean)} — converting
+     * amounts only for the literal {@code convertxamount} argument — and a complete (bootable)
+     * snapshot neither exits nor falls through to {@code start()}.
+     */
+    @Test
+    public void testMakeSnapshot() throws Exception {
+        XdagCli xdagCLI = spy(new XdagCli());
+        xdagCLI.setConfig(config);
+        doReturn(true).when(xdagCLI).makeSnapshot(anyBoolean());
+        doNothing().when(xdagCLI).exit(anyInt());
+
+        xdagCLI.start(new String[]{"--makesnapshot"});
+        verify(xdagCLI).makeSnapshot(false);
+
+        xdagCLI.start(new String[]{"--makesnapshot", "convertxamount"});
+        verify(xdagCLI).makeSnapshot(true);
+
+        verify(xdagCLI, never()).exit(anyInt());
+        verify(xdagCLI, never()).startKernel(any(), any());
+    }
+
+    /**
+     * SP0b-1: a snapshot that cannot boot a node (one of its directories was not written, so
+     * {@link XdagCli#makeSnapshot(boolean)} returned false) exits 1 through {@link XdagCli#exit(int)}.
+     */
+    @Test
+    public void testMakeSnapshotExitsOneWhenTheSnapshotCannotBoot() throws Exception {
+        XdagCli xdagCLI = spy(new XdagCli());
+        xdagCLI.setConfig(config);
+        doReturn(false).when(xdagCLI).makeSnapshot(anyBoolean());
+        doNothing().when(xdagCLI).exit(anyInt());
+
+        xdagCLI.start(new String[]{"--makesnapshot"});
+
+        verify(xdagCLI).exit(1);
+        verify(xdagCLI, never()).startKernel(any(), any());
+    }
 }

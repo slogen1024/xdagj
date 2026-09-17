@@ -35,10 +35,15 @@ import io.xdag.chain.repair.ChainRepairTool;
 import io.xdag.db.BlockStore;
 import io.xdag.db.rocksdb.BlockStoreImpl;
 import io.xdag.db.rocksdb.DatabaseFactory;
+import io.xdag.db.rocksdb.DatabaseName;
 import io.xdag.db.rocksdb.RocksdbFactory;
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.function.Function;
+import org.apache.commons.io.FileUtils;
 import org.junit.Test;
 
 /**
@@ -194,5 +199,50 @@ public class RepairChainCommandTest extends ChainL1TestBase {
         assertEquals(3, cli().repairChain("dryrun"));
         assertEquals(nmain - 1, marker());
         assertEquals(nmain, persistedNmain());
+    }
+
+    /**
+     * The other in-flight shape: a {@code setMain} (op 1) that never finished is the one record
+     * {@code reinit-marker} does discard — adopting the tip already asserts that every height up to
+     * it, that one included, was confirmed completely — so the command exits 0 and clears it.
+     */
+    @Test
+    public void reinitMarkerDiscardsAnInFlightSetMain() {
+        for (int i = 0; i < MAIN_BLOCKS; i++) {
+            mineMain(List.of());
+        }
+        long tip = blockchain.getXdagStats().nmain;
+        kernel.getBlockStore().saveLastCompletedMain(tip - 3);
+        kernel.getBlockStore().saveMainInFlight(tip, BlockStore.IN_FLIGHT_SET_MAIN);
+        releaseStores();
+
+        assertEquals("a reinit-marker over an in-flight setMain exits 0", 0, cli().repairChain("reinit-marker"));
+        assertEquals("the in-flight setMain record was discarded", -1L, inFlight());
+        assertEquals("nothing is in flight any more", 0, inFlightOp());
+        assertEquals("the marker was re-initialized to the persisted tip", tip, marker());
+        assertEquals("nothing was unwound", tip, persistedNmain());
+    }
+
+    /**
+     * A store the command cannot open once it has started — INDEX is a regular file where RocksDB
+     * expects a directory, the closest stand-in for a directory another process holds — is a
+     * failure while running (4), reported on one line with its root cause and the stop-the-node
+     * hint rather than as a stack trace. Nothing can be read back afterwards, so nothing is.
+     */
+    @Test
+    public void aStoreThatCannotBeOpenedIsReportedAsFailedWithTheStopHint() throws Exception {
+        mineAndCorruptMarker(1);
+        // RocksdbKVSource opens <storeDir>/<database name>; the fixture's handles are released, so
+        // the directory can be replaced.
+        File index = new File(config.getNodeSpec().getStoreDir(), DatabaseName.INDEX.toString());
+        FileUtils.deleteDirectory(index);
+        Files.writeString(index.toPath(), "not a database", StandardCharsets.UTF_8);
+
+        int[] code = new int[1];
+        String out = tapSystemOut(() -> code[0] = cli().repairChain(null));
+
+        assertEquals("a failure after the command started exits 4", 4, code[0]);
+        assertTrue("the failure is reported with its root cause:\n" + out, out.contains("--repairchain failed: "));
+        assertTrue("the operator is told to stop the node first:\n" + out, out.contains("stop it first"));
     }
 }
