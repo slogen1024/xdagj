@@ -628,6 +628,25 @@ public class BlockStoreImpl implements BlockStore {
         indexSource.put(new byte[]{LAST_COMPLETED_MAIN}, BytesUtils.longToBytes(height, false));
     }
 
+    @Override
+    public long getMainInFlight() {
+        byte[] data = indexSource.get(new byte[]{MAIN_IN_FLIGHT});
+        if (data == null || data.length != 8) {
+            return -1L;
+        }
+        return BytesUtils.bytesToLong(data, 0, false);
+    }
+
+    @Override
+    public void saveMainInFlight(long height) {
+        indexSource.put(new byte[]{MAIN_IN_FLIGHT}, BytesUtils.longToBytes(height, false));
+    }
+
+    @Override
+    public void clearMainInFlight() {
+        indexSource.delete(new byte[]{MAIN_IN_FLIGHT});
+    }
+
     public void savePreSeed(byte[] preseed) {
         indexSource.put(new byte[]{SNAPSHOT_PRESEED}, preseed);
     }

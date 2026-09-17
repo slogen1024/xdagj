@@ -201,8 +201,12 @@ public class BlockchainImpl implements Blockchain {
             blockStore.saveXdagTopStatus(xdagTopStatus);
             blockStore.saveXdagStatus(xdagStats);
 
-            // SP0b-1: a freshly re-seeded block store is complete up to the snapshot height.
-            blockStore.saveLastCompletedMain(snapshotHeight);
+            // SP0b-1: a freshly re-seeded block store is complete up to the tip it actually carries.
+            // That is xdagStats.nmain, not the configured snapshotHeight: on the SnapshotJ path
+            // initSnapshotJ() has just set nmain = snapshotHeight so the two agree, but when
+            // SnapshotJ is off nothing was imported and nmain is still 0 — claiming snapshotHeight
+            // there would mark a completion that never happened.
+            blockStore.saveLastCompletedMain(xdagStats.nmain);
 
         } else {
             // Load existing state
@@ -1088,6 +1092,12 @@ public class BlockchainImpl implements Blockchain {
                 ref = getBlockByHash(link.getAddress(), true);
                 ref.getInfo().setFee(XAmount.ZERO);
 
+                // I1 (SP0b-1): the same shape as the G1 fix one level down — point the child at this
+                // main block BEFORE descending into it, so a throw out of the child's own apply
+                // leaves a child that unApplyBlock can still reach (it skips a BI_MAIN_REF block
+                // whose ref is null). ref lives only in the local BlockInfo; it is not hashed.
+                updateBlockRef(ref, new Address(block));
+
                 XAmount childGas = applyBlock(false, ref);
 
                 int refFlag = ref.getInfo().getFlags() & ~(BI_OURS | BI_REMARK);
@@ -1100,9 +1110,12 @@ public class BlockchainImpl implements Blockchain {
                 String blockType = isTxBlock(ref) ? "TxBlock  " : "LinkBlock";
                 execLog.info("{} | Hash: {} | State: {}", blockType, ref.getHashLow().toHexString(), executionState);
 
-                if (!childGas.equals(XAmount.ZERO.subtract(XAmount.ONE))) {
+                if (childGas.equals(XAmount.ZERO.subtract(XAmount.ONE))) {
+                    // rejected: restore the pre-call state the trailing restore loop in
+                    // unApplyBlock relies on (it only clears BI_MAIN_REF on a ref == null block)
+                    updateBlockRef(ref, null);
+                } else {
                     gasCollected = gasCollected.add(childGas);
-                    updateBlockRef(ref, new Address(block));
                 }
             }
         }
@@ -1315,6 +1328,10 @@ public class BlockchainImpl implements Blockchain {
         synchronized (this) {
             // Set reward
             long mainNumber = xdagStats.nmain + 1;
+            // I3 (SP0b-1): record the transition as in flight before ANY other store write, so a
+            // setMain that dies half way through leaves proof of it at this height. Cleared on both
+            // normal exits, right after the completion marker.
+            blockStore.saveMainInFlight(mainNumber);
             log.debug("mainNumber = {},hash = {}", mainNumber, Hex.toHexString(block.getInfo().getHash()));
             XAmount reward = getReward(mainNumber);
             block.getInfo().setHeight(mainNumber);
@@ -1322,6 +1339,7 @@ public class BlockchainImpl implements Blockchain {
             chainHooks.onSetMainBegin(mainNumber, block);
 
             try {
+                // Main block REF points to itself.
                 // G1 root fix (SP0b-1): point the main block at itself BEFORE the DFS. A throw out of
                 // applyBlock then leaves ref == self, so unApplyBlock treats this block normally
                 // instead of skipping a BI_MAIN_REF block whose ref is null (which could never be
@@ -1334,24 +1352,31 @@ public class BlockchainImpl implements Blockchain {
 
                 // Recursively execute blocks referenced by main block and get fees
                 XAmount mainBlockFee = applyBlock(true, block); //the mainBlock may have tx, return the fee to itself.
-                if (mainBlockFee.compareTo(XAmount.ZERO) < 0) {// normal mainBlock will not go into this
+                if (mainBlockFee.compareTo(XAmount.ZERO) < 0) {
+                    // Reachable: a tx block promoted to main whose own input fails the nonce or
+                    // sync-status checks in applyBlock (see BlockchainTest's TxBlockTobeMain cases).
+                    // The block keeps BI_MAIN with no fee accepted, and setMain is DONE — this is a
+                    // normal exit, so the completion marker advances here exactly as it does below.
+                    blockStore.saveLastCompletedMain(mainNumber);
+                    blockStore.clearMainInFlight();
                     return;
                 } else {
                     acceptAmount(block, mainBlockFee); //add the fee
                     block.getInfo().setFee(mainBlockFee);
                     blockStore.saveBlockInfo(block.getInfo());
                 }
-                // Main block REF points to itself
-                // TODO: Add fee
-                updateBlockRef(block, new Address(block));
 
                 if (randomx != null) {
                     randomx.randomXSetForkTime(block);
                 }
 
-                // G2 marker (SP0b-1): written only on a normal completion — deliberately NOT in the
-                // finally block — so a boot can tell whether the previous setMain finished.
+                // G2 marker (SP0b-1): written on both normal exits, never in finally — so a boot can
+                // tell whether the previous setMain finished. A RocksDB failure in this one write
+                // surfaces as an exception thrown from an otherwise complete setMain; that is
+                // accepted, because the next boot then sees the marker sitting behind nmain and
+                // unwinds that height, which is safe (it undoes work that did land).
                 blockStore.saveLastCompletedMain(mainNumber);
+                blockStore.clearMainInFlight();
             } finally {
                 // Closes the apply context on every exit: the early return above, a normal finish,
                 // and a throw out of the applyBlock DFS.
@@ -1369,9 +1394,31 @@ public class BlockchainImpl implements Blockchain {
 
         synchronized (this) {
 
+            if ((block.getInfo().flags & BI_MAIN) == 0) {
+                // M6 (SP0b-1): not a main block, so there is nothing to undo — and undoing it anyway
+                // would decrement nmain and push the completion marker below the real tip.
+                log.warn("unSetMain on a block that is not main: {}", block.getHash().toHexString());
+                return;
+            }
+
             log.debug("UnSet main,{}, mainnumber = {}", block.getHash().toHexString(), xdagStats.nmain);
             // Height is still the confirmed height here; it is zeroed at the end of this method.
             long height = block.getInfo().getHeight();
+            // I3 (SP0b-1): as in setMain, flag the transition before touching anything else.
+            blockStore.saveMainInFlight(height);
+            // I4 (SP0b-1): randomXSetForkTime runs only AFTER the apply DFS, so a setMain that threw
+            // never set this height's fork time, and unsetting it anyway would corrupt the seed
+            // epoch bookkeeping (randomXHashEpochIndex is decremented by the unset). The completion
+            // marker is what distinguishes the two: it never reaches a height whose setMain threw.
+            // It is read here, before the height - 1 write at the end, so a multi-block unwind still
+            // sees the marker at or above each height it is undoing. (It cannot distinguish the
+            // early-return exit, which likewise skips randomXSetForkTime yet is a normal completion;
+            // that far narrower asymmetry predates this gate and is left as is.) A store that has
+            // never written the marker (-1, i.e. one written before SP0b-1 and not yet re-confirmed
+            // by a setMain) knows nothing either way, so it keeps the old unconditional behaviour
+            // rather than silently skipping an unset that a pre-upgrade setMain really did perform.
+            long lastCompleted = blockStore.getLastCompletedMain();
+            boolean forkTimeWasSet = lastCompleted < 0 || lastCompleted >= height;
             chainHooks.onUnsetMain(height, block);
 
             XAmount reward = getReward(height);
@@ -1383,7 +1430,7 @@ public class BlockchainImpl implements Blockchain {
             unApplyBlock(block, true);
 
             acceptAmount(block, XAmount.ZERO.subtract(block.getFee()));
-            if (randomx != null) {
+            if (randomx != null && forkTimeWasSet) {
                 randomx.randomXUnsetForkTime(block);
             }
             block.getInfo().setFee(XAmount.ZERO);
@@ -1392,8 +1439,10 @@ public class BlockchainImpl implements Blockchain {
             updateBlockRef(block, null);
 
             // G2 marker (SP0b-1): unSetMain removes the top main block, so completion now sits one
-            // height lower.
-            blockStore.saveLastCompletedMain(height - 1);
+            // height lower — clamped at 0, since "completed up to height 0" (the genesis state, no
+            // main block) is the floor and a negative marker would be read back as "never written".
+            blockStore.saveLastCompletedMain(Math.max(0, height - 1));
+            blockStore.clearMainInFlight();
         }
     }
 

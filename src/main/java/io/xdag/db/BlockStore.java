@@ -45,8 +45,17 @@ public interface BlockStore extends XdagLifecycle {
     byte BLOCK_HEIGHT = (byte) 0x80;
     byte SNAPSHOT_PRESEED = (byte) 0x90;
     byte TX_HISTORY = (byte) 0xa0;
-    /** Node-local: height of the last setMain that ran to completion (see BlockchainImpl.setMain). */
+    /**
+     * Node-local: height of the last {@code setMain} that ran to completion (see
+     * {@link io.xdag.core.BlockchainImpl#setMain}). See {@link #getLastCompletedMain()} for exactly
+     * what the value proves.
+     */
     byte LAST_COMPLETED_MAIN = (byte) 0xb0;
+    /**
+     * Node-local: height of a {@code setMain}/{@code unSetMain} that started but has not been
+     * observed to finish. See {@link #getMainInFlight()} for exactly what the value proves.
+     */
+    byte MAIN_IN_FLIGHT = (byte) 0xc0;
     String SUM_FILE_NAME = "sums.dat";
 
     void reset();
@@ -104,10 +113,36 @@ public interface BlockStore extends XdagLifecycle {
      * Height of the last main block whose {@code setMain} ran to completion, or {@code -1} if the
      * marker was never written (a store created before SP0b-1). Node-local bookkeeping: never part
      * of any hash, never exported with a snapshot.
+     *
+     * <p><b>What it proves:</b> every INDEX write that {@code setMain} performs for heights up to
+     * and including the returned value was issued before the marker itself, so on a store whose
+     * INDEX column family is internally ordered the marker is never ahead of that block's own index
+     * state. <b>What it does not prove:</b> it says nothing about the other stores — ADDRESS and
+     * CHAIN_L1 are separate RocksDB instances with their own write-ahead logs, and a crash can land
+     * between two of them. This is a progress marker, not a cross-store commit record; a boot must
+     * still reconcile the stores rather than trust the marker as a transaction boundary.
      */
     long getLastCompletedMain();
 
     void saveLastCompletedMain(long height);
+
+    /**
+     * Height of a {@code setMain}/{@code unSetMain} that was entered but whose completion was never
+     * recorded, or {@code -1} when no such call is outstanding.
+     *
+     * <p><b>What it proves:</b> the key is written as the first INDEX write of {@code setMain} and
+     * of {@code unSetMain}, and cleared immediately after the matching {@link #saveLastCompletedMain}
+     * on every normal exit. A boot that finds it present therefore knows the process died — or a
+     * handler threw — somewhere inside that height's transition, and that the on-disk state for that
+     * height is partial. <b>What it does not prove:</b> nothing about which of the writes actually
+     * landed, and nothing about ADDRESS or CHAIN_L1, which have their own write-ahead logs. It is a
+     * "something was in flight here" flag, not a rollback journal.
+     */
+    long getMainInFlight();
+
+    void saveMainInFlight(long height);
+
+    void clearMainInFlight();
 
     // RandomX seed
     void savePreSeed(byte[] preseed);
