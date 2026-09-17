@@ -56,43 +56,35 @@ public class BlockStoreImplTest {
 
     Config config = new DevnetConfig();
     DatabaseFactory factory;
-    KVSource<byte[], byte[]> indexSource;
-    KVSource<byte[], byte[]> timeSource;
-    KVSource<byte[], byte[]> blockSource;
-    KVSource<byte[], byte[]>  TxHistorySource ;
 
     @Before
     public void setUp() throws Exception {
         config.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
         config.getNodeSpec().setStoreBackupDir(root.newFolder().getAbsolutePath());
         factory = new RocksdbFactory(config);
-        indexSource = factory.getDB(DatabaseName.INDEX);
-        timeSource = factory.getDB(DatabaseName.TIME);
-        blockSource = factory.getDB(DatabaseName.BLOCK);
-        TxHistorySource = factory.getDB(DatabaseName.TXHISTORY);
     }
 
     @Test
     public void testNewBlockStore() {
-        BlockStore bs = new BlockStoreImpl(indexSource, timeSource, blockSource,TxHistorySource);
+        BlockStore bs = BlockStoreImpl.forNode(factory);
         assertNotNull(bs);
     }
 
     @Test
     public void testStart() {
-        BlockStore bs = new BlockStoreImpl(indexSource, timeSource, blockSource,TxHistorySource);
+        BlockStore bs = BlockStoreImpl.forNode(factory);
         bs.start();
     }
 
     @Test
     public void testReset() {
-        BlockStore bs = new BlockStoreImpl(indexSource, timeSource, blockSource,TxHistorySource);
+        BlockStore bs = BlockStoreImpl.forNode(factory);
         bs.reset();
     }
 
     @Test
     public void testSaveXdagStatus() {
-        BlockStore bs = new BlockStoreImpl(indexSource, timeSource, blockSource,TxHistorySource);
+        BlockStore bs = BlockStoreImpl.forNode(factory);
         bs.start();
         XdagStats stats = new XdagStats();
         stats.setNmain(1);
@@ -104,7 +96,7 @@ public class BlockStoreImplTest {
     @Test
     public void testSaveBlock()
             throws InvalidAlgorithmParameterException, NoSuchAlgorithmException, NoSuchProviderException {
-        BlockStore bs = new BlockStoreImpl(indexSource, timeSource, blockSource,TxHistorySource);
+        BlockStore bs = BlockStoreImpl.forNode(factory);
         bs.start();
         long time = System.currentTimeMillis();
         ECKeyPair key = ECKeyPair.generate();
@@ -118,7 +110,7 @@ public class BlockStoreImplTest {
     @Test
     public void testSaveBlockInfo()
             throws InvalidAlgorithmParameterException, NoSuchAlgorithmException, NoSuchProviderException {
-        BlockStore bs = new BlockStoreImpl(indexSource, timeSource, blockSource,TxHistorySource);
+        BlockStore bs = BlockStoreImpl.forNode(factory);
         bs.start();
         long time = System.currentTimeMillis();
         ECKeyPair key = ECKeyPair.generate();
@@ -133,7 +125,7 @@ public class BlockStoreImplTest {
     @Test
     public void testSaveOurBlock()
             throws InvalidAlgorithmParameterException, NoSuchAlgorithmException, NoSuchProviderException {
-        BlockStore bs = new BlockStoreImpl(indexSource, timeSource, blockSource,TxHistorySource);
+        BlockStore bs = BlockStoreImpl.forNode(factory);
         bs.start();
         long time = System.currentTimeMillis();
         ECKeyPair key = ECKeyPair.generate();
@@ -146,7 +138,7 @@ public class BlockStoreImplTest {
     @Test
     public void testRemoveOurBlock()
             throws InvalidAlgorithmParameterException, NoSuchAlgorithmException, NoSuchProviderException {
-        BlockStore bs = new BlockStoreImpl(indexSource, timeSource, blockSource,TxHistorySource);
+        BlockStore bs = BlockStoreImpl.forNode(factory);
         bs.start();
         long time = System.currentTimeMillis();
         ECKeyPair key = ECKeyPair.generate();
@@ -161,7 +153,7 @@ public class BlockStoreImplTest {
     @Test
     public void testSaveBlockSums()
             throws InvalidAlgorithmParameterException, NoSuchAlgorithmException, NoSuchProviderException {
-        BlockStore bs = new BlockStoreImpl(indexSource, timeSource, blockSource,TxHistorySource);
+        BlockStore bs = BlockStoreImpl.forNode(factory);
         bs.start();
         long time = 1602951025307L;
         ECKeyPair key = ECKeyPair.generate();
@@ -174,7 +166,7 @@ public class BlockStoreImplTest {
 
     @Test
     public void getBlockByTimeTest() {
-        BlockStore blockStore = new BlockStoreImpl(indexSource, timeSource, blockSource,TxHistorySource);
+        BlockStore blockStore = BlockStoreImpl.forNode(factory);
         blockStore.start();
 
         // Create blocks
