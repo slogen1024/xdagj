@@ -34,6 +34,7 @@ import io.xdag.chain.l1.ChainL1Hooks;
 import io.xdag.chain.l1.ChainL1Processor;
 import io.xdag.chain.l1.ChainL1SnapshotGate;
 import io.xdag.chain.l1.ChainL1Store;
+import io.xdag.chain.repair.ChainConsistencyCheck;
 import io.xdag.config.MainnetConfig;
 import io.xdag.core.XdagField.FieldType;
 import io.xdag.consensus.RandomX;
@@ -239,6 +240,29 @@ public class BlockchainImpl implements Blockchain {
             randomx.setBlockchain(this);
         }
 
+        // SP0b-1: refuse to run on a main chain the chain hooks cannot trust. Both boot paths reach
+        // this point with xdagStats loaded (the snapshot branch wrote the marker itself, so it never
+        // reports markerInitialized here), and both reach it before anything can confirm a block.
+        ChainConsistencyCheck.Report report = ChainConsistencyCheck.run(blockStore, xdagStats,
+                kernel.getConfig().getChainSpec(), kernel.getConfig().getChainSpec().getChainConsistencyWindow());
+        if (report.markerInitialized()) {
+            // A store from before SP0b-1: adopt the tip as the last complete height, once, so the
+            // next boot has a marker to verify against (the check already warned that the history
+            // below it cannot be verified).
+            blockStore.saveLastCompletedMain(xdagStats.nmain);
+        }
+        kernel.setConsistencyReport(report);
+        if (!report.clean()) {
+            if (kernel.isRepairMode()) {
+                log.warn("repair mode: {}", report.describe());
+            } else {
+                // Deliberately not swallowed: on the kernel path this aborts startup, and
+                // XdagCli.start() catches Exception around startKernel(), prints getMessage() and
+                // exits -1 -- so describeForBoot()'s repair hint is what the operator actually sees.
+                throw new IllegalStateException(report.describeForBoot());
+            }
+        }
+
         // Chain contracts (SP0a): install the hooks before the check-main loop can confirm anything.
         // kernel.getChainKindHandlers() is THE registration point for the SP2/SP3 per-kind semantics:
         // it is read exactly here, once, before any hook can run (the processor rejects a handler
@@ -254,7 +278,10 @@ public class BlockchainImpl implements Blockchain {
 
         // Start main chain checking
         checkLoop = new ScheduledThreadPoolExecutor(1, factory);
-        this.startCheckMain(1024);
+        // SP0b-1: in repair mode nothing may be confirmed while the main chain is being unwound.
+        if (!kernel.isRepairMode()) {
+            this.startCheckMain(1024);
+        }
 
         this.mBlockTx.clear();
         this.mBlockTimedOut.clear();

@@ -96,7 +96,10 @@ public class MainCompletionMarkerTest extends ChainL1TestBase {
 
     @Test
     public void markerFollowsNormalConfirmationAndUnwind() {
-        assertEquals("fresh store carries no marker", -1L, kernel.getBlockStore().getLastCompletedMain());
+        // A fresh store has no marker of its own; the boot check in BlockchainImpl's constructor
+        // (SP0b-1 Task 4) initializes it to the empty tip, which is the same floor unSetMain uses.
+        assertEquals("fresh store's marker is initialized to the empty tip", 0L,
+                kernel.getBlockStore().getLastCompletedMain());
         assertEquals("fresh store has nothing in flight", -1L, kernel.getBlockStore().getMainInFlight());
         assertEquals("and no operation to report", 0, kernel.getBlockStore().getMainInFlightOp());
         for (int i = 0; i < 6; i++) {

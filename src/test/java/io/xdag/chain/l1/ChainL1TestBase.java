@@ -120,8 +120,16 @@ public abstract class ChainL1TestBase {
         public void addOurBlock(int keyIndex, Block block) {
         }
 
+        /**
+         * Deliberately without the {@code try/catch} of the real {@link BlockchainImpl#checkMain()}:
+         * an exception out of {@code setMain} must reach the test (plan §0.5). The stats save is
+         * kept, because the real {@code checkMain} does it too and {@code setMain} itself only
+         * bumps {@code nmain} in memory — without it every "restart" in a test would load stats
+         * lagging the confirmed tip, a shape the SP0b-1 boot check rightly reports as a crash.
+         */
         public void checkMain() {
             checkNewMain();
+            getBlockStore().saveXdagStatus(getXdagStats());
         }
     }
 

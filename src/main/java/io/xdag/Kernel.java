@@ -29,6 +29,7 @@ import static io.xdag.crypto.keys.AddressUtils.toBytesAddress;
 import io.xdag.chain.ext.ExtKind;
 import io.xdag.chain.l1.ChainKindHandler;
 import io.xdag.chain.l1.ChainL1Store;
+import io.xdag.chain.repair.ChainConsistencyCheck;
 import io.xdag.cli.TelnetServer;
 import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
@@ -88,6 +89,21 @@ public class Kernel {
      * @see io.xdag.chain.l1.ChainKindHandler
      */
     protected final Map<ExtKind, ChainKindHandler> chainKindHandlers = new EnumMap<>(ExtKind.class);
+
+    /**
+     * SP0b-1: when true, {@code BlockchainImpl}'s constructor records a non-clean consistency report
+     * in {@link #consistencyReport} instead of throwing, and does not start the check-main loop —
+     * nothing may be confirmed behind the repair tool's back while the main chain is being fixed.
+     * Set by the offline repair tool ({@code --repairchain}) only.
+     */
+    protected boolean repairMode;
+
+    /**
+     * SP0b-1: the startup consistency report of the most recent {@code BlockchainImpl} construction.
+     * Always set by that constructor, clean or not; the repair tool reads it instead of scanning the
+     * store a second time. Null before the blockchain has been built.
+     */
+    protected ChainConsistencyCheck.Report consistencyReport;
 
     protected SnapshotStore snapshotStore;
     protected Blockchain blockchain;
