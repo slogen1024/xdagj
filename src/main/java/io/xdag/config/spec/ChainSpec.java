@@ -167,4 +167,14 @@ public interface ChainSpec {
      * @return the fee owed per linked chunk
      */
     XAmount getChainChunkFee();
+
+    /** Protocol-independent default for {@code chain.consistency.window}. */
+    int DEFAULT_CONSISTENCY_WINDOW = 128;
+
+    /**
+     * How many main heights below the tip the startup consistency check scans for main blocks
+     * left without a self reference. Node-local (not consensus): may be set in the conf as
+     * {@code chain.consistency.window}; must be positive.
+     */
+    int getChainConsistencyWindow();
 }

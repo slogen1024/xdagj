@@ -83,6 +83,7 @@ public class ChainL1ProcessorTest {
         @Override public int getChainMaxWasmBytes() { return maxWasm; }
         @Override public int getChainMaxInlineArgs() { return 256; }
         @Override public XAmount getChainChunkFee() { return XAmount.of(10, XUnit.MILLI_XDAG); }
+        @Override public int getChainConsistencyWindow() { return ChainSpec.DEFAULT_CONSISTENCY_WINDOW; }
     }
 
     /** A handler that records nothing; used where only registration behaviour is under test. */

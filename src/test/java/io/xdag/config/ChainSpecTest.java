@@ -26,6 +26,7 @@ package io.xdag.config;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -213,5 +214,19 @@ public class ChainSpecTest {
     @Test
     public void chunkDataLenConstantMatchesWireFormat() {
         assertEquals(352, ChunkExt.MAX_DATA_LEN);
+    }
+
+    @Test
+    public void consistencyWindowDefaultsTo128() {
+        assertEquals(128, new DevnetConfig().getChainSpec().getChainConsistencyWindow());
+    }
+
+    @Test
+    public void consistencyWindowIsNodeLocalAndValidated() {
+        assertEquals(64, (int) withProperty("chain.consistency.window", "64",
+                () -> new DevnetConfig().getChainSpec().getChainConsistencyWindow()));
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> withProperty("chain.consistency.window", "0", DevnetConfig::new));
+        assertTrue(e.getMessage().contains("chain.consistency.window"));
     }
 }

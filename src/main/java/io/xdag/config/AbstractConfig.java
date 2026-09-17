@@ -160,6 +160,7 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected int chainMaxWasmBytes = 1024 * 1024;
     @Setter(AccessLevel.NONE)
     protected XAmount chainChunkFee = XAmount.of(10, XUnit.MILLI_XDAG);
+    protected int chainConsistencyWindow = ChainSpec.DEFAULT_CONSISTENCY_WINDOW;
 
     // RandomX configuration
     protected boolean flag;
@@ -222,6 +223,11 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     @Override
     public XAmount getChainChunkFee() {
         return chainChunkFee;
+    }
+
+    @Override
+    public int getChainConsistencyWindow() {
+        return chainConsistencyWindow;
     }
 
     @Override
@@ -395,6 +401,13 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
             throw new IllegalArgumentException(
                     "Invalid combination of chain.chunk.feeMilliXdag and chain.chunk.maxPerChain: " + chainChunkFee
                             + " x 2 x " + chainMaxChunksPerChain + " overflows a long", e);
+        }
+        if (config.hasPath("chain.consistency.window")) {
+            chainConsistencyWindow = config.getInt("chain.consistency.window");
+        }
+        if (chainConsistencyWindow <= 0) {
+            throw new IllegalArgumentException(
+                    "Invalid chain.consistency.window: " + chainConsistencyWindow + " (must be > 0)");
         }
     }
 
