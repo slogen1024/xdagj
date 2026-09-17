@@ -146,11 +146,7 @@ public class BlockchainTest {
         kernel = new Kernel(config, key);
         dbFactory = new RocksdbFactory(config);
 
-        BlockStore blockStore = new BlockStoreImpl(
-                dbFactory.getDB(DatabaseName.INDEX),
-                dbFactory.getDB(DatabaseName.TIME),
-                dbFactory.getDB(DatabaseName.BLOCK),
-                dbFactory.getDB(DatabaseName.TXHISTORY));
+        BlockStore blockStore = BlockStoreImpl.forNode(dbFactory);
 
         blockStore.reset();
         OrphanBlockStore orphanBlockStore = new OrphanBlockStoreImpl(dbFactory.getDB(DatabaseName.ORPHANIND), kernel);
@@ -182,11 +178,7 @@ public class BlockchainTest {
         kernel2 = new Kernel(config2, key2);
         dbFactory2 = new RocksdbFactory(config2);
 
-        BlockStore blockStore2 = new BlockStoreImpl(
-                dbFactory2.getDB(DatabaseName.INDEX),
-                dbFactory2.getDB(DatabaseName.TIME),
-                dbFactory2.getDB(DatabaseName.BLOCK),
-                dbFactory2.getDB(DatabaseName.TXHISTORY));
+        BlockStore blockStore2 = BlockStoreImpl.forNode(dbFactory2);
         blockStore2.reset();
 
         OrphanBlockStore orphanBlockStore2 = new OrphanBlockStoreImpl(dbFactory2.getDB(DatabaseName.ORPHANIND), kernel);

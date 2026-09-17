@@ -176,11 +176,9 @@ public class Kernel {
 
         // Initialize database components
         dbFactory = new RocksdbFactory(this.config);
-        blockStore = new BlockStoreImpl(
-                dbFactory.getDB(DatabaseName.INDEX),
-                dbFactory.getDB(DatabaseName.BLOCK),
-                dbFactory.getDB(DatabaseName.TIME),
-                dbFactory.getDB(DatabaseName.TXHISTORY));
+        // BlockStoreImpl.forNode, not the constructor: the databases named BLOCK and TIME go into
+        // swapped roles here, and that is the on-disk layout of every node (see forNode's javadoc).
+        blockStore = BlockStoreImpl.forNode(dbFactory);
         log.info("Block Store init.");
         blockStore.start();
 

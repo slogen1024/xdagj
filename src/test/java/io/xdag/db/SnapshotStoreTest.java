@@ -122,11 +122,7 @@ public class SnapshotStoreTest {
         kernel = new Kernel(config, key);
         dbFactory = new RocksdbFactory(config);
 
-        BlockStore blockStore = new BlockStoreImpl(
-                dbFactory.getDB(DatabaseName.INDEX),
-                dbFactory.getDB(DatabaseName.TIME),
-                dbFactory.getDB(DatabaseName.BLOCK),
-                dbFactory.getDB(DatabaseName.TXHISTORY));
+        BlockStore blockStore = BlockStoreImpl.forNode(dbFactory);
         blockStore.reset();
 
         AddressStore addressStore = new AddressStoreImpl(dbFactory.getDB(DatabaseName.ADDRESS));
@@ -191,11 +187,7 @@ public class SnapshotStoreTest {
     public void testSaveSnapshotToIndex() throws Exception {
         makeSnapshot();
         RocksdbFactory dbFactory = new RocksdbFactory(snapshotConfig);
-        BlockStore blockStore = new BlockStoreImpl(
-                dbFactory.getDB(DatabaseName.INDEX),
-                dbFactory.getDB(DatabaseName.TIME),
-                dbFactory.getDB(DatabaseName.BLOCK),
-                dbFactory.getDB(DatabaseName.TXHISTORY));
+        BlockStore blockStore = BlockStoreImpl.forNode(dbFactory);
         blockStore.reset();
         AddressStore addressStore = new AddressStoreImpl(dbFactory.getDB(DatabaseName.ADDRESS));
         addressStore.reset();
@@ -222,7 +214,10 @@ public class SnapshotStoreTest {
     public void makeSnapshot() throws IOException {
         dataConfig.getNodeSpec().setStoreDir(backup.getAbsolutePath());
         dataConfig.getNodeSpec().setStoreBackupDir(root2.newFolder().getAbsolutePath());
-        RocksdbKVSource blockSource = new RocksdbKVSource(DatabaseName.BLOCK.toString());
+        // TIME, not BLOCK: the fixture now writes through BlockStoreImpl.forNode, so the raw blocks
+        // are in the database NAMED TIME, exactly as on a node -- and exactly what the real
+        // XdagCli.makeSnapshot opens as its block source.
+        RocksdbKVSource blockSource = new RocksdbKVSource(DatabaseName.TIME.toString());
         blockSource.setConfig(dataConfig);
         blockSource.init();
 

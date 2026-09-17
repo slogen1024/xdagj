@@ -532,6 +532,8 @@ public class XdagCli extends Launcher {
         System.out.println("convertXAmount = " + b);
         long start = System.currentTimeMillis();
         this.getConfig().getSnapshotSpec().setSnapshotJ(true);
+        // TIME, not BLOCK: the raw blocks a node wrote are in the database NAMED TIME — the same
+        // node layout BlockStoreImpl.forNode encodes. This source is the snapshot's block source.
         RocksdbKVSource blockSource = new RocksdbKVSource(DatabaseName.TIME.toString());
         blockSource.setConfig(getConfig());
         blockSource.init();
@@ -628,15 +630,11 @@ public class XdagCli extends Launcher {
         BlockchainImpl blockchain = null;
         ChainL1Store chainStore = null;
         try {
-            // Argument order per BlockStoreImpl(index, time, block, txHistory). Note that
-            // Kernel.testStart passes BLOCK and TIME the other way round, so a running node's raw
-            // blocks and time index live in each other's directory (and the TIME source's fixed
-            // 9-byte prefix lands on the wrong one); this opens the stores by the signature.
-            BlockStore blockStore = new BlockStoreImpl(
-                    dbFactory.getDB(DatabaseName.INDEX),
-                    dbFactory.getDB(DatabaseName.TIME),
-                    dbFactory.getDB(DatabaseName.BLOCK),
-                    dbFactory.getDB(DatabaseName.TXHISTORY));
+            // forNode, never the constructor: it is the single definition of the layout a node
+            // writes (raw blocks in the database named TIME). Opening by the signature order here
+            // would hand the tool the two databases swapped, and every repair would fail on
+            // "block data is incomplete" because no raw bytes could be found.
+            BlockStore blockStore = BlockStoreImpl.forNode(dbFactory);
             blockStore.start();
             AddressStore addressStore = new AddressStoreImpl(dbFactory.getDB(DatabaseName.ADDRESS));
             addressStore.start();

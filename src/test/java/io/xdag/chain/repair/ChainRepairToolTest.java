@@ -446,7 +446,9 @@ public class ChainRepairToolTest extends ChainL1TestBase {
         long marker = kernel.getBlockStore().getLastCompletedMain();
         Block tip = blockchain.getBlockByHeight(nmain);
         assertNotNull(tip);
-        dbFactory.getDB(DatabaseName.BLOCK).delete(tip.getHashLow().toArray());
+        // TIME is where the raw block bytes live on a node (BlockStoreImpl.forNode); deleting from
+        // BLOCK would only drop a time-index entry and leave the walk perfectly able to finish.
+        dbFactory.getDB(DatabaseName.TIME).delete(tip.getHashLow().toArray());
 
         MockBlockchain repair = restartInRepairMode();
         ChainRepairTool.Outcome done = repair(repair, false, false);

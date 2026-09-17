@@ -89,11 +89,7 @@ public class ExtraBlockTest {
         kernel = new Kernel(config, key);
         dbFactory = new RocksdbFactory(config);
 
-        BlockStore blockStore = new BlockStoreImpl(
-                dbFactory.getDB(DatabaseName.INDEX),
-                dbFactory.getDB(DatabaseName.TIME),
-                dbFactory.getDB(DatabaseName.BLOCK),
-                dbFactory.getDB(DatabaseName.TXHISTORY));
+        BlockStore blockStore = BlockStoreImpl.forNode(dbFactory);
 
         blockStore.reset();
         OrphanBlockStore orphanBlockStore = new OrphanBlockStoreImpl(dbFactory.getDB(DatabaseName.ORPHANIND) , kernel);

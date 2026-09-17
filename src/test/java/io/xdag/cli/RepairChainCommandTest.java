@@ -32,7 +32,6 @@ import io.xdag.chain.l1.ChainL1TestBase;
 import io.xdag.db.BlockStore;
 import io.xdag.db.rocksdb.BlockStoreImpl;
 import io.xdag.db.rocksdb.DatabaseFactory;
-import io.xdag.db.rocksdb.DatabaseName;
 import io.xdag.db.rocksdb.RocksdbFactory;
 import java.util.List;
 import java.util.function.Function;
@@ -78,11 +77,7 @@ public class RepairChainCommandTest extends ChainL1TestBase {
     /** Reads the store back the way a later boot would, on handles of its own. */
     private <T> T readStore(Function<BlockStore, T> read) {
         DatabaseFactory factory = new RocksdbFactory(config);
-        BlockStore blockStore = new BlockStoreImpl(
-                factory.getDB(DatabaseName.INDEX),
-                factory.getDB(DatabaseName.TIME),
-                factory.getDB(DatabaseName.BLOCK),
-                factory.getDB(DatabaseName.TXHISTORY));
+        BlockStore blockStore = BlockStoreImpl.forNode(factory);
         blockStore.start();
         try {
             return read.apply(blockStore);

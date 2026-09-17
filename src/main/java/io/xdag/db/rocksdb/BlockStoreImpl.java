@@ -81,6 +81,26 @@ public class BlockStoreImpl implements BlockStore {
     private final KVSource<byte[], byte[]> blockSource;
     private final KVSource<byte[], byte[]> txHistorySource;
 
+    /**
+     * The store wiring every running node has always used: the raw-block source is the database
+     * NAMED {@link DatabaseName#TIME} and the time index is the one NAMED {@link DatabaseName#BLOCK}.
+     * That is an argument-order slip in the original {@code Kernel} wiring which has long since
+     * become the on-disk layout of every existing node (it also puts {@code RocksdbFactory}'s fixed
+     * 9-byte prefix extractor, attached by database name, on the raw-block source); renaming the
+     * directories to match their contents would need a data migration and is not what this does.
+     *
+     * <p>Every offline tool that opens a node's store MUST go through this method, so that it reads
+     * back exactly the layout the node wrote. The tests use it too, so that what they exercise is
+     * the production layout rather than the signature order.
+     */
+    public static BlockStoreImpl forNode(DatabaseFactory dbFactory) {
+        return new BlockStoreImpl(
+                dbFactory.getDB(DatabaseName.INDEX),
+                dbFactory.getDB(DatabaseName.BLOCK),
+                dbFactory.getDB(DatabaseName.TIME),
+                dbFactory.getDB(DatabaseName.TXHISTORY));
+    }
+
     public BlockStoreImpl(
             KVSource<byte[], byte[]> index,
             KVSource<byte[], byte[]> time,
