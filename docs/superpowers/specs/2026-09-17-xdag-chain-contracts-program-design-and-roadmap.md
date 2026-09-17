@@ -196,14 +196,11 @@ SP0b 切成三个可独立交付的切片，顺序固定：**SP0b-1 基准 + 加
 - 阶段重演（同一批块，测试侧单独计时）：解析、`canUseInput` 验签、引用点查、`saveBlock`。给出占比估计。
 - 输出：控制台表 + `target/bench/*.json`；基线写入 `docs/benchmarks/<date>-l1-import-baseline.md`（含机器信息）。不改 `BlockchainImpl`。
 
-**B. 一致性检查（G2）与卡死主块检测（G1）**
+**B. 一致性检查（G2）与卡死主块（G1）**（设计已由用户于 2026-09-17 逐节确认，细节见 SP0b-1 规格 §3.2–§3.4）
 
-- `CHAIN_L1` 新增节点本地键 `0xFE ‖ "done"`（不进 `stateHash`，与 `0xFF` 同类）：`onSetMainEnd(h)` 在自己的一个 batch 里写 `lastCompletedHeight = h`；`onUnsetMain(h)` 写 `h − 1`。
-- `ChainConsistencyCheck.run(blockStore, chainStore, spec, window)`（`Kernel` 在构造 `BlockchainImpl` 之前调用；快照启动分支在 `ChainL1SnapshotGate` 之后调用）：
-  1. 若 `nmain ≥ activation` 且 `nmain > lastCompletedHeight`（或缺失）→ **G2 型不一致**。
-  2. 扫描 `max(activation, nmain − window)..nmain` 的主块：`BI_MAIN` 已置而 `BlockInfo.ref == null` → **G1 型卡死**。
-  3. 任一命中 → 抛 `IllegalStateException`，消息含高度、原因与修复命令；节点拒绝启动。
-- `window` 默认 128，键 `chain.consistency.window`（节点本地，可在 conf 设置；仍不写进仓库 conf）。
+- **G1 根治**：`setMain` 在 `applyBlock` 之前就 `updateBlockRef(block, self)`（结尾那句保留，幂等）。DFS 中途抛异常留下的主块因此 `ref == self`，`unApplyBlock` 能正常处理它；"永远 unwind 不了"的状态不再产生。`ref` 只在本地 `BlockInfo`，不进任何哈希。
+- **G2 标记**：`BlockStore` 新增节点本地键 `LAST_COMPLETED_MAIN`（INDEX 列）：`setMain` **正常走到末尾**时写 `h`（异常路径不写，不在 `finally`）；`unSetMain` 末尾写 `h − 1`；快照导入后写 `snapshotHeight`。不放在 `CHAIN_L1`（免去状态哈希与快照门的排除逻辑）。
+- `ChainConsistencyCheck.run(blockStore, stats, spec, window)`：放在 `BlockchainImpl` 构造器、快照分支与统计加载之后、装配处理器之前。规则：标记缺失 → warn 并初始化为 `nmain`；`标记 < nmain` → 未完成的 `setMain`；扫描 `[max(activation, nmain − window), nmain + 8]` 中 `BI_MAIN` 已置而 `ref == null` 的主块 → 旧版遗留卡死；命中即抛 `IllegalStateException`（`repairMode` 下只记录报告）。`window` 默认 128（`chain.consistency.window`，节点本地）。
 
 **C. 修复命令 `XdagCli --repairchain [--dry-run]`**
 
@@ -423,7 +420,7 @@ SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器�
 | `CHAIN_EXEC` | 节点本地 | 否 | 链 KV、变更集、快照页、MMR、承诺开解、回执 |
 | `BLOCK/INDEX/ADDRESS` | 共识 | 现有 | 不新增语义；系统划账只经 `chainTransfer` 入口 |
 
-`CHAIN_L1` 新前缀由本文预留：`0x10 SETTLEMENT_JOURNAL`、`0xFE LOCAL_META`（节点本地、不进哈希，SP0b-1 的 `done` 键用它）。
+`CHAIN_L1` 新前缀由本文预留：`0x10 SETTLEMENT_JOURNAL`、`0xFE LOCAL_META`（节点本地、不进哈希；SP0b-1 最终把完成标记放在 `BlockStore`，此前缀暂未使用，保留给将来的节点本地元数据）。
 
 ### 11.2 配置与参数
 
@@ -535,7 +532,7 @@ brainstorming（子项目 spec，以本文对应章节为起点）→ writing-pl
 | 0x01–0x03, 0x07, 0x0C–0x0E | 注册表/合约/代码/计数/输入/引用计数/反向索引 | SP0a |
 | 0x04 BOND、0x05 ANCHOR_HEAD、0x06 ANCHOR、0x09 HEIGHT_TRIGGER、0x0A CHALLENGE、0x0B SEGMENT_CURSOR | SP3 |
 | 0x08 CLAIMED、0x10 SETTLEMENT_JOURNAL | SP2 |
-| 0xFE LOCAL_META（不进哈希） | SP0b-1 |
+| 0xFE LOCAL_META（不进哈希，预留） | 未使用 |
 | 0xFF SNAPSHOT_HASH（不进哈希） | SP0a |
 
 ### 15.3 术语
