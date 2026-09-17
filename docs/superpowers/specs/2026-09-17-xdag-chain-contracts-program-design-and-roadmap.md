@@ -206,9 +206,9 @@ SP0b 切成三个可独立交付的切片，顺序固定：**SP0b-1 基准 + 加
 
 - 离线打开 BLOCK/ADDRESS/CHAIN_L1，按 `ChainL1TestBase` 的方式组装无网络的 `Kernel + BlockchainImpl`（`startCheckMain` 不启动）。
 - 对每个卡死主块 M：`updateBlockRef(M, new Address(M))`（补上 `setMain` 本应写的那一步，`fee` 保持 0）。
-- 目标高度 `target = min(lastCompletedHeight, 最早卡死高度 − 1)`；`unWindMain(getBlockByHeight(target))`。回滚经由钩子成对撤销 `CHAIN_L1` 记录、撤销奖励；块仍在库里，节点启动后 `checkNewMain` 重新确认并重新应用。
+- 目标高度 `target = min(LAST_COMPLETED_MAIN, 最早卡死高度 − 1)`；`unWindMain(getBlockByHeight(target))`。回滚经由钩子成对撤销 `CHAIN_L1` 记录、撤销奖励；块仍在库里，节点启动后 `checkNewMain` 重新确认并重新应用。
 - 结束时重跑 `ChainConsistencyCheck`；`--dry-run` 只打印计划。
-- 测试：用基座人为制造 G1（在 `onBlockApplied` 抛异常的 handler）与 G2（`onSetMainEnd` 前 kill 模拟：直接删掉 `done` 键）两种状态，验证检查命中、修复后检查通过且 `CHAIN_L1` 与"干净重放"逐字节相等。
+- 测试：用基座人为制造 G1/G2 两种状态（在第 k 个块上抛异常的 handler 得到未完成的 `setMain`；人为把已确认主块的 `ref` 置 null 模拟旧版遗留），验证检查命中、`--dry-run` 不改库、修复后检查通过且 `CHAIN_L1` 与"干净重放"逐字节相等。
 
 **D. G9 / G10**
 
@@ -537,4 +537,4 @@ brainstorming（子项目 spec，以本文对应章节为起点）→ writing-pl
 
 ### 15.3 术语
 
-同总规格 §21；新增：**切片 SPx-y**、**journal（划账日志）**、**预验证（PreValidated）**、**done 键（最后完整处理高度）**。
+同总规格 §21；新增：**切片 SPx-y**、**journal（划账日志）**、**预验证（PreValidated）**、**LAST_COMPLETED_MAIN（`BlockStore` 里的最后完整 `setMain` 高度标记）**。
