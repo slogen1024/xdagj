@@ -45,6 +45,8 @@ public interface BlockStore extends XdagLifecycle {
     byte BLOCK_HEIGHT = (byte) 0x80;
     byte SNAPSHOT_PRESEED = (byte) 0x90;
     byte TX_HISTORY = (byte) 0xa0;
+    /** Node-local: height of the last setMain that ran to completion (see BlockchainImpl.setMain). */
+    byte LAST_COMPLETED_MAIN = (byte) 0xb0;
     String SUM_FILE_NAME = "sums.dat";
 
     void reset();
@@ -97,6 +99,15 @@ public interface BlockStore extends XdagLifecycle {
     boolean isSnapshotBoot();
 
     void setSnapshotBoot();
+
+    /**
+     * Height of the last main block whose {@code setMain} ran to completion, or {@code -1} if the
+     * marker was never written (a store created before SP0b-1). Node-local bookkeeping: never part
+     * of any hash, never exported with a snapshot.
+     */
+    long getLastCompletedMain();
+
+    void saveLastCompletedMain(long height);
 
     // RandomX seed
     void savePreSeed(byte[] preseed);

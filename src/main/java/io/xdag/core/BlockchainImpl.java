@@ -201,6 +201,9 @@ public class BlockchainImpl implements Blockchain {
             blockStore.saveXdagTopStatus(xdagTopStatus);
             blockStore.saveXdagStatus(xdagStats);
 
+            // SP0b-1: a freshly re-seeded block store is complete up to the snapshot height.
+            blockStore.saveLastCompletedMain(snapshotHeight);
+
         } else {
             // Load existing state
             XdagStats storedStats = blockStore.getXdagStatus();
@@ -1319,6 +1322,12 @@ public class BlockchainImpl implements Blockchain {
             chainHooks.onSetMainBegin(mainNumber, block);
 
             try {
+                // G1 root fix (SP0b-1): point the main block at itself BEFORE the DFS. A throw out of
+                // applyBlock then leaves ref == self, so unApplyBlock treats this block normally
+                // instead of skipping a BI_MAIN_REF block whose ref is null (which could never be
+                // unwound). ref lives only in the local BlockInfo; it is not part of any hash.
+                updateBlockRef(block, new Address(block));
+
                 // Accept reward
                 acceptAmount(block, reward);
                 xdagStats.nmain++;
@@ -1339,6 +1348,10 @@ public class BlockchainImpl implements Blockchain {
                 if (randomx != null) {
                     randomx.randomXSetForkTime(block);
                 }
+
+                // G2 marker (SP0b-1): written only on a normal completion — deliberately NOT in the
+                // finally block — so a boot can tell whether the previous setMain finished.
+                blockStore.saveLastCompletedMain(mainNumber);
             } finally {
                 // Closes the apply context on every exit: the early return above, a normal finish,
                 // and a throw out of the applyBlock DFS.
@@ -1358,9 +1371,10 @@ public class BlockchainImpl implements Blockchain {
 
             log.debug("UnSet main,{}, mainnumber = {}", block.getHash().toHexString(), xdagStats.nmain);
             // Height is still the confirmed height here; it is zeroed at the end of this method.
-            chainHooks.onUnsetMain(block.getInfo().getHeight(), block);
+            long height = block.getInfo().getHeight();
+            chainHooks.onUnsetMain(height, block);
 
-            XAmount reward = getReward(block.getInfo().getHeight());
+            XAmount reward = getReward(height);
             updateBlockFlag(block, BI_MAIN, false);
 
             xdagStats.nmain--;
@@ -1376,6 +1390,10 @@ public class BlockchainImpl implements Blockchain {
             block.getInfo().setHeight(0);
             updateBlockFlag(block, BI_MAIN_REF, false);
             updateBlockRef(block, null);
+
+            // G2 marker (SP0b-1): unSetMain removes the top main block, so completion now sits one
+            // height lower.
+            blockStore.saveLastCompletedMain(height - 1);
         }
     }
 

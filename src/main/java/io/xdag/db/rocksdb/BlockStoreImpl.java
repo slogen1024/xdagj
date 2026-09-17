@@ -614,6 +614,20 @@ public class BlockStoreImpl implements BlockStore {
         indexSource.put(new byte[]{SNAPSHOT_BOOT}, BytesUtils.intToBytes(1, false));
     }
 
+    @Override
+    public long getLastCompletedMain() {
+        byte[] data = indexSource.get(new byte[]{LAST_COMPLETED_MAIN});
+        if (data == null || data.length != 8) {
+            return -1L;
+        }
+        return BytesUtils.bytesToLong(data, 0, false);
+    }
+
+    @Override
+    public void saveLastCompletedMain(long height) {
+        indexSource.put(new byte[]{LAST_COMPLETED_MAIN}, BytesUtils.longToBytes(height, false));
+    }
+
     public void savePreSeed(byte[] preseed) {
         indexSource.put(new byte[]{SNAPSHOT_PRESEED}, preseed);
     }
