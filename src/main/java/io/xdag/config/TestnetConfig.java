@@ -59,7 +59,7 @@ public class TestnetConfig extends AbstractConfig {
         this.xdagFieldHeader = XDAG_FIELD_HEAD_TEST;
         this.walletKeyFile = this.rootDir + "/wallet-testnet.dat";
         this.walletFilePath = this.rootDir + "/wallet/" + Constants.WALLET_FILE_NAME;
-        this.laneActivationHeight = Long.MAX_VALUE;
+        this.chainActivationHeight = Long.MAX_VALUE;
     }
 
 }

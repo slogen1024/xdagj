@@ -58,7 +58,7 @@ public class MainnetConfig extends AbstractConfig {
         this.xdagFieldHeader = XDAG_FIELD_HEAD;
         this.walletKeyFile = this.rootDir + "/wallet.dat";
         this.walletFilePath = this.rootDir + "/wallet/" + Constants.WALLET_FILE_NAME;
-        this.laneActivationHeight = Long.MAX_VALUE;
+        this.chainActivationHeight = Long.MAX_VALUE;
     }
 
 }

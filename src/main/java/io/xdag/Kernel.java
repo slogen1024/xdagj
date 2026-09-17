@@ -26,6 +26,9 @@ package io.xdag;
 
 import static io.xdag.crypto.keys.AddressUtils.toBytesAddress;
 
+import io.xdag.chain.ext.ExtKind;
+import io.xdag.chain.l1.ChainKindHandler;
+import io.xdag.chain.l1.ChainL1Store;
 import io.xdag.cli.TelnetServer;
 import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
@@ -40,9 +43,6 @@ import io.xdag.crypto.keys.ECKeyPair;
 import io.xdag.db.*;
 import io.xdag.db.mysql.TransactionHistoryStoreImpl;
 import io.xdag.db.rocksdb.*;
-import io.xdag.lane.ext.ExtKind;
-import io.xdag.lane.l1.LaneKindHandler;
-import io.xdag.lane.l1.LaneL1Store;
 import io.xdag.net.*;
 import io.xdag.net.message.MessageQueue;
 import io.xdag.net.node.NodeManager;
@@ -76,18 +76,18 @@ public class Kernel {
     protected BlockStore blockStore;
     protected OrphanBlockStore orphanBlockStore;
     protected TransactionHistoryStore txHistoryStore;
-    protected LaneL1Store laneL1Store;
+    protected ChainL1Store chainL1Store;
     /**
-     * Lane extension-kind semantics, keyed by kind. Handlers SP2/SP3 register BEFORE the kernel
+     * Chain extension-kind semantics, keyed by kind. Handlers SP2/SP3 register BEFORE the kernel
      * constructs {@code BlockchainImpl}; consulted once in the {@code BlockchainImpl} constructor,
-     * never afterwards — that constructor creates the {@code LaneL1Processor} and hands it every
+     * never afterwards — that constructor creates the {@code ChainL1Processor} and hands it every
      * entry of this map before the check-main loop can confirm anything, and the processor refuses
      * a registration once its first hook has run. Putting a handler in here after construction
      * therefore has no effect at all. Never null; empty in SP0a, which ships no handlers.
      *
-     * @see io.xdag.lane.l1.LaneKindHandler
+     * @see io.xdag.chain.l1.ChainKindHandler
      */
-    protected final Map<ExtKind, LaneKindHandler> laneKindHandlers = new EnumMap<>(ExtKind.class);
+    protected final Map<ExtKind, ChainKindHandler> chainKindHandlers = new EnumMap<>(ExtKind.class);
 
     protected SnapshotStore snapshotStore;
     protected Blockchain blockchain;
@@ -169,11 +169,11 @@ public class Kernel {
         orphanBlockStore = new OrphanBlockStoreImpl(dbFactory.getDB(DatabaseName.ORPHANIND) , this);
         orphanBlockStore.start();
 
-        // Lane contracts (SP0a): LANE_L1 index consumed by the lane hooks. Must exist before
-        // new BlockchainImpl(this) below, whose constructor installs the LaneL1Processor from it.
+        // Chain contracts (SP0a): CHAIN_L1 index consumed by the chain hooks. Must exist before
+        // new BlockchainImpl(this) below, whose constructor installs the ChainL1Processor from it.
         // Stopped in testStop() before the databases are closed, so isRunning() stays truthful.
-        laneL1Store = new LaneL1Store(dbFactory.getDB(DatabaseName.LANE_L1));
-        laneL1Store.start();
+        chainL1Store = new ChainL1Store(dbFactory.getDB(DatabaseName.CHAIN_L1));
+        chainL1Store.start();
 
         if (config.getEnableTxHistory()) {
             long txPageSizeLimit = config.getTxPageSizeLimit();
@@ -306,9 +306,9 @@ public class Kernel {
         // Stop data layer
         blockchain.stopCheckMain();
 
-        // Stop the lane store before its database is closed below
-        if (laneL1Store != null) {
-            laneL1Store.stop();
+        // Stop the chain store before its database is closed below
+        if (chainL1Store != null) {
+            chainL1Store.stop();
         }
 
         // Close all databases

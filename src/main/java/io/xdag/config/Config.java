@@ -118,9 +118,9 @@ public interface Config {
     SnapshotSpec getSnapshotSpec();
 
     /**
-     * Get the lane (DAG-native channel contract) specification configuration
+     * Get the chain (DAG-native channel contract) specification configuration
      */
-    LaneSpec getLaneSpec();
+    ChainSpec getChainSpec();
 
     /**
      * Get the RandomX specification configuration

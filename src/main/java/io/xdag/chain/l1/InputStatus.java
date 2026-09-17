@@ -22,36 +22,28 @@
  * THE SOFTWARE.
  */
 
-package io.xdag.db.rocksdb;
+package io.xdag.chain.l1;
 
-public enum DatabaseName {
+/** Outcome of L1-level attribution of a chain input. All statuses produce an input record. */
+public enum InputStatus {
+    OK(0), INVALID_FORMAT(1), INVALID_FEE(2), CODE_TOO_LARGE(3);
 
-    /**
-     * Block index.
-     */
-    INDEX,
+    private final byte code;
 
-    /**
-     * Block raw data.
-     */
-    BLOCK,
+    InputStatus(int code) {
+        this.code = (byte) code;
+    }
 
-    /**
-     * Time related block.
-     */
-    TIME,
+    public byte code() {
+        return code;
+    }
 
-    /**
-     * Orphan block index
-     */
-    ORPHANIND,
-
-    SNAPSHOT,
-
-    ADDRESS,
-
-    TXHISTORY,
-
-    /** Chain contracts: global L1 state (registry, code store, input index, bonds, anchors). */
-    CHAIN_L1
+    public static InputStatus fromCode(int code) {
+        for (InputStatus s : values()) {
+            if (s.code == code) {
+                return s;
+            }
+        }
+        throw new IllegalArgumentException("unknown input status " + code);
+    }
 }

@@ -28,6 +28,8 @@ import com.google.common.collect.Lists;
 import io.xdag.Kernel;
 import io.xdag.Launcher;
 import io.xdag.Wallet;
+import io.xdag.chain.l1.ChainL1SnapshotGate;
+import io.xdag.chain.l1.ChainL1Store;
 import io.xdag.config.Config;
 import io.xdag.config.Constants;
 import io.xdag.crypto.bip.Bip39Mnemonic;
@@ -38,8 +40,6 @@ import io.xdag.db.SnapshotStore;
 import io.xdag.db.rocksdb.DatabaseName;
 import io.xdag.db.rocksdb.RocksdbKVSource;
 import io.xdag.db.rocksdb.SnapshotStoreImpl;
-import io.xdag.lane.l1.LaneL1Store;
-import io.xdag.lane.l1.LaneL1SnapshotGate;
 import io.xdag.utils.BytesUtils;
 import io.xdag.utils.XdagTime;
 import org.apache.commons.cli.CommandLine;
@@ -524,27 +524,27 @@ public class XdagCli extends Launcher {
         Path target = Paths.get(getConfig().getRootDir() + "/rocksdb/xdagdb/SNAPSHOT/ADDRESS");
         copyDir(source.toString(),target.toString());
 
-        // Lane contracts (SP0a): carry LANE_L1 alongside SNAPSHOT/BLOCKS and SNAPSHOT/ADDRESS.
-        // Always exported: an "empty" LANE_L1 snapshot is one META key plus its hash, and a node
-        // below the lane activation height ignores the directory anyway.
-        RocksdbKVSource laneSource = new RocksdbKVSource(DatabaseName.LANE_L1.toString());
-        laneSource.setConfig(getConfig());
-        LaneL1Store laneStore = new LaneL1Store(laneSource);
-        String laneFailure = null;
+        // Chain contracts (SP0a): carry CHAIN_L1 alongside SNAPSHOT/BLOCKS and SNAPSHOT/ADDRESS.
+        // Always exported: an "empty" CHAIN_L1 snapshot is one META key plus its hash, and a node
+        // below the chain activation height ignores the directory anyway.
+        RocksdbKVSource chainSource = new RocksdbKVSource(DatabaseName.CHAIN_L1.toString());
+        chainSource.setConfig(getConfig());
+        ChainL1Store chainStore = new ChainL1Store(chainSource);
+        String chainFailure = null;
         try {
-            laneStore.start();
-            LaneL1SnapshotGate.export(getConfig(), laneStore);
-            System.out.println("lane state snapshot written to " + LaneL1SnapshotGate.snapshotDir(getConfig()));
+            chainStore.start();
+            ChainL1SnapshotGate.export(getConfig(), chainStore);
+            System.out.println("chain state snapshot written to " + ChainL1SnapshotGate.snapshotDir(getConfig()));
         } catch (RuntimeException e) {
-            // Every runtime failure, not just IllegalStateException: laneStore.start() opens a
+            // Every runtime failure, not just IllegalStateException: chainStore.start() opens a
             // RocksDB column family and surfaces a failure to do so as a plain RuntimeException.
-            // The block/address snapshot is already written: report the lane failure but still
+            // The block/address snapshot is already written: report the chain failure but still
             // print the height and next start frame the operator needs.
             // e, not e.getMessage(): a RocksDB failure may carry no message at all.
-            laneFailure = "lane state snapshot NOT written: " + e;
-            System.out.println(laneFailure);
+            chainFailure = "chain state snapshot NOT written: " + e;
+            System.out.println(chainFailure);
         } finally {
-            laneStore.stop();
+            chainStore.stop();
         }
 
         long end = System.currentTimeMillis();
@@ -552,9 +552,9 @@ public class XdagCli extends Launcher {
         System.out.println("time：" + (end - start) + "ms");
         System.out.println("snapshot height: " + snapshotStore.getHeight());
         System.out.println("next start frame: " + Long.toHexString(XdagTime.getEndOfEpoch(snapshotStore.getNextTime()) + 1));
-        if (laneFailure != null) {
-            System.out.println(laneFailure + " -- this snapshot cannot boot a node at or past the lane "
-                    + "activation height; fix the cause and export SNAPSHOT/LANE_L1 again");
+        if (chainFailure != null) {
+            System.out.println(chainFailure + " -- this snapshot cannot boot a node at or past the chain "
+                    + "activation height; fix the cause and export SNAPSHOT/CHAIN_L1 again");
         }
     }
 

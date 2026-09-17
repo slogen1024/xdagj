@@ -30,9 +30,9 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 
+import io.xdag.chain.InMemoryKVSource;
 import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
-import io.xdag.lane.InMemoryKVSource;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.commons.codec.binary.Hex;
@@ -70,7 +70,7 @@ public class BatchWriteTest {
     public void rocksBatchWriteUsesWriteBatch() throws Exception {
         Config config = new DevnetConfig();
         config.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
-        RocksdbKVSource src = new RocksdbKVSource(DatabaseName.LANE_L1.toString());
+        RocksdbKVSource src = new RocksdbKVSource(DatabaseName.CHAIN_L1.toString());
         src.setConfig(config);
         src.init();
         try {
@@ -90,7 +90,7 @@ public class BatchWriteTest {
     public void rocksBatchWriteAppliesPutsThenDeletesInOrder() throws Exception {
         Config config = new DevnetConfig();
         config.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
-        RocksdbKVSource src = new RocksdbKVSource(DatabaseName.LANE_L1.toString());
+        RocksdbKVSource src = new RocksdbKVSource(DatabaseName.CHAIN_L1.toString());
         src.setConfig(config);
         src.init();
         try {
@@ -120,13 +120,13 @@ public class BatchWriteTest {
     }
 
     @Test
-    public void factoryKnowsLaneL1() throws Exception {
+    public void factoryKnowsChainL1() throws Exception {
         Config config = new DevnetConfig();
         config.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
         RocksdbFactory factory = new RocksdbFactory(config);
-        KVSource<byte[], byte[]> db = factory.getDB(DatabaseName.LANE_L1);
+        KVSource<byte[], byte[]> db = factory.getDB(DatabaseName.CHAIN_L1);
         assertNotNull(db);
-        assertEquals("LANE_L1", db.getName());
+        assertEquals("CHAIN_L1", db.getName());
         factory.close();
     }
 
@@ -161,7 +161,7 @@ public class BatchWriteTest {
 
         Config config = new DevnetConfig();
         config.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
-        RocksdbKVSource rocksSrc = new RocksdbKVSource(DatabaseName.LANE_L1.toString());
+        RocksdbKVSource rocksSrc = new RocksdbKVSource(DatabaseName.CHAIN_L1.toString());
         rocksSrc.setConfig(config);
         rocksSrc.init();
         try {
@@ -199,7 +199,7 @@ public class BatchWriteTest {
     public void batchWriteAfterCloseThrows() throws Exception {
         Config config = new DevnetConfig();
         config.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
-        RocksdbKVSource src = new RocksdbKVSource(DatabaseName.LANE_L1.toString());
+        RocksdbKVSource src = new RocksdbKVSource(DatabaseName.CHAIN_L1.toString());
         src.setConfig(config);
         src.init();
         src.close();

@@ -46,7 +46,7 @@ import java.util.*;
 @Slf4j
 @Getter
 @Setter
-public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, RPCSpec, SnapshotSpec, RandomxSpec, FundSpec, LaneSpec {
+public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, RPCSpec, SnapshotSpec, RandomxSpec, FundSpec, ChainSpec {
 
     protected String configName;
 
@@ -147,19 +147,19 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected long snapshotTime;
     protected boolean isSnapshotJ;
 
-    // Lane (DAG-native contracts) configuration
-    // volatile: laneActivationHeight/laneActivationHeightOverride may be flipped by tests
-    // (see LaneSpec#setLaneActivationHeight) while another thread is importing blocks.
-    protected volatile long laneActivationHeight = Long.MAX_VALUE;
+    // Chain (DAG-native contracts) configuration
+    // volatile: chainActivationHeight/chainActivationHeightOverride may be flipped by tests
+    // (see ChainSpec#setChainActivationHeight) while another thread is importing blocks.
+    protected volatile long chainActivationHeight = Long.MAX_VALUE;
     @Setter(AccessLevel.NONE)
     @Getter(AccessLevel.NONE)
-    protected volatile Long laneActivationHeightOverride;
+    protected volatile Long chainActivationHeightOverride;
     @Setter(AccessLevel.NONE)
-    protected int laneMaxChunksPerChain = LaneSpec.DEFAULT_MAX_CHUNKS_PER_CHAIN;
+    protected int chainMaxChunksPerChain = ChainSpec.DEFAULT_MAX_CHUNKS_PER_CHAIN;
     @Setter(AccessLevel.NONE)
-    protected int laneMaxWasmBytes = 1024 * 1024;
+    protected int chainMaxWasmBytes = 1024 * 1024;
     @Setter(AccessLevel.NONE)
-    protected XAmount laneChunkFee = XAmount.of(10, XUnit.MILLI_XDAG);
+    protected XAmount chainChunkFee = XAmount.of(10, XUnit.MILLI_XDAG);
 
     // RandomX configuration
     protected boolean flag;
@@ -189,39 +189,39 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     }
 
     @Override
-    public LaneSpec getLaneSpec() {
+    public ChainSpec getChainSpec() {
         return this;
     }
 
     @Override
-    public long getLaneActivationHeight() {
-        return laneActivationHeightOverride != null ? laneActivationHeightOverride : laneActivationHeight;
+    public long getChainActivationHeight() {
+        return chainActivationHeightOverride != null ? chainActivationHeightOverride : chainActivationHeight;
     }
 
     @Override
-    public void setLaneActivationHeight(long height) {
-        this.laneActivationHeightOverride = null;
-        this.laneActivationHeight = height;
+    public void setChainActivationHeight(long height) {
+        this.chainActivationHeightOverride = null;
+        this.chainActivationHeight = height;
     }
 
     @Override
-    public int getLaneMaxChunksPerChain() {
-        return laneMaxChunksPerChain;
+    public int getChainMaxChunksPerChain() {
+        return chainMaxChunksPerChain;
     }
 
     @Override
-    public int getLaneMaxWasmBytes() {
-        return laneMaxWasmBytes;
+    public int getChainMaxWasmBytes() {
+        return chainMaxWasmBytes;
     }
 
     @Override
-    public int getLaneMaxInlineArgs() {
-        return LaneSpec.LANE_MAX_INLINE_ARGS;
+    public int getChainMaxInlineArgs() {
+        return ChainSpec.CHAIN_MAX_INLINE_ARGS;
     }
 
     @Override
-    public XAmount getLaneChunkFee() {
-        return laneChunkFee;
+    public XAmount getChainChunkFee() {
+        return chainChunkFee;
     }
 
     @Override
@@ -319,92 +319,92 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
         }
         flag = config.hasPath("randomx.flags.fullmem") && config.getBoolean("randomx.flags.fullmem");
 
-        // Lane configuration overrides (defaults live in the per-network constructors)
-        laneActivationHeightOverride = config.hasPath("lane.activation.height") ? config.getLong("lane.activation.height") : null;
-        if (config.hasPath("lane.chunk.maxPerChain")) {
-            int overridden = config.getInt("lane.chunk.maxPerChain");
-            warnLaneConsensusOverride("lane.chunk.maxPerChain", overridden, laneMaxChunksPerChain);
-            laneMaxChunksPerChain = overridden;
+        // Chain configuration overrides (defaults live in the per-network constructors)
+        chainActivationHeightOverride = config.hasPath("chain.activation.height") ? config.getLong("chain.activation.height") : null;
+        if (config.hasPath("chain.chunk.maxPerChain")) {
+            int overridden = config.getInt("chain.chunk.maxPerChain");
+            warnChainConsensusOverride("chain.chunk.maxPerChain", overridden, chainMaxChunksPerChain);
+            chainMaxChunksPerChain = overridden;
         }
-        if (config.hasPath("lane.wasm.maxBytes")) {
-            int overridden = config.getInt("lane.wasm.maxBytes");
-            warnLaneConsensusOverride("lane.wasm.maxBytes", overridden, laneMaxWasmBytes);
-            laneMaxWasmBytes = overridden;
+        if (config.hasPath("chain.wasm.maxBytes")) {
+            int overridden = config.getInt("chain.wasm.maxBytes");
+            warnChainConsensusOverride("chain.wasm.maxBytes", overridden, chainMaxWasmBytes);
+            chainMaxWasmBytes = overridden;
         }
-        if (config.hasPath("lane.chunk.feeMilliXdag")) {
-            long feeMilliXdag = config.getLong("lane.chunk.feeMilliXdag");
+        if (config.hasPath("chain.chunk.feeMilliXdag")) {
+            long feeMilliXdag = config.getLong("chain.chunk.feeMilliXdag");
             if (feeMilliXdag < 0) {
                 throw new IllegalArgumentException(
-                        "Invalid lane.chunk.feeMilliXdag: " + feeMilliXdag + " (must not be negative)");
+                        "Invalid chain.chunk.feeMilliXdag: " + feeMilliXdag + " (must not be negative)");
             }
             try {
                 XAmount overridden = XAmount.of(feeMilliXdag, XUnit.MILLI_XDAG);
-                warnLaneConsensusOverride("lane.chunk.feeMilliXdag", overridden, laneChunkFee);
-                laneChunkFee = overridden;
+                warnChainConsensusOverride("chain.chunk.feeMilliXdag", overridden, chainChunkFee);
+                chainChunkFee = overridden;
             } catch (ArithmeticException e) {
                 throw new IllegalArgumentException(
-                        "Invalid lane.chunk.feeMilliXdag: " + feeMilliXdag + " overflows XAmount", e);
+                        "Invalid chain.chunk.feeMilliXdag: " + feeMilliXdag + " overflows XAmount", e);
             }
         }
 
-        // Fail fast on lane parameters that would silently fork the node: every node must
-        // agree on these values (see LaneSpec), so a bad conf value is rejected at startup
+        // Fail fast on chain parameters that would silently fork the node: every node must
+        // agree on these values (see ChainSpec), so a bad conf value is rejected at startup
         // rather than producing divergent consensus state later.
-        if (laneActivationHeightOverride != null) {
-            if (laneActivationHeightOverride < 0) {
+        if (chainActivationHeightOverride != null) {
+            if (chainActivationHeightOverride < 0) {
                 throw new IllegalArgumentException(
-                        "Invalid lane.activation.height: " + laneActivationHeightOverride
+                        "Invalid chain.activation.height: " + chainActivationHeightOverride
                                 + " (must be >= 0; 0 means active from genesis)");
             }
-            log.warn("Lane activation height overridden by configuration to {} (network default suppressed)",
-                    laneActivationHeightOverride);
+            log.warn("Chain activation height overridden by configuration to {} (network default suppressed)",
+                    chainActivationHeightOverride);
         }
-        if (laneMaxChunksPerChain <= 0) {
+        if (chainMaxChunksPerChain <= 0) {
             throw new IllegalArgumentException(
-                    "Invalid lane.chunk.maxPerChain: " + laneMaxChunksPerChain + " (must be > 0)");
+                    "Invalid chain.chunk.maxPerChain: " + chainMaxChunksPerChain + " (must be > 0)");
         }
-        if (laneMaxWasmBytes <= 0) {
+        if (chainMaxWasmBytes <= 0) {
             throw new IllegalArgumentException(
-                    "Invalid lane.wasm.maxBytes: " + laneMaxWasmBytes + " (must be > 0)");
+                    "Invalid chain.wasm.maxBytes: " + chainMaxWasmBytes + " (must be > 0)");
         }
-        // laneChunkFee can only be negative here if the conf-read path above admitted a negative
+        // chainChunkFee can only be negative here if the conf-read path above admitted a negative
         // feeMilliXdag, which it now rejects before XAmount.of ever runs; the default is a
         // non-negative literal. Kept as a defensive assertion against that invariant drifting.
-        assert !laneChunkFee.isNegative() : "laneChunkFee must not be negative: " + laneChunkFee;
+        assert !chainChunkFee.isNegative() : "chainChunkFee must not be negative: " + chainChunkFee;
         // A chunk chain carries at most maxPerChain chunks, each holding at most
-        // CHUNK_DATA_LEN bytes of payload (mirrors io.xdag.lane.ext.ChunkExt.MAX_DATA_LEN;
-        // not imported here to keep io.xdag.config free of a dependency on the lane.ext
+        // CHUNK_DATA_LEN bytes of payload (mirrors io.xdag.chain.ext.ChunkExt.MAX_DATA_LEN;
+        // not imported here to keep io.xdag.config free of a dependency on the chain.ext
         // wire-format package). A WASM bound above that ceiling could never be satisfied by
         // any chunk chain.
         final int CHUNK_DATA_LEN = 352;
-        long maxChainCapacity = (long) laneMaxChunksPerChain * CHUNK_DATA_LEN;
-        if (laneMaxWasmBytes > maxChainCapacity) {
+        long maxChainCapacity = (long) chainMaxChunksPerChain * CHUNK_DATA_LEN;
+        if (chainMaxWasmBytes > maxChainCapacity) {
             throw new IllegalArgumentException(
-                    "Invalid lane.wasm.maxBytes: " + laneMaxWasmBytes
-                            + " exceeds what any chunk chain could carry (lane.chunk.maxPerChain=" + laneMaxChunksPerChain
+                    "Invalid chain.wasm.maxBytes: " + chainMaxWasmBytes
+                            + " exceeds what any chunk chain could carry (chain.chunk.maxPerChain=" + chainMaxChunksPerChain
                             + " x " + CHUNK_DATA_LEN + " bytes/chunk = " + maxChainCapacity + " bytes max)");
         }
-        // The consensus chunk-fee re-check (LaneL1Processor.feeCovers) multiplies the configured
+        // The consensus chunk-fee re-check (ChainL1Processor.feeCovers) multiplies the configured
         // chunk fee (in nano-XDAG) by the chunk count of every chain a paying block links: a DEPLOY
-        // may carry a code chain AND an args chain, so the worst case is 2 x laneMaxChunksPerChain.
+        // may carry a code chain AND an args chain, so the worst case is 2 x chainMaxChunksPerChain.
         // An overflow there would throw inside setMain, so the combination is rejected here instead,
         // at startup.
         try {
-            laneChunkFee.multiply(2L * laneMaxChunksPerChain);
+            chainChunkFee.multiply(2L * chainMaxChunksPerChain);
         } catch (ArithmeticException e) {
             throw new IllegalArgumentException(
-                    "Invalid combination of lane.chunk.feeMilliXdag and lane.chunk.maxPerChain: " + laneChunkFee
-                            + " x 2 x " + laneMaxChunksPerChain + " overflows a long", e);
+                    "Invalid combination of chain.chunk.feeMilliXdag and chain.chunk.maxPerChain: " + chainChunkFee
+                            + " x 2 x " + chainMaxChunksPerChain + " overflows a long", e);
         }
     }
 
     /**
-     * Warns that a lane consensus parameter was taken from the conf file instead of the protocol
-     * default. These are not node-local tuning knobs: every node must compute the same LANE_L1
+     * Warns that a chain consensus parameter was taken from the conf file instead of the protocol
+     * default. These are not node-local tuning knobs: every node must compute the same CHAIN_L1
      * verdicts, so a node running a non-default value simply forks, silently and without any error
-     * of its own. Mirrors the {@code lane.activation.height} warning above.
+     * of its own. Mirrors the {@code chain.activation.height} warning above.
      */
-    private static void warnLaneConsensusOverride(String key, Object value, Object protocolDefault) {
+    private static void warnChainConsensusOverride(String key, Object value, Object protocolDefault) {
         log.warn("{} overridden by configuration to {} (protocol default {}); this is a consensus "
                 + "parameter, never set it on testnet/mainnet", key, value, protocolDefault);
     }

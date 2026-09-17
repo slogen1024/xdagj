@@ -21,37 +21,22 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+package io.xdag.chain.l1;
 
-package io.xdag.db.rocksdb;
+import java.util.Objects;
+import org.apache.tuweni.bytes.Bytes32;
 
-public enum DatabaseName {
+/**
+ * Lives from {@code onSetMainBegin} to {@code onSetMainEnd} of one confirmed main block: the height
+ * every input applied during that {@code applyBlock} DFS is attributed to, and the main block's own
+ * hash.
+ *
+ * <p>Immutable. {@code mainBlockHash} is not defensively copied because {@link Bytes32} is itself
+ * immutable.
+ */
+public record ApplyContext(long height, Bytes32 mainBlockHash) {
 
-    /**
-     * Block index.
-     */
-    INDEX,
-
-    /**
-     * Block raw data.
-     */
-    BLOCK,
-
-    /**
-     * Time related block.
-     */
-    TIME,
-
-    /**
-     * Orphan block index
-     */
-    ORPHANIND,
-
-    SNAPSHOT,
-
-    ADDRESS,
-
-    TXHISTORY,
-
-    /** Chain contracts: global L1 state (registry, code store, input index, bonds, anchors). */
-    CHAIN_L1
+    public ApplyContext {
+        Objects.requireNonNull(mainBlockHash, "mainBlockHash");
+    }
 }

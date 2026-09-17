@@ -22,36 +22,29 @@
  * THE SOFTWARE.
  */
 
-package io.xdag.db.rocksdb;
+package io.xdag.chain.ext;
 
-public enum DatabaseName {
+import java.util.Objects;
 
-    /**
-     * Block index.
-     */
-    INDEX,
+/** Either a decoded value or an {@link ExtError}; exactly one of the two is non-null. */
+public record ExtResult<T>(T value, ExtError error) {
 
-    /**
-     * Block raw data.
-     */
-    BLOCK,
+    public ExtResult {
+        if ((value == null) == (error == null)) {
+            throw new IllegalArgumentException("exactly one of value/error must be set");
+        }
+    }
 
-    /**
-     * Time related block.
-     */
-    TIME,
+    public static <T> ExtResult<T> ok(T value) {
+        return new ExtResult<>(value, null);
+    }
 
-    /**
-     * Orphan block index
-     */
-    ORPHANIND,
+    public static <T> ExtResult<T> fail(ExtError error) {
+        Objects.requireNonNull(error, "error");
+        return new ExtResult<>(null, error);
+    }
 
-    SNAPSHOT,
-
-    ADDRESS,
-
-    TXHISTORY,
-
-    /** Chain contracts: global L1 state (registry, code store, input index, bonds, anchors). */
-    CHAIN_L1
+    public boolean isOk() {
+        return error == null;
+    }
 }

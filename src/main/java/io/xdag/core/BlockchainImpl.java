@@ -30,6 +30,10 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import io.xdag.Kernel;
 import io.xdag.Wallet;
+import io.xdag.chain.l1.ChainL1Hooks;
+import io.xdag.chain.l1.ChainL1Processor;
+import io.xdag.chain.l1.ChainL1SnapshotGate;
+import io.xdag.chain.l1.ChainL1Store;
 import io.xdag.config.MainnetConfig;
 import io.xdag.core.XdagField.FieldType;
 import io.xdag.consensus.RandomX;
@@ -43,10 +47,6 @@ import io.xdag.crypto.keys.Signer;
 import io.xdag.db.*;
 import io.xdag.db.rocksdb.RocksdbKVSource;
 import io.xdag.db.rocksdb.SnapshotStoreImpl;
-import io.xdag.lane.l1.LaneL1Hooks;
-import io.xdag.lane.l1.LaneL1Processor;
-import io.xdag.lane.l1.LaneL1Store;
-import io.xdag.lane.l1.LaneL1SnapshotGate;
 import io.xdag.listener.BlockMessage;
 import io.xdag.listener.Listener;
 import io.xdag.listener.PretopMessage;
@@ -152,16 +152,16 @@ public class BlockchainImpl implements Blockchain {
     private byte[] preSeed;
 
     /**
-     * Lane contracts (SP0a): hooks invoked from setMain/applyBlock. Installed by this class's own
-     * constructor from {@code kernel.getLaneL1Store()}, before {@link #startCheckMain(long)} is
+     * Chain contracts (SP0a): hooks invoked from setMain/applyBlock. Installed by this class's own
+     * constructor from {@code kernel.getChainL1Store()}, before {@link #startCheckMain(long)} is
      * called: the check-main loop is scheduled with an initial delay of zero, so its very first
      * {@code checkNewMain -> setMain} can run before the constructor's caller gets control back.
      * Wiring the processor from outside (as the kernel used to) would therefore let a main block be
-     * confirmed while these hooks were still {@link LaneL1Hooks#NOOP}, and that block's lane inputs
-     * would be missing from LANE_L1 forever. Stays NOOP when the kernel has no lane store (tests
+     * confirmed while these hooks were still {@link ChainL1Hooks#NOOP}, and that block's chain inputs
+     * would be missing from CHAIN_L1 forever. Stays NOOP when the kernel has no chain store (tests
      * that build a blockchain without one).
      */
-    private volatile LaneL1Hooks laneHooks = LaneL1Hooks.NOOP;
+    private volatile ChainL1Hooks chainHooks = ChainL1Hooks.NOOP;
 
     // Constructor initializes all components and starts main chain checking
     public BlockchainImpl(Kernel kernel) {
@@ -182,13 +182,13 @@ public class BlockchainImpl implements Blockchain {
                 && kernel.getConfig().getSnapshotSpec().getSnapshotHeight() > 0
                 && !blockStore.isSnapshotBoot()) {
 
-            // Lane contracts (SP0a): LANE_L1 travels with the snapshot and is mandatory once the
-            // snapshot height is at or past the lane activation height (hash-verified on import).
+            // Chain contracts (SP0a): CHAIN_L1 travels with the snapshot and is mandatory once the
+            // snapshot height is at or past the chain activation height (hash-verified on import).
             // This runs first, on EVERY snapshot boot: the isSnapshotJ() branch below is not the
             // only way in (--enablesnapshot false H T boots from a snapshot too, and the kernel
             // records setSnapshotBoot() either way), and failing here is also cheaper than failing
             // after the block/address imports.
-            LaneL1SnapshotGate.checkAndImport(kernel.getConfig(), snapshotHeight, kernel.getLaneL1Store());
+            ChainL1SnapshotGate.checkAndImport(kernel.getConfig(), snapshotHeight, kernel.getChainL1Store());
 
             this.xdagStats = new XdagStats();
             this.xdagTopStatus = new XdagTopStatus();
@@ -232,17 +232,17 @@ public class BlockchainImpl implements Blockchain {
             randomx.setBlockchain(this);
         }
 
-        // Lane contracts (SP0a): install the hooks before the check-main loop can confirm anything.
-        // kernel.getLaneKindHandlers() is THE registration point for the SP2/SP3 per-kind semantics:
+        // Chain contracts (SP0a): install the hooks before the check-main loop can confirm anything.
+        // kernel.getChainKindHandlers() is THE registration point for the SP2/SP3 per-kind semantics:
         // it is read exactly here, once, before any hook can run (the processor rejects a handler
         // registered after its first hook), so a handler must be in the kernel's map before
         // new BlockchainImpl(kernel).
-        LaneL1Store laneStore = kernel.getLaneL1Store();
-        if (laneStore != null) {
-            LaneL1Processor processor = new LaneL1Processor(laneStore, kernel.getConfig().getLaneSpec(),
+        ChainL1Store chainStore = kernel.getChainL1Store();
+        if (chainStore != null) {
+            ChainL1Processor processor = new ChainL1Processor(chainStore, kernel.getConfig().getChainSpec(),
                     hash -> getBlockByHash(hash, true));
-            kernel.getLaneKindHandlers().forEach(processor::registerHandler);
-            this.laneHooks = processor;
+            kernel.getChainKindHandlers().forEach(processor::registerHandler);
+            this.chainHooks = processor;
         }
 
         // Start main chain checking
@@ -1070,7 +1070,7 @@ public class BlockchainImpl implements Blockchain {
         List<Address> links = block.getLinks();
         if (links == null || links.isEmpty()) {
             updateBlockFlag(block, BI_APPLIED, true);
-            laneHooks.onBlockApplied(block);
+            chainHooks.onBlockApplied(block);
             return XAmount.ZERO;
         }
 
@@ -1188,7 +1188,7 @@ public class BlockchainImpl implements Blockchain {
 
 
         updateBlockFlag(block, BI_APPLIED, true);
-        laneHooks.onBlockApplied(block);
+        chainHooks.onBlockApplied(block);
 
 //        XAmount totalFee = gasCollected.add(blockGas);
 //        block.getInfo().setFee(totalFee);
@@ -1250,9 +1250,9 @@ public class BlockchainImpl implements Blockchain {
             }
 
             // Unapply visits blocks in the exact reverse of the apply DFS order (this block first,
-            // then its links in reversed order), which the lane processor's per-(lane,height) index
+            // then its links in reversed order), which the chain processor's per-(chain,height) index
             // bookkeeping relies on.
-            laneHooks.onBlockUnapplied(block);
+            chainHooks.onBlockUnapplied(block);
             updateBlockFlag(block, BI_APPLIED, false);
         } else {
             //When rolling back, the unaccepted transactions in the main block need to be processed, which is the number of confirmed transactions sent corresponding to their account addresses, nonce, needs to be reduced by one
@@ -1316,7 +1316,7 @@ public class BlockchainImpl implements Blockchain {
             XAmount reward = getReward(mainNumber);
             block.getInfo().setHeight(mainNumber);
             updateBlockFlag(block, BI_MAIN, true);
-            laneHooks.onSetMainBegin(mainNumber, block);
+            chainHooks.onSetMainBegin(mainNumber, block);
 
             try {
                 // Accept reward
@@ -1342,7 +1342,7 @@ public class BlockchainImpl implements Blockchain {
             } finally {
                 // Closes the apply context on every exit: the early return above, a normal finish,
                 // and a throw out of the applyBlock DFS.
-                laneHooks.onSetMainEnd(mainNumber, block);
+                chainHooks.onSetMainEnd(mainNumber, block);
             }
         }
 
@@ -1358,7 +1358,7 @@ public class BlockchainImpl implements Blockchain {
 
             log.debug("UnSet main,{}, mainnumber = {}", block.getHash().toHexString(), xdagStats.nmain);
             // Height is still the confirmed height here; it is zeroed at the end of this method.
-            laneHooks.onUnsetMain(block.getInfo().getHeight(), block);
+            chainHooks.onUnsetMain(block.getInfo().getHeight(), block);
 
             XAmount reward = getReward(block.getInfo().getHeight());
             updateBlockFlag(block, BI_MAIN, false);

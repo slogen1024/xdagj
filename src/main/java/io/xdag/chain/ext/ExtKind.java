@@ -22,36 +22,31 @@
  * THE SOFTWARE.
  */
 
-package io.xdag.db.rocksdb;
+package io.xdag.chain.ext;
 
-public enum DatabaseName {
+/**
+ * Kinds of extension blocks. The code is stored in byte 0 of the extension header field.
+ */
+public enum ExtKind {
+    CALL(1), DEPLOY(2), CHUNK(3), ANCHOR(4), BOND(5), CHALLENGE(6), CLAIM(7);
 
-    /**
-     * Block index.
-     */
-    INDEX,
+    private final byte code;
 
-    /**
-     * Block raw data.
-     */
-    BLOCK,
+    ExtKind(int code) {
+        this.code = (byte) code;
+    }
 
-    /**
-     * Time related block.
-     */
-    TIME,
+    public byte code() {
+        return code;
+    }
 
-    /**
-     * Orphan block index
-     */
-    ORPHANIND,
-
-    SNAPSHOT,
-
-    ADDRESS,
-
-    TXHISTORY,
-
-    /** Chain contracts: global L1 state (registry, code store, input index, bonds, anchors). */
-    CHAIN_L1
+    /** Returns the kind for a code, or null when the code is not assigned. */
+    public static ExtKind fromCode(int code) {
+        for (ExtKind k : values()) {
+            if ((k.code & 0xff) == code) {
+                return k;
+            }
+        }
+        return null;
+    }
 }
