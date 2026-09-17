@@ -748,7 +748,7 @@ public class XdagCli extends Launcher {
             }
             bos.flush();
         } catch(IOException e) {
-            e.printStackTrace();
+            throw new IllegalStateException("snapshot copy failed: " + sourcePath + " -> " + newPath, e);
         }
     }
 }

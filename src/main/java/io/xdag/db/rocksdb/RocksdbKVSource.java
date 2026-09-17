@@ -163,6 +163,7 @@ public class RocksdbKVSource implements KVSource<byte[], byte[]> {
                         db = RocksDB.open(options, dbPath.toString());
                     } catch (RocksDBException e) {
                         log.error(e.getMessage(), e);
+                        releaseReadOpts();
                         throw new RuntimeException("Failed to initialize database", e);
                     }
 
@@ -170,6 +171,7 @@ public class RocksdbKVSource implements KVSource<byte[], byte[]> {
 
                 } catch (IOException ioe) {
                     log.error(ioe.getMessage(), ioe);
+                    releaseReadOpts();
                     throw new RuntimeException("Failed to initialize database", ioe);
                 }
 
@@ -177,6 +179,17 @@ public class RocksdbKVSource implements KVSource<byte[], byte[]> {
             }
         } finally {
             resetDbLock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Releases the {@link ReadOptions} a failed {@link #init()} already built: {@code alive} is still
+     * false on that path, so {@link #close()} early-returns and would never free the native handle.
+     */
+    private void releaseReadOpts() {
+        if (readOpts != null) {
+            readOpts.close();
+            readOpts = null;
         }
     }
 
