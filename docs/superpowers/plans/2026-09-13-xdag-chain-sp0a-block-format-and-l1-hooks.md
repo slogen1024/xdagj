@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 让 xdagj 能识别、承载、索引通道合约的七类扩展块（字段码 0x0F），并在主块确认时按激活高度把 DEPLOY/CALL 登记进 `LANE_L1`，作为 SP1 执行引擎的确定性输入流与代码库；全程不改变任何 L1 区块有效性规则。
+**Goal:** 让 xdagj 能识别、承载、索引链合约的七类扩展块（字段码 0x0F），并在主块确认时按激活高度把 DEPLOY/CALL 登记进 `CHAIN_L1`，作为 SP1 执行引擎的确定性输入流与代码库；全程不改变任何 L1 区块有效性规则。
 
-**Architecture:** 三条原则贯穿所有任务：(P1) `tryToConnect` 零改动，EXT 不影响 L1 有效性；(P2) 通道语义只在 `setMain`/`applyBlock` 中按主块高度激活；(P3) 每个写有成对反写，`apply → unwind → apply` 与直接 `apply` 逐字节相等。新代码集中在新包 `io.xdag.lane`（`ext` 子包 = 纯函数编解码与分类，`l1` 子包 = 存储与钩子），对既有代码的改动限于 `Block`/`XdagField`（扩展字段）、`BlockchainImpl`（五处钩子 + 快照门）、`Kernel`（接线）、`KVSource`/`RocksdbKVSource`（`batchWrite`）、`DatabaseName`、配置类、`XdagCli`（快照导出）。
+**Architecture:** 三条原则贯穿所有任务：(P1) `tryToConnect` 零改动，EXT 不影响 L1 有效性；(P2) 链语义只在 `setMain`/`applyBlock` 中按主块高度激活；(P3) 每个写有成对反写，`apply → unwind → apply` 与直接 `apply` 逐字节相等。新代码集中在新包 `io.xdag.chain`（`ext` 子包 = 纯函数编解码与分类，`l1` 子包 = 存储与钩子），对既有代码的改动限于 `Block`/`XdagField`（扩展字段）、`BlockchainImpl`（五处钩子 + 快照门）、`Kernel`（接线）、`KVSource`/`RocksdbKVSource`（`batchWrite`）、`DatabaseName`、配置类、`XdagCli`（快照导出）。
 
 **Tech Stack:** Java 21、Maven 3.9.9 + toolchains、JUnit 4.13 + Mockito、RocksDB（`rocksdbjni`）、Tuweni `Bytes`/`Bytes32`、`io.xdag.crypto`（`HashUtils.sha256(Bytes) -> Bytes32`、`ECKeyPair`）。
 
-**规格：** `docs/superpowers/specs/2026-09-13-xdag-lane-sp0a-block-format-and-l1-hooks-design.md`（下称 SP0a 规格）；总规格 `docs/superpowers/specs/2026-09-13-xdag-lane-contracts-design.md`。
+**规格：** `docs/superpowers/specs/2026-09-13-xdag-chain-sp0a-block-format-and-l1-hooks-design.md`（下称 SP0a 规格）；总规格 `docs/superpowers/specs/2026-09-13-xdag-chain-contracts-design.md`。
 
 ---
 
@@ -27,7 +27,7 @@ export PATH="$JAVA_HOME/bin:$HOME/tools/apache-maven-3.9.9/bin:$PATH"
 跑单个测试类（`-Dsurefire.failIfNoSpecifiedTests=false` 避免多模块告警；首次跑前 `mvn -q compile` 以确认主代码可编译）：
 
 ```bash
-mvn -q -Dtest=io.xdag.lane.ext.ChunkExtTest -Dsurefire.failIfNoSpecifiedTests=false test
+mvn -q -Dtest=io.xdag.chain.ext.ChunkExtTest -Dsurefire.failIfNoSpecifiedTests=false test
 ```
 
 期望输出末尾：`Tests run: N, Failures: 0, Errors: 0, Skipped: 0`（`-q` 下只在失败时打印详细日志；成功时命令退出码 0）。失败时去掉 `-q` 看完整输出。
@@ -88,7 +88,7 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6
 
 1. 测试里的伪主块（`BlockBuilder.generateExtraBlock`）和 CHUNK 块的难度都来自原始哈希（`calculateCurrentBlockDiff` 对无 INPUT 的块用 `getDiffByRawHash`），量级相同。Task 14 的测试基座用 nonce 循环把伪主块难度挖到 `[2^46, 2^47)` 区间，并在每次导入后断言链顶仍是预期主块。主网 PoW 难度高出几十个数量级，不受影响。
 2. `Block.getHash()` 首次调用会缓存 `xdagBlock`；**先取哈希再签名会得到错误哈希**。构造器/测试统一在 `signOut` 之后用 `new Block(new XdagBlock(b.toBytes()))` 重新解析得到干净对象。
-3. `src/test/resources/xdag-devnet.conf` 是主配置的影子副本，Typesafe Config 按 key 合并且测试副本优先。本计划**不**往任何 conf 里加 `lane.*` 键（用代码默认值），避免两份文件不同步。
+3. `src/test/resources/xdag-devnet.conf` 是主配置的影子副本，Typesafe Config 按 key 合并且测试副本优先。本计划**不**往任何 conf 里加 `chain.*` 键（用代码默认值），避免两份文件不同步。
 4. 所有用 `DevnetConfig` 的测试类共享 CWD 相对的 `devnet/wallet/wallet.data`；`@After` 里删除钱包（照抄 `BlockchainTest.tearDown`）。
 
 ---
@@ -101,17 +101,17 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6
 |------|------|
 | `src/main/java/io/xdag/core/XdagField.java` | `XDAG_FIELD_RESERVE6` → `XDAG_FIELD_EXT` |
 | `src/main/java/io/xdag/core/Block.java` | `extFields`；11 参构造器；`parse()`/`getEncodedBody()`；`getBlockLinks()` |
-| `src/main/java/io/xdag/db/rocksdb/DatabaseName.java` | 新增 `LANE_L1` |
+| `src/main/java/io/xdag/db/rocksdb/DatabaseName.java` | 新增 `CHAIN_L1` |
 | `src/main/java/io/xdag/db/rocksdb/KVSource.java` | `batchWrite` 默认方法 |
 | `src/main/java/io/xdag/db/rocksdb/RocksdbKVSource.java` | `batchWrite` 用 `WriteBatch` 覆盖 |
-| `src/main/java/io/xdag/config/Config.java` | `getLaneSpec()` |
-| `src/main/java/io/xdag/config/AbstractConfig.java` | 实现 `LaneSpec`；conf 键读取 |
+| `src/main/java/io/xdag/config/Config.java` | `getChainSpec()` |
+| `src/main/java/io/xdag/config/AbstractConfig.java` | 实现 `ChainSpec`；conf 键读取 |
 | `src/main/java/io/xdag/config/{Devnet,Testnet,Mainnet}Config.java` | 激活高度默认值 |
-| `src/main/java/io/xdag/core/BlockchainImpl.java` | `laneHooks` 字段与五处调用；`initSnapshotJ` 末尾快照门 |
-| `src/main/java/io/xdag/Kernel.java` | `laneL1Store` 字段、构造与钩子接线 |
-| `src/main/java/io/xdag/cli/XdagCli.java` | `makeSnapshot` 末尾导出 `SNAPSHOT/LANE_L1` |
+| `src/main/java/io/xdag/core/BlockchainImpl.java` | `chainHooks` 字段与五处调用；`initSnapshotJ` 末尾快照门 |
+| `src/main/java/io/xdag/Kernel.java` | `chainL1Store` 字段、构造与钩子接线 |
+| `src/main/java/io/xdag/cli/XdagCli.java` | `makeSnapshot` 末尾导出 `SNAPSHOT/CHAIN_L1` |
 
-**新增（主代码，包 `io.xdag.lane`）**
+**新增（主代码，包 `io.xdag.chain`）**
 
 | 文件 | 职责 |
 |------|------|
@@ -119,19 +119,19 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6
 | `ext/ExtError.java` | 结构错误枚举 |
 | `ext/ExtResult.java` | 值/错误二选一的 record |
 | `ext/ExtCodec.java` | 小端读写、载荷字段拼接/切分 |
-| `ext/ChunkExt.java`、`ext/CallExt.java`、`ext/LaneConfigExt.java`、`ext/DeployExt.java`、`ext/AnchorExt.java`、`ext/BondExt.java`、`ext/ChallengeExt.java`、`ext/ClaimExt.java` | 各 kind 的 record + `decode`/`encode` |
-| `ext/Classified.java`、`ext/LaneBlockClassifier.java` | Block → kind/record/error |
+| `ext/ChunkExt.java`、`ext/CallExt.java`、`ext/ChainConfigExt.java`、`ext/DeployExt.java`、`ext/AnchorExt.java`、`ext/BondExt.java`、`ext/ChallengeExt.java`、`ext/ClaimExt.java` | 各 kind 的 record + `decode`/`encode` |
+| `ext/Classified.java`、`ext/ChainBlockClassifier.java` | Block → kind/record/error |
 | `ext/ChunkChain.java`、`ext/ChunkChainBuilder.java` | 分片链装配/计数/构造 |
-| `ext/LaneBlockBuilder.java` | 构造 CALL/DEPLOY 块（含分片链） |
-| `l1/InputStatus.java`、`l1/LaneRecord.java`、`l1/ContractRecord.java`、`l1/InputRecord.java`、`l1/InputRef.java` | 存储记录 |
-| `l1/LaneL1Keys.java`、`l1/LaneL1Batch.java`、`l1/LaneL1Store.java` | `LANE_L1` 键布局、批量写、存储 API、快照导出/导入/哈希 |
-| `l1/LaneIds.java` | laneId / contractId 派生，地址工具 |
-| `l1/LaneL1Hooks.java`、`l1/LaneKindHandler.java`、`l1/ApplyContext.java`、`l1/LaneL1Processor.java` | 钩子接口与处理器 |
-| `l1/LaneL1SnapshotGate.java` | 快照启动时的 `LANE_L1` 门控 |
-| `LaneActivation.java` | 激活判定 |
-| `config/spec/LaneSpec.java`（包 `io.xdag.config.spec`） | 配置接口 |
+| `ext/ChainBlockBuilder.java` | 构造 CALL/DEPLOY 块（含分片链） |
+| `l1/InputStatus.java`、`l1/ChainRecord.java`、`l1/ContractRecord.java`、`l1/InputRecord.java`、`l1/InputRef.java` | 存储记录 |
+| `l1/ChainL1Keys.java`、`l1/ChainL1Batch.java`、`l1/ChainL1Store.java` | `CHAIN_L1` 键布局、批量写、存储 API、快照导出/导入/哈希 |
+| `l1/ChainIds.java` | chainId / contractId 派生，地址工具 |
+| `l1/ChainL1Hooks.java`、`l1/ChainKindHandler.java`、`l1/ApplyContext.java`、`l1/ChainL1Processor.java` | 钩子接口与处理器 |
+| `l1/ChainL1SnapshotGate.java` | 快照启动时的 `CHAIN_L1` 门控 |
+| `ChainActivation.java` | 激活判定 |
+| `config/spec/ChainSpec.java`（包 `io.xdag.config.spec`） | 配置接口 |
 
-**新增（测试，镜像目录 `src/test/java/io/xdag/...`）**：`core/BlockExtFieldTest`、`lane/ext/{ExtCodecTest, ChunkExtTest, CallExtTest, DeployExtTest, SystemExtTest, LaneBlockClassifierTest, ChunkChainTest, LaneBlockBuilderTest}`、`lane/InMemoryKVSource`、`db/rocksdb/BatchWriteTest`、`lane/l1/{LaneL1StoreTest, LaneL1ProcessorTest, LaneL1TestBase, LaneL1HooksIntegrationTest, LaneL1UnwindTest, LaneActivationGateTest, LaneL1SnapshotTest}`、`config/LaneSpecTest`。
+**新增（测试，镜像目录 `src/test/java/io/xdag/...`）**：`core/BlockExtFieldTest`、`chain/ext/{ExtCodecTest, ChunkExtTest, CallExtTest, DeployExtTest, SystemExtTest, ChainBlockClassifierTest, ChunkChainTest, ChainBlockBuilderTest}`、`chain/InMemoryKVSource`、`db/rocksdb/BatchWriteTest`、`chain/l1/{ChainL1StoreTest, ChainL1ProcessorTest, ChainL1TestBase, ChainL1HooksIntegrationTest, ChainL1UnwindTest, ChainActivationGateTest, ChainL1SnapshotTest}`、`config/ChainSpecTest`。
 
 ---
 
@@ -374,16 +374,16 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 ### Task 2: `ExtKind` / `ExtError` / `ExtResult` / `ExtCodec`
 
 **Files:**
-- Create: `src/main/java/io/xdag/lane/ext/ExtKind.java`
-- Create: `src/main/java/io/xdag/lane/ext/ExtError.java`
-- Create: `src/main/java/io/xdag/lane/ext/ExtResult.java`
-- Create: `src/main/java/io/xdag/lane/ext/ExtCodec.java`
-- Test: `src/test/java/io/xdag/lane/ext/ExtCodecTest.java`
+- Create: `src/main/java/io/xdag/chain/ext/ExtKind.java`
+- Create: `src/main/java/io/xdag/chain/ext/ExtError.java`
+- Create: `src/main/java/io/xdag/chain/ext/ExtResult.java`
+- Create: `src/main/java/io/xdag/chain/ext/ExtCodec.java`
+- Test: `src/test/java/io/xdag/chain/ext/ExtCodecTest.java`
 
 - [ ] **Step 1: 写失败测试**
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -459,15 +459,15 @@ public class ExtCodecTest {
 
 - [ ] **Step 2: 运行，确认失败**
 
-Run: `mvn -q -Dtest=io.xdag.lane.ext.ExtCodecTest -Dsurefire.failIfNoSpecifiedTests=false test`
-Expected: 编译错误 `package io.xdag.lane.ext does not exist`。
+Run: `mvn -q -Dtest=io.xdag.chain.ext.ExtCodecTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Expected: 编译错误 `package io.xdag.chain.ext does not exist`。
 
 - [ ] **Step 3: 实现四个类**
 
-`src/main/java/io/xdag/lane/ext/ExtKind.java`：
+`src/main/java/io/xdag/chain/ext/ExtKind.java`：
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 /**
  * Kinds of extension blocks. The code is stored in byte 0 of the extension header field.
@@ -497,10 +497,10 @@ public enum ExtKind {
 }
 ```
 
-`src/main/java/io/xdag/lane/ext/ExtError.java`：
+`src/main/java/io/xdag/chain/ext/ExtError.java`：
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 /** Structural errors of extension blocks and chunk chains. Decoding never throws; it reports one of these. */
 public enum ExtError {
@@ -524,10 +524,10 @@ public enum ExtError {
 }
 ```
 
-`src/main/java/io/xdag/lane/ext/ExtResult.java`：
+`src/main/java/io/xdag/chain/ext/ExtResult.java`：
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 /** Either a decoded value or an {@link ExtError}. */
 public record ExtResult<T>(T value, ExtError error) {
@@ -546,10 +546,10 @@ public record ExtResult<T>(T value, ExtError error) {
 }
 ```
 
-`src/main/java/io/xdag/lane/ext/ExtCodec.java`：
+`src/main/java/io/xdag/chain/ext/ExtCodec.java`：
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -645,14 +645,14 @@ public final class ExtCodec {
 
 - [ ] **Step 4: 运行测试，确认通过**
 
-Run: `mvn -q -Dtest=io.xdag.lane.ext.ExtCodecTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.ext.ExtCodecTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `Tests run: 5, Failures: 0`
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/main/java/io/xdag/lane/ext/ExtKind.java src/main/java/io/xdag/lane/ext/ExtError.java src/main/java/io/xdag/lane/ext/ExtResult.java src/main/java/io/xdag/lane/ext/ExtCodec.java src/test/java/io/xdag/lane/ext/ExtCodecTest.java
-git commit -m "Add extension kind, error and codec primitives for lane blocks
+git add src/main/java/io/xdag/chain/ext/ExtKind.java src/main/java/io/xdag/chain/ext/ExtError.java src/main/java/io/xdag/chain/ext/ExtResult.java src/main/java/io/xdag/chain/ext/ExtCodec.java src/test/java/io/xdag/chain/ext/ExtCodecTest.java
+git commit -m "Add extension kind, error and codec primitives for chain blocks
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
@@ -663,13 +663,13 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 ### Task 3: `ChunkExt` 编解码
 
 **Files:**
-- Create: `src/main/java/io/xdag/lane/ext/ChunkExt.java`
-- Test: `src/test/java/io/xdag/lane/ext/ChunkExtTest.java`
+- Create: `src/main/java/io/xdag/chain/ext/ChunkExt.java`
+- Test: `src/test/java/io/xdag/chain/ext/ChunkExtTest.java`
 
 - [ ] **Step 1: 写失败测试**
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUT;
 import static org.junit.Assert.assertEquals;
@@ -758,15 +758,15 @@ public class ChunkExtTest {
 
 - [ ] **Step 2: 运行，确认失败**
 
-Run: `mvn -q -Dtest=io.xdag.lane.ext.ChunkExtTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.ext.ChunkExtTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 编译错误 `cannot find symbol: class ChunkExt`。
 
 - [ ] **Step 3: 实现**
 
-`src/main/java/io/xdag/lane/ext/ChunkExt.java`：
+`src/main/java/io/xdag/chain/ext/ChunkExt.java`：
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 import io.xdag.core.Address;
 import java.util.List;
@@ -825,13 +825,13 @@ public record ChunkExt(long seq, long totalLen, int dataLen, Bytes32 next, Bytes
 
 - [ ] **Step 4: 运行测试，确认通过**
 
-Run: `mvn -q -Dtest=io.xdag.lane.ext.ChunkExtTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.ext.ChunkExtTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `Tests run: 4, Failures: 0`
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/main/java/io/xdag/lane/ext/ChunkExt.java src/test/java/io/xdag/lane/ext/ChunkExtTest.java
+git add src/main/java/io/xdag/chain/ext/ChunkExt.java src/test/java/io/xdag/chain/ext/ChunkExtTest.java
 git commit -m "Add CHUNK extension codec
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
@@ -843,16 +843,16 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 ### Task 4: `CallExt` 编解码
 
 **Files:**
-- Create: `src/main/java/io/xdag/lane/ext/CallExt.java`
-- Test: `src/test/java/io/xdag/lane/ext/CallExtTest.java`
+- Create: `src/main/java/io/xdag/chain/ext/CallExt.java`
+- Test: `src/test/java/io/xdag/chain/ext/CallExtTest.java`
 
 - [ ] **Step 1: 写失败测试**
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
-import static io.xdag.lane.ext.ChunkExtTest.hashLow;
-import static io.xdag.lane.ext.ChunkExtTest.link;
+import static io.xdag.chain.ext.ChunkExtTest.hashLow;
+import static io.xdag.chain.ext.ChunkExtTest.link;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -919,15 +919,15 @@ public class CallExtTest {
 
 - [ ] **Step 2: 运行，确认失败**
 
-Run: `mvn -q -Dtest=io.xdag.lane.ext.CallExtTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.ext.CallExtTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 编译错误 `cannot find symbol: class CallExt`。
 
 - [ ] **Step 3: 实现**
 
-`src/main/java/io/xdag/lane/ext/CallExt.java`：
+`src/main/java/io/xdag/chain/ext/CallExt.java`：
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 import io.xdag.core.Address;
 import java.util.Arrays;
@@ -1011,13 +1011,13 @@ public record CallExt(int flags, Bytes contract, int selector, long gasLimit, in
 
 - [ ] **Step 4: 运行测试，确认通过**
 
-Run: `mvn -q -Dtest=io.xdag.lane.ext.CallExtTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.ext.CallExtTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `Tests run: 4, Failures: 0`
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/main/java/io/xdag/lane/ext/CallExt.java src/test/java/io/xdag/lane/ext/CallExtTest.java
+git add src/main/java/io/xdag/chain/ext/CallExt.java src/test/java/io/xdag/chain/ext/CallExtTest.java
 git commit -m "Add CALL extension codec
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
@@ -1026,20 +1026,20 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 
 ---
 
-### Task 5: `LaneConfigExt` 与 `DeployExt` 编解码
+### Task 5: `ChainConfigExt` 与 `DeployExt` 编解码
 
 **Files:**
-- Create: `src/main/java/io/xdag/lane/ext/LaneConfigExt.java`
-- Create: `src/main/java/io/xdag/lane/ext/DeployExt.java`
-- Test: `src/test/java/io/xdag/lane/ext/DeployExtTest.java`
+- Create: `src/main/java/io/xdag/chain/ext/ChainConfigExt.java`
+- Create: `src/main/java/io/xdag/chain/ext/DeployExt.java`
+- Test: `src/test/java/io/xdag/chain/ext/DeployExtTest.java`
 
 - [ ] **Step 1: 写失败测试**
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
-import static io.xdag.lane.ext.ChunkExtTest.hashLow;
-import static io.xdag.lane.ext.ChunkExtTest.link;
+import static io.xdag.chain.ext.ChunkExtTest.hashLow;
+import static io.xdag.chain.ext.ChunkExtTest.link;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -1051,40 +1051,40 @@ import org.junit.Test;
 
 public class DeployExtTest {
 
-    private static final Bytes ZERO_LANE = Bytes.wrap(new byte[20]);
-    private static final Bytes LANE = Bytes.random(20);
+    private static final Bytes ZERO_CHAIN = Bytes.wrap(new byte[20]);
+    private static final Bytes CHAIN = Bytes.random(20);
     private static final Bytes32 CODE_HASH = Bytes32.random();
-    private static final LaneConfigExt CONFIG = new LaneConfigExt(5L, 32L, 10_000_000L);
+    private static final ChainConfigExt CONFIG = new ChainConfigExt(5L, 32L, 10_000_000L);
 
     @Test
-    public void laneConfigRoundTrip() {
-        ExtResult<LaneConfigExt> r = LaneConfigExt.decode(CONFIG.encode());
+    public void chainConfigRoundTrip() {
+        ExtResult<ChainConfigExt> r = ChainConfigExt.decode(CONFIG.encode());
         assertTrue(r.isOk());
         assertEquals(CONFIG, r.value());
         byte[] dirty = CONFIG.encode().toArray();
         dirty[20] = 1;
-        assertEquals(ExtError.RESERVED_NONZERO, LaneConfigExt.decode(Bytes32.wrap(dirty)).error());
+        assertEquals(ExtError.RESERVED_NONZERO, ChainConfigExt.decode(Bytes32.wrap(dirty)).error());
     }
 
     @Test
-    public void newLaneWithCodeChainAndInlineArgs() {
+    public void newChainWithCodeChainAndInlineArgs() {
         Bytes32 codeHead = hashLow(11);
         Bytes args = Bytes.random(50);
-        DeployExt d = new DeployExt(DeployExt.FLAG_NEW_LANE | DeployExt.FLAG_CODE_CHAIN, ZERO_LANE, 1_000_000L, 50,
+        DeployExt d = new DeployExt(DeployExt.FLAG_NEW_CHAIN | DeployExt.FLAG_CODE_CHAIN, ZERO_CHAIN, 1_000_000L, 50,
                 CODE_HASH, CONFIG, args, codeHead, null);
         ExtResult<DeployExt> r = DeployExt.decode(d.encodeHeader(), d.encodePayload(), List.of(link(codeHead)));
         assertTrue(String.valueOf(r.error()), r.isOk());
         assertEquals(d, r.value());
-        assertTrue(r.value().newLane());
+        assertTrue(r.value().newChain());
         assertTrue(r.value().codeByChain());
         // payload = codeHash + config + 2 args fields
         assertEquals(4, d.encodePayload().size());
     }
 
     @Test
-    public void intoLaneWithKnownCodeAndChainedArgs() {
+    public void intoChainWithKnownCodeAndChainedArgs() {
         Bytes32 argsHead = hashLow(12);
-        DeployExt d = new DeployExt(DeployExt.FLAG_ARGS_CHAIN, LANE, 1L, 0, CODE_HASH, null, Bytes.EMPTY, null, argsHead);
+        DeployExt d = new DeployExt(DeployExt.FLAG_ARGS_CHAIN, CHAIN, 1L, 0, CODE_HASH, null, Bytes.EMPTY, null, argsHead);
         ExtResult<DeployExt> r = DeployExt.decode(d.encodeHeader(), d.encodePayload(), List.of(link(argsHead)));
         assertTrue(String.valueOf(r.error()), r.isOk());
         assertEquals(d, r.value());
@@ -1093,10 +1093,10 @@ public class DeployExtTest {
     }
 
     @Test
-    public void intoLaneWithBothChainsOrdersLinksCodeThenArgs() {
+    public void intoChainWithBothChainsOrdersLinksCodeThenArgs() {
         Bytes32 codeHead = hashLow(13);
         Bytes32 argsHead = hashLow(14);
-        DeployExt d = new DeployExt(DeployExt.FLAG_CODE_CHAIN | DeployExt.FLAG_ARGS_CHAIN, LANE, 1L, 0, CODE_HASH,
+        DeployExt d = new DeployExt(DeployExt.FLAG_CODE_CHAIN | DeployExt.FLAG_ARGS_CHAIN, CHAIN, 1L, 0, CODE_HASH,
                 null, Bytes.EMPTY, codeHead, argsHead);
         ExtResult<DeployExt> r = DeployExt.decode(d.encodeHeader(), d.encodePayload(),
                 List.of(link(codeHead), link(argsHead)));
@@ -1111,18 +1111,18 @@ public class DeployExtTest {
 
     @Test
     public void rejectsBadShapes() {
-        DeployExt nonZeroLane = new DeployExt(DeployExt.FLAG_NEW_LANE, LANE, 1L, 0, CODE_HASH, CONFIG, Bytes.EMPTY, null, null);
+        DeployExt nonZeroChain = new DeployExt(DeployExt.FLAG_NEW_CHAIN, CHAIN, 1L, 0, CODE_HASH, CONFIG, Bytes.EMPTY, null, null);
         assertEquals(ExtError.RESERVED_NONZERO,
-                DeployExt.decode(nonZeroLane.encodeHeader(), nonZeroLane.encodePayload(), List.of()).error());
+                DeployExt.decode(nonZeroChain.encodeHeader(), nonZeroChain.encodePayload(), List.of()).error());
 
-        DeployExt ok = new DeployExt(0, LANE, 1L, 0, CODE_HASH, null, Bytes.EMPTY, null, null);
+        DeployExt ok = new DeployExt(0, CHAIN, 1L, 0, CODE_HASH, null, Bytes.EMPTY, null, null);
         assertEquals(ExtError.BAD_LENGTH, DeployExt.decode(ok.encodeHeader(), List.of(), List.of()).error());
 
-        DeployExt missingConfig = new DeployExt(DeployExt.FLAG_NEW_LANE, ZERO_LANE, 1L, 0, CODE_HASH, CONFIG, Bytes.EMPTY, null, null);
+        DeployExt missingConfig = new DeployExt(DeployExt.FLAG_NEW_CHAIN, ZERO_CHAIN, 1L, 0, CODE_HASH, CONFIG, Bytes.EMPTY, null, null);
         assertEquals(ExtError.BAD_LENGTH,
                 DeployExt.decode(missingConfig.encodeHeader(), List.of(CODE_HASH), List.of()).error());
 
-        DeployExt badFlags = new DeployExt(0x08, LANE, 1L, 0, CODE_HASH, null, Bytes.EMPTY, null, null);
+        DeployExt badFlags = new DeployExt(0x08, CHAIN, 1L, 0, CODE_HASH, null, Bytes.EMPTY, null, null);
         assertEquals(ExtError.RESERVED_NONZERO,
                 DeployExt.decode(badFlags.encodeHeader(), badFlags.encodePayload(), List.of()).error());
     }
@@ -1131,27 +1131,27 @@ public class DeployExtTest {
 
 - [ ] **Step 2: 运行，确认失败**
 
-Run: `mvn -q -Dtest=io.xdag.lane.ext.DeployExtTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.ext.DeployExtTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 编译错误 `cannot find symbol: class DeployExt`。
 
 - [ ] **Step 3: 实现**
 
-`src/main/java/io/xdag/lane/ext/LaneConfigExt.java`：
+`src/main/java/io/xdag/chain/ext/ChainConfigExt.java`：
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 import org.apache.tuweni.bytes.Bytes32;
 
-/** Lane configuration carried by a new-lane DEPLOY: gasPrice u64 (nano/gas) | deliveryDelayD u32 | maxCallGas u32 | 16 zero. */
-public record LaneConfigExt(long gasPriceNano, long deliveryDelayD, long maxCallGas) {
+/** Chain configuration carried by a new-chain DEPLOY: gasPrice u64 (nano/gas) | deliveryDelayD u32 | maxCallGas u32 | 16 zero. */
+public record ChainConfigExt(long gasPriceNano, long deliveryDelayD, long maxCallGas) {
 
-    public static ExtResult<LaneConfigExt> decode(Bytes32 field) {
+    public static ExtResult<ChainConfigExt> decode(Bytes32 field) {
         byte[] a = field.toArray();
         if (!ExtCodec.isZero(a, 16, 32)) {
             return ExtResult.fail(ExtError.RESERVED_NONZERO);
         }
-        return ExtResult.ok(new LaneConfigExt(ExtCodec.u64(a, 0), ExtCodec.u32(a, 8), ExtCodec.u32(a, 12)));
+        return ExtResult.ok(new ChainConfigExt(ExtCodec.u64(a, 0), ExtCodec.u32(a, 8), ExtCodec.u32(a, 12)));
     }
 
     public Bytes32 encode() {
@@ -1164,10 +1164,10 @@ public record LaneConfigExt(long gasPriceNano, long deliveryDelayD, long maxCall
 }
 ```
 
-`src/main/java/io/xdag/lane/ext/DeployExt.java`：
+`src/main/java/io/xdag/chain/ext/DeployExt.java`：
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 import io.xdag.core.Address;
 import java.util.ArrayList;
@@ -1177,20 +1177,20 @@ import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 
 /**
- * DEPLOY (kind 2). Header: b0 kind, b1 flags, b2..21 laneId (zero when creating a lane), b22..25 gasLimit u32,
- * b26..27 argsLen u16, b28..31 zero. Payload: [0] codeHash, [1] lane config (new lane only), then inline init args.
+ * DEPLOY (kind 2). Header: b0 kind, b1 flags, b2..21 chainId (zero when creating a chain), b22..25 gasLimit u32,
+ * b26..27 argsLen u16, b28..31 zero. Payload: [0] codeHash, [1] chain config (new chain only), then inline init args.
  * Links: code chain head (FLAG_CODE_CHAIN) first, then args chain head (FLAG_ARGS_CHAIN).
  */
-public record DeployExt(int flags, Bytes laneId, long gasLimit, int argsLen, Bytes32 codeHash, LaneConfigExt config,
+public record DeployExt(int flags, Bytes chainId, long gasLimit, int argsLen, Bytes32 codeHash, ChainConfigExt config,
                         Bytes inlineArgs, Bytes32 codeChainHead, Bytes32 argsChainHead) {
 
-    public static final int FLAG_NEW_LANE = 0x01;
+    public static final int FLAG_NEW_CHAIN = 0x01;
     public static final int FLAG_CODE_CHAIN = 0x02;
     public static final int FLAG_ARGS_CHAIN = 0x04;
-    private static final int FLAGS_MASK = FLAG_NEW_LANE | FLAG_CODE_CHAIN | FLAG_ARGS_CHAIN;
+    private static final int FLAGS_MASK = FLAG_NEW_CHAIN | FLAG_CODE_CHAIN | FLAG_ARGS_CHAIN;
 
-    public boolean newLane() {
-        return (flags & FLAG_NEW_LANE) != 0;
+    public boolean newChain() {
+        return (flags & FLAG_NEW_CHAIN) != 0;
     }
 
     public boolean codeByChain() {
@@ -1210,13 +1210,13 @@ public record DeployExt(int flags, Bytes laneId, long gasLimit, int argsLen, Byt
         if ((flags & ~FLAGS_MASK) != 0 || !ExtCodec.isZero(h, 28, 32)) {
             return ExtResult.fail(ExtError.RESERVED_NONZERO);
         }
-        boolean newLane = (flags & FLAG_NEW_LANE) != 0;
+        boolean newChain = (flags & FLAG_NEW_CHAIN) != 0;
         boolean codeChain = (flags & FLAG_CODE_CHAIN) != 0;
         boolean argsChain = (flags & FLAG_ARGS_CHAIN) != 0;
-        if (newLane && !ExtCodec.isZero(h, 2, 22)) {
+        if (newChain && !ExtCodec.isZero(h, 2, 22)) {
             return ExtResult.fail(ExtError.RESERVED_NONZERO);
         }
-        Bytes laneId = Bytes.wrap(Arrays.copyOfRange(h, 2, 22));
+        Bytes chainId = Bytes.wrap(Arrays.copyOfRange(h, 2, 22));
         long gasLimit = ExtCodec.u32(h, 22);
         int argsLen = ExtCodec.u16(h, 26);
 
@@ -1225,12 +1225,12 @@ public record DeployExt(int flags, Bytes laneId, long gasLimit, int argsLen, Byt
         }
         Bytes32 codeHash = payload.get(0);
         int idx = 1;
-        LaneConfigExt config = null;
-        if (newLane) {
+        ChainConfigExt config = null;
+        if (newChain) {
             if (payload.size() < 2) {
                 return ExtResult.fail(ExtError.BAD_LENGTH);
             }
-            ExtResult<LaneConfigExt> c = LaneConfigExt.decode(payload.get(1));
+            ExtResult<ChainConfigExt> c = ChainConfigExt.decode(payload.get(1));
             if (!c.isOk()) {
                 return ExtResult.fail(c.error());
             }
@@ -1265,14 +1265,14 @@ public record DeployExt(int flags, Bytes laneId, long gasLimit, int argsLen, Byt
         }
         Bytes32 codeHead = codeChain ? Bytes32.wrap(links.get(0).getAddress().toArray()) : null;
         Bytes32 argsHead = argsChain ? Bytes32.wrap(links.get(codeChain ? 1 : 0).getAddress().toArray()) : null;
-        return ExtResult.ok(new DeployExt(flags, laneId, gasLimit, argsLen, codeHash, config, inline, codeHead, argsHead));
+        return ExtResult.ok(new DeployExt(flags, chainId, gasLimit, argsLen, codeHash, config, inline, codeHead, argsHead));
     }
 
     public Bytes32 encodeHeader() {
         byte[] h = new byte[32];
         h[0] = ExtKind.DEPLOY.code();
         h[1] = (byte) flags;
-        System.arraycopy(laneId.toArray(), 0, h, 2, 20);
+        System.arraycopy(chainId.toArray(), 0, h, 2, 20);
         ExtCodec.putU32(h, 22, gasLimit);
         ExtCodec.putU16(h, 26, argsLen);
         return Bytes32.wrap(h);
@@ -1281,7 +1281,7 @@ public record DeployExt(int flags, Bytes laneId, long gasLimit, int argsLen, Byt
     public List<Bytes32> encodePayload() {
         List<Bytes32> out = new ArrayList<>();
         out.add(codeHash);
-        if (newLane()) {
+        if (newChain()) {
             out.add(config.encode());
         }
         if (!argsByChain()) {
@@ -1294,14 +1294,14 @@ public record DeployExt(int flags, Bytes laneId, long gasLimit, int argsLen, Byt
 
 - [ ] **Step 4: 运行测试，确认通过**
 
-Run: `mvn -q -Dtest=io.xdag.lane.ext.DeployExtTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.ext.DeployExtTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `Tests run: 5, Failures: 0`
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/main/java/io/xdag/lane/ext/LaneConfigExt.java src/main/java/io/xdag/lane/ext/DeployExt.java src/test/java/io/xdag/lane/ext/DeployExtTest.java
-git commit -m "Add DEPLOY extension codec with lane configuration
+git add src/main/java/io/xdag/chain/ext/ChainConfigExt.java src/main/java/io/xdag/chain/ext/DeployExt.java src/test/java/io/xdag/chain/ext/DeployExtTest.java
+git commit -m "Add DEPLOY extension codec with chain configuration
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
@@ -1312,19 +1312,19 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 ### Task 6: `AnchorExt` / `BondExt` / `ChallengeExt` / `ClaimExt` 编解码
 
 **Files:**
-- Create: `src/main/java/io/xdag/lane/ext/AnchorExt.java`
-- Create: `src/main/java/io/xdag/lane/ext/BondExt.java`
-- Create: `src/main/java/io/xdag/lane/ext/ChallengeExt.java`
-- Create: `src/main/java/io/xdag/lane/ext/ClaimExt.java`
-- Test: `src/test/java/io/xdag/lane/ext/SystemExtTest.java`
+- Create: `src/main/java/io/xdag/chain/ext/AnchorExt.java`
+- Create: `src/main/java/io/xdag/chain/ext/BondExt.java`
+- Create: `src/main/java/io/xdag/chain/ext/ChallengeExt.java`
+- Create: `src/main/java/io/xdag/chain/ext/ClaimExt.java`
+- Test: `src/test/java/io/xdag/chain/ext/SystemExtTest.java`
 
 - [ ] **Step 1: 写失败测试**
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
-import static io.xdag.lane.ext.ChunkExtTest.hashLow;
-import static io.xdag.lane.ext.ChunkExtTest.link;
+import static io.xdag.chain.ext.ChunkExtTest.hashLow;
+import static io.xdag.chain.ext.ChunkExtTest.link;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -1335,14 +1335,14 @@ import org.junit.Test;
 
 public class SystemExtTest {
 
-    private static final Bytes LANE = Bytes.random(20);
+    private static final Bytes CHAIN = Bytes.random(20);
 
     @Test
     public void anchorRoundTripAndLinkCount() {
         Bytes32 prev = hashLow(1);
         Bytes32 main = hashLow(2);
         Bytes32 commit = hashLow(3);
-        AnchorExt a = new AnchorExt(LANE, 120L, Bytes32.random(), Bytes32.random(), 100L, 42L, 2L, prev, main, commit);
+        AnchorExt a = new AnchorExt(CHAIN, 120L, Bytes32.random(), Bytes32.random(), 100L, 42L, 2L, prev, main, commit);
         ExtResult<AnchorExt> r = AnchorExt.decode(a.encodeHeader(), a.encodePayload(), List.of(link(prev), link(main), link(commit)));
         assertTrue(String.valueOf(r.error()), r.isOk());
         assertEquals(a, r.value());
@@ -1356,7 +1356,7 @@ public class SystemExtTest {
 
     @Test
     public void bondRoundTrip() {
-        BondExt bond = new BondExt(false, LANE, 0L);
+        BondExt bond = new BondExt(false, CHAIN, 0L);
         assertEquals(bond, BondExt.decode(bond.encodeHeader(), List.of(), List.of()).value());
         BondExt unbond = new BondExt(true, Bytes.wrap(new byte[20]), 5_000_000_000L);
         assertEquals(unbond, BondExt.decode(unbond.encodeHeader(), List.of(), List.of()).value());
@@ -1380,7 +1380,7 @@ public class SystemExtTest {
         Bytes32 anchor = hashLow(6);
         Bytes32 proof = hashLow(7);
         Bytes recipient = Bytes.random(20);
-        ClaimExt c = new ClaimExt(true, LANE, 99L, 3L, 1_000_000_000L, recipient, anchor, proof);
+        ClaimExt c = new ClaimExt(true, CHAIN, 99L, 3L, 1_000_000_000L, recipient, anchor, proof);
         ExtResult<ClaimExt> r = ClaimExt.decode(c.encodeHeader(), c.encodePayload(), List.of(link(anchor), link(proof)));
         assertTrue(String.valueOf(r.error()), r.isOk());
         assertEquals(c, r.value());
@@ -1392,15 +1392,15 @@ public class SystemExtTest {
 
 - [ ] **Step 2: 运行，确认失败**
 
-Run: `mvn -q -Dtest=io.xdag.lane.ext.SystemExtTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.ext.SystemExtTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 编译错误 `cannot find symbol: class AnchorExt`。
 
 - [ ] **Step 3: 实现四个 record**
 
-`src/main/java/io/xdag/lane/ext/AnchorExt.java`：
+`src/main/java/io/xdag/chain/ext/AnchorExt.java`：
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 import io.xdag.core.Address;
 import java.util.Arrays;
@@ -1409,11 +1409,11 @@ import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 
 /**
- * ANCHOR (kind 4). Header: b0 kind, b1 flags (must be 0 in v1), b2..21 laneId, b22..29 seq u64, b30..31 zero.
+ * ANCHOR (kind 4). Header: b0 kind, b1 flags (must be 0 in v1), b2..21 chainId, b22..29 seq u64, b30..31 zero.
  * Payload: [0] stateRoot, [1] outboxMapRoot, [2] prevSeq u64 | inputCount u32 | segmentCount u32 | 16 zero.
  * Links: [0] previous anchor, [1] main block at seq, [2] commitment chain head.
  */
-public record AnchorExt(Bytes laneId, long seq, Bytes32 stateRoot, Bytes32 outboxMapRoot, long prevSeq,
+public record AnchorExt(Bytes chainId, long seq, Bytes32 stateRoot, Bytes32 outboxMapRoot, long prevSeq,
                         long inputCount, long segmentCount, Bytes32 prevAnchor, Bytes32 mainBlock,
                         Bytes32 commitmentHead) {
 
@@ -1454,7 +1454,7 @@ public record AnchorExt(Bytes laneId, long seq, Bytes32 stateRoot, Bytes32 outbo
     public Bytes32 encodeHeader() {
         byte[] h = new byte[32];
         h[0] = ExtKind.ANCHOR.code();
-        System.arraycopy(laneId.toArray(), 0, h, 2, 20);
+        System.arraycopy(chainId.toArray(), 0, h, 2, 20);
         ExtCodec.putU64(h, 22, seq);
         return Bytes32.wrap(h);
     }
@@ -1469,10 +1469,10 @@ public record AnchorExt(Bytes laneId, long seq, Bytes32 stateRoot, Bytes32 outbo
 }
 ```
 
-`src/main/java/io/xdag/lane/ext/BondExt.java`：
+`src/main/java/io/xdag/chain/ext/BondExt.java`：
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 import io.xdag.core.Address;
 import java.util.Arrays;
@@ -1480,8 +1480,8 @@ import java.util.List;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 
-/** BOND (kind 5). Header: b0 kind, b1 flags (bit0 = unbond), b2..21 laneId (zero = global), b22..29 amount u64, b30..31 zero. */
-public record BondExt(boolean unbond, Bytes laneId, long amount) {
+/** BOND (kind 5). Header: b0 kind, b1 flags (bit0 = unbond), b2..21 chainId (zero = global), b22..29 amount u64, b30..31 zero. */
+public record BondExt(boolean unbond, Bytes chainId, long amount) {
 
     public static final int FLAG_UNBOND = 0x01;
 
@@ -1508,17 +1508,17 @@ public record BondExt(boolean unbond, Bytes laneId, long amount) {
         byte[] h = new byte[32];
         h[0] = ExtKind.BOND.code();
         h[1] = (byte) (unbond ? FLAG_UNBOND : 0);
-        System.arraycopy(laneId.toArray(), 0, h, 2, 20);
+        System.arraycopy(chainId.toArray(), 0, h, 2, 20);
         ExtCodec.putU64(h, 22, amount);
         return Bytes32.wrap(h);
     }
 }
 ```
 
-`src/main/java/io/xdag/lane/ext/ChallengeExt.java`：
+`src/main/java/io/xdag/chain/ext/ChallengeExt.java`：
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 import io.xdag.core.Address;
 import java.util.List;
@@ -1559,10 +1559,10 @@ public record ChallengeExt(long inputIndex, long deposit, Bytes32 anchor, Bytes3
 }
 ```
 
-`src/main/java/io/xdag/lane/ext/ClaimExt.java`：
+`src/main/java/io/xdag/chain/ext/ClaimExt.java`：
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 import io.xdag.core.Address;
 import java.util.Arrays;
@@ -1571,13 +1571,13 @@ import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 
 /**
- * CLAIM (kind 7). Header: b0 kind, b1 flags (bit0 = recipient is a lane vault), b2..21 srcLane, b22..29 seq u64,
+ * CLAIM (kind 7). Header: b0 kind, b1 flags (bit0 = recipient is a chain vault), b2..21 srcChain, b22..29 seq u64,
  * b30..31 zero. Payload: [0] index u64 | amount u64 | 16 zero; [1] recipient 20 | 12 zero. Links: [0] anchor, [1] proof chain head.
  */
-public record ClaimExt(boolean toLaneVault, Bytes srcLane, long seq, long index, long amount, Bytes recipient,
+public record ClaimExt(boolean toChainVault, Bytes srcChain, long seq, long index, long amount, Bytes recipient,
                        Bytes32 anchor, Bytes32 proofHead) {
 
-    public static final int FLAG_TO_LANE_VAULT = 0x01;
+    public static final int FLAG_TO_CHAIN_VAULT = 0x01;
 
     public static ExtResult<ClaimExt> decode(Bytes32 header, List<Bytes32> payload, List<Address> links) {
         byte[] h = header.toArray();
@@ -1585,7 +1585,7 @@ public record ClaimExt(boolean toLaneVault, Bytes srcLane, long seq, long index,
             return ExtResult.fail(ExtError.UNKNOWN_KIND);
         }
         int flags = ExtCodec.u8(h, 1);
-        if ((flags & ~FLAG_TO_LANE_VAULT) != 0 || !ExtCodec.isZero(h, 30, 32)) {
+        if ((flags & ~FLAG_TO_CHAIN_VAULT) != 0 || !ExtCodec.isZero(h, 30, 32)) {
             return ExtResult.fail(ExtError.RESERVED_NONZERO);
         }
         if (payload.size() != 2) {
@@ -1602,7 +1602,7 @@ public record ClaimExt(boolean toLaneVault, Bytes srcLane, long seq, long index,
         if (!ExtCodec.isZero(p0, 16, 32) || !ExtCodec.isZero(p1, 20, 32)) {
             return ExtResult.fail(ExtError.RESERVED_NONZERO);
         }
-        return ExtResult.ok(new ClaimExt((flags & FLAG_TO_LANE_VAULT) != 0,
+        return ExtResult.ok(new ClaimExt((flags & FLAG_TO_CHAIN_VAULT) != 0,
                 Bytes.wrap(Arrays.copyOfRange(h, 2, 22)), ExtCodec.u64(h, 22),
                 ExtCodec.u64(p0, 0), ExtCodec.u64(p0, 8), Bytes.wrap(Arrays.copyOfRange(p1, 0, 20)),
                 Bytes32.wrap(links.get(0).getAddress().toArray()),
@@ -1612,8 +1612,8 @@ public record ClaimExt(boolean toLaneVault, Bytes srcLane, long seq, long index,
     public Bytes32 encodeHeader() {
         byte[] h = new byte[32];
         h[0] = ExtKind.CLAIM.code();
-        h[1] = (byte) (toLaneVault ? FLAG_TO_LANE_VAULT : 0);
-        System.arraycopy(srcLane.toArray(), 0, h, 2, 20);
+        h[1] = (byte) (toChainVault ? FLAG_TO_CHAIN_VAULT : 0);
+        System.arraycopy(srcChain.toArray(), 0, h, 2, 20);
         ExtCodec.putU64(h, 22, seq);
         return Bytes32.wrap(h);
     }
@@ -1631,13 +1631,13 @@ public record ClaimExt(boolean toLaneVault, Bytes srcLane, long seq, long index,
 
 - [ ] **Step 4: 运行测试，确认通过**
 
-Run: `mvn -q -Dtest=io.xdag.lane.ext.SystemExtTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.ext.SystemExtTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `Tests run: 4, Failures: 0`
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/main/java/io/xdag/lane/ext/AnchorExt.java src/main/java/io/xdag/lane/ext/BondExt.java src/main/java/io/xdag/lane/ext/ChallengeExt.java src/main/java/io/xdag/lane/ext/ClaimExt.java src/test/java/io/xdag/lane/ext/SystemExtTest.java
+git add src/main/java/io/xdag/chain/ext/AnchorExt.java src/main/java/io/xdag/chain/ext/BondExt.java src/main/java/io/xdag/chain/ext/ChallengeExt.java src/main/java/io/xdag/chain/ext/ClaimExt.java src/test/java/io/xdag/chain/ext/SystemExtTest.java
 git commit -m "Add ANCHOR, BOND, CHALLENGE and CLAIM extension codecs
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
@@ -1646,20 +1646,20 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 
 ---
 
-### Task 7: `Classified` 与 `LaneBlockClassifier`
+### Task 7: `Classified` 与 `ChainBlockClassifier`
 
 **Files:**
-- Create: `src/main/java/io/xdag/lane/ext/Classified.java`
-- Create: `src/main/java/io/xdag/lane/ext/LaneBlockClassifier.java`
-- Test: `src/test/java/io/xdag/lane/ext/LaneBlockClassifierTest.java`
+- Create: `src/main/java/io/xdag/chain/ext/Classified.java`
+- Create: `src/main/java/io/xdag/chain/ext/ChainBlockClassifier.java`
+- Test: `src/test/java/io/xdag/chain/ext/ChainBlockClassifierTest.java`
 
 - [ ] **Step 1: 写失败测试**
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
-import static io.xdag.lane.ext.ChunkExtTest.hashLow;
-import static io.xdag.lane.ext.ChunkExtTest.link;
+import static io.xdag.chain.ext.ChunkExtTest.hashLow;
+import static io.xdag.chain.ext.ChunkExtTest.link;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
@@ -1678,7 +1678,7 @@ import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 import org.junit.Test;
 
-public class LaneBlockClassifierTest {
+public class ChainBlockClassifierTest {
 
     private final Config config = new DevnetConfig();
 
@@ -1692,7 +1692,7 @@ public class LaneBlockClassifierTest {
     @Test
     public void blockWithoutExtIsNone() {
         Block b = extBlock(config, List.of(), List.of());
-        Classified c = LaneBlockClassifier.classify(b);
+        Classified c = ChainBlockClassifier.classify(b);
         assertSame(Classified.NONE, c);
         assertNull(c.kind());
         assertEquals(ExtError.NO_EXT, c.error());
@@ -1704,7 +1704,7 @@ public class LaneBlockClassifierTest {
         List<Bytes32> ext = new ArrayList<>();
         ext.add(call.encodeHeader());
         ext.addAll(call.encodePayload());
-        Classified c = LaneBlockClassifier.classify(extBlock(config, ext, List.of()));
+        Classified c = ChainBlockClassifier.classify(extBlock(config, ext, List.of()));
         assertTrue(String.valueOf(c.error()), c.isOk());
         assertEquals(ExtKind.CALL, c.kind());
         assertEquals(call, c.as(CallExt.class));
@@ -1717,7 +1717,7 @@ public class LaneBlockClassifierTest {
         List<Bytes32> ext = new ArrayList<>();
         ext.add(chunk.encodeHeader());
         ext.addAll(chunk.encodePayload());
-        Classified c = LaneBlockClassifier.classify(extBlock(config, ext, List.of(link(next))));
+        Classified c = ChainBlockClassifier.classify(extBlock(config, ext, List.of(link(next))));
         assertTrue(c.isOk());
         assertEquals(ExtKind.CHUNK, c.kind());
         assertEquals(next, c.as(ChunkExt.class).next());
@@ -1727,12 +1727,12 @@ public class LaneBlockClassifierTest {
     public void unknownKindAndDecodeErrorsAreReported() {
         byte[] h = new byte[32];
         h[0] = 9;
-        Classified unknown = LaneBlockClassifier.classify(extBlock(config, List.of(Bytes32.wrap(h)), List.of()));
+        Classified unknown = ChainBlockClassifier.classify(extBlock(config, List.of(Bytes32.wrap(h)), List.of()));
         assertEquals(ExtError.UNKNOWN_KIND, unknown.error());
         assertNull(unknown.kind());
 
         CallExt chained = new CallExt(CallExt.FLAG_ARGS_CHAIN, Bytes.random(20), 1, 1, 0, Bytes.EMPTY, hashLow(1));
-        Classified missing = LaneBlockClassifier.classify(extBlock(config, List.of(chained.encodeHeader()), List.of()));
+        Classified missing = ChainBlockClassifier.classify(extBlock(config, List.of(chained.encodeHeader()), List.of()));
         assertEquals(ExtKind.CALL, missing.kind());
         assertEquals(ExtError.MISSING_LINK, missing.error());
         assertNull(missing.value());
@@ -1742,15 +1742,15 @@ public class LaneBlockClassifierTest {
 
 - [ ] **Step 2: 运行，确认失败**
 
-Run: `mvn -q -Dtest=io.xdag.lane.ext.LaneBlockClassifierTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.ext.ChainBlockClassifierTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 编译错误 `cannot find symbol: class Classified`。
 
 - [ ] **Step 3: 实现**
 
-`src/main/java/io/xdag/lane/ext/Classified.java`：
+`src/main/java/io/xdag/chain/ext/Classified.java`：
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 /** Result of classifying a block: its extension kind, the decoded record (one of the *Ext records) and a structural error. */
 public record Classified(ExtKind kind, Object value, ExtError error) {
@@ -1767,10 +1767,10 @@ public record Classified(ExtKind kind, Object value, ExtError error) {
 }
 ```
 
-`src/main/java/io/xdag/lane/ext/LaneBlockClassifier.java`：
+`src/main/java/io/xdag/chain/ext/ChainBlockClassifier.java`：
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 import io.xdag.core.Address;
 import io.xdag.core.Block;
@@ -1779,9 +1779,9 @@ import java.util.List;
 import org.apache.tuweni.bytes.Bytes32;
 
 /** Pure function Block -> Classified. Never touches storage, never throws. */
-public final class LaneBlockClassifier {
+public final class ChainBlockClassifier {
 
-    private LaneBlockClassifier() {
+    private ChainBlockClassifier() {
     }
 
     public static Classified classify(Block block) {
@@ -1815,14 +1815,14 @@ public final class LaneBlockClassifier {
 
 - [ ] **Step 4: 运行测试，确认通过**
 
-Run: `mvn -q -Dtest=io.xdag.lane.ext.LaneBlockClassifierTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.ext.ChainBlockClassifierTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `Tests run: 4, Failures: 0`
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/main/java/io/xdag/lane/ext/Classified.java src/main/java/io/xdag/lane/ext/LaneBlockClassifier.java src/test/java/io/xdag/lane/ext/LaneBlockClassifierTest.java
-git commit -m "Add lane block classifier
+git add src/main/java/io/xdag/chain/ext/Classified.java src/main/java/io/xdag/chain/ext/ChainBlockClassifier.java src/test/java/io/xdag/chain/ext/ChainBlockClassifierTest.java
+git commit -m "Add chain block classifier
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
@@ -1833,14 +1833,14 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 ### Task 8: `ChunkChain` 装配与 `ChunkChainBuilder`
 
 **Files:**
-- Create: `src/main/java/io/xdag/lane/ext/ChunkChain.java`
-- Create: `src/main/java/io/xdag/lane/ext/ChunkChainBuilder.java`
-- Test: `src/test/java/io/xdag/lane/ext/ChunkChainTest.java`
+- Create: `src/main/java/io/xdag/chain/ext/ChunkChain.java`
+- Create: `src/main/java/io/xdag/chain/ext/ChunkChainBuilder.java`
+- Test: `src/test/java/io/xdag/chain/ext/ChunkChainTest.java`
 
 - [ ] **Step 1: 写失败测试**
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUT;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_SIGN_OUT;
@@ -1917,7 +1917,7 @@ public class ChunkChainTest {
         for (int i = 0; i < chunks.size(); i++) {
             Block b = chunks.get(i);
             assertEquals(TS - i, b.getTimestamp());
-            ChunkExt c = LaneBlockClassifier.classify(b).as(ChunkExt.class);
+            ChunkExt c = ChainBlockClassifier.classify(b).as(ChunkExt.class);
             assertEquals(i, c.seq());
             assertEquals(1000, c.totalLen());
             assertNotNull(b.getOutsig()); // zero signature parsed as the (1,1) pseudo signature
@@ -1929,7 +1929,7 @@ public class ChunkChainTest {
             }
             assertEquals(2, fields);
         }
-        assertNull(LaneBlockClassifier.classify(chunks.get(chunks.size() - 1)).as(ChunkExt.class).next());
+        assertNull(ChainBlockClassifier.classify(chunks.get(chunks.size() - 1)).as(ChunkExt.class).next());
         assertEquals(1, chunks.get(0).getBlockLinks().size());
     }
 
@@ -1942,14 +1942,14 @@ public class ChunkChainTest {
         assertEquals(ExtError.MISSING_LINK, ChunkChain.assemble(head(good), h -> null, 4096).error());
 
         // seq gap: middle chunk re-encoded with seq 5
-        ChunkExt mid = LaneBlockClassifier.classify(good.get(1)).as(ChunkExt.class);
+        ChunkExt mid = ChainBlockClassifier.classify(good.get(1)).as(ChunkExt.class);
         Block badMid = rawChunk(config, TS - 1, new ChunkExt(5, mid.totalLen(), mid.dataLen(), mid.next(), mid.data()));
         Map<Bytes32, Block> gap = new HashMap<>(idx);
         gap.put(Bytes32.wrap(good.get(1).getHashLow().toArray()), badMid);
         assertEquals(ExtError.CHUNK_SEQ_GAP, ChunkChain.assemble(head(good), h -> gap.get(h), 4096).error());
 
         // total mismatch: tail claims a different total
-        ChunkExt tail = LaneBlockClassifier.classify(good.get(2)).as(ChunkExt.class);
+        ChunkExt tail = ChainBlockClassifier.classify(good.get(2)).as(ChunkExt.class);
         Block badTail = rawChunk(config, TS - 2, new ChunkExt(2, 999, tail.dataLen(), null, tail.data()));
         Map<Bytes32, Block> mismatch = new HashMap<>(idx);
         mismatch.put(Bytes32.wrap(good.get(2).getHashLow().toArray()), badTail);
@@ -1957,7 +1957,7 @@ public class ChunkChainTest {
 
         // not a chunk
         Map<Bytes32, Block> notChunk = new HashMap<>(idx);
-        notChunk.put(head(good), LaneBlockClassifierTest.extBlock(config, List.of(), List.of()));
+        notChunk.put(head(good), ChainBlockClassifierTest.extBlock(config, List.of(), List.of()));
         assertEquals(ExtError.NOT_A_CHUNK, ChunkChain.assemble(head(good), h -> notChunk.get(h), 4096).error());
     }
 
@@ -1984,15 +1984,15 @@ public class ChunkChainTest {
 
 - [ ] **Step 2: 运行，确认失败**
 
-Run: `mvn -q -Dtest=io.xdag.lane.ext.ChunkChainTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.ext.ChunkChainTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 编译错误 `cannot find symbol: class ChunkChainBuilder`。
 
 - [ ] **Step 3: 实现**
 
-`src/main/java/io/xdag/lane/ext/ChunkChain.java`：
+`src/main/java/io/xdag/chain/ext/ChunkChain.java`：
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 import io.xdag.core.Block;
 import java.io.ByteArrayOutputStream;
@@ -2030,7 +2030,7 @@ public final class ChunkChain {
             if (b == null) {
                 return ExtResult.fail(ExtError.MISSING_LINK);
             }
-            Classified c = LaneBlockClassifier.classify(b);
+            Classified c = ChainBlockClassifier.classify(b);
             if (c.kind() != ExtKind.CHUNK) {
                 return ExtResult.fail(ExtError.NOT_A_CHUNK);
             }
@@ -2071,7 +2071,7 @@ public final class ChunkChain {
             if (b == null) {
                 break;
             }
-            Classified c = LaneBlockClassifier.classify(b);
+            Classified c = ChainBlockClassifier.classify(b);
             if (c.kind() != ExtKind.CHUNK || !c.isOk()) {
                 break;
             }
@@ -2082,10 +2082,10 @@ public final class ChunkChain {
 }
 ```
 
-`src/main/java/io/xdag/lane/ext/ChunkChainBuilder.java`：
+`src/main/java/io/xdag/chain/ext/ChunkChainBuilder.java`：
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUT;
 
@@ -2135,13 +2135,13 @@ public final class ChunkChainBuilder {
 
 - [ ] **Step 4: 运行测试，确认通过**
 
-Run: `mvn -q -Dtest=io.xdag.lane.ext.ChunkChainTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.ext.ChunkChainTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `Tests run: 4, Failures: 0`
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/main/java/io/xdag/lane/ext/ChunkChain.java src/main/java/io/xdag/lane/ext/ChunkChainBuilder.java src/test/java/io/xdag/lane/ext/ChunkChainTest.java
+git add src/main/java/io/xdag/chain/ext/ChunkChain.java src/main/java/io/xdag/chain/ext/ChunkChainBuilder.java src/test/java/io/xdag/chain/ext/ChunkChainTest.java
 git commit -m "Add chunk chain assembly and builder
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
@@ -2150,19 +2150,19 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 
 ---
 
-### Task 9: `LaneBlockBuilder`（CALL / DEPLOY 块构造）
+### Task 9: `ChainBlockBuilder`（CALL / DEPLOY 块构造）
 
 **Files:**
-- Create: `src/main/java/io/xdag/lane/ext/LaneBlockBuilder.java`
-- Test: `src/test/java/io/xdag/lane/ext/LaneBlockBuilderTest.java`
+- Create: `src/main/java/io/xdag/chain/ext/ChainBlockBuilder.java`
+- Test: `src/test/java/io/xdag/chain/ext/ChainBlockBuilderTest.java`
 
 - [ ] **Step 1: 写失败测试**
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
-import static io.xdag.lane.ext.ChunkChainTest.index;
-import static io.xdag.lane.ext.ChunkChainTest.payload;
+import static io.xdag.chain.ext.ChunkChainTest.index;
+import static io.xdag.chain.ext.ChunkChainTest.payload;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -2180,25 +2180,25 @@ import org.apache.tuweni.bytes.Bytes32;
 import org.apache.tuweni.units.bigints.UInt64;
 import org.junit.Test;
 
-public class LaneBlockBuilderTest {
+public class ChainBlockBuilderTest {
 
     private final Config config = new DevnetConfig();
     private final ECKeyPair sender = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
     private static final long TS = 0x16a00000000L;
-    private static final Bytes LANE = Bytes.random(20);
+    private static final Bytes CHAIN = Bytes.random(20);
     private static final Bytes CONTRACT = Bytes.random(20);
     private static final XAmount ONE = XAmount.of(1, XUnit.XDAG);
     private static final XAmount FEE = XAmount.of(100, XUnit.MILLI_XDAG);
-    private static final LaneConfigExt CFG = new LaneConfigExt(1L, 32L, 10_000_000L);
+    private static final ChainConfigExt CFG = new ChainConfigExt(1L, 32L, 10_000_000L);
 
     @Test
     public void callWithInlineArgs() {
-        ExtResult<LaneBlockBuilder.Built> r = LaneBlockBuilder.call(config, TS, sender, UInt64.ONE, LANE, CONTRACT, 7, 100L, ONE, FEE, payload(200, 1));
+        ExtResult<ChainBlockBuilder.Built> r = ChainBlockBuilder.call(config, TS, sender, UInt64.ONE, CHAIN, CONTRACT, 7, 100L, ONE, FEE, payload(200, 1));
         assertTrue(String.valueOf(r.error()), r.isOk());
-        LaneBlockBuilder.Built built = r.value();
+        ChainBlockBuilder.Built built = r.value();
         assertTrue(built.chunks().isEmpty());
         Block b = built.block();
-        Classified c = LaneBlockClassifier.classify(b);
+        Classified c = ChainBlockClassifier.classify(b);
         assertTrue(String.valueOf(c.error()), c.isOk());
         assertEquals(ExtKind.CALL, c.kind());
         assertEquals(payload(200, 1), c.as(CallExt.class).inlineArgs());
@@ -2213,9 +2213,9 @@ public class LaneBlockBuilderTest {
     @Test
     public void callWithChainedArgs() {
         Bytes args = payload(1000, 2);
-        LaneBlockBuilder.Built built = LaneBlockBuilder.call(config, TS, sender, UInt64.ONE, LANE, CONTRACT, 7, 100L, ONE, FEE, args).value();
+        ChainBlockBuilder.Built built = ChainBlockBuilder.call(config, TS, sender, UInt64.ONE, CHAIN, CONTRACT, 7, 100L, ONE, FEE, args).value();
         assertEquals(3, built.chunks().size());
-        Classified c = LaneBlockClassifier.classify(built.block());
+        Classified c = ChainBlockClassifier.classify(built.block());
         assertTrue(c.isOk());
         assertTrue(c.as(CallExt.class).argsByChain());
         assertEquals(1, built.block().getBlockLinks().size());
@@ -2225,14 +2225,14 @@ public class LaneBlockBuilderTest {
     }
 
     @Test
-    public void deployNewLaneChainsCodeAndKeepsSmallArgsInline() {
+    public void deployNewChainChainsCodeAndKeepsSmallArgsInline() {
         Bytes wasm = payload(10_000, 3);
-        LaneBlockBuilder.Built built = LaneBlockBuilder.deployNewLane(config, TS, sender, UInt64.ONE, FEE, wasm, CFG, payload(160, 4), 1_000L).value();
+        ChainBlockBuilder.Built built = ChainBlockBuilder.deployNewChain(config, TS, sender, UInt64.ONE, FEE, wasm, CFG, payload(160, 4), 1_000L).value();
         assertEquals(29, built.chunks().size());
-        Classified c = LaneBlockClassifier.classify(built.block());
+        Classified c = ChainBlockClassifier.classify(built.block());
         assertTrue(String.valueOf(c.error()), c.isOk());
         DeployExt d = c.as(DeployExt.class);
-        assertTrue(d.newLane());
+        assertTrue(d.newChain());
         assertTrue(d.codeByChain());
         assertEquals(false, d.argsByChain());
         assertEquals(HashUtils.sha256(wasm), d.codeHash());
@@ -2243,9 +2243,9 @@ public class LaneBlockBuilderTest {
     }
 
     @Test
-    public void deployNewLaneChainsArgsWhenTheyDoNotFit() {
-        LaneBlockBuilder.Built built = LaneBlockBuilder.deployNewLane(config, TS, sender, UInt64.ONE, FEE, payload(500, 5), CFG, payload(161, 6), 1L).value();
-        DeployExt d = LaneBlockClassifier.classify(built.block()).as(DeployExt.class);
+    public void deployNewChainChainsArgsWhenTheyDoNotFit() {
+        ChainBlockBuilder.Built built = ChainBlockBuilder.deployNewChain(config, TS, sender, UInt64.ONE, FEE, payload(500, 5), CFG, payload(161, 6), 1L).value();
+        DeployExt d = ChainBlockClassifier.classify(built.block()).as(DeployExt.class);
         assertTrue(d.argsByChain());
         assertEquals(2, built.block().getBlockLinks().size());
         assertEquals(2 + 1, built.chunks().size()); // 500B code = 2 chunks, 161B args = 1 chunk
@@ -2255,22 +2255,22 @@ public class LaneBlockBuilderTest {
 
     @Test
     public void feeHelpers() {
-        assertEquals(0, LaneBlockBuilder.chunksFor(0));
-        assertEquals(1, LaneBlockBuilder.chunksFor(352));
-        assertEquals(2, LaneBlockBuilder.chunksFor(353));
-        assertEquals(XAmount.of(30, XUnit.MILLI_XDAG), LaneBlockBuilder.minHeaderFee(XAmount.of(10, XUnit.MILLI_XDAG), 3));
+        assertEquals(0, ChainBlockBuilder.chunksFor(0));
+        assertEquals(1, ChainBlockBuilder.chunksFor(352));
+        assertEquals(2, ChainBlockBuilder.chunksFor(353));
+        assertEquals(XAmount.of(30, XUnit.MILLI_XDAG), ChainBlockBuilder.minHeaderFee(XAmount.of(10, XUnit.MILLI_XDAG), 3));
     }
 
     @Test
-    public void deployIntoLaneWithKnownCode() {
+    public void deployIntoChainWithKnownCode() {
         Bytes32 codeHash = Bytes32.random();
-        LaneBlockBuilder.Built built = LaneBlockBuilder.deployIntoLane(config, TS, sender, UInt64.ONE, LANE, ONE, FEE, null, codeHash, payload(100, 7), 1L).value();
+        ChainBlockBuilder.Built built = ChainBlockBuilder.deployIntoChain(config, TS, sender, UInt64.ONE, CHAIN, ONE, FEE, null, codeHash, payload(100, 7), 1L).value();
         assertTrue(built.chunks().isEmpty());
-        DeployExt d = LaneBlockClassifier.classify(built.block()).as(DeployExt.class);
-        assertEquals(false, d.newLane());
+        DeployExt d = ChainBlockClassifier.classify(built.block()).as(DeployExt.class);
+        assertEquals(false, d.newChain());
         assertEquals(false, d.codeByChain());
         assertEquals(codeHash, d.codeHash());
-        assertEquals(LANE, d.laneId());
+        assertEquals(CHAIN, d.chainId());
         assertEquals(payload(100, 7), d.inlineArgs());
     }
 }
@@ -2278,15 +2278,15 @@ public class LaneBlockBuilderTest {
 
 - [ ] **Step 2: 运行，确认失败**
 
-Run: `mvn -q -Dtest=io.xdag.lane.ext.LaneBlockBuilderTest -Dsurefire.failIfNoSpecifiedTests=false test`
-Expected: 编译错误 `cannot find symbol: class LaneBlockBuilder`。
+Run: `mvn -q -Dtest=io.xdag.chain.ext.ChainBlockBuilderTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Expected: 编译错误 `cannot find symbol: class ChainBlockBuilder`。
 
 - [ ] **Step 3: 实现**
 
-`src/main/java/io/xdag/lane/ext/LaneBlockBuilder.java`：
+`src/main/java/io/xdag/chain/ext/ChainBlockBuilder.java`：
 
 ```java
-package io.xdag.lane.ext;
+package io.xdag.chain.ext;
 
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_INPUT;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUT;
@@ -2310,10 +2310,10 @@ import org.apache.tuweni.units.bigints.UInt64;
 /**
  * Builds signed CALL / DEPLOY account-transaction blocks plus their chunk chains.
  * Chunks are returned head-first and must be imported tail-first before the paying block.
- * Callers must pass value >= headerFee + MIN_GAS for call/deployIntoLane (L1 input rule); deployNewLane sizes its
+ * Callers must pass value >= headerFee + MIN_GAS for call/deployIntoChain (L1 input rule); deployNewChain sizes its
  * self-transfer automatically. headerFee must be >= minHeaderFee(chunkFee, chunks) or the input is recorded INVALID_FEE.
  */
-public final class LaneBlockBuilder {
+public final class ChainBlockBuilder {
 
     /** header, nonce, INPUT, OUTPUT, pubkey, SIGN_OUT x2, ext header */
     private static final int TX_FIXED_FIELDS = 8;
@@ -2321,10 +2321,10 @@ public final class LaneBlockBuilder {
     public record Built(Block block, List<Block> chunks) {
     }
 
-    private LaneBlockBuilder() {
+    private ChainBlockBuilder() {
     }
 
-    public static ExtResult<Built> call(Config config, long timestamp, ECKeyPair sender, UInt64 nonce, Bytes laneId,
+    public static ExtResult<Built> call(Config config, long timestamp, ECKeyPair sender, UInt64 nonce, Bytes chainId,
                                         Bytes contract, int selector, long gasLimit, XAmount value, XAmount headerFee,
                                         Bytes args) {
         int inlineCapacity = Math.min((XdagBlock.XDAG_BLOCK_FIELDS - TX_FIXED_FIELDS) * ExtCodec.FIELD, CallExt.MAX_INLINE_ARGS);
@@ -2341,15 +2341,15 @@ public final class LaneBlockBuilder {
         CallExt ext = new CallExt(flags, contract, selector, gasLimit, inline.size(), inline, argsHead);
         List<Address> refs = new ArrayList<>();
         refs.add(input(sender, value));
-        refs.add(new Address(BytesUtils.arrayToByte32(laneId.toArray()), XDAG_FIELD_OUTPUT, value, true));
+        refs.add(new Address(BytesUtils.arrayToByte32(chainId.toArray()), XDAG_FIELD_OUTPUT, value, true));
         if (argsHead != null) {
             refs.add(new Address(argsHead, XDAG_FIELD_OUT, false));
         }
         return finish(config, timestamp, sender, nonce, headerFee, refs, ext.encodeHeader(), ext.encodePayload(), chunks);
     }
 
-    public static ExtResult<Built> deployNewLane(Config config, long timestamp, ECKeyPair sender, UInt64 nonce,
-                                                 XAmount headerFee, Bytes wasm, LaneConfigExt laneConfig,
+    public static ExtResult<Built> deployNewChain(Config config, long timestamp, ECKeyPair sender, UInt64 nonce,
+                                                 XAmount headerFee, Bytes wasm, ChainConfigExt chainConfig,
                                                  Bytes initArgs, long gasLimit) {
         List<Block> chunks = new ArrayList<>();
         long nextHeadTs = timestamp - 1;
@@ -2357,7 +2357,7 @@ public final class LaneBlockBuilder {
         chunks.addAll(code);
         Bytes32 codeHead = Bytes32.wrap(code.get(0).getHashLow().toArray());
         nextHeadTs -= code.size();
-        int flags = DeployExt.FLAG_NEW_LANE | DeployExt.FLAG_CODE_CHAIN;
+        int flags = DeployExt.FLAG_NEW_CHAIN | DeployExt.FLAG_CODE_CHAIN;
         // fixed 8 + codeHash + config + code link = 11 fields used
         int inlineCapacity = (XdagBlock.XDAG_BLOCK_FIELDS - TX_FIXED_FIELDS - 3) * ExtCodec.FIELD;
         Bytes32 argsHead = null;
@@ -2370,7 +2370,7 @@ public final class LaneBlockBuilder {
             inline = Bytes.EMPTY;
         }
         DeployExt ext = new DeployExt(flags, Bytes.wrap(new byte[20]), gasLimit, inline.size(), HashUtils.sha256(wasm),
-                laneConfig, inline, codeHead, argsHead);
+                chainConfig, inline, codeHead, argsHead);
         List<Address> refs = new ArrayList<>();
         // self transfer; tryToConnect requires input amount >= header fee + MIN_GAS x outputs
         XAmount self = headerFee.add(Constants.MIN_GAS);
@@ -2384,8 +2384,8 @@ public final class LaneBlockBuilder {
     }
 
     /** wasm may be null when the code hash is already known to the network; then codeHash is used as given. */
-    public static ExtResult<Built> deployIntoLane(Config config, long timestamp, ECKeyPair sender, UInt64 nonce,
-                                                  Bytes laneId, XAmount value, XAmount headerFee, Bytes wasm,
+    public static ExtResult<Built> deployIntoChain(Config config, long timestamp, ECKeyPair sender, UInt64 nonce,
+                                                  Bytes chainId, XAmount value, XAmount headerFee, Bytes wasm,
                                                   Bytes32 codeHash, Bytes initArgs, long gasLimit) {
         List<Block> chunks = new ArrayList<>();
         long nextHeadTs = timestamp - 1;
@@ -2411,10 +2411,10 @@ public final class LaneBlockBuilder {
             flags |= DeployExt.FLAG_ARGS_CHAIN;
             inline = Bytes.EMPTY;
         }
-        DeployExt ext = new DeployExt(flags, laneId, gasLimit, inline.size(), hash, null, inline, codeHead, argsHead);
+        DeployExt ext = new DeployExt(flags, chainId, gasLimit, inline.size(), hash, null, inline, codeHead, argsHead);
         List<Address> refs = new ArrayList<>();
         refs.add(input(sender, value));
-        refs.add(new Address(BytesUtils.arrayToByte32(laneId.toArray()), XDAG_FIELD_OUTPUT, value, true));
+        refs.add(new Address(BytesUtils.arrayToByte32(chainId.toArray()), XDAG_FIELD_OUTPUT, value, true));
         if (codeHead != null) {
             refs.add(new Address(codeHead, XDAG_FIELD_OUT, false));
         }
@@ -2433,7 +2433,7 @@ public final class LaneBlockBuilder {
         return (len + ChunkExt.MAX_DATA_LEN - 1) / ChunkExt.MAX_DATA_LEN;
     }
 
-    /** Smallest header fee that satisfies the consensus chunk-fee rule for {@code chunks} chunk blocks (chunkFee = LaneSpec.getLaneChunkFee()). */
+    /** Smallest header fee that satisfies the consensus chunk-fee rule for {@code chunks} chunk blocks (chunkFee = ChainSpec.getChainChunkFee()). */
     public static XAmount minHeaderFee(XAmount chunkFee, int chunks) {
         return chunkFee.multiply(chunks);
     }
@@ -2457,14 +2457,14 @@ public final class LaneBlockBuilder {
 
 - [ ] **Step 4: 运行测试，确认通过**
 
-Run: `mvn -q -Dtest=io.xdag.lane.ext.LaneBlockBuilderTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.ext.ChainBlockBuilderTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `Tests run: 6, Failures: 0`
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/main/java/io/xdag/lane/ext/LaneBlockBuilder.java src/test/java/io/xdag/lane/ext/LaneBlockBuilderTest.java
-git commit -m "Add builder for CALL and DEPLOY lane blocks
+git add src/main/java/io/xdag/chain/ext/ChainBlockBuilder.java src/test/java/io/xdag/chain/ext/ChainBlockBuilderTest.java
+git commit -m "Add builder for CALL and DEPLOY chain blocks
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
@@ -2472,21 +2472,21 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 
 ---
 
-### Task 10: `DatabaseName.LANE_L1`、`KVSource.batchWrite` 与测试用 `InMemoryKVSource`
+### Task 10: `DatabaseName.CHAIN_L1`、`KVSource.batchWrite` 与测试用 `InMemoryKVSource`
 
 **Files:**
 - Modify: `src/main/java/io/xdag/db/rocksdb/DatabaseName.java`
 - Modify: `src/main/java/io/xdag/db/rocksdb/KVSource.java`
 - Modify: `src/main/java/io/xdag/db/rocksdb/RocksdbKVSource.java`
-- Create: `src/test/java/io/xdag/lane/InMemoryKVSource.java`
+- Create: `src/test/java/io/xdag/chain/InMemoryKVSource.java`
 - Test: `src/test/java/io/xdag/db/rocksdb/BatchWriteTest.java`
 
 - [ ] **Step 1: 写测试用 `InMemoryKVSource`（测试基础设施，先于测试）**
 
-`src/test/java/io/xdag/lane/InMemoryKVSource.java`：
+`src/test/java/io/xdag/chain/InMemoryKVSource.java`：
 
 ```java
-package io.xdag.lane;
+package io.xdag.chain;
 
 import io.xdag.db.rocksdb.KVSource;
 import java.util.ArrayList;
@@ -2628,7 +2628,7 @@ import static org.junit.Assert.assertNull;
 
 import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
-import io.xdag.lane.InMemoryKVSource;
+import io.xdag.chain.InMemoryKVSource;
 import java.util.List;
 import org.apache.commons.lang3.tuple.Pair;
 import org.junit.Rule;
@@ -2664,7 +2664,7 @@ public class BatchWriteTest {
     public void rocksBatchWriteUsesWriteBatch() throws Exception {
         Config config = new DevnetConfig();
         config.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
-        RocksdbKVSource src = new RocksdbKVSource(DatabaseName.LANE_L1.toString());
+        RocksdbKVSource src = new RocksdbKVSource(DatabaseName.CHAIN_L1.toString());
         src.setConfig(config);
         src.init();
         try {
@@ -2681,13 +2681,13 @@ public class BatchWriteTest {
     }
 
     @Test
-    public void factoryKnowsLaneL1() throws Exception {
+    public void factoryKnowsChainL1() throws Exception {
         Config config = new DevnetConfig();
         config.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
         RocksdbFactory factory = new RocksdbFactory(config);
-        KVSource<byte[], byte[]> db = factory.getDB(DatabaseName.LANE_L1);
+        KVSource<byte[], byte[]> db = factory.getDB(DatabaseName.CHAIN_L1);
         assertNotNull(db);
-        assertEquals("LANE_L1", db.getName());
+        assertEquals("CHAIN_L1", db.getName());
         factory.close();
     }
 }
@@ -2696,7 +2696,7 @@ public class BatchWriteTest {
 - [ ] **Step 3: 运行，确认失败**
 
 Run: `mvn -q -Dtest=io.xdag.db.rocksdb.BatchWriteTest -Dsurefire.failIfNoSpecifiedTests=false test`
-Expected: 编译错误（`batchWrite` 不存在 / `LANE_L1` 不存在）。
+Expected: 编译错误（`batchWrite` 不存在 / `CHAIN_L1` 不存在）。
 
 - [ ] **Step 4: 实现**
 
@@ -2704,8 +2704,8 @@ Expected: 编译错误（`batchWrite` 不存在 / `LANE_L1` 不存在）。
 
 ```java
     TXHISTORY,
-    /** Lane contracts: global L1 state (registry, code store, input index, bonds, anchors). */
-    LANE_L1
+    /** Chain contracts: global L1 state (registry, code store, input index, bonds, anchors). */
+    CHAIN_L1
 ```
 
 `KVSource.java`：接口内追加默认方法（文件已 import `java.util.List` 与 `org.apache.commons.lang3.tuple.Pair`）：
@@ -2761,8 +2761,8 @@ Expected: `Tests run: 3, Failures: 0`
 - [ ] **Step 6: 提交**
 
 ```bash
-git add src/main/java/io/xdag/db/rocksdb/DatabaseName.java src/main/java/io/xdag/db/rocksdb/KVSource.java src/main/java/io/xdag/db/rocksdb/RocksdbKVSource.java src/test/java/io/xdag/lane/InMemoryKVSource.java src/test/java/io/xdag/db/rocksdb/BatchWriteTest.java
-git commit -m "Add LANE_L1 database and atomic batchWrite to KVSource
+git add src/main/java/io/xdag/db/rocksdb/DatabaseName.java src/main/java/io/xdag/db/rocksdb/KVSource.java src/main/java/io/xdag/db/rocksdb/RocksdbKVSource.java src/test/java/io/xdag/chain/InMemoryKVSource.java src/test/java/io/xdag/db/rocksdb/BatchWriteTest.java
+git commit -m "Add CHAIN_L1 database and atomic batchWrite to KVSource
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
@@ -2770,23 +2770,23 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 
 ---
 
-### Task 11: `LANE_L1` 存储：记录、键、批量写、快照导出/导入/哈希
+### Task 11: `CHAIN_L1` 存储：记录、键、批量写、快照导出/导入/哈希
 
 **Files:**
-- Create: `src/main/java/io/xdag/lane/l1/InputStatus.java`
-- Create: `src/main/java/io/xdag/lane/l1/LaneRecord.java`
-- Create: `src/main/java/io/xdag/lane/l1/ContractRecord.java`
-- Create: `src/main/java/io/xdag/lane/l1/InputRecord.java`
-- Create: `src/main/java/io/xdag/lane/l1/InputRef.java`
-- Create: `src/main/java/io/xdag/lane/l1/LaneL1Keys.java`
-- Create: `src/main/java/io/xdag/lane/l1/LaneL1Batch.java`
-- Create: `src/main/java/io/xdag/lane/l1/LaneL1Store.java`
-- Test: `src/test/java/io/xdag/lane/l1/LaneL1StoreTest.java`
+- Create: `src/main/java/io/xdag/chain/l1/InputStatus.java`
+- Create: `src/main/java/io/xdag/chain/l1/ChainRecord.java`
+- Create: `src/main/java/io/xdag/chain/l1/ContractRecord.java`
+- Create: `src/main/java/io/xdag/chain/l1/InputRecord.java`
+- Create: `src/main/java/io/xdag/chain/l1/InputRef.java`
+- Create: `src/main/java/io/xdag/chain/l1/ChainL1Keys.java`
+- Create: `src/main/java/io/xdag/chain/l1/ChainL1Batch.java`
+- Create: `src/main/java/io/xdag/chain/l1/ChainL1Store.java`
+- Test: `src/test/java/io/xdag/chain/l1/ChainL1StoreTest.java`
 
 - [ ] **Step 1: 写失败测试**
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -2800,8 +2800,8 @@ import io.xdag.config.DevnetConfig;
 import io.xdag.db.rocksdb.DatabaseName;
 import io.xdag.db.rocksdb.KVSource;
 import io.xdag.db.rocksdb.RocksdbKVSource;
-import io.xdag.lane.InMemoryKVSource;
-import io.xdag.lane.ext.ExtKind;
+import io.xdag.chain.InMemoryKVSource;
+import io.xdag.chain.ext.ExtKind;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.commons.lang3.tuple.Pair;
@@ -2811,18 +2811,18 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
-public class LaneL1StoreTest {
+public class ChainL1StoreTest {
 
     @Rule
     public TemporaryFolder root = new TemporaryFolder();
 
-    private static final Bytes LANE = Bytes.random(20);
+    private static final Bytes CHAIN = Bytes.random(20);
     private static final Bytes CONTRACT = Bytes.random(20);
     private static final Bytes32 CODE_HASH = Bytes32.random();
     private static final Bytes32 BLOCK = Bytes32.random();
 
-    private static LaneL1Store memStore() {
-        LaneL1Store s = new LaneL1Store(new InMemoryKVSource());
+    private static ChainL1Store memStore() {
+        ChainL1Store s = new ChainL1Store(new InMemoryKVSource());
         s.start();
         return s;
     }
@@ -2830,26 +2830,26 @@ public class LaneL1StoreTest {
     @Test
     public void startWritesSchemaVersionOnce() {
         InMemoryKVSource src = new InMemoryKVSource();
-        LaneL1Store s = new LaneL1Store(src);
+        ChainL1Store s = new ChainL1Store(src);
         s.start();
         assertEquals(1, src.keys().size());
-        assertEquals(LaneL1Store.SCHEMA_VERSION, s.schemaVersion());
+        assertEquals(ChainL1Store.SCHEMA_VERSION, s.schemaVersion());
         s.start();
         assertEquals(1, src.keys().size());
     }
 
     @Test
     public void recordsRoundTrip() {
-        LaneRecord lane = new LaneRecord(7L, BLOCK, 5L, 32L, 10_000_000L, 2L);
-        assertEquals(lane, LaneRecord.decode(lane.encode()));
-        assertEquals(3L, lane.withContractCount(3L).contractCount());
-        ContractRecord contract = new ContractRecord(LANE, CODE_HASH, 7L, BLOCK);
+        ChainRecord chain = new ChainRecord(7L, BLOCK, 5L, 32L, 10_000_000L, 2L);
+        assertEquals(chain, ChainRecord.decode(chain.encode()));
+        assertEquals(3L, chain.withContractCount(3L).contractCount());
+        ContractRecord contract = new ContractRecord(CHAIN, CODE_HASH, 7L, BLOCK);
         assertEquals(contract, ContractRecord.decode(contract.encode()));
         InputRecord in = new InputRecord(BLOCK, ExtKind.CALL, InputStatus.INVALID_FEE, CONTRACT);
         assertEquals(in, InputRecord.decode(in.encode()));
         InputRecord none = new InputRecord(BLOCK, null, InputStatus.INVALID_FORMAT, Bytes.wrap(new byte[20]));
         assertEquals(none, InputRecord.decode(none.encode()));
-        List<InputRef> refs = List.of(new InputRef(LANE, 7L, 0L), new InputRef(LANE, 7L, 1L));
+        List<InputRef> refs = List.of(new InputRef(CHAIN, 7L, 0L), new InputRef(CHAIN, 7L, 1L));
         assertEquals(refs, InputRef.decodeList(InputRef.encodeList(refs)));
         assertEquals(InputStatus.CODE_TOO_LARGE, InputStatus.fromCode(3));
     }
@@ -2864,84 +2864,84 @@ public class LaneL1StoreTest {
                 super.batchWrite(puts, deletes);
             }
         };
-        LaneL1Store s = new LaneL1Store(src);
+        ChainL1Store s = new ChainL1Store(src);
         s.start();
 
-        LaneL1Batch batch = new LaneL1Batch();
-        batch.putLane(LANE, new LaneRecord(7L, BLOCK, 5L, 32L, 10_000_000L, 1L));
-        batch.putContract(CONTRACT, new ContractRecord(LANE, CODE_HASH, 7L, BLOCK));
+        ChainL1Batch batch = new ChainL1Batch();
+        batch.putChain(CHAIN, new ChainRecord(7L, BLOCK, 5L, 32L, 10_000_000L, 1L));
+        batch.putContract(CONTRACT, new ContractRecord(CHAIN, CODE_HASH, 7L, BLOCK));
         batch.putCode(CODE_HASH, 1L, Bytes.of((byte) 1, (byte) 2, (byte) 3));
-        batch.putCallCount(LANE, 7L, 1L);
-        batch.putInput(LANE, 7L, 0L, new InputRecord(BLOCK, ExtKind.DEPLOY, InputStatus.OK, CONTRACT));
-        batch.putReverse(BLOCK, List.of(new InputRef(LANE, 7L, 0L)));
+        batch.putCallCount(CHAIN, 7L, 1L);
+        batch.putInput(CHAIN, 7L, 0L, new InputRecord(BLOCK, ExtKind.DEPLOY, InputStatus.OK, CONTRACT));
+        batch.putReverse(BLOCK, List.of(new InputRef(CHAIN, 7L, 0L)));
         s.commit(batch);
 
         assertEquals(1, calls.get());
-        assertTrue(s.hasLane(LANE));
-        assertEquals(1L, s.getLane(LANE).contractCount());
-        assertEquals(LANE, s.getContract(CONTRACT).laneId());
+        assertTrue(s.hasChain(CHAIN));
+        assertEquals(1L, s.getChain(CHAIN).contractCount());
+        assertEquals(CHAIN, s.getContract(CONTRACT).chainId());
         assertTrue(s.hasCode(CODE_HASH));
         assertEquals(1L, s.getCodeRefCount(CODE_HASH));
         assertEquals(Bytes.of((byte) 1, (byte) 2, (byte) 3), s.getCode(CODE_HASH));
-        assertEquals(1L, s.getCallCount(LANE, 7L));
-        assertEquals(InputStatus.OK, s.getInput(LANE, 7L, 0L).status());
+        assertEquals(1L, s.getCallCount(CHAIN, 7L));
+        assertEquals(InputStatus.OK, s.getInput(CHAIN, 7L, 0L).status());
         assertEquals(1, s.getReverse(BLOCK).size());
 
-        LaneL1Batch undo = new LaneL1Batch();
-        undo.deleteLane(LANE);
+        ChainL1Batch undo = new ChainL1Batch();
+        undo.deleteChain(CHAIN);
         undo.deleteContract(CONTRACT);
         undo.deleteCode(CODE_HASH);
-        undo.deleteCallCount(LANE, 7L);
-        undo.deleteInput(LANE, 7L, 0L);
+        undo.deleteCallCount(CHAIN, 7L);
+        undo.deleteInput(CHAIN, 7L, 0L);
         undo.deleteReverse(BLOCK);
         s.commit(undo);
         assertEquals(2, calls.get());
-        assertFalse(s.hasLane(LANE));
+        assertFalse(s.hasChain(CHAIN));
         assertNull(s.getContract(CONTRACT));
         assertFalse(s.hasCode(CODE_HASH));
         assertEquals(0L, s.getCodeRefCount(CODE_HASH));
-        assertEquals(0L, s.getCallCount(LANE, 7L));
-        assertNull(s.getInput(LANE, 7L, 0L));
+        assertEquals(0L, s.getCallCount(CHAIN, 7L));
+        assertNull(s.getInput(CHAIN, 7L, 0L));
         assertTrue(s.getReverse(BLOCK).isEmpty());
         assertEquals(1, src.keys().size()); // only META remains
 
-        s.commit(new LaneL1Batch());
+        s.commit(new ChainL1Batch());
         assertEquals(2, calls.get()); // empty batch does not touch the store
     }
 
     @Test
     public void snapshotExportImportAndHash() {
-        LaneL1Store a = memStore();
-        LaneL1Batch batch = new LaneL1Batch();
-        batch.putLane(LANE, new LaneRecord(7L, BLOCK, 5L, 32L, 10_000_000L, 1L));
+        ChainL1Store a = memStore();
+        ChainL1Batch batch = new ChainL1Batch();
+        batch.putChain(CHAIN, new ChainRecord(7L, BLOCK, 5L, 32L, 10_000_000L, 1L));
         batch.putCode(CODE_HASH, 2L, Bytes.random(1000));
         a.commit(batch);
         Bytes32 hashA = a.stateHash();
 
         InMemoryKVSource snap = new InMemoryKVSource();
         a.exportSnapshot(snap);
-        assertEquals(hashA, Bytes32.wrap(snap.get(new byte[]{LaneL1Keys.SNAPSHOT_HASH})));
+        assertEquals(hashA, Bytes32.wrap(snap.get(new byte[]{ChainL1Keys.SNAPSHOT_HASH})));
 
-        LaneL1Store b = memStore();
+        ChainL1Store b = memStore();
         b.importSnapshot(snap);
         assertEquals(hashA, b.stateHash());
-        assertTrue(b.hasLane(LANE));
+        assertTrue(b.hasChain(CHAIN));
         assertEquals(2L, b.getCodeRefCount(CODE_HASH));
 
         // tampering is detected
-        snap.put(LaneL1Keys.code(CODE_HASH), new byte[]{1, 2, 3, 4, 5, 6, 7, 8});
-        LaneL1Store c = memStore();
+        snap.put(ChainL1Keys.code(CODE_HASH), new byte[]{1, 2, 3, 4, 5, 6, 7, 8});
+        ChainL1Store c = memStore();
         assertThrows(IllegalStateException.class, () -> c.importSnapshot(snap));
 
         // a snapshot without a hash is refused
         InMemoryKVSource noHash = new InMemoryKVSource();
         a.exportSnapshot(noHash);
-        noHash.delete(new byte[]{LaneL1Keys.SNAPSHOT_HASH});
+        noHash.delete(new byte[]{ChainL1Keys.SNAPSHOT_HASH});
         assertThrows(IllegalStateException.class, () -> memStore().importSnapshot(noHash));
 
         // hash depends on content
-        LaneL1Batch more = new LaneL1Batch();
-        more.putCallCount(LANE, 8L, 1L);
+        ChainL1Batch more = new ChainL1Batch();
+        more.putCallCount(CHAIN, 8L, 1L);
         a.commit(more);
         assertNotEquals(hashA, a.stateHash());
     }
@@ -2950,17 +2950,17 @@ public class LaneL1StoreTest {
     public void rocksAndMemoryProduceTheSameHashForTheSameContent() throws Exception {
         Config config = new DevnetConfig();
         config.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
-        RocksdbKVSource rocks = new RocksdbKVSource(DatabaseName.LANE_L1.toString());
+        RocksdbKVSource rocks = new RocksdbKVSource(DatabaseName.CHAIN_L1.toString());
         rocks.setConfig(config);
-        LaneL1Store onRocks = new LaneL1Store(rocks);
+        ChainL1Store onRocks = new ChainL1Store(rocks);
         onRocks.start();
-        LaneL1Store inMem = memStore();
+        ChainL1Store inMem = memStore();
         try {
-            for (LaneL1Store s : List.of(onRocks, inMem)) {
-                LaneL1Batch batch = new LaneL1Batch();
-                batch.putLane(LANE, new LaneRecord(7L, BLOCK, 5L, 32L, 10_000_000L, 1L));
-                batch.putContract(CONTRACT, new ContractRecord(LANE, CODE_HASH, 7L, BLOCK));
-                batch.putInput(LANE, 7L, 0L, new InputRecord(BLOCK, ExtKind.DEPLOY, InputStatus.OK, CONTRACT));
+            for (ChainL1Store s : List.of(onRocks, inMem)) {
+                ChainL1Batch batch = new ChainL1Batch();
+                batch.putChain(CHAIN, new ChainRecord(7L, BLOCK, 5L, 32L, 10_000_000L, 1L));
+                batch.putContract(CONTRACT, new ContractRecord(CHAIN, CODE_HASH, 7L, BLOCK));
+                batch.putInput(CHAIN, 7L, 0L, new InputRecord(BLOCK, ExtKind.DEPLOY, InputStatus.OK, CONTRACT));
                 s.commit(batch);
             }
             assertEquals(inMem.stateHash(), onRocks.stateHash());
@@ -2974,17 +2974,17 @@ public class LaneL1StoreTest {
 
 - [ ] **Step 2: 运行，确认失败**
 
-Run: `mvn -q -Dtest=io.xdag.lane.l1.LaneL1StoreTest -Dsurefire.failIfNoSpecifiedTests=false test`
-Expected: 编译错误 `package io.xdag.lane.l1 does not exist`。
+Run: `mvn -q -Dtest=io.xdag.chain.l1.ChainL1StoreTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Expected: 编译错误 `package io.xdag.chain.l1 does not exist`。
 
 - [ ] **Step 3: 实现记录类型**
 
-`src/main/java/io/xdag/lane/l1/InputStatus.java`：
+`src/main/java/io/xdag/chain/l1/InputStatus.java`：
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
-/** Outcome of L1-level attribution of a lane input. All statuses produce an input record. */
+/** Outcome of L1-level attribution of a chain input. All statuses produce an input record. */
 public enum InputStatus {
     OK(0), INVALID_FORMAT(1), INVALID_FEE(2), CODE_TOO_LARGE(3);
 
@@ -3009,17 +3009,17 @@ public enum InputStatus {
 }
 ```
 
-`src/main/java/io/xdag/lane/l1/LaneRecord.java`：
+`src/main/java/io/xdag/chain/l1/ChainRecord.java`：
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
-import io.xdag.lane.ext.ExtCodec;
+import io.xdag.chain.ext.ExtCodec;
 import java.util.Arrays;
 import org.apache.tuweni.bytes.Bytes32;
 
-/** LANE_L1 0x01 value: createdHeight u64 | createBlockHash 32 | gasPriceNano u64 | D u32 | maxCallGas u32 | contractCount u32. */
-public record LaneRecord(long createdHeight, Bytes32 createBlockHash, long gasPriceNano, long deliveryDelayD,
+/** CHAIN_L1 0x01 value: createdHeight u64 | createBlockHash 32 | gasPriceNano u64 | D u32 | maxCallGas u32 | contractCount u32. */
+public record ChainRecord(long createdHeight, Bytes32 createBlockHash, long gasPriceNano, long deliveryDelayD,
                          long maxCallGas, long contractCount) {
 
     public static final int SIZE = 8 + 32 + 8 + 4 + 4 + 4;
@@ -3035,35 +3035,35 @@ public record LaneRecord(long createdHeight, Bytes32 createBlockHash, long gasPr
         return a;
     }
 
-    public static LaneRecord decode(byte[] a) {
-        return new LaneRecord(ExtCodec.u64(a, 0), Bytes32.wrap(Arrays.copyOfRange(a, 8, 40)), ExtCodec.u64(a, 40),
+    public static ChainRecord decode(byte[] a) {
+        return new ChainRecord(ExtCodec.u64(a, 0), Bytes32.wrap(Arrays.copyOfRange(a, 8, 40)), ExtCodec.u64(a, 40),
                 ExtCodec.u32(a, 48), ExtCodec.u32(a, 52), ExtCodec.u32(a, 56));
     }
 
-    public LaneRecord withContractCount(long count) {
-        return new LaneRecord(createdHeight, createBlockHash, gasPriceNano, deliveryDelayD, maxCallGas, count);
+    public ChainRecord withContractCount(long count) {
+        return new ChainRecord(createdHeight, createBlockHash, gasPriceNano, deliveryDelayD, maxCallGas, count);
     }
 }
 ```
 
-`src/main/java/io/xdag/lane/l1/ContractRecord.java`：
+`src/main/java/io/xdag/chain/l1/ContractRecord.java`：
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
-import io.xdag.lane.ext.ExtCodec;
+import io.xdag.chain.ext.ExtCodec;
 import java.util.Arrays;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 
-/** LANE_L1 0x02 value: laneId 20 | codeHash 32 | deployHeight u64 | deployBlockHash 32. */
-public record ContractRecord(Bytes laneId, Bytes32 codeHash, long deployHeight, Bytes32 deployBlockHash) {
+/** CHAIN_L1 0x02 value: chainId 20 | codeHash 32 | deployHeight u64 | deployBlockHash 32. */
+public record ContractRecord(Bytes chainId, Bytes32 codeHash, long deployHeight, Bytes32 deployBlockHash) {
 
     public static final int SIZE = 20 + 32 + 8 + 32;
 
     public byte[] encode() {
         byte[] a = new byte[SIZE];
-        System.arraycopy(laneId.toArray(), 0, a, 0, 20);
+        System.arraycopy(chainId.toArray(), 0, a, 0, 20);
         System.arraycopy(codeHash.toArray(), 0, a, 20, 32);
         ExtCodec.putU64(a, 52, deployHeight);
         System.arraycopy(deployBlockHash.toArray(), 0, a, 60, 32);
@@ -3077,17 +3077,17 @@ public record ContractRecord(Bytes laneId, Bytes32 codeHash, long deployHeight, 
 }
 ```
 
-`src/main/java/io/xdag/lane/l1/InputRecord.java`：
+`src/main/java/io/xdag/chain/l1/InputRecord.java`：
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
-import io.xdag.lane.ext.ExtKind;
+import io.xdag.chain.ext.ExtKind;
 import java.util.Arrays;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 
-/** LANE_L1 0x0C value: blockHash 32 | kind u8 (0 = none) | status u8 | contract 20. */
+/** CHAIN_L1 0x0C value: blockHash 32 | kind u8 (0 = none) | status u8 | contract 20. */
 public record InputRecord(Bytes32 blockHash, ExtKind kind, InputStatus status, Bytes contract) {
 
     public static final int SIZE = 32 + 1 + 1 + 20;
@@ -3109,25 +3109,25 @@ public record InputRecord(Bytes32 blockHash, ExtKind kind, InputStatus status, B
 }
 ```
 
-`src/main/java/io/xdag/lane/l1/InputRef.java`：
+`src/main/java/io/xdag/chain/l1/InputRef.java`：
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
-import io.xdag.lane.ext.ExtCodec;
+import io.xdag.chain.ext.ExtCodec;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import org.apache.tuweni.bytes.Bytes;
 
-/** Address of one input record: laneId 20 | height u64 | index u32. A block can own several (one per vault output). */
-public record InputRef(Bytes laneId, long height, long index) {
+/** Address of one input record: chainId 20 | height u64 | index u32. A block can own several (one per vault output). */
+public record InputRef(Bytes chainId, long height, long index) {
 
     public static final int SIZE = 20 + 8 + 4;
 
     public byte[] encode() {
         byte[] a = new byte[SIZE];
-        System.arraycopy(laneId.toArray(), 0, a, 0, 20);
+        System.arraycopy(chainId.toArray(), 0, a, 0, 20);
         ExtCodec.putU64(a, 20, height);
         ExtCodec.putU32(a, 28, index);
         return a;
@@ -3157,21 +3157,21 @@ public record InputRef(Bytes laneId, long height, long index) {
 
 - [ ] **Step 4: 实现键、批与存储**
 
-`src/main/java/io/xdag/lane/l1/LaneL1Keys.java`：
+`src/main/java/io/xdag/chain/l1/ChainL1Keys.java`：
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
-import io.xdag.lane.ext.ExtCodec;
+import io.xdag.chain.ext.ExtCodec;
 import io.xdag.utils.BytesUtils;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 
-/** Key layout of the LANE_L1 RocksDB instance (one-byte prefixes). Prefixes 0x04..0x0B are reserved for SP2/SP3. */
-public final class LaneL1Keys {
+/** Key layout of the CHAIN_L1 RocksDB instance (one-byte prefixes). Prefixes 0x04..0x0B are reserved for SP2/SP3. */
+public final class ChainL1Keys {
 
     public static final byte META = 0x00;
-    public static final byte LANE = 0x01;
+    public static final byte CHAIN = 0x01;
     public static final byte CONTRACT = 0x02;
     public static final byte CODE = 0x03;
     public static final byte BOND = 0x04;
@@ -3190,11 +3190,11 @@ public final class LaneL1Keys {
     public static final byte[] META_KEY = {META};
     public static final byte[] SNAPSHOT_HASH_KEY = {SNAPSHOT_HASH};
 
-    private LaneL1Keys() {
+    private ChainL1Keys() {
     }
 
-    public static byte[] lane(Bytes laneId) {
-        return BytesUtils.merge(LANE, laneId.toArray());
+    public static byte[] chain(Bytes chainId) {
+        return BytesUtils.merge(CHAIN, chainId.toArray());
     }
 
     public static byte[] contract(Bytes contract) {
@@ -3205,17 +3205,17 @@ public final class LaneL1Keys {
         return BytesUtils.merge(CODE, codeHash.toArray());
     }
 
-    public static byte[] callCount(Bytes laneId, long height) {
+    public static byte[] callCount(Bytes chainId, long height) {
         byte[] h = new byte[8];
         ExtCodec.putU64(h, 0, height);
-        return BytesUtils.merge(new byte[]{CALL_COUNT}, laneId.toArray(), h);
+        return BytesUtils.merge(new byte[]{CALL_COUNT}, chainId.toArray(), h);
     }
 
-    public static byte[] input(Bytes laneId, long height, long index) {
+    public static byte[] input(Bytes chainId, long height, long index) {
         byte[] tail = new byte[12];
         ExtCodec.putU64(tail, 0, height);
         ExtCodec.putU32(tail, 8, index);
-        return BytesUtils.merge(new byte[]{INPUT}, laneId.toArray(), tail);
+        return BytesUtils.merge(new byte[]{INPUT}, chainId.toArray(), tail);
     }
 
     public static byte[] reverse(Bytes32 blockHash) {
@@ -3224,20 +3224,20 @@ public final class LaneL1Keys {
 }
 ```
 
-`src/main/java/io/xdag/lane/l1/LaneL1Batch.java`：
+`src/main/java/io/xdag/chain/l1/ChainL1Batch.java`：
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
-import io.xdag.lane.ext.ExtCodec;
+import io.xdag.chain.ext.ExtCodec;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 
-/** Collects the LANE_L1 writes of one block; committed atomically by {@link LaneL1Store#commit}. */
-public final class LaneL1Batch {
+/** Collects the CHAIN_L1 writes of one block; committed atomically by {@link ChainL1Store#commit}. */
+public final class ChainL1Batch {
 
     private final List<Pair<byte[], byte[]>> puts = new ArrayList<>();
     private final List<byte[]> deletes = new ArrayList<>();
@@ -3254,20 +3254,20 @@ public final class LaneL1Batch {
         return puts.isEmpty() && deletes.isEmpty();
     }
 
-    public void putLane(Bytes laneId, LaneRecord record) {
-        puts.add(Pair.of(LaneL1Keys.lane(laneId), record.encode()));
+    public void putChain(Bytes chainId, ChainRecord record) {
+        puts.add(Pair.of(ChainL1Keys.chain(chainId), record.encode()));
     }
 
-    public void deleteLane(Bytes laneId) {
-        deletes.add(LaneL1Keys.lane(laneId));
+    public void deleteChain(Bytes chainId) {
+        deletes.add(ChainL1Keys.chain(chainId));
     }
 
     public void putContract(Bytes contract, ContractRecord record) {
-        puts.add(Pair.of(LaneL1Keys.contract(contract), record.encode()));
+        puts.add(Pair.of(ChainL1Keys.contract(contract), record.encode()));
     }
 
     public void deleteContract(Bytes contract) {
-        deletes.add(LaneL1Keys.contract(contract));
+        deletes.add(ChainL1Keys.contract(contract));
     }
 
     /** value: refCount u32 | len u32 | bytes */
@@ -3276,49 +3276,49 @@ public final class LaneL1Batch {
         ExtCodec.putU32(v, 0, refCount);
         ExtCodec.putU32(v, 4, code.size());
         System.arraycopy(code.toArray(), 0, v, 8, code.size());
-        puts.add(Pair.of(LaneL1Keys.code(codeHash), v));
+        puts.add(Pair.of(ChainL1Keys.code(codeHash), v));
     }
 
     public void deleteCode(Bytes32 codeHash) {
-        deletes.add(LaneL1Keys.code(codeHash));
+        deletes.add(ChainL1Keys.code(codeHash));
     }
 
-    public void putCallCount(Bytes laneId, long height, long count) {
+    public void putCallCount(Bytes chainId, long height, long count) {
         byte[] v = new byte[4];
         ExtCodec.putU32(v, 0, count);
-        puts.add(Pair.of(LaneL1Keys.callCount(laneId, height), v));
+        puts.add(Pair.of(ChainL1Keys.callCount(chainId, height), v));
     }
 
-    public void deleteCallCount(Bytes laneId, long height) {
-        deletes.add(LaneL1Keys.callCount(laneId, height));
+    public void deleteCallCount(Bytes chainId, long height) {
+        deletes.add(ChainL1Keys.callCount(chainId, height));
     }
 
-    public void putInput(Bytes laneId, long height, long index, InputRecord record) {
-        puts.add(Pair.of(LaneL1Keys.input(laneId, height, index), record.encode()));
+    public void putInput(Bytes chainId, long height, long index, InputRecord record) {
+        puts.add(Pair.of(ChainL1Keys.input(chainId, height, index), record.encode()));
     }
 
-    public void deleteInput(Bytes laneId, long height, long index) {
-        deletes.add(LaneL1Keys.input(laneId, height, index));
+    public void deleteInput(Bytes chainId, long height, long index) {
+        deletes.add(ChainL1Keys.input(chainId, height, index));
     }
 
     public void putReverse(Bytes32 blockHash, List<InputRef> refs) {
-        puts.add(Pair.of(LaneL1Keys.reverse(blockHash), InputRef.encodeList(refs)));
+        puts.add(Pair.of(ChainL1Keys.reverse(blockHash), InputRef.encodeList(refs)));
     }
 
     public void deleteReverse(Bytes32 blockHash) {
-        deletes.add(LaneL1Keys.reverse(blockHash));
+        deletes.add(ChainL1Keys.reverse(blockHash));
     }
 }
 ```
 
-`src/main/java/io/xdag/lane/l1/LaneL1Store.java`：
+`src/main/java/io/xdag/chain/l1/ChainL1Store.java`：
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
 import io.xdag.core.XdagLifecycle;
 import io.xdag.db.rocksdb.KVSource;
-import io.xdag.lane.ext.ExtCodec;
+import io.xdag.chain.ext.ExtCodec;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -3327,15 +3327,15 @@ import java.util.List;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 
-/** Global (every node) lane state: registry, contracts, code store, input index. All writes go through {@link LaneL1Batch}. */
-public final class LaneL1Store implements XdagLifecycle {
+/** Global (every node) chain state: registry, contracts, code store, input index. All writes go through {@link ChainL1Batch}. */
+public final class ChainL1Store implements XdagLifecycle {
 
     public static final int SCHEMA_VERSION = 1;
 
     private final KVSource<byte[], byte[]> source;
     private volatile boolean running;
 
-    public LaneL1Store(KVSource<byte[], byte[]> source) {
+    public ChainL1Store(KVSource<byte[], byte[]> source) {
         this.source = source;
     }
 
@@ -3363,43 +3363,43 @@ public final class LaneL1Store implements XdagLifecycle {
     }
 
     private void ensureMeta() {
-        if (source.get(LaneL1Keys.META_KEY) == null) {
+        if (source.get(ChainL1Keys.META_KEY) == null) {
             byte[] v = new byte[4];
             ExtCodec.putU32(v, 0, SCHEMA_VERSION);
-            source.put(LaneL1Keys.META_KEY, v);
+            source.put(ChainL1Keys.META_KEY, v);
         }
     }
 
     public int schemaVersion() {
-        byte[] v = source.get(LaneL1Keys.META_KEY);
+        byte[] v = source.get(ChainL1Keys.META_KEY);
         return v == null ? 0 : (int) ExtCodec.u32(v, 0);
     }
 
-    public boolean hasLane(Bytes laneId) {
-        return source.get(LaneL1Keys.lane(laneId)) != null;
+    public boolean hasChain(Bytes chainId) {
+        return source.get(ChainL1Keys.chain(chainId)) != null;
     }
 
-    public LaneRecord getLane(Bytes laneId) {
-        byte[] v = source.get(LaneL1Keys.lane(laneId));
-        return v == null ? null : LaneRecord.decode(v);
+    public ChainRecord getChain(Bytes chainId) {
+        byte[] v = source.get(ChainL1Keys.chain(chainId));
+        return v == null ? null : ChainRecord.decode(v);
     }
 
     public ContractRecord getContract(Bytes contract) {
-        byte[] v = source.get(LaneL1Keys.contract(contract));
+        byte[] v = source.get(ChainL1Keys.contract(contract));
         return v == null ? null : ContractRecord.decode(v);
     }
 
     public boolean hasCode(Bytes32 codeHash) {
-        return source.get(LaneL1Keys.code(codeHash)) != null;
+        return source.get(ChainL1Keys.code(codeHash)) != null;
     }
 
     public long getCodeRefCount(Bytes32 codeHash) {
-        byte[] v = source.get(LaneL1Keys.code(codeHash));
+        byte[] v = source.get(ChainL1Keys.code(codeHash));
         return v == null ? 0 : ExtCodec.u32(v, 0);
     }
 
     public Bytes getCode(Bytes32 codeHash) {
-        byte[] v = source.get(LaneL1Keys.code(codeHash));
+        byte[] v = source.get(ChainL1Keys.code(codeHash));
         if (v == null) {
             return null;
         }
@@ -3407,22 +3407,22 @@ public final class LaneL1Store implements XdagLifecycle {
         return Bytes.wrap(Arrays.copyOfRange(v, 8, 8 + len));
     }
 
-    public long getCallCount(Bytes laneId, long height) {
-        byte[] v = source.get(LaneL1Keys.callCount(laneId, height));
+    public long getCallCount(Bytes chainId, long height) {
+        byte[] v = source.get(ChainL1Keys.callCount(chainId, height));
         return v == null ? 0 : ExtCodec.u32(v, 0);
     }
 
-    public InputRecord getInput(Bytes laneId, long height, long index) {
-        byte[] v = source.get(LaneL1Keys.input(laneId, height, index));
+    public InputRecord getInput(Bytes chainId, long height, long index) {
+        byte[] v = source.get(ChainL1Keys.input(chainId, height, index));
         return v == null ? null : InputRecord.decode(v);
     }
 
     public List<InputRef> getReverse(Bytes32 blockHash) {
-        byte[] v = source.get(LaneL1Keys.reverse(blockHash));
+        byte[] v = source.get(ChainL1Keys.reverse(blockHash));
         return v == null ? List.of() : InputRef.decodeList(v);
     }
 
-    public void commit(LaneL1Batch batch) {
+    public void commit(ChainL1Batch batch) {
         if (!batch.isEmpty()) {
             source.batchWrite(batch.puts(), batch.deletes());
         }
@@ -3442,7 +3442,7 @@ public final class LaneL1Store implements XdagLifecycle {
     }
 
     private static boolean isSnapshotHashKey(byte[] key) {
-        return key.length == 1 && key[0] == LaneL1Keys.SNAPSHOT_HASH;
+        return key.length == 1 && key[0] == ChainL1Keys.SNAPSHOT_HASH;
     }
 
     public Bytes32 stateHash() {
@@ -3477,14 +3477,14 @@ public final class LaneL1Store implements XdagLifecycle {
         for (byte[] k : sortedKeys()) {
             target.put(k, source.get(k));
         }
-        target.put(LaneL1Keys.SNAPSHOT_HASH_KEY, stateHash().toArray());
+        target.put(ChainL1Keys.SNAPSHOT_HASH_KEY, stateHash().toArray());
     }
 
     /** Copies every key from the snapshot and verifies the recorded state hash; throws on mismatch or missing hash. */
     public void importSnapshot(KVSource<byte[], byte[]> from) {
-        byte[] expected = from.get(LaneL1Keys.SNAPSHOT_HASH_KEY);
+        byte[] expected = from.get(ChainL1Keys.SNAPSHOT_HASH_KEY);
         if (expected == null) {
-            throw new IllegalStateException("LANE_L1 snapshot has no state hash");
+            throw new IllegalStateException("CHAIN_L1 snapshot has no state hash");
         }
         for (byte[] k : sortedKeysOf(from)) {
             if (isSnapshotHashKey(k)) {
@@ -3494,7 +3494,7 @@ public final class LaneL1Store implements XdagLifecycle {
         }
         Bytes32 actual = stateHash();
         if (!actual.equals(Bytes32.wrap(expected))) {
-            throw new IllegalStateException("LANE_L1 snapshot hash mismatch: expected " + Bytes32.wrap(expected)
+            throw new IllegalStateException("CHAIN_L1 snapshot hash mismatch: expected " + Bytes32.wrap(expected)
                     + " actual " + actual);
         }
     }
@@ -3503,14 +3503,14 @@ public final class LaneL1Store implements XdagLifecycle {
 
 - [ ] **Step 5: 运行测试，确认通过**
 
-Run: `mvn -q -Dtest=io.xdag.lane.l1.LaneL1StoreTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.l1.ChainL1StoreTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `Tests run: 5, Failures: 0`
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add src/main/java/io/xdag/lane/l1/ src/test/java/io/xdag/lane/l1/LaneL1StoreTest.java
-git commit -m "Add LANE_L1 store with records, batched writes and snapshot support
+git add src/main/java/io/xdag/chain/l1/ src/test/java/io/xdag/chain/l1/ChainL1StoreTest.java
+git commit -m "Add CHAIN_L1 store with records, batched writes and snapshot support
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
@@ -3518,17 +3518,17 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 
 ---
 
-### Task 12: `LaneSpec` 配置与 `LaneActivation`
+### Task 12: `ChainSpec` 配置与 `ChainActivation`
 
 **Files:**
-- Create: `src/main/java/io/xdag/config/spec/LaneSpec.java`
+- Create: `src/main/java/io/xdag/config/spec/ChainSpec.java`
 - Modify: `src/main/java/io/xdag/config/Config.java`
 - Modify: `src/main/java/io/xdag/config/AbstractConfig.java`
 - Modify: `src/main/java/io/xdag/config/DevnetConfig.java`
 - Modify: `src/main/java/io/xdag/config/TestnetConfig.java`
 - Modify: `src/main/java/io/xdag/config/MainnetConfig.java`
-- Create: `src/main/java/io/xdag/lane/LaneActivation.java`
-- Test: `src/test/java/io/xdag/config/LaneSpecTest.java`
+- Create: `src/main/java/io/xdag/chain/ChainActivation.java`
+- Test: `src/test/java/io/xdag/config/ChainSpecTest.java`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -3541,32 +3541,32 @@ import static org.junit.Assert.assertTrue;
 
 import io.xdag.core.XAmount;
 import io.xdag.core.XUnit;
-import io.xdag.lane.LaneActivation;
+import io.xdag.chain.ChainActivation;
 import org.junit.Test;
 
-public class LaneSpecTest {
+public class ChainSpecTest {
 
     @Test
     public void devnetIsActiveFromGenesisWithProtocolDefaults() {
         Config config = new DevnetConfig();
-        assertEquals(0L, config.getLaneSpec().getLaneActivationHeight());
-        assertEquals(4096, config.getLaneSpec().getLaneMaxChunksPerChain());
-        assertEquals(1024 * 1024, config.getLaneSpec().getLaneMaxWasmBytes());
-        assertEquals(256, config.getLaneSpec().getLaneMaxInlineArgs());
-        assertEquals(XAmount.of(10, XUnit.MILLI_XDAG), config.getLaneSpec().getLaneChunkFee());
+        assertEquals(0L, config.getChainSpec().getChainActivationHeight());
+        assertEquals(4096, config.getChainSpec().getChainMaxChunksPerChain());
+        assertEquals(1024 * 1024, config.getChainSpec().getChainMaxWasmBytes());
+        assertEquals(256, config.getChainSpec().getChainMaxInlineArgs());
+        assertEquals(XAmount.of(10, XUnit.MILLI_XDAG), config.getChainSpec().getChainChunkFee());
     }
 
     @Test
     public void sharedNetworksAreNotScheduled() {
-        assertEquals(Long.MAX_VALUE, new MainnetConfig().getLaneSpec().getLaneActivationHeight());
-        assertEquals(Long.MAX_VALUE, new TestnetConfig().getLaneSpec().getLaneActivationHeight());
+        assertEquals(Long.MAX_VALUE, new MainnetConfig().getChainSpec().getChainActivationHeight());
+        assertEquals(Long.MAX_VALUE, new TestnetConfig().getChainSpec().getChainActivationHeight());
     }
 
     @Test
     public void activationCanBeOverriddenProgrammatically() {
         Config config = new DevnetConfig();
-        config.getLaneSpec().setLaneActivationHeight(100L);
-        LaneActivation activation = new LaneActivation(config.getLaneSpec());
+        config.getChainSpec().setChainActivationHeight(100L);
+        ChainActivation activation = new ChainActivation(config.getChainSpec());
         assertFalse(activation.isActive(99L));
         assertTrue(activation.isActive(100L));
         assertTrue(activation.isActive(101L));
@@ -3576,51 +3576,51 @@ public class LaneSpecTest {
 
 - [ ] **Step 2: 运行，确认失败**
 
-Run: `mvn -q -Dtest=io.xdag.config.LaneSpecTest -Dsurefire.failIfNoSpecifiedTests=false test`
-Expected: 编译错误 `cannot find symbol: method getLaneSpec()`。
+Run: `mvn -q -Dtest=io.xdag.config.ChainSpecTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Expected: 编译错误 `cannot find symbol: method getChainSpec()`。
 
 - [ ] **Step 3: 实现**
 
-`src/main/java/io/xdag/config/spec/LaneSpec.java`：
+`src/main/java/io/xdag/config/spec/ChainSpec.java`：
 
 ```java
 package io.xdag.config.spec;
 
 import io.xdag.core.XAmount;
 
-/** Lane (DAG-native contract) protocol parameters. Activation height gates every lane hook in setMain/applyBlock. */
-public interface LaneSpec {
+/** Chain (DAG-native contract) protocol parameters. Activation height gates every chain hook in setMain/applyBlock. */
+public interface ChainSpec {
 
-    long getLaneActivationHeight();
+    long getChainActivationHeight();
 
-    void setLaneActivationHeight(long height);
+    void setChainActivationHeight(long height);
 
-    int getLaneMaxChunksPerChain();
+    int getChainMaxChunksPerChain();
 
-    int getLaneMaxWasmBytes();
+    int getChainMaxWasmBytes();
 
-    int getLaneMaxInlineArgs();
+    int getChainMaxInlineArgs();
 
-    XAmount getLaneChunkFee();
+    XAmount getChainChunkFee();
 }
 ```
 
-`Config.java`：在 `SnapshotSpec getSnapshotSpec();` 之后追加 `LaneSpec getLaneSpec();`（并 import `io.xdag.config.spec.LaneSpec`；文件已 `import io.xdag.config.spec.*` 则无需）。
+`Config.java`：在 `SnapshotSpec getSnapshotSpec();` 之后追加 `ChainSpec getChainSpec();`（并 import `io.xdag.config.spec.ChainSpec`；文件已 `import io.xdag.config.spec.*` 则无需）。
 
 `AbstractConfig.java`：
 
-(a) 类声明 `implements Config, AdminSpec, NodeSpec, WalletSpec, RPCSpec, SnapshotSpec, RandomxSpec, FundSpec` 末尾追加 `, LaneSpec`。
+(a) 类声明 `implements Config, AdminSpec, NodeSpec, WalletSpec, RPCSpec, SnapshotSpec, RandomxSpec, FundSpec` 末尾追加 `, ChainSpec`。
 
 (b) 字段区（`// RandomX configuration` 之前）新增：
 
 ```java
-    // Lane (DAG-native contracts) configuration
-    protected long laneActivationHeight = Long.MAX_VALUE;
-    protected Long laneActivationHeightOverride;
-    protected int laneMaxChunksPerChain = 4096;
-    protected int laneMaxWasmBytes = 1024 * 1024;
-    protected int laneMaxInlineArgs = 256;
-    protected XAmount laneChunkFee = XAmount.of(10, XUnit.MILLI_XDAG);
+    // Chain (DAG-native contracts) configuration
+    protected long chainActivationHeight = Long.MAX_VALUE;
+    protected Long chainActivationHeightOverride;
+    protected int chainMaxChunksPerChain = 4096;
+    protected int chainMaxWasmBytes = 1024 * 1024;
+    protected int chainMaxInlineArgs = 256;
+    protected XAmount chainChunkFee = XAmount.of(10, XUnit.MILLI_XDAG);
 ```
 
 确认文件有 `import io.xdag.core.XUnit;`（没有则加）。
@@ -3628,85 +3628,85 @@ public interface LaneSpec {
 (c) `getSetting()` 末尾（`flag = ...` 之后）追加：
 
 ```java
-        // Lane configuration overrides (defaults live in the per-network constructors)
-        laneActivationHeightOverride = config.hasPath("lane.activation.height") ? config.getLong("lane.activation.height") : null;
-        if (config.hasPath("lane.chunk.maxPerChain")) {
-            laneMaxChunksPerChain = config.getInt("lane.chunk.maxPerChain");
+        // Chain configuration overrides (defaults live in the per-network constructors)
+        chainActivationHeightOverride = config.hasPath("chain.activation.height") ? config.getLong("chain.activation.height") : null;
+        if (config.hasPath("chain.chunk.maxPerChain")) {
+            chainMaxChunksPerChain = config.getInt("chain.chunk.maxPerChain");
         }
-        if (config.hasPath("lane.wasm.maxBytes")) {
-            laneMaxWasmBytes = config.getInt("lane.wasm.maxBytes");
+        if (config.hasPath("chain.wasm.maxBytes")) {
+            chainMaxWasmBytes = config.getInt("chain.wasm.maxBytes");
         }
-        if (config.hasPath("lane.args.maxInline")) {
-            laneMaxInlineArgs = config.getInt("lane.args.maxInline");
+        if (config.hasPath("chain.args.maxInline")) {
+            chainMaxInlineArgs = config.getInt("chain.args.maxInline");
         }
-        if (config.hasPath("lane.chunk.feeMilliXdag")) {
-            laneChunkFee = XAmount.of(config.getLong("lane.chunk.feeMilliXdag"), XUnit.MILLI_XDAG);
+        if (config.hasPath("chain.chunk.feeMilliXdag")) {
+            chainChunkFee = XAmount.of(config.getLong("chain.chunk.feeMilliXdag"), XUnit.MILLI_XDAG);
         }
 ```
 
-`getSetting()` 在父构造器里先跑，子类构造器随后设默认值；用 `laneActivationHeightOverride` 保证 conf 覆盖不被子类默认值冲掉。
+`getSetting()` 在父构造器里先跑，子类构造器随后设默认值；用 `chainActivationHeightOverride` 保证 conf 覆盖不被子类默认值冲掉。
 
 (d) 在 `getSnapshotSpec()` 之后新增：
 
 ```java
     @Override
-    public LaneSpec getLaneSpec() {
+    public ChainSpec getChainSpec() {
         return this;
     }
 
     @Override
-    public long getLaneActivationHeight() {
-        return laneActivationHeightOverride != null ? laneActivationHeightOverride : laneActivationHeight;
+    public long getChainActivationHeight() {
+        return chainActivationHeightOverride != null ? chainActivationHeightOverride : chainActivationHeight;
     }
 
     @Override
-    public void setLaneActivationHeight(long height) {
-        this.laneActivationHeightOverride = null;
-        this.laneActivationHeight = height;
+    public void setChainActivationHeight(long height) {
+        this.chainActivationHeightOverride = null;
+        this.chainActivationHeight = height;
     }
 
     @Override
-    public int getLaneMaxChunksPerChain() {
-        return laneMaxChunksPerChain;
+    public int getChainMaxChunksPerChain() {
+        return chainMaxChunksPerChain;
     }
 
     @Override
-    public int getLaneMaxWasmBytes() {
-        return laneMaxWasmBytes;
+    public int getChainMaxWasmBytes() {
+        return chainMaxWasmBytes;
     }
 
     @Override
-    public int getLaneMaxInlineArgs() {
-        return laneMaxInlineArgs;
+    public int getChainMaxInlineArgs() {
+        return chainMaxInlineArgs;
     }
 
     @Override
-    public XAmount getLaneChunkFee() {
-        return laneChunkFee;
+    public XAmount getChainChunkFee() {
+        return chainChunkFee;
     }
 ```
 
-`DevnetConfig.java` 构造器末尾追加 `this.laneActivationHeight = 0;`；`TestnetConfig.java` 与 `MainnetConfig.java` 构造器末尾追加 `this.laneActivationHeight = Long.MAX_VALUE;`。
+`DevnetConfig.java` 构造器末尾追加 `this.chainActivationHeight = 0;`；`TestnetConfig.java` 与 `MainnetConfig.java` 构造器末尾追加 `this.chainActivationHeight = Long.MAX_VALUE;`。
 
-`src/main/java/io/xdag/lane/LaneActivation.java`：
+`src/main/java/io/xdag/chain/ChainActivation.java`：
 
 ```java
-package io.xdag.lane;
+package io.xdag.chain;
 
-import io.xdag.config.spec.LaneSpec;
+import io.xdag.config.spec.ChainSpec;
 import io.xdag.core.XdagStats;
 
-/** Single place that answers "is the lane protocol active at this main height". Used by hooks now, by RPC/wallet gating later. */
-public final class LaneActivation {
+/** Single place that answers "is the chain protocol active at this main height". Used by hooks now, by RPC/wallet gating later. */
+public final class ChainActivation {
 
-    private final LaneSpec spec;
+    private final ChainSpec spec;
 
-    public LaneActivation(LaneSpec spec) {
+    public ChainActivation(ChainSpec spec) {
         this.spec = spec;
     }
 
     public boolean isActive(long mainHeight) {
-        return mainHeight >= spec.getLaneActivationHeight();
+        return mainHeight >= spec.getChainActivationHeight();
     }
 
     public boolean isActiveNow(XdagStats stats) {
@@ -3717,14 +3717,14 @@ public final class LaneActivation {
 
 - [ ] **Step 4: 运行测试，确认通过**
 
-Run: `mvn -q -Dtest=io.xdag.config.LaneSpecTest -Dsurefire.failIfNoSpecifiedTests=false test`
-Expected: `Tests run: 3, Failures: 0`。若 `MainnetConfig`/`TestnetConfig` 在测试类路径下因缺少必填 conf 键（如 `admin.telnet.password`）抛异常，把第二个测试改为只断言 `new DevnetConfig()` 用 `setLaneActivationHeight(Long.MAX_VALUE)` 后的值，并在提交信息里注明。
+Run: `mvn -q -Dtest=io.xdag.config.ChainSpecTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Expected: `Tests run: 3, Failures: 0`。若 `MainnetConfig`/`TestnetConfig` 在测试类路径下因缺少必填 conf 键（如 `admin.telnet.password`）抛异常，把第二个测试改为只断言 `new DevnetConfig()` 用 `setChainActivationHeight(Long.MAX_VALUE)` 后的值，并在提交信息里注明。
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/main/java/io/xdag/config/spec/LaneSpec.java src/main/java/io/xdag/config/Config.java src/main/java/io/xdag/config/AbstractConfig.java src/main/java/io/xdag/config/DevnetConfig.java src/main/java/io/xdag/config/TestnetConfig.java src/main/java/io/xdag/config/MainnetConfig.java src/main/java/io/xdag/lane/LaneActivation.java src/test/java/io/xdag/config/LaneSpecTest.java
-git commit -m "Add LaneSpec configuration and activation height per network
+git add src/main/java/io/xdag/config/spec/ChainSpec.java src/main/java/io/xdag/config/Config.java src/main/java/io/xdag/config/AbstractConfig.java src/main/java/io/xdag/config/DevnetConfig.java src/main/java/io/xdag/config/TestnetConfig.java src/main/java/io/xdag/config/MainnetConfig.java src/main/java/io/xdag/chain/ChainActivation.java src/test/java/io/xdag/config/ChainSpecTest.java
+git commit -m "Add ChainSpec configuration and activation height per network
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
@@ -3732,24 +3732,24 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 
 ---
 
-### Task 13: `LaneIds`、钩子接口与 `LaneL1Processor`
+### Task 13: `ChainIds`、钩子接口与 `ChainL1Processor`
 
 **Files:**
-- Create: `src/main/java/io/xdag/lane/l1/LaneIds.java`
-- Create: `src/main/java/io/xdag/lane/l1/LaneL1Hooks.java`
-- Create: `src/main/java/io/xdag/lane/l1/LaneKindHandler.java`
-- Create: `src/main/java/io/xdag/lane/l1/ApplyContext.java`
-- Create: `src/main/java/io/xdag/lane/l1/LaneL1Processor.java`
-- Test: `src/test/java/io/xdag/lane/l1/LaneL1ProcessorTest.java`
+- Create: `src/main/java/io/xdag/chain/l1/ChainIds.java`
+- Create: `src/main/java/io/xdag/chain/l1/ChainL1Hooks.java`
+- Create: `src/main/java/io/xdag/chain/l1/ChainKindHandler.java`
+- Create: `src/main/java/io/xdag/chain/l1/ApplyContext.java`
+- Create: `src/main/java/io/xdag/chain/l1/ChainL1Processor.java`
+- Test: `src/test/java/io/xdag/chain/l1/ChainL1ProcessorTest.java`
 
 - [ ] **Step 1: 写失败测试**
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_INPUT;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUTPUT;
-import static io.xdag.lane.ext.ChunkChainTest.payload;
+import static io.xdag.chain.ext.ChunkChainTest.payload;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -3760,7 +3760,7 @@ import static org.junit.Assert.assertTrue;
 import io.xdag.BlockBuilder;
 import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
-import io.xdag.config.spec.LaneSpec;
+import io.xdag.config.spec.ChainSpec;
 import io.xdag.core.Address;
 import io.xdag.core.Block;
 import io.xdag.core.XAmount;
@@ -3769,13 +3769,13 @@ import io.xdag.core.XdagBlock;
 import io.xdag.crypto.SampleKeys;
 import io.xdag.crypto.hash.HashUtils;
 import io.xdag.crypto.keys.ECKeyPair;
-import io.xdag.lane.InMemoryKVSource;
-import io.xdag.lane.ext.BondExt;
-import io.xdag.lane.ext.Classified;
-import io.xdag.lane.ext.ExtKind;
-import io.xdag.lane.ext.LaneBlockBuilder;
-import io.xdag.lane.ext.LaneBlockClassifierTest;
-import io.xdag.lane.ext.LaneConfigExt;
+import io.xdag.chain.InMemoryKVSource;
+import io.xdag.chain.ext.BondExt;
+import io.xdag.chain.ext.Classified;
+import io.xdag.chain.ext.ExtKind;
+import io.xdag.chain.ext.ChainBlockBuilder;
+import io.xdag.chain.ext.ChainBlockClassifierTest;
+import io.xdag.chain.ext.ChainConfigExt;
 import io.xdag.utils.BytesUtils;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -3787,34 +3787,34 @@ import org.apache.tuweni.units.bigints.UInt64;
 import org.junit.Before;
 import org.junit.Test;
 
-public class LaneL1ProcessorTest {
+public class ChainL1ProcessorTest {
 
-    /** A LaneSpec whose limits tests can shrink. */
-    static final class TestSpec implements LaneSpec {
+    /** A ChainSpec whose limits tests can shrink. */
+    static final class TestSpec implements ChainSpec {
         long activation = 0;
         int maxChunks = 4096;
         int maxWasm = 1024 * 1024;
 
-        @Override public long getLaneActivationHeight() { return activation; }
-        @Override public void setLaneActivationHeight(long height) { activation = height; }
-        @Override public int getLaneMaxChunksPerChain() { return maxChunks; }
-        @Override public int getLaneMaxWasmBytes() { return maxWasm; }
-        @Override public int getLaneMaxInlineArgs() { return 256; }
-        @Override public XAmount getLaneChunkFee() { return XAmount.of(10, XUnit.MILLI_XDAG); }
+        @Override public long getChainActivationHeight() { return activation; }
+        @Override public void setChainActivationHeight(long height) { activation = height; }
+        @Override public int getChainMaxChunksPerChain() { return maxChunks; }
+        @Override public int getChainMaxWasmBytes() { return maxWasm; }
+        @Override public int getChainMaxInlineArgs() { return 256; }
+        @Override public XAmount getChainChunkFee() { return XAmount.of(10, XUnit.MILLI_XDAG); }
     }
 
     private static final long TS = 0x16a00000000L;
     private static final XAmount ONE = XAmount.of(1, XUnit.XDAG);
     private static final XAmount FEE = XAmount.of(100, XUnit.MILLI_XDAG);
-    private static final LaneConfigExt CFG = new LaneConfigExt(1L, 32L, 10_000_000L);
+    private static final ChainConfigExt CFG = new ChainConfigExt(1L, 32L, 10_000_000L);
 
     private final Config config = new DevnetConfig();
     private final ECKeyPair sender = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
     private final Map<Bytes32, Block> dag = new HashMap<>();
     private InMemoryKVSource src;
-    private LaneL1Store store;
+    private ChainL1Store store;
     private TestSpec spec;
-    private LaneL1Processor proc;
+    private ChainL1Processor proc;
     private Block mainBlock;
     private long nonce = 1;
     private final List<Block> appliedOrder = new ArrayList<>();
@@ -3822,11 +3822,11 @@ public class LaneL1ProcessorTest {
     @Before
     public void setUp() {
         src = new InMemoryKVSource();
-        store = new LaneL1Store(src);
+        store = new ChainL1Store(src);
         store.start();
         spec = new TestSpec();
-        proc = new LaneL1Processor(store, spec, h -> dag.get(Bytes32.wrap(h.toArray())));
-        mainBlock = LaneBlockClassifierTest.extBlock(config, List.of(), List.of());
+        proc = new ChainL1Processor(store, spec, h -> dag.get(Bytes32.wrap(h.toArray())));
+        mainBlock = ChainBlockClassifierTest.extBlock(config, List.of(), List.of());
     }
 
     private UInt64 nextNonce() {
@@ -3834,7 +3834,7 @@ public class LaneL1ProcessorTest {
     }
 
     /** Registers chunks and the block in the fake DAG and feeds them to the processor in import order (tail first). */
-    private void apply(LaneBlockBuilder.Built built) {
+    private void apply(ChainBlockBuilder.Built built) {
         for (int i = built.chunks().size() - 1; i >= 0; i--) {
             apply(built.chunks().get(i));
         }
@@ -3854,42 +3854,42 @@ public class LaneL1ProcessorTest {
         appliedOrder.clear();
     }
 
-    private LaneBlockBuilder.Built deployNewLane(Bytes wasm) {
-        int chunks = LaneBlockBuilder.chunksFor(wasm.size());
-        XAmount fee = LaneBlockBuilder.minHeaderFee(spec.getLaneChunkFee(), chunks);
-        return LaneBlockBuilder.deployNewLane(config, TS, sender, nextNonce(), fee, wasm, CFG, payload(20, 9), 1000L).value();
+    private ChainBlockBuilder.Built deployNewChain(Bytes wasm) {
+        int chunks = ChainBlockBuilder.chunksFor(wasm.size());
+        XAmount fee = ChainBlockBuilder.minHeaderFee(spec.getChainChunkFee(), chunks);
+        return ChainBlockBuilder.deployNewChain(config, TS, sender, nextNonce(), fee, wasm, CFG, payload(20, 9), 1000L).value();
     }
 
-    private LaneBlockBuilder.Built call(Bytes laneId, Bytes contract, Bytes args, XAmount headerFee) {
-        return LaneBlockBuilder.call(config, TS, sender, nextNonce(), laneId, contract, 1, 100L, ONE, headerFee, args).value();
+    private ChainBlockBuilder.Built call(Bytes chainId, Bytes contract, Bytes args, XAmount headerFee) {
+        return ChainBlockBuilder.call(config, TS, sender, nextNonce(), chainId, contract, 1, 100L, ONE, headerFee, args).value();
     }
 
     @Test
-    public void deployCreatesLaneContractCodeAndInputRecord() {
+    public void deployCreatesChainContractCodeAndInputRecord() {
         proc.onSetMainBegin(10, mainBlock);
         Bytes wasm = payload(1000, 1);
-        LaneBlockBuilder.Built deploy = deployNewLane(wasm);
+        ChainBlockBuilder.Built deploy = deployNewChain(wasm);
         apply(deploy);
 
-        Bytes laneId = LaneIds.laneIdOf(deploy.block().getHash());
-        Bytes contract = LaneIds.contractIdOf(deploy.block().getHash());
-        assertTrue(store.hasLane(laneId));
-        LaneRecord lane = store.getLane(laneId);
-        assertEquals(10L, lane.createdHeight());
-        assertEquals(deploy.block().getHash(), lane.createBlockHash());
-        assertEquals(1L, lane.contractCount());
-        assertEquals(CFG.gasPriceNano(), lane.gasPriceNano());
+        Bytes chainId = ChainIds.chainIdOf(deploy.block().getHash());
+        Bytes contract = ChainIds.contractIdOf(deploy.block().getHash());
+        assertTrue(store.hasChain(chainId));
+        ChainRecord chain = store.getChain(chainId);
+        assertEquals(10L, chain.createdHeight());
+        assertEquals(deploy.block().getHash(), chain.createBlockHash());
+        assertEquals(1L, chain.contractCount());
+        assertEquals(CFG.gasPriceNano(), chain.gasPriceNano());
         ContractRecord cr = store.getContract(contract);
-        assertEquals(laneId, cr.laneId());
+        assertEquals(chainId, cr.chainId());
         assertEquals(HashUtils.sha256(wasm), cr.codeHash());
         assertEquals(wasm, store.getCode(cr.codeHash()));
         assertEquals(1L, store.getCodeRefCount(cr.codeHash()));
-        assertEquals(1L, store.getCallCount(laneId, 10));
-        InputRecord in = store.getInput(laneId, 10, 0);
+        assertEquals(1L, store.getCallCount(chainId, 10));
+        InputRecord in = store.getInput(chainId, 10, 0);
         assertEquals(ExtKind.DEPLOY, in.kind());
         assertEquals(InputStatus.OK, in.status());
         assertEquals(contract, in.contract());
-        assertEquals(List.of(new InputRef(laneId, 10, 0)), store.getReverse(deploy.block().getHash()));
+        assertEquals(List.of(new InputRef(chainId, 10, 0)), store.getReverse(deploy.block().getHash()));
         // chunk blocks produce no records
         assertTrue(store.getReverse(deploy.chunks().get(0).getHash()).isEmpty());
     }
@@ -3897,15 +3897,15 @@ public class LaneL1ProcessorTest {
     @Test
     public void callsAreRecordedWithStatusesInOrder() {
         proc.onSetMainBegin(10, mainBlock);
-        LaneBlockBuilder.Built deploy = deployNewLane(payload(600, 2));
+        ChainBlockBuilder.Built deploy = deployNewChain(payload(600, 2));
         apply(deploy);
-        Bytes laneId = LaneIds.laneIdOf(deploy.block().getHash());
-        Bytes contract = LaneIds.contractIdOf(deploy.block().getHash());
+        Bytes chainId = ChainIds.chainIdOf(deploy.block().getHash());
+        Bytes contract = ChainIds.contractIdOf(deploy.block().getHash());
 
-        LaneBlockBuilder.Built ok = call(laneId, contract, payload(20, 3), FEE);
-        LaneBlockBuilder.Built unknownContract = call(laneId, Bytes.random(20), payload(20, 4), FEE);
-        LaneBlockBuilder.Built lowFee = call(laneId, contract, payload(1000, 5), XAmount.of(20, XUnit.MILLI_XDAG));
-        LaneBlockBuilder.Built exactFee = call(laneId, contract, payload(1000, 6), XAmount.of(30, XUnit.MILLI_XDAG));
+        ChainBlockBuilder.Built ok = call(chainId, contract, payload(20, 3), FEE);
+        ChainBlockBuilder.Built unknownContract = call(chainId, Bytes.random(20), payload(20, 4), FEE);
+        ChainBlockBuilder.Built lowFee = call(chainId, contract, payload(1000, 5), XAmount.of(20, XUnit.MILLI_XDAG));
+        ChainBlockBuilder.Built exactFee = call(chainId, contract, payload(1000, 6), XAmount.of(30, XUnit.MILLI_XDAG));
         apply(ok);
         apply(unknownContract);
         apply(lowFee);
@@ -3913,76 +3913,76 @@ public class LaneL1ProcessorTest {
 
         // plain transfer into the vault: no EXT at all
         Address from = new Address(BytesUtils.arrayToByte32(sender.toAddress().toArray()), XDAG_FIELD_INPUT, true);
-        Address to = new Address(BytesUtils.arrayToByte32(laneId.toArray()), XDAG_FIELD_OUTPUT, true);
+        Address to = new Address(BytesUtils.arrayToByte32(chainId.toArray()), XDAG_FIELD_OUTPUT, true);
         Block plain = BlockBuilder.generateNewTransactionBlock(config, sender, TS, from, to, ONE, nextNonce());
         apply(new Block(new XdagBlock(plain.toBytes())));
 
-        assertEquals(6L, store.getCallCount(laneId, 10));
-        assertEquals(InputStatus.OK, store.getInput(laneId, 10, 1).status());
-        assertEquals(ExtKind.CALL, store.getInput(laneId, 10, 1).kind());
-        assertEquals(contract, store.getInput(laneId, 10, 1).contract());
-        assertEquals(InputStatus.INVALID_FORMAT, store.getInput(laneId, 10, 2).status());
-        assertNull(store.getInput(laneId, 10, 2).kind());
-        assertEquals(InputStatus.INVALID_FEE, store.getInput(laneId, 10, 3).status());
-        assertEquals(InputStatus.OK, store.getInput(laneId, 10, 4).status());
-        assertEquals(InputStatus.INVALID_FORMAT, store.getInput(laneId, 10, 5).status());
-        assertEquals(ok.block().getHash(), store.getInput(laneId, 10, 1).blockHash());
+        assertEquals(6L, store.getCallCount(chainId, 10));
+        assertEquals(InputStatus.OK, store.getInput(chainId, 10, 1).status());
+        assertEquals(ExtKind.CALL, store.getInput(chainId, 10, 1).kind());
+        assertEquals(contract, store.getInput(chainId, 10, 1).contract());
+        assertEquals(InputStatus.INVALID_FORMAT, store.getInput(chainId, 10, 2).status());
+        assertNull(store.getInput(chainId, 10, 2).kind());
+        assertEquals(InputStatus.INVALID_FEE, store.getInput(chainId, 10, 3).status());
+        assertEquals(InputStatus.OK, store.getInput(chainId, 10, 4).status());
+        assertEquals(InputStatus.INVALID_FORMAT, store.getInput(chainId, 10, 5).status());
+        assertEquals(ok.block().getHash(), store.getInput(chainId, 10, 1).blockHash());
     }
 
     @Test
-    public void deployIntoLaneAndCodeReferenceCounting() {
+    public void deployIntoChainAndCodeReferenceCounting() {
         proc.onSetMainBegin(10, mainBlock);
         Bytes wasm = payload(600, 7);
-        LaneBlockBuilder.Built first = deployNewLane(wasm);
+        ChainBlockBuilder.Built first = deployNewChain(wasm);
         apply(first);
-        Bytes laneId = LaneIds.laneIdOf(first.block().getHash());
+        Bytes chainId = ChainIds.chainIdOf(first.block().getHash());
         Bytes32 codeHash = HashUtils.sha256(wasm);
 
-        LaneBlockBuilder.Built reuse = LaneBlockBuilder.deployIntoLane(config, TS, sender, nextNonce(), laneId, ONE, FEE, null, codeHash, payload(10, 8), 1L).value();
+        ChainBlockBuilder.Built reuse = ChainBlockBuilder.deployIntoChain(config, TS, sender, nextNonce(), chainId, ONE, FEE, null, codeHash, payload(10, 8), 1L).value();
         apply(reuse);
-        assertEquals(2L, store.getLane(laneId).contractCount());
+        assertEquals(2L, store.getChain(chainId).contractCount());
         assertEquals(2L, store.getCodeRefCount(codeHash));
-        assertEquals(laneId, store.getContract(LaneIds.contractIdOf(reuse.block().getHash())).laneId());
+        assertEquals(chainId, store.getContract(ChainIds.contractIdOf(reuse.block().getHash())).chainId());
 
-        LaneBlockBuilder.Built unknown = LaneBlockBuilder.deployIntoLane(config, TS, sender, nextNonce(), laneId, ONE, FEE, null, Bytes32.random(), payload(10, 8), 1L).value();
+        ChainBlockBuilder.Built unknown = ChainBlockBuilder.deployIntoChain(config, TS, sender, nextNonce(), chainId, ONE, FEE, null, Bytes32.random(), payload(10, 8), 1L).value();
         apply(unknown);
-        assertEquals(InputStatus.INVALID_FORMAT, store.getInput(laneId, 10, 2).status());
-        assertEquals(ExtKind.DEPLOY, store.getInput(laneId, 10, 2).kind());
-        assertEquals(2L, store.getLane(laneId).contractCount());
-        assertNull(store.getContract(LaneIds.contractIdOf(unknown.block().getHash())));
+        assertEquals(InputStatus.INVALID_FORMAT, store.getInput(chainId, 10, 2).status());
+        assertEquals(ExtKind.DEPLOY, store.getInput(chainId, 10, 2).kind());
+        assertEquals(2L, store.getChain(chainId).contractCount());
+        assertNull(store.getContract(ChainIds.contractIdOf(unknown.block().getHash())));
     }
 
     @Test
     public void oversizedCodeIsRecordedButNotStored() {
         spec.maxWasm = 500;
         proc.onSetMainBegin(10, mainBlock);
-        LaneBlockBuilder.Built deploy = deployNewLane(payload(600, 10));
+        ChainBlockBuilder.Built deploy = deployNewChain(payload(600, 10));
         apply(deploy);
-        Bytes laneId = LaneIds.laneIdOf(deploy.block().getHash());
-        assertEquals(InputStatus.CODE_TOO_LARGE, store.getInput(laneId, 10, 0).status());
-        assertFalse(store.hasLane(laneId));
+        Bytes chainId = ChainIds.chainIdOf(deploy.block().getHash());
+        assertEquals(InputStatus.CODE_TOO_LARGE, store.getInput(chainId, 10, 0).status());
+        assertFalse(store.hasChain(chainId));
         assertFalse(store.hasCode(HashUtils.sha256(payload(600, 10))));
-        assertEquals(1L, store.getCallCount(laneId, 10));
+        assertEquals(1L, store.getCallCount(chainId, 10));
     }
 
     @Test
     public void nothingHappensBelowActivationOrOutsideSetMain() {
         spec.activation = 100;
         proc.onSetMainBegin(99, mainBlock);
-        apply(deployNewLane(payload(600, 11)));
+        apply(deployNewChain(payload(600, 11)));
         assertEquals(1, src.keys().size());
         proc.onSetMainEnd(99, mainBlock);
 
         spec.activation = 0;
         // no onSetMainBegin: context is null, hook must be inert
-        apply(deployNewLane(payload(600, 12)));
+        apply(deployNewChain(payload(600, 12)));
         assertEquals(1, src.keys().size());
     }
 
     @Test
     public void handlersAreDispatchedForOtherKinds() {
         List<Classified> seen = new ArrayList<>();
-        proc.registerHandler(ExtKind.BOND, new LaneKindHandler() {
+        proc.registerHandler(ExtKind.BOND, new ChainKindHandler() {
             @Override
             public void onApplied(Block block, Classified classified, ApplyContext ctx) {
                 assertEquals(10L, ctx.height());
@@ -3996,7 +3996,7 @@ public class LaneL1ProcessorTest {
         });
         proc.onSetMainBegin(10, mainBlock);
         BondExt bond = new BondExt(false, Bytes.random(20), 0L);
-        Block bondBlock = LaneBlockClassifierTest.extBlock(config, List.of(bond.encodeHeader()), List.of());
+        Block bondBlock = ChainBlockClassifierTest.extBlock(config, List.of(bond.encodeHeader()), List.of());
         apply(bondBlock);
         assertEquals(1, seen.size());
         assertEquals(bond, seen.get(0).as(BondExt.class));
@@ -4009,39 +4009,39 @@ public class LaneL1ProcessorTest {
     public void unapplyRestoresAnEmptyStore() {
         proc.onSetMainBegin(10, mainBlock);
         Bytes wasm = payload(900, 13);
-        LaneBlockBuilder.Built deploy = deployNewLane(wasm);
+        ChainBlockBuilder.Built deploy = deployNewChain(wasm);
         apply(deploy);
-        Bytes laneId = LaneIds.laneIdOf(deploy.block().getHash());
-        Bytes contract = LaneIds.contractIdOf(deploy.block().getHash());
-        apply(call(laneId, contract, payload(20, 14), FEE));
-        apply(LaneBlockBuilder.deployIntoLane(config, TS, sender, nextNonce(), laneId, ONE, FEE, null, HashUtils.sha256(wasm), Bytes.EMPTY, 1L).value());
+        Bytes chainId = ChainIds.chainIdOf(deploy.block().getHash());
+        Bytes contract = ChainIds.contractIdOf(deploy.block().getHash());
+        apply(call(chainId, contract, payload(20, 14), FEE));
+        apply(ChainBlockBuilder.deployIntoChain(config, TS, sender, nextNonce(), chainId, ONE, FEE, null, HashUtils.sha256(wasm), Bytes.EMPTY, 1L).value());
         proc.onSetMainEnd(10, mainBlock);
         assertTrue(src.keys().size() > 1);
 
         proc.onSetMainBegin(11, mainBlock);
-        apply(call(laneId, contract, payload(20, 15), FEE));
+        apply(call(chainId, contract, payload(20, 15), FEE));
         proc.onSetMainEnd(11, mainBlock);
-        assertEquals(1L, store.getCallCount(laneId, 11));
+        assertEquals(1L, store.getCallCount(chainId, 11));
 
         unapplyAll();
         assertEquals(1, src.keys().size());
-        assertNotNull(src.get(LaneL1Keys.META_KEY));
-        assertSame(null, store.getLane(laneId));
+        assertNotNull(src.get(ChainL1Keys.META_KEY));
+        assertSame(null, store.getChain(chainId));
     }
 }
 ```
 
 - [ ] **Step 2: 运行，确认失败**
 
-Run: `mvn -q -Dtest=io.xdag.lane.l1.LaneL1ProcessorTest -Dsurefire.failIfNoSpecifiedTests=false test`
-Expected: 编译错误 `cannot find symbol: class LaneL1Processor`。
+Run: `mvn -q -Dtest=io.xdag.chain.l1.ChainL1ProcessorTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Expected: 编译错误 `cannot find symbol: class ChainL1Processor`。
 
 - [ ] **Step 3: 实现接口与工具**
 
-`src/main/java/io/xdag/lane/l1/LaneIds.java`：
+`src/main/java/io/xdag/chain/l1/ChainIds.java`：
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
 import io.xdag.core.Address;
 import io.xdag.crypto.hash.HashUtils;
@@ -4050,18 +4050,18 @@ import java.nio.charset.StandardCharsets;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 
-/** Deterministic identifiers: laneId / contractId are derived from the creating block hash; laneId is also the vault address. */
-public final class LaneIds {
+/** Deterministic identifiers: chainId / contractId are derived from the creating block hash; chainId is also the vault address. */
+public final class ChainIds {
 
-    private static final Bytes LANE_TAG = Bytes.wrap("xdag-lane".getBytes(StandardCharsets.US_ASCII));
+    private static final Bytes CHAIN_TAG = Bytes.wrap("xdag-chain".getBytes(StandardCharsets.US_ASCII));
     private static final Bytes CONTRACT_TAG = Bytes.wrap("xdag-contract".getBytes(StandardCharsets.US_ASCII));
     public static final Bytes ZERO_ADDRESS = Bytes.wrap(new byte[20]);
 
-    private LaneIds() {
+    private ChainIds() {
     }
 
-    public static Bytes laneIdOf(Bytes32 blockHash) {
-        return Bytes.wrap(HashUtils.sha256(Bytes.concatenate(LANE_TAG, blockHash)).slice(0, 20).toArray());
+    public static Bytes chainIdOf(Bytes32 blockHash) {
+        return Bytes.wrap(HashUtils.sha256(Bytes.concatenate(CHAIN_TAG, blockHash)).slice(0, 20).toArray());
     }
 
     public static Bytes contractIdOf(Bytes32 blockHash) {
@@ -4075,15 +4075,15 @@ public final class LaneIds {
 }
 ```
 
-`src/main/java/io/xdag/lane/l1/LaneL1Hooks.java`：
+`src/main/java/io/xdag/chain/l1/ChainL1Hooks.java`：
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
 import io.xdag.core.Block;
 
-/** The five points where BlockchainImpl hands control to the lane layer. Every implementation must be reorg-symmetric. */
-public interface LaneL1Hooks {
+/** The five points where BlockchainImpl hands control to the chain layer. Every implementation must be reorg-symmetric. */
+public interface ChainL1Hooks {
 
     void onSetMainBegin(long height, Block mainBlock);
 
@@ -4095,7 +4095,7 @@ public interface LaneL1Hooks {
 
     void onUnsetMain(long height, Block mainBlock);
 
-    LaneL1Hooks NOOP = new LaneL1Hooks() {
+    ChainL1Hooks NOOP = new ChainL1Hooks() {
         @Override
         public void onSetMainBegin(long height, Block mainBlock) {
         }
@@ -4119,16 +4119,16 @@ public interface LaneL1Hooks {
 }
 ```
 
-`src/main/java/io/xdag/lane/l1/LaneKindHandler.java`：
+`src/main/java/io/xdag/chain/l1/ChainKindHandler.java`：
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
 import io.xdag.core.Block;
-import io.xdag.lane.ext.Classified;
+import io.xdag.chain.ext.Classified;
 
 /** Per-kind L1 semantics for BOND / ANCHOR / CHALLENGE / CLAIM. SP0a ships no implementations; SP2/SP3 register theirs. */
-public interface LaneKindHandler {
+public interface ChainKindHandler {
 
     void onApplied(Block block, Classified classified, ApplyContext ctx);
 
@@ -4136,10 +4136,10 @@ public interface LaneKindHandler {
 }
 ```
 
-`src/main/java/io/xdag/lane/l1/ApplyContext.java`：
+`src/main/java/io/xdag/chain/l1/ApplyContext.java`：
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
 import org.apache.tuweni.bytes.Bytes32;
 
@@ -4166,25 +4166,25 @@ public final class ApplyContext {
 
 - [ ] **Step 4: 实现处理器**
 
-`src/main/java/io/xdag/lane/l1/LaneL1Processor.java`：
+`src/main/java/io/xdag/chain/l1/ChainL1Processor.java`：
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
-import io.xdag.config.spec.LaneSpec;
+import io.xdag.config.spec.ChainSpec;
 import io.xdag.core.Address;
 import io.xdag.core.Block;
 import io.xdag.core.XAmount;
 import io.xdag.core.XUnit;
 import io.xdag.core.XdagBlock;
 import io.xdag.crypto.hash.HashUtils;
-import io.xdag.lane.ext.CallExt;
-import io.xdag.lane.ext.ChunkChain;
-import io.xdag.lane.ext.Classified;
-import io.xdag.lane.ext.DeployExt;
-import io.xdag.lane.ext.ExtKind;
-import io.xdag.lane.ext.ExtResult;
-import io.xdag.lane.ext.LaneBlockClassifier;
+import io.xdag.chain.ext.CallExt;
+import io.xdag.chain.ext.ChunkChain;
+import io.xdag.chain.ext.Classified;
+import io.xdag.chain.ext.DeployExt;
+import io.xdag.chain.ext.ExtKind;
+import io.xdag.chain.ext.ExtResult;
+import io.xdag.chain.ext.ChainBlockClassifier;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -4196,25 +4196,25 @@ import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 
 /**
- * L1 semantics of lane blocks, evaluated in applyBlock DFS order after value settlement.
- * Only active while a context exists (main height >= activation). One LANE_L1 batch per block.
+ * L1 semantics of chain blocks, evaluated in applyBlock DFS order after value settlement.
+ * Only active while a context exists (main height >= activation). One CHAIN_L1 batch per block.
  */
 @Slf4j
-public final class LaneL1Processor implements LaneL1Hooks {
+public final class ChainL1Processor implements ChainL1Hooks {
 
-    private final LaneL1Store store;
-    private final LaneSpec spec;
+    private final ChainL1Store store;
+    private final ChainSpec spec;
     private final ChunkChain.RawBlockLookup lookup;
-    private final Map<ExtKind, LaneKindHandler> handlers = new EnumMap<>(ExtKind.class);
+    private final Map<ExtKind, ChainKindHandler> handlers = new EnumMap<>(ExtKind.class);
     private ApplyContext ctx;
 
-    public LaneL1Processor(LaneL1Store store, LaneSpec spec, ChunkChain.RawBlockLookup lookup) {
+    public ChainL1Processor(ChainL1Store store, ChainSpec spec, ChunkChain.RawBlockLookup lookup) {
         this.store = store;
         this.spec = spec;
         this.lookup = lookup;
     }
 
-    public void registerHandler(ExtKind kind, LaneKindHandler handler) {
+    public void registerHandler(ExtKind kind, ChainKindHandler handler) {
         handlers.put(kind, handler);
     }
 
@@ -4225,7 +4225,7 @@ public final class LaneL1Processor implements LaneL1Hooks {
 
     @Override
     public void onSetMainBegin(long height, Block mainBlock) {
-        ctx = height >= spec.getLaneActivationHeight() ? new ApplyContext(height, mainBlock.getHash()) : null;
+        ctx = height >= spec.getChainActivationHeight() ? new ApplyContext(height, mainBlock.getHash()) : null;
     }
 
     @Override
@@ -4243,30 +4243,30 @@ public final class LaneL1Processor implements LaneL1Hooks {
         if (ctx == null) {
             return;
         }
-        Classified c = LaneBlockClassifier.classify(block);
+        Classified c = ChainBlockClassifier.classify(block);
         List<Bytes> vaults = vaultOutputs(block);
         if (c.kind() == null && vaults.isEmpty()) {
             return;
         }
         Bytes32 blockHash = block.getHash();
-        LaneL1Batch batch = new LaneL1Batch();
+        ChainL1Batch batch = new ChainL1Batch();
         List<InputRef> refs = new ArrayList<>();
         Map<Bytes, Long> counts = new HashMap<>();
         boolean vaultConsumed = false;
 
         if (c.kind() == ExtKind.DEPLOY && c.isOk()) {
             DeployExt d = c.as(DeployExt.class);
-            if (d.newLane()) {
-                applyDeploy(block, d, LaneIds.laneIdOf(blockHash), true, batch, refs, counts);
-            } else if (vaults.size() == 1 && vaults.get(0).equals(d.laneId())) {
+            if (d.newChain()) {
+                applyDeploy(block, d, ChainIds.chainIdOf(blockHash), true, batch, refs, counts);
+            } else if (vaults.size() == 1 && vaults.get(0).equals(d.chainId())) {
                 vaultConsumed = true;
-                applyDeploy(block, d, d.laneId(), false, batch, refs, counts);
+                applyDeploy(block, d, d.chainId(), false, batch, refs, counts);
             }
         } else if (c.kind() == ExtKind.CALL && c.isOk()) {
             CallExt call = c.as(CallExt.class);
             if (vaults.size() == 1) {
                 ContractRecord target = store.getContract(call.contract());
-                if (target != null && target.laneId().equals(vaults.get(0))) {
+                if (target != null && target.chainId().equals(vaults.get(0))) {
                     vaultConsumed = true;
                     int chunks = chainCount(call.argsChainHead());
                     InputStatus status = feeCovers(block, chunks) ? InputStatus.OK : InputStatus.INVALID_FEE;
@@ -4274,7 +4274,7 @@ public final class LaneL1Processor implements LaneL1Hooks {
                 }
             }
         } else if (c.kind() != null && c.isOk()) {
-            LaneKindHandler handler = handlers.get(c.kind());
+            ChainKindHandler handler = handlers.get(c.kind());
             if (handler != null) {
                 handler.onApplied(block, c, ctx);
             }
@@ -4284,22 +4284,22 @@ public final class LaneL1Processor implements LaneL1Hooks {
             if (i == 0 && vaultConsumed) {
                 continue;
             }
-            record(batch, refs, counts, vaults.get(i), blockHash, null, InputStatus.INVALID_FORMAT, LaneIds.ZERO_ADDRESS);
+            record(batch, refs, counts, vaults.get(i), blockHash, null, InputStatus.INVALID_FORMAT, ChainIds.ZERO_ADDRESS);
         }
         if (refs.isEmpty()) {
             return;
         }
         batch.putReverse(blockHash, refs);
         store.commit(batch);
-        log.debug("lane inputs recorded: block={} height={} refs={}", blockHash, ctx.height(), refs.size());
+        log.debug("chain inputs recorded: block={} height={} refs={}", blockHash, ctx.height(), refs.size());
     }
 
     @Override
     public void onBlockUnapplied(Block block) {
         Bytes32 blockHash = block.getHash();
-        Classified c = LaneBlockClassifier.classify(block);
+        Classified c = ChainBlockClassifier.classify(block);
         if (c.kind() != null && c.isOk() && c.kind() != ExtKind.CALL && c.kind() != ExtKind.DEPLOY) {
-            LaneKindHandler handler = handlers.get(c.kind());
+            ChainKindHandler handler = handlers.get(c.kind());
             if (handler != null) {
                 handler.onUnapplied(block, c);
             }
@@ -4308,17 +4308,17 @@ public final class LaneL1Processor implements LaneL1Hooks {
         if (refs.isEmpty()) {
             return;
         }
-        LaneL1Batch batch = new LaneL1Batch();
+        ChainL1Batch batch = new ChainL1Batch();
         Map<Bytes, Long> counts = new HashMap<>();
         long height = refs.get(0).height();
         for (int i = refs.size() - 1; i >= 0; i--) {
             InputRef r = refs.get(i);
-            InputRecord in = store.getInput(r.laneId(), r.height(), r.index());
-            batch.deleteInput(r.laneId(), r.height(), r.index());
-            long remaining = counts.computeIfAbsent(r.laneId(), l -> store.getCallCount(l, r.height())) - 1;
-            counts.put(r.laneId(), remaining);
+            InputRecord in = store.getInput(r.chainId(), r.height(), r.index());
+            batch.deleteInput(r.chainId(), r.height(), r.index());
+            long remaining = counts.computeIfAbsent(r.chainId(), l -> store.getCallCount(l, r.height())) - 1;
+            counts.put(r.chainId(), remaining);
             if (in != null && in.kind() == ExtKind.DEPLOY && in.status() == InputStatus.OK) {
-                undoDeploy(blockHash, r.laneId(), in.contract(), batch);
+                undoDeploy(blockHash, r.chainId(), in.contract(), batch);
             }
         }
         for (Map.Entry<Bytes, Long> e : counts.entrySet()) {
@@ -4330,22 +4330,22 @@ public final class LaneL1Processor implements LaneL1Hooks {
         }
         batch.deleteReverse(blockHash);
         store.commit(batch);
-        log.debug("lane inputs removed: block={} height={} refs={}", blockHash, height, refs.size());
+        log.debug("chain inputs removed: block={} height={} refs={}", blockHash, height, refs.size());
     }
 
-    private void applyDeploy(Block block, DeployExt d, Bytes laneId, boolean newLane, LaneL1Batch batch,
+    private void applyDeploy(Block block, DeployExt d, Bytes chainId, boolean newChain, ChainL1Batch batch,
                              List<InputRef> refs, Map<Bytes, Long> counts) {
         Bytes32 blockHash = block.getHash();
-        Bytes contract = LaneIds.contractIdOf(blockHash);
+        Bytes contract = ChainIds.contractIdOf(blockHash);
         InputStatus status = InputStatus.OK;
         Bytes code = null;
         int chunks = 0;
         if (d.codeByChain()) {
             chunks += chainCount(d.codeChainHead());
-            ExtResult<Bytes> assembled = ChunkChain.assemble(d.codeChainHead(), lookup, spec.getLaneMaxChunksPerChain());
+            ExtResult<Bytes> assembled = ChunkChain.assemble(d.codeChainHead(), lookup, spec.getChainMaxChunksPerChain());
             if (!assembled.isOk()) {
                 status = InputStatus.INVALID_FORMAT;
-            } else if (assembled.value().size() > spec.getLaneMaxWasmBytes()) {
+            } else if (assembled.value().size() > spec.getChainMaxWasmBytes()) {
                 status = InputStatus.CODE_TOO_LARGE;
             } else if (!HashUtils.sha256(assembled.value()).equals(d.codeHash())) {
                 status = InputStatus.INVALID_FORMAT;
@@ -4361,23 +4361,23 @@ public final class LaneL1Processor implements LaneL1Hooks {
         if (status == InputStatus.OK && !feeCovers(block, chunks)) {
             status = InputStatus.INVALID_FEE;
         }
-        record(batch, refs, counts, laneId, blockHash, ExtKind.DEPLOY, status, contract);
+        record(batch, refs, counts, chainId, blockHash, ExtKind.DEPLOY, status, contract);
         if (status != InputStatus.OK) {
             return;
         }
-        if (newLane) {
-            batch.putLane(laneId, new LaneRecord(ctx.height(), blockHash, d.config().gasPriceNano(),
+        if (newChain) {
+            batch.putChain(chainId, new ChainRecord(ctx.height(), blockHash, d.config().gasPriceNano(),
                     d.config().deliveryDelayD(), d.config().maxCallGas(), 1L));
         } else {
-            LaneRecord lane = store.getLane(laneId);
-            batch.putLane(laneId, lane.withContractCount(lane.contractCount() + 1));
+            ChainRecord chain = store.getChain(chainId);
+            batch.putChain(chainId, chain.withContractCount(chain.contractCount() + 1));
         }
-        batch.putContract(contract, new ContractRecord(laneId, d.codeHash(), ctx.height(), blockHash));
+        batch.putContract(contract, new ContractRecord(chainId, d.codeHash(), ctx.height(), blockHash));
         Bytes bytes = code != null ? code : store.getCode(d.codeHash());
         batch.putCode(d.codeHash(), store.getCodeRefCount(d.codeHash()) + 1, bytes);
     }
 
-    private void undoDeploy(Bytes32 blockHash, Bytes laneId, Bytes contract, LaneL1Batch batch) {
+    private void undoDeploy(Bytes32 blockHash, Bytes chainId, Bytes contract, ChainL1Batch batch) {
         ContractRecord cr = store.getContract(contract);
         batch.deleteContract(contract);
         if (cr != null) {
@@ -4388,32 +4388,32 @@ public final class LaneL1Processor implements LaneL1Hooks {
                 batch.putCode(cr.codeHash(), refCount - 1, store.getCode(cr.codeHash()));
             }
         }
-        LaneRecord lane = store.getLane(laneId);
-        if (lane != null) {
-            if (lane.createBlockHash().equals(blockHash)) {
-                batch.deleteLane(laneId);
+        ChainRecord chain = store.getChain(chainId);
+        if (chain != null) {
+            if (chain.createBlockHash().equals(blockHash)) {
+                batch.deleteChain(chainId);
             } else {
-                batch.putLane(laneId, lane.withContractCount(lane.contractCount() - 1));
+                batch.putChain(chainId, chain.withContractCount(chain.contractCount() - 1));
             }
         }
     }
 
-    private void record(LaneL1Batch batch, List<InputRef> refs, Map<Bytes, Long> counts, Bytes laneId,
+    private void record(ChainL1Batch batch, List<InputRef> refs, Map<Bytes, Long> counts, Bytes chainId,
                         Bytes32 blockHash, ExtKind kind, InputStatus status, Bytes contract) {
-        long index = counts.computeIfAbsent(laneId, l -> store.getCallCount(l, ctx.height()));
-        counts.put(laneId, index + 1);
-        batch.putInput(laneId, ctx.height(), index, new InputRecord(blockHash, kind, status, contract));
-        batch.putCallCount(laneId, ctx.height(), index + 1);
-        refs.add(new InputRef(laneId, ctx.height(), index));
+        long index = counts.computeIfAbsent(chainId, l -> store.getCallCount(l, ctx.height()));
+        counts.put(chainId, index + 1);
+        batch.putInput(chainId, ctx.height(), index, new InputRecord(blockHash, kind, status, contract));
+        batch.putCallCount(chainId, ctx.height(), index + 1);
+        refs.add(new InputRef(chainId, ctx.height(), index));
     }
 
-    /** Address-type outputs whose address is a registered lane vault, in field order. */
+    /** Address-type outputs whose address is a registered chain vault, in field order. */
     private List<Bytes> vaultOutputs(Block block) {
         List<Bytes> out = new ArrayList<>();
         for (Address o : block.getOutputs()) {
             if (o.getIsAddress()) {
-                Bytes a = LaneIds.address20(o);
-                if (store.hasLane(a)) {
+                Bytes a = ChainIds.address20(o);
+                if (store.hasChain(a)) {
                     out.add(a);
                 }
             }
@@ -4422,7 +4422,7 @@ public final class LaneL1Processor implements LaneL1Hooks {
     }
 
     private int chainCount(Bytes32 head) {
-        return head == null ? 0 : ChunkChain.countLenient(head, lookup, spec.getLaneMaxChunksPerChain());
+        return head == null ? 0 : ChunkChain.countLenient(head, lookup, spec.getChainMaxChunksPerChain());
     }
 
     /** Consensus re-check of the chunk fee rule: header fee field >= chunkFee x chunks. */
@@ -4430,7 +4430,7 @@ public final class LaneL1Processor implements LaneL1Hooks {
         if (chunks == 0) {
             return true;
         }
-        return headerFee(block).compareTo(spec.getLaneChunkFee().multiply(chunks)) >= 0;
+        return headerFee(block).compareTo(spec.getChainChunkFee().multiply(chunks)) >= 0;
     }
 
     /**
@@ -4450,14 +4450,14 @@ public final class LaneL1Processor implements LaneL1Hooks {
 
 - [ ] **Step 5: 运行测试，确认通过**
 
-Run: `mvn -q -Dtest=io.xdag.lane.l1.LaneL1ProcessorTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.l1.ChainL1ProcessorTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `Tests run: 7, Failures: 0`
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add src/main/java/io/xdag/lane/l1/LaneIds.java src/main/java/io/xdag/lane/l1/LaneL1Hooks.java src/main/java/io/xdag/lane/l1/LaneKindHandler.java src/main/java/io/xdag/lane/l1/ApplyContext.java src/main/java/io/xdag/lane/l1/LaneL1Processor.java src/test/java/io/xdag/lane/l1/LaneL1ProcessorTest.java
-git commit -m "Add lane L1 processor with DEPLOY/CALL attribution and symmetric unapply
+git add src/main/java/io/xdag/chain/l1/ChainIds.java src/main/java/io/xdag/chain/l1/ChainL1Hooks.java src/main/java/io/xdag/chain/l1/ChainKindHandler.java src/main/java/io/xdag/chain/l1/ApplyContext.java src/main/java/io/xdag/chain/l1/ChainL1Processor.java src/test/java/io/xdag/chain/l1/ChainL1ProcessorTest.java
+git commit -m "Add chain L1 processor with DEPLOY/CALL attribution and symmetric unapply
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
@@ -4470,15 +4470,15 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 **Files:**
 - Modify: `src/main/java/io/xdag/core/BlockchainImpl.java`
 - Modify: `src/main/java/io/xdag/Kernel.java`
-- Create: `src/test/java/io/xdag/lane/l1/LaneL1TestBase.java`
-- Test: `src/test/java/io/xdag/lane/l1/LaneL1HooksIntegrationTest.java`
+- Create: `src/test/java/io/xdag/chain/l1/ChainL1TestBase.java`
+- Test: `src/test/java/io/xdag/chain/l1/ChainL1HooksIntegrationTest.java`
 
 - [ ] **Step 1: 写测试基座**
 
-`src/test/java/io/xdag/lane/l1/LaneL1TestBase.java`：
+`src/test/java/io/xdag/chain/l1/ChainL1TestBase.java`：
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
 import static io.xdag.config.Constants.BI_APPLIED;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_COINBASE;
@@ -4512,9 +4512,9 @@ import io.xdag.db.rocksdb.DatabaseFactory;
 import io.xdag.db.rocksdb.DatabaseName;
 import io.xdag.db.rocksdb.OrphanBlockStoreImpl;
 import io.xdag.db.rocksdb.RocksdbFactory;
-import io.xdag.lane.ext.ExtCodec;
-import io.xdag.lane.ext.LaneBlockBuilder;
-import io.xdag.lane.ext.LaneConfigExt;
+import io.xdag.chain.ext.ExtCodec;
+import io.xdag.chain.ext.ChainBlockBuilder;
+import io.xdag.chain.ext.ChainConfigExt;
 import io.xdag.utils.BasicUtils;
 import io.xdag.utils.XdagTime;
 import java.io.IOException;
@@ -4533,18 +4533,18 @@ import org.junit.rules.TemporaryFolder;
 import org.mockito.Mockito;
 
 /**
- * Real BlockchainImpl + RocksDB fixture for lane hook tests. Main blocks are "mined" by searching a nonce whose
+ * Real BlockchainImpl + RocksDB fixture for chain hook tests. Main blocks are "mined" by searching a nonce whose
  * raw-hash difficulty lies in [2^46, 2^47), so chain weight grows predictably and chunk blocks (difficulty ~2^33)
  * can never hijack the top (see plan §0.5).
  */
-public abstract class LaneL1TestBase {
+public abstract class ChainL1TestBase {
 
     @Rule
     public TemporaryFolder root = new TemporaryFolder();
 
     protected static final XAmount ONE_XDAG = XAmount.of(1, XUnit.XDAG);
     protected static final XAmount FEE = XAmount.of(100, XUnit.MILLI_XDAG);
-    protected static final LaneConfigExt CFG = new LaneConfigExt(1L, 32L, 10_000_000L);
+    protected static final ChainConfigExt CFG = new ChainConfigExt(1L, 32L, 10_000_000L);
     private static final BigInteger DIFF_LO = BigInteger.ONE.shiftLeft(46);
     private static final BigInteger DIFF_HI = BigInteger.ONE.shiftLeft(47);
 
@@ -4553,7 +4553,7 @@ public abstract class LaneL1TestBase {
     protected Kernel kernel;
     protected DatabaseFactory dbFactory;
     protected AddressStore addressStore;
-    protected LaneL1Store laneStore;
+    protected ChainL1Store chainStore;
     protected MockBlockchain blockchain;
     protected final ECKeyPair poolKey = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
     protected long generateTime = 1600616700000L;
@@ -4581,7 +4581,7 @@ public abstract class LaneL1TestBase {
     }
 
     @Before
-    public void setUpLane() throws Exception {
+    public void setUpChain() throws Exception {
         config.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
         config.getNodeSpec().setStoreBackupDir(root.newFolder().getAbsolutePath());
         wallet = new Wallet(config);
@@ -4601,19 +4601,19 @@ public abstract class LaneL1TestBase {
         orphanBlockStore.reset();
         addressStore = new AddressStoreImpl(dbFactory.getDB(DatabaseName.ADDRESS));
         addressStore.reset();
-        laneStore = new LaneL1Store(dbFactory.getDB(DatabaseName.LANE_L1));
-        laneStore.start();
-        laneStore.reset();
+        chainStore = new ChainL1Store(dbFactory.getDB(DatabaseName.CHAIN_L1));
+        chainStore.start();
+        chainStore.reset();
 
         kernel.setBlockStore(blockStore);
         kernel.setOrphanBlockStore(orphanBlockStore);
         kernel.setAddressStore(addressStore);
         kernel.setTxHistoryStore(Mockito.mock(TransactionHistoryStore.class));
         kernel.setWallet(wallet);
-        kernel.setLaneL1Store(laneStore);
+        kernel.setChainL1Store(chainStore);
 
         blockchain = new MockBlockchain(kernel);
-        blockchain.setLaneHooks(new LaneL1Processor(laneStore, config.getLaneSpec(),
+        blockchain.setChainHooks(new ChainL1Processor(chainStore, config.getChainSpec(),
                 hash -> blockchain.getBlockByHash(hash, true)));
 
         Block addressBlock = BlockBuilder.generateAddressBlock(config, poolKey, generateTime);
@@ -4623,7 +4623,7 @@ public abstract class LaneL1TestBase {
     }
 
     @After
-    public void tearDownLane() throws IOException {
+    public void tearDownChain() throws IOException {
         if (wallet != null) {
             try {
                 wallet.delete();
@@ -4649,18 +4649,18 @@ public abstract class LaneL1TestBase {
         return XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime + 64000L)) - 60000L;
     }
 
-    protected LaneBlockBuilder.Built deployNewLane(Bytes wasm, Bytes initArgs) {
-        int chunks = LaneBlockBuilder.chunksFor(wasm.size());
-        XAmount fee = LaneBlockBuilder.minHeaderFee(config.getLaneSpec().getLaneChunkFee(), chunks);
-        return LaneBlockBuilder.deployNewLane(config, txTime(), poolKey, nextNonce(), fee, wasm, CFG, initArgs, 1000L).value();
+    protected ChainBlockBuilder.Built deployNewChain(Bytes wasm, Bytes initArgs) {
+        int chunks = ChainBlockBuilder.chunksFor(wasm.size());
+        XAmount fee = ChainBlockBuilder.minHeaderFee(config.getChainSpec().getChainChunkFee(), chunks);
+        return ChainBlockBuilder.deployNewChain(config, txTime(), poolKey, nextNonce(), fee, wasm, CFG, initArgs, 1000L).value();
     }
 
-    protected LaneBlockBuilder.Built call(Bytes laneId, Bytes contract, Bytes args, XAmount headerFee) {
-        return LaneBlockBuilder.call(config, txTime(), poolKey, nextNonce(), laneId, contract, 1, 100L, ONE_XDAG, headerFee, args).value();
+    protected ChainBlockBuilder.Built call(Bytes chainId, Bytes contract, Bytes args, XAmount headerFee) {
+        return ChainBlockBuilder.call(config, txTime(), poolKey, nextNonce(), chainId, contract, 1, 100L, ONE_XDAG, headerFee, args).value();
     }
 
     /** Imports chunks tail-first, then the paying block. */
-    protected void importBuilt(LaneBlockBuilder.Built built) {
+    protected void importBuilt(ChainBlockBuilder.Built built) {
         for (int i = built.chunks().size() - 1; i >= 0; i--) {
             assertImported(built.chunks().get(i));
         }
@@ -4747,14 +4747,14 @@ public abstract class LaneL1TestBase {
 
 - [ ] **Step 2: 写失败的端到端测试**
 
-`src/test/java/io/xdag/lane/l1/LaneL1HooksIntegrationTest.java`：
+`src/test/java/io/xdag/chain/l1/ChainL1HooksIntegrationTest.java`：
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_INPUT;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUTPUT;
-import static io.xdag.lane.ext.ChunkChainTest.payload;
+import static io.xdag.chain.ext.ChunkChainTest.payload;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
@@ -4767,15 +4767,15 @@ import io.xdag.core.XAmount;
 import io.xdag.core.XUnit;
 import io.xdag.core.XdagBlock;
 import io.xdag.crypto.hash.HashUtils;
-import io.xdag.lane.ext.ExtKind;
-import io.xdag.lane.ext.LaneBlockBuilder;
+import io.xdag.chain.ext.ExtKind;
+import io.xdag.chain.ext.ChainBlockBuilder;
 import io.xdag.utils.BytesUtils;
 import java.util.List;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.units.bigints.UInt64;
 import org.junit.Test;
 
-public class LaneL1HooksIntegrationTest extends LaneL1TestBase {
+public class ChainL1HooksIntegrationTest extends ChainL1TestBase {
 
     @Test
     public void deployAndCallsAreRecordedInDfsOrderAfterConfirmation() {
@@ -4785,34 +4785,34 @@ public class LaneL1HooksIntegrationTest extends LaneL1TestBase {
         assertTrue(blockchain.getXdagStats().nmain >= 8);
 
         Bytes wasm = payload(100_000, 42);
-        LaneBlockBuilder.Built deploy = deployNewLane(wasm, payload(50, 1));
+        ChainBlockBuilder.Built deploy = deployNewChain(wasm, payload(50, 1));
         assertEquals(285, deploy.chunks().size());
         importBuilt(deploy);
         Block mDeploy = mineMain(List.of(hashLow(deploy.block())));
         confirm(deploy.block());
 
-        Bytes laneId = LaneIds.laneIdOf(deploy.block().getHash());
-        Bytes contract = LaneIds.contractIdOf(deploy.block().getHash());
+        Bytes chainId = ChainIds.chainIdOf(deploy.block().getHash());
+        Bytes contract = ChainIds.contractIdOf(deploy.block().getHash());
         long hDeploy = heightOf(mDeploy);
-        LaneRecord lane = laneStore.getLane(laneId);
-        assertNotNull("lane registered", lane);
-        assertEquals(hDeploy, lane.createdHeight());
-        assertEquals(1L, lane.contractCount());
-        assertEquals(wasm, laneStore.getCode(HashUtils.sha256(wasm)));
-        assertEquals(1L, laneStore.getCodeRefCount(HashUtils.sha256(wasm)));
-        assertEquals(List.of(new InputRef(laneId, hDeploy, 0)), laneStore.getReverse(deploy.block().getHash()));
-        InputRecord deployInput = laneStore.getInput(laneId, hDeploy, 0);
+        ChainRecord chain = chainStore.getChain(chainId);
+        assertNotNull("chain registered", chain);
+        assertEquals(hDeploy, chain.createdHeight());
+        assertEquals(1L, chain.contractCount());
+        assertEquals(wasm, chainStore.getCode(HashUtils.sha256(wasm)));
+        assertEquals(1L, chainStore.getCodeRefCount(HashUtils.sha256(wasm)));
+        assertEquals(List.of(new InputRef(chainId, hDeploy, 0)), chainStore.getReverse(deploy.block().getHash()));
+        InputRecord deployInput = chainStore.getInput(chainId, hDeploy, 0);
         assertEquals(ExtKind.DEPLOY, deployInput.kind());
         assertEquals(InputStatus.OK, deployInput.status());
         assertEquals(contract, deployInput.contract());
-        assertEquals(1L, laneStore.getCallCount(laneId, hDeploy));
+        assertEquals(1L, chainStore.getCallCount(chainId, hDeploy));
 
-        LaneBlockBuilder.Built ok = call(laneId, contract, payload(20, 2), FEE);
-        LaneBlockBuilder.Built badContract = call(laneId, Bytes.random(20), payload(20, 3), FEE);
-        LaneBlockBuilder.Built lowFee = call(laneId, contract, payload(1000, 4), XAmount.of(20, XUnit.MILLI_XDAG));
-        LaneBlockBuilder.Built goodFee = call(laneId, contract, payload(1000, 5), XAmount.of(30, XUnit.MILLI_XDAG));
+        ChainBlockBuilder.Built ok = call(chainId, contract, payload(20, 2), FEE);
+        ChainBlockBuilder.Built badContract = call(chainId, Bytes.random(20), payload(20, 3), FEE);
+        ChainBlockBuilder.Built lowFee = call(chainId, contract, payload(1000, 4), XAmount.of(20, XUnit.MILLI_XDAG));
+        ChainBlockBuilder.Built goodFee = call(chainId, contract, payload(1000, 5), XAmount.of(30, XUnit.MILLI_XDAG));
         Address from = new Address(BytesUtils.arrayToByte32(poolKey.toAddress().toArray()), XDAG_FIELD_INPUT, true);
-        Address vault = new Address(BytesUtils.arrayToByte32(laneId.toArray()), XDAG_FIELD_OUTPUT, true);
+        Address vault = new Address(BytesUtils.arrayToByte32(chainId.toArray()), XDAG_FIELD_OUTPUT, true);
         Block plain = new Block(new XdagBlock(BlockBuilder.generateNewTransactionBlock(
                 config, poolKey, txTime(), from, vault, ONE_XDAG, nextNonce()).toBytes()));
         importBuilt(ok);
@@ -4826,18 +4826,18 @@ public class LaneL1HooksIntegrationTest extends LaneL1TestBase {
         confirm(plain);
         long h = heightOf(mCalls);
 
-        assertEquals(5L, laneStore.getCallCount(laneId, h));
-        assertEquals(InputStatus.OK, laneStore.getInput(laneId, h, 0).status());
-        assertEquals(ok.block().getHash(), laneStore.getInput(laneId, h, 0).blockHash());
-        assertEquals(contract, laneStore.getInput(laneId, h, 0).contract());
-        assertEquals(InputStatus.INVALID_FORMAT, laneStore.getInput(laneId, h, 1).status());
-        assertEquals(InputStatus.INVALID_FEE, laneStore.getInput(laneId, h, 2).status());
-        assertEquals(InputStatus.OK, laneStore.getInput(laneId, h, 3).status());
-        assertEquals(InputStatus.INVALID_FORMAT, laneStore.getInput(laneId, h, 4).status());
-        assertNull(laneStore.getInput(laneId, h, 5));
+        assertEquals(5L, chainStore.getCallCount(chainId, h));
+        assertEquals(InputStatus.OK, chainStore.getInput(chainId, h, 0).status());
+        assertEquals(ok.block().getHash(), chainStore.getInput(chainId, h, 0).blockHash());
+        assertEquals(contract, chainStore.getInput(chainId, h, 0).contract());
+        assertEquals(InputStatus.INVALID_FORMAT, chainStore.getInput(chainId, h, 1).status());
+        assertEquals(InputStatus.INVALID_FEE, chainStore.getInput(chainId, h, 2).status());
+        assertEquals(InputStatus.OK, chainStore.getInput(chainId, h, 3).status());
+        assertEquals(InputStatus.INVALID_FORMAT, chainStore.getInput(chainId, h, 4).status());
+        assertNull(chainStore.getInput(chainId, h, 5));
 
         // value settled by the unchanged L1 rules: five deposits of 1 XDAG minus their fee shares
-        assertTrue(balanceOf(laneId).greaterThan(XAmount.of(4, XUnit.XDAG)));
+        assertTrue(balanceOf(chainId).greaterThan(XAmount.of(4, XUnit.XDAG)));
         assertEquals(UInt64.valueOf(6), addressStore.getExecutedNonceNum(poolKey.toAddress().toArray()));
     }
 }
@@ -4845,21 +4845,21 @@ public class LaneL1HooksIntegrationTest extends LaneL1TestBase {
 
 - [ ] **Step 3: 运行，确认失败**
 
-Run: `mvn -q -Dtest=io.xdag.lane.l1.LaneL1HooksIntegrationTest -Dsurefire.failIfNoSpecifiedTests=false test`
-Expected: 编译错误 `cannot find symbol: method setLaneHooks` / `setLaneL1Store`。
+Run: `mvn -q -Dtest=io.xdag.chain.l1.ChainL1HooksIntegrationTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Expected: 编译错误 `cannot find symbol: method setChainHooks` / `setChainL1Store`。
 
 - [ ] **Step 4: 改 `BlockchainImpl`**
 
-(a) import：`import io.xdag.lane.l1.LaneL1Hooks;`
+(a) import：`import io.xdag.chain.l1.ChainL1Hooks;`
 
 (b) 字段区（`private byte[] preSeed;` 之后）新增：
 
 ```java
-    // Lane contracts (SP0a): hooks invoked from setMain/applyBlock; NOOP until Kernel wires the processor
-    private volatile LaneL1Hooks laneHooks = LaneL1Hooks.NOOP;
+    // Chain contracts (SP0a): hooks invoked from setMain/applyBlock; NOOP until Kernel wires the processor
+    private volatile ChainL1Hooks chainHooks = ChainL1Hooks.NOOP;
 
-    public void setLaneHooks(LaneL1Hooks hooks) {
-        this.laneHooks = hooks == null ? LaneL1Hooks.NOOP : hooks;
+    public void setChainHooks(ChainL1Hooks hooks) {
+        this.chainHooks = hooks == null ? ChainL1Hooks.NOOP : hooks;
     }
 ```
 
@@ -4868,7 +4868,7 @@ Expected: 编译错误 `cannot find symbol: method setLaneHooks` / `setLaneL1Sto
 ```java
         if (links == null || links.isEmpty()) {
             updateBlockFlag(block, BI_APPLIED, true);
-            laneHooks.onBlockApplied(block);
+            chainHooks.onBlockApplied(block);
             return XAmount.ZERO;
         }
 ```
@@ -4877,13 +4877,13 @@ Expected: 编译错误 `cannot find symbol: method setLaneHooks` / `setLaneL1Sto
 
 ```java
         updateBlockFlag(block, BI_APPLIED, true);
-        laneHooks.onBlockApplied(block);
+        chainHooks.onBlockApplied(block);
 ```
 
 (d) `unApplyBlock`：在 `if ((block.getInfo().flags & BI_APPLIED) != 0) {` 分支内、`updateBlockFlag(block, BI_APPLIED, false);` 之前加：
 
 ```java
-            laneHooks.onBlockUnapplied(block);
+            chainHooks.onBlockUnapplied(block);
             updateBlockFlag(block, BI_APPLIED, false);
 ```
 
@@ -4891,51 +4891,51 @@ Expected: 编译错误 `cannot find symbol: method setLaneHooks` / `setLaneL1Sto
 
 ```java
             updateBlockFlag(block, BI_MAIN, true);
-            laneHooks.onSetMainBegin(mainNumber, block);
+            chainHooks.onSetMainBegin(mainNumber, block);
             ...
             XAmount mainBlockFee = applyBlock(true, block);
             if (mainBlockFee.compareTo(XAmount.ZERO) < 0) {
-                laneHooks.onSetMainEnd(mainNumber, block);
+                chainHooks.onSetMainEnd(mainNumber, block);
                 return;
             } else {
             ...
             if (randomx != null) {
                 randomx.randomXSetForkTime(block);
             }
-            laneHooks.onSetMainEnd(mainNumber, block);
+            chainHooks.onSetMainEnd(mainNumber, block);
         }
 ```
 
 (f) `unSetMain`：`log.debug("UnSet main,...")` 之后加：
 
 ```java
-            laneHooks.onUnsetMain(block.getInfo().getHeight(), block);
+            chainHooks.onUnsetMain(block.getInfo().getHeight(), block);
 ```
 
 - [ ] **Step 5: 改 `Kernel`**
 
-import：`io.xdag.core.BlockchainImpl`、`io.xdag.lane.l1.LaneL1Processor`、`io.xdag.lane.l1.LaneL1Store`。字段区新增 `protected LaneL1Store laneL1Store;`（类级 `@Getter @Setter` 生成访问器）。
+import：`io.xdag.core.BlockchainImpl`、`io.xdag.chain.l1.ChainL1Processor`、`io.xdag.chain.l1.ChainL1Store`。字段区新增 `protected ChainL1Store chainL1Store;`（类级 `@Getter @Setter` 生成访问器）。
 
 在 `orphanBlockStore.start();` 之后追加：
 
 ```java
-        laneL1Store = new LaneL1Store(dbFactory.getDB(DatabaseName.LANE_L1));
-        laneL1Store.start();
+        chainL1Store = new ChainL1Store(dbFactory.getDB(DatabaseName.CHAIN_L1));
+        chainL1Store.start();
 ```
 
 把 `blockchain = new BlockchainImpl(this);` 改为：
 
 ```java
         BlockchainImpl chain = new BlockchainImpl(this);
-        chain.setLaneHooks(new LaneL1Processor(laneL1Store, config.getLaneSpec(), hash -> chain.getBlockByHash(hash, true)));
+        chain.setChainHooks(new ChainL1Processor(chainL1Store, config.getChainSpec(), hash -> chain.getBlockByHash(hash, true)));
         blockchain = chain;
 ```
 
-`Kernel.stop()` 已遍历 `DatabaseName.values()` 关闭所有实例，`LANE_L1` 随之关闭，不要再调 `laneL1Store.stop()`（避免双重 close）。
+`Kernel.stop()` 已遍历 `DatabaseName.values()` 关闭所有实例，`CHAIN_L1` 随之关闭，不要再调 `chainL1Store.stop()`（避免双重 close）。
 
 - [ ] **Step 6: 运行端到端测试，确认通过**
 
-Run: `mvn -q -Dtest=io.xdag.lane.l1.LaneL1HooksIntegrationTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.l1.ChainL1HooksIntegrationTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `Tests run: 1, Failures: 0`（约 10–30 s：285 片导入 + 若干次 nonce 搜索）。若 `assertImported` 报 "hijacked the chain top"，改 `payload(100_000, 42)` 的 seed 并记录在提交信息里。
 
 - [ ] **Step 7: 跑核心回归**
@@ -4946,11 +4946,11 @@ Expected: 全绿（钩子默认 NOOP，激活前无行为改变）。
 - [ ] **Step 8: 提交**
 
 ```bash
-git add src/main/java/io/xdag/core/BlockchainImpl.java src/main/java/io/xdag/Kernel.java src/test/java/io/xdag/lane/l1/LaneL1TestBase.java src/test/java/io/xdag/lane/l1/LaneL1HooksIntegrationTest.java
-git commit -m "Wire lane L1 hooks into setMain/applyBlock and the kernel
+git add src/main/java/io/xdag/core/BlockchainImpl.java src/main/java/io/xdag/Kernel.java src/test/java/io/xdag/chain/l1/ChainL1TestBase.java src/test/java/io/xdag/chain/l1/ChainL1HooksIntegrationTest.java
+git commit -m "Wire chain L1 hooks into setMain/applyBlock and the kernel
 
 Five hook call sites in BlockchainImpl (setMain begin/end, block applied,
-block unapplied, unsetMain), LANE_L1 store construction in Kernel, and an
+block unapplied, unsetMain), CHAIN_L1 store construction in Kernel, and an
 end-to-end fixture that confirms DEPLOY and CALL blocks through real main
 block confirmation with fake PoW of bounded difficulty.
 
@@ -4963,14 +4963,14 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 ### Task 15: Reorg 对称性测试
 
 **Files:**
-- Test: `src/test/java/io/xdag/lane/l1/LaneL1UnwindTest.java`
+- Test: `src/test/java/io/xdag/chain/l1/ChainL1UnwindTest.java`
 
 - [ ] **Step 1: 写测试**
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
-import static io.xdag.lane.ext.ChunkChainTest.payload;
+import static io.xdag.chain.ext.ChunkChainTest.payload;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -4979,15 +4979,15 @@ import static org.junit.Assert.assertTrue;
 
 import io.xdag.core.Block;
 import io.xdag.crypto.hash.HashUtils;
-import io.xdag.lane.ext.LaneBlockBuilder;
+import io.xdag.chain.ext.ChainBlockBuilder;
 import java.util.List;
 import org.apache.tuweni.bytes.Bytes;
 import org.junit.Test;
 
-public class LaneL1UnwindTest extends LaneL1TestBase {
+public class ChainL1UnwindTest extends ChainL1TestBase {
 
     @Test
-    public void reorgRemovesLaneStateAndReapplyRestoresIt() {
+    public void reorgRemovesChainStateAndReapplyRestoresIt() {
         Block forkPoint = null;
         long forkTime = 0;
         for (int i = 0; i < 12; i++) {
@@ -4999,22 +4999,22 @@ public class LaneL1UnwindTest extends LaneL1TestBase {
         }
 
         Bytes wasm = payload(5_000, 21);
-        LaneBlockBuilder.Built deploy = deployNewLane(wasm, payload(10, 22));
+        ChainBlockBuilder.Built deploy = deployNewChain(wasm, payload(10, 22));
         importBuilt(deploy);
         Block mDeploy = mineMain(List.of(hashLow(deploy.block())));
         confirm(deploy.block());
-        Bytes laneId = LaneIds.laneIdOf(deploy.block().getHash());
-        Bytes contract = LaneIds.contractIdOf(deploy.block().getHash());
+        Bytes chainId = ChainIds.chainIdOf(deploy.block().getHash());
+        Bytes contract = ChainIds.contractIdOf(deploy.block().getHash());
 
-        LaneBlockBuilder.Built call = call(laneId, contract, payload(20, 23), FEE);
+        ChainBlockBuilder.Built call = call(chainId, contract, payload(20, 23), FEE);
         importBuilt(call);
         Block mCall = mineMain(List.of(hashLow(call.block())));
         confirm(call.block());
 
-        assertTrue(laneStore.hasLane(laneId));
-        assertEquals(1L, laneStore.getCallCount(laneId, heightOf(mDeploy)));
-        assertEquals(1L, laneStore.getCallCount(laneId, heightOf(mCall)));
-        int keysWhenApplied = laneStore.sortedKeys().size();
+        assertTrue(chainStore.hasChain(chainId));
+        assertEquals(1L, chainStore.getCallCount(chainId, heightOf(mDeploy)));
+        assertEquals(1L, chainStore.getCallCount(chainId, heightOf(mCall)));
+        int keysWhenApplied = chainStore.sortedKeys().size();
         assertTrue(keysWhenApplied > 1);
 
         // A competing branch from the fork point. Branch A above the fork point has at most 12 blocks of weight
@@ -5027,39 +5027,39 @@ public class LaneL1UnwindTest extends LaneL1TestBase {
         assertNotNull(last);
         assertArrayEquals("fork branch did not overtake", hashLow(last).toArray(), blockchain.getXdagTopStatus().getTop());
 
-        // unwind of the confirmed main blocks removed every lane record symmetrically
-        assertEquals(1, laneStore.sortedKeys().size());
-        assertFalse(laneStore.hasLane(laneId));
-        assertFalse(laneStore.hasCode(HashUtils.sha256(wasm)));
-        assertTrue(laneStore.getReverse(deploy.block().getHash()).isEmpty());
-        assertTrue(laneStore.getReverse(call.block().getHash()).isEmpty());
+        // unwind of the confirmed main blocks removed every chain record symmetrically
+        assertEquals(1, chainStore.sortedKeys().size());
+        assertFalse(chainStore.hasChain(chainId));
+        assertFalse(chainStore.hasCode(HashUtils.sha256(wasm)));
+        assertTrue(chainStore.getReverse(deploy.block().getHash()).isEmpty());
+        assertTrue(chainStore.getReverse(call.block().getHash()).isEmpty());
 
         // the same blocks re-linked on the new branch produce equivalent records at their new heights
         Block mDeploy2 = mineMain(List.of(hashLow(deploy.block())));
         confirm(deploy.block());
         Block mCall2 = mineMain(List.of(hashLow(call.block())));
         confirm(call.block());
-        assertTrue(laneStore.hasLane(laneId));
-        assertEquals(heightOf(mDeploy2), laneStore.getLane(laneId).createdHeight());
-        assertEquals(1L, laneStore.getCodeRefCount(HashUtils.sha256(wasm)));
-        assertEquals(wasm, laneStore.getCode(HashUtils.sha256(wasm)));
-        assertEquals(InputStatus.OK, laneStore.getInput(laneId, heightOf(mCall2), 0).status());
-        assertEquals(contract, laneStore.getInput(laneId, heightOf(mCall2), 0).contract());
-        assertEquals(keysWhenApplied, laneStore.sortedKeys().size());
+        assertTrue(chainStore.hasChain(chainId));
+        assertEquals(heightOf(mDeploy2), chainStore.getChain(chainId).createdHeight());
+        assertEquals(1L, chainStore.getCodeRefCount(HashUtils.sha256(wasm)));
+        assertEquals(wasm, chainStore.getCode(HashUtils.sha256(wasm)));
+        assertEquals(InputStatus.OK, chainStore.getInput(chainId, heightOf(mCall2), 0).status());
+        assertEquals(contract, chainStore.getInput(chainId, heightOf(mCall2), 0).contract());
+        assertEquals(keysWhenApplied, chainStore.sortedKeys().size());
     }
 }
 ```
 
 - [ ] **Step 2: 运行**
 
-Run: `mvn -q -Dtest=io.xdag.lane.l1.LaneL1UnwindTest -Dsurefire.failIfNoSpecifiedTests=false test`
-Expected: `Tests run: 1, Failures: 0`。若失败于 "fork branch did not overtake"，把 24 提高到 32（分叉块权重下限 2^46 与 A 分支上限 2^47 之比决定所需数量）。若失败于 `sortedKeys().size()` 不为 1，说明某个反写缺失：对照 `LaneL1Processor.onBlockUnapplied` 与 `undoDeploy` 逐项核对。
+Run: `mvn -q -Dtest=io.xdag.chain.l1.ChainL1UnwindTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Expected: `Tests run: 1, Failures: 0`。若失败于 "fork branch did not overtake"，把 24 提高到 32（分叉块权重下限 2^46 与 A 分支上限 2^47 之比决定所需数量）。若失败于 `sortedKeys().size()` 不为 1，说明某个反写缺失：对照 `ChainL1Processor.onBlockUnapplied` 与 `undoDeploy` 逐项核对。
 
 - [ ] **Step 3: 提交**
 
 ```bash
-git add src/test/java/io/xdag/lane/l1/LaneL1UnwindTest.java
-git commit -m "Test lane L1 state symmetry across a main chain reorg
+git add src/test/java/io/xdag/chain/l1/ChainL1UnwindTest.java
+git commit -m "Test chain L1 state symmetry across a main chain reorg
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
@@ -5070,16 +5070,16 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 ### Task 16: 激活门控与旧节点等价性测试
 
 **Files:**
-- Test: `src/test/java/io/xdag/lane/l1/LaneActivationGateTest.java`
+- Test: `src/test/java/io/xdag/chain/l1/ChainActivationGateTest.java`
 
 - [ ] **Step 1: 写测试**
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_INPUT;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUTPUT;
-import static io.xdag.lane.ext.ChunkChainTest.payload;
+import static io.xdag.chain.ext.ChunkChainTest.payload;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 
@@ -5089,48 +5089,48 @@ import io.xdag.core.Block;
 import io.xdag.core.XAmount;
 import io.xdag.core.XUnit;
 import io.xdag.core.XdagBlock;
-import io.xdag.lane.ext.LaneBlockBuilder;
+import io.xdag.chain.ext.ChainBlockBuilder;
 import io.xdag.utils.BytesUtils;
 import java.util.List;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.units.bigints.UInt64;
 import org.junit.Test;
 
-public class LaneActivationGateTest extends LaneL1TestBase {
+public class ChainActivationGateTest extends ChainL1TestBase {
 
     @Test
     public void belowActivationNothingIsRecordedAndValueSettlesLikeAPlainTransfer() {
-        config.getLaneSpec().setLaneActivationHeight(Long.MAX_VALUE);
+        config.getChainSpec().setChainActivationHeight(Long.MAX_VALUE);
         for (int i = 0; i < 10; i++) {
             mineMain(List.of());
         }
 
-        LaneBlockBuilder.Built deploy = deployNewLane(payload(2_000, 31), payload(10, 32));
+        ChainBlockBuilder.Built deploy = deployNewChain(payload(2_000, 31), payload(10, 32));
         importBuilt(deploy);
         mineMain(List.of(hashLow(deploy.block())));
         confirm(deploy.block());
-        Bytes laneId = LaneIds.laneIdOf(deploy.block().getHash());
-        assertEquals(1, laneStore.sortedKeys().size());
-        assertFalse(laneStore.hasLane(laneId));
+        Bytes chainId = ChainIds.chainIdOf(deploy.block().getHash());
+        assertEquals(1, chainStore.sortedKeys().size());
+        assertFalse(chainStore.hasChain(chainId));
 
         // a CALL-shaped block: 1 XDAG to the vault address, header fee 0.1 -> recipient gets 1 - (0.1 + MIN_GAS) = 0.8
-        LaneBlockBuilder.Built callShaped = call(laneId, Bytes.random(20), payload(20, 33), FEE);
+        ChainBlockBuilder.Built callShaped = call(chainId, Bytes.random(20), payload(20, 33), FEE);
         importBuilt(callShaped);
         mineMain(List.of(hashLow(callShaped.block())));
         confirm(callShaped.block());
-        assertEquals(XAmount.of(800, XUnit.MILLI_XDAG), balanceOf(laneId));
+        assertEquals(XAmount.of(800, XUnit.MILLI_XDAG), balanceOf(chainId));
 
         // a plain transfer of the same shape moves exactly the same amount
         Address from = new Address(BytesUtils.arrayToByte32(poolKey.toAddress().toArray()), XDAG_FIELD_INPUT, true);
-        Address to = new Address(BytesUtils.arrayToByte32(laneId.toArray()), XDAG_FIELD_OUTPUT, true);
+        Address to = new Address(BytesUtils.arrayToByte32(chainId.toArray()), XDAG_FIELD_OUTPUT, true);
         Block plain = new Block(new XdagBlock(BlockBuilder.generateNewTransactionBlock(
                 config, poolKey, txTime(), from, to, ONE_XDAG, nextNonce()).toBytes()));
         assertImported(plain);
         mineMain(List.of(hashLow(plain)));
         confirm(plain);
-        assertEquals(XAmount.of(1600, XUnit.MILLI_XDAG), balanceOf(laneId));
+        assertEquals(XAmount.of(1600, XUnit.MILLI_XDAG), balanceOf(chainId));
 
-        assertEquals(1, laneStore.sortedKeys().size());
+        assertEquals(1, chainStore.sortedKeys().size());
         assertEquals(UInt64.valueOf(3), addressStore.getExecutedNonceNum(poolKey.toAddress().toArray()));
     }
 }
@@ -5138,14 +5138,14 @@ public class LaneActivationGateTest extends LaneL1TestBase {
 
 - [ ] **Step 2: 运行**
 
-Run: `mvn -q -Dtest=io.xdag.lane.l1.LaneActivationGateTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.l1.ChainActivationGateTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `Tests run: 1, Failures: 0`
 
 - [ ] **Step 3: 提交**
 
 ```bash
-git add src/test/java/io/xdag/lane/l1/LaneActivationGateTest.java
-git commit -m "Test activation gating and legacy-equivalent settlement of lane blocks
+git add src/test/java/io/xdag/chain/l1/ChainActivationGateTest.java
+git commit -m "Test activation gating and legacy-equivalent settlement of chain blocks
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
@@ -5153,18 +5153,18 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 
 ---
 
-### Task 17: 快照门控 `LaneL1SnapshotGate`、CLI 导出与 `initSnapshotJ` 接入
+### Task 17: 快照门控 `ChainL1SnapshotGate`、CLI 导出与 `initSnapshotJ` 接入
 
 **Files:**
-- Create: `src/main/java/io/xdag/lane/l1/LaneL1SnapshotGate.java`
+- Create: `src/main/java/io/xdag/chain/l1/ChainL1SnapshotGate.java`
 - Modify: `src/main/java/io/xdag/cli/XdagCli.java`
 - Modify: `src/main/java/io/xdag/core/BlockchainImpl.java`（`initSnapshotJ` 末尾）
-- Test: `src/test/java/io/xdag/lane/l1/LaneL1SnapshotTest.java`
+- Test: `src/test/java/io/xdag/chain/l1/ChainL1SnapshotTest.java`
 
 - [ ] **Step 1: 写失败测试**
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -5185,12 +5185,12 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
-public class LaneL1SnapshotTest {
+public class ChainL1SnapshotTest {
 
     @Rule
     public TemporaryFolder root = new TemporaryFolder();
 
-    private static final Bytes LANE = Bytes.random(20);
+    private static final Bytes CHAIN = Bytes.random(20);
     private static final Bytes32 CODE_HASH = Bytes32.random();
 
     private Config configIn(Path storeDir) {
@@ -5200,10 +5200,10 @@ public class LaneL1SnapshotTest {
         return c;
     }
 
-    private LaneL1Store openStore(Config config) {
-        RocksdbKVSource src = new RocksdbKVSource(DatabaseName.LANE_L1.toString());
+    private ChainL1Store openStore(Config config) {
+        RocksdbKVSource src = new RocksdbKVSource(DatabaseName.CHAIN_L1.toString());
         src.setConfig(config);
-        LaneL1Store store = new LaneL1Store(src);
+        ChainL1Store store = new ChainL1Store(src);
         store.start();
         return store;
     }
@@ -5215,24 +5215,24 @@ public class LaneL1SnapshotTest {
         Config configA = configIn(dirA);
         Config configB = configIn(dirB);
 
-        LaneL1Store a = openStore(configA);
-        LaneL1Batch batch = new LaneL1Batch();
-        batch.putLane(LANE, new LaneRecord(7L, Bytes32.random(), 5L, 32L, 10_000_000L, 1L));
+        ChainL1Store a = openStore(configA);
+        ChainL1Batch batch = new ChainL1Batch();
+        batch.putChain(CHAIN, new ChainRecord(7L, Bytes32.random(), 5L, 32L, 10_000_000L, 1L));
         batch.putCode(CODE_HASH, 1L, Bytes.random(700));
         a.commit(batch);
         Bytes32 expected = a.stateHash();
-        LaneL1SnapshotGate.export(configA, a);
+        ChainL1SnapshotGate.export(configA, a);
         a.stop();
-        assertTrue(Files.isDirectory(dirA.resolve(LaneL1SnapshotGate.SNAPSHOT_DB_NAME)));
+        assertTrue(Files.isDirectory(dirA.resolve(ChainL1SnapshotGate.SNAPSHOT_DB_NAME)));
 
         // ship the snapshot directory to node B (what operators do with SNAPSHOT/BLOCKS today)
-        XdagCli.copyDir(dirA.resolve(LaneL1SnapshotGate.SNAPSHOT_DB_NAME).toString(),
-                dirB.resolve(LaneL1SnapshotGate.SNAPSHOT_DB_NAME).toString());
+        XdagCli.copyDir(dirA.resolve(ChainL1SnapshotGate.SNAPSHOT_DB_NAME).toString(),
+                dirB.resolve(ChainL1SnapshotGate.SNAPSHOT_DB_NAME).toString());
 
-        LaneL1Store b = openStore(configB);
-        LaneL1SnapshotGate.checkAndImport(configB, 100L, b);
+        ChainL1Store b = openStore(configB);
+        ChainL1SnapshotGate.checkAndImport(configB, 100L, b);
         assertEquals(expected, b.stateHash());
-        assertTrue(b.hasLane(LANE));
+        assertTrue(b.hasChain(CHAIN));
         b.stop();
     }
 
@@ -5240,11 +5240,11 @@ public class LaneL1SnapshotTest {
     public void missingSnapshotIsFatalOnceActivated() throws Exception {
         Path dir = root.newFolder("c").toPath();
         Config config = configIn(dir);
-        LaneL1Store store = openStore(config);
+        ChainL1Store store = openStore(config);
         try {
             IllegalStateException e = assertThrows(IllegalStateException.class,
-                    () -> LaneL1SnapshotGate.checkAndImport(config, 100L, store));
-            assertTrue(e.getMessage().contains("LANE_L1 snapshot required"));
+                    () -> ChainL1SnapshotGate.checkAndImport(config, 100L, store));
+            assertTrue(e.getMessage().contains("CHAIN_L1 snapshot required"));
         } finally {
             store.stop();
         }
@@ -5254,11 +5254,11 @@ public class LaneL1SnapshotTest {
     public void snapshotBelowActivationIsIgnored() throws Exception {
         Path dir = root.newFolder("d").toPath();
         Config config = configIn(dir);
-        config.getLaneSpec().setLaneActivationHeight(1_000L);
-        LaneL1Store store = openStore(config);
+        config.getChainSpec().setChainActivationHeight(1_000L);
+        ChainL1Store store = openStore(config);
         try {
-            LaneL1SnapshotGate.checkAndImport(config, 999L, store); // no directory, no exception
-            assertFalse(Files.exists(dir.resolve(LaneL1SnapshotGate.SNAPSHOT_DB_NAME)));
+            ChainL1SnapshotGate.checkAndImport(config, 999L, store); // no directory, no exception
+            assertFalse(Files.exists(dir.resolve(ChainL1SnapshotGate.SNAPSHOT_DB_NAME)));
         } finally {
             store.stop();
         }
@@ -5268,25 +5268,25 @@ public class LaneL1SnapshotTest {
     public void tamperedSnapshotIsRejected() throws Exception {
         Path dir = root.newFolder("e").toPath();
         Config config = configIn(dir);
-        LaneL1Store a = openStore(config);
-        LaneL1Batch batch = new LaneL1Batch();
-        batch.putLane(LANE, new LaneRecord(7L, Bytes32.random(), 5L, 32L, 10_000_000L, 1L));
+        ChainL1Store a = openStore(config);
+        ChainL1Batch batch = new ChainL1Batch();
+        batch.putChain(CHAIN, new ChainRecord(7L, Bytes32.random(), 5L, 32L, 10_000_000L, 1L));
         a.commit(batch);
-        LaneL1SnapshotGate.export(config, a);
+        ChainL1SnapshotGate.export(config, a);
         a.stop();
 
-        RocksdbKVSource snap = new RocksdbKVSource(LaneL1SnapshotGate.SNAPSHOT_DB_NAME);
+        RocksdbKVSource snap = new RocksdbKVSource(ChainL1SnapshotGate.SNAPSHOT_DB_NAME);
         snap.setConfig(config);
         snap.init();
-        snap.put(LaneL1Keys.lane(LANE), new LaneRecord(8L, Bytes32.random(), 5L, 32L, 10_000_000L, 1L).encode());
+        snap.put(ChainL1Keys.chain(CHAIN), new ChainRecord(8L, Bytes32.random(), 5L, 32L, 10_000_000L, 1L).encode());
         snap.close();
 
         Config fresh = configIn(root.newFolder("f").toPath());
-        XdagCli.copyDir(dir.resolve(LaneL1SnapshotGate.SNAPSHOT_DB_NAME).toString(),
-                Paths.get(fresh.getNodeSpec().getStoreDir(), LaneL1SnapshotGate.SNAPSHOT_DB_NAME).toString());
-        LaneL1Store b = openStore(fresh);
+        XdagCli.copyDir(dir.resolve(ChainL1SnapshotGate.SNAPSHOT_DB_NAME).toString(),
+                Paths.get(fresh.getNodeSpec().getStoreDir(), ChainL1SnapshotGate.SNAPSHOT_DB_NAME).toString());
+        ChainL1Store b = openStore(fresh);
         try {
-            assertThrows(IllegalStateException.class, () -> LaneL1SnapshotGate.checkAndImport(fresh, 100L, b));
+            assertThrows(IllegalStateException.class, () -> ChainL1SnapshotGate.checkAndImport(fresh, 100L, b));
         } finally {
             b.stop();
         }
@@ -5296,15 +5296,15 @@ public class LaneL1SnapshotTest {
 
 - [ ] **Step 2: 运行，确认失败**
 
-Run: `mvn -q -Dtest=io.xdag.lane.l1.LaneL1SnapshotTest -Dsurefire.failIfNoSpecifiedTests=false test`
-Expected: 编译错误 `cannot find symbol: class LaneL1SnapshotGate`。
+Run: `mvn -q -Dtest=io.xdag.chain.l1.ChainL1SnapshotTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Expected: 编译错误 `cannot find symbol: class ChainL1SnapshotGate`。
 
-- [ ] **Step 3: 实现 `LaneL1SnapshotGate`**
+- [ ] **Step 3: 实现 `ChainL1SnapshotGate`**
 
-`src/main/java/io/xdag/lane/l1/LaneL1SnapshotGate.java`：
+`src/main/java/io/xdag/chain/l1/ChainL1SnapshotGate.java`：
 
 ```java
-package io.xdag.lane.l1;
+package io.xdag.chain.l1;
 
 import io.xdag.config.Config;
 import io.xdag.db.rocksdb.RocksdbKVSource;
@@ -5313,22 +5313,22 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 
 /**
- * Snapshot bootstrap rule for LANE_L1: once the snapshot height is at or past the lane activation height, a node
- * booting from a snapshot must also import SNAPSHOT/LANE_L1 (hash-verified). Below activation the directory is ignored.
+ * Snapshot bootstrap rule for CHAIN_L1: once the snapshot height is at or past the chain activation height, a node
+ * booting from a snapshot must also import SNAPSHOT/CHAIN_L1 (hash-verified). Below activation the directory is ignored.
  */
-public final class LaneL1SnapshotGate {
+public final class ChainL1SnapshotGate {
 
-    public static final String SNAPSHOT_DB_NAME = "SNAPSHOT/LANE_L1";
+    public static final String SNAPSHOT_DB_NAME = "SNAPSHOT/CHAIN_L1";
 
-    private LaneL1SnapshotGate() {
+    private ChainL1SnapshotGate() {
     }
 
     public static Path snapshotDir(Config config) {
         return Paths.get(config.getNodeSpec().getStoreDir(), SNAPSHOT_DB_NAME);
     }
 
-    /** Writes the whole LANE_L1 state plus its hash into SNAPSHOT/LANE_L1 under the node's store directory. */
-    public static void export(Config config, LaneL1Store store) {
+    /** Writes the whole CHAIN_L1 state plus its hash into SNAPSHOT/CHAIN_L1 under the node's store directory. */
+    public static void export(Config config, ChainL1Store store) {
         RocksdbKVSource target = new RocksdbKVSource(SNAPSHOT_DB_NAME);
         target.setConfig(config);
         target.init();
@@ -5340,15 +5340,15 @@ public final class LaneL1SnapshotGate {
     }
 
     /** Called from snapshot bootstrap. Throws IllegalStateException when the snapshot is required but missing or corrupt. */
-    public static void checkAndImport(Config config, long snapshotHeight, LaneL1Store store) {
-        long activation = config.getLaneSpec().getLaneActivationHeight();
+    public static void checkAndImport(Config config, long snapshotHeight, ChainL1Store store) {
+        long activation = config.getChainSpec().getChainActivationHeight();
         if (snapshotHeight < activation || store == null) {
             return;
         }
         Path dir = snapshotDir(config);
         if (!Files.isDirectory(dir)) {
-            throw new IllegalStateException("LANE_L1 snapshot required at height " + snapshotHeight
-                    + " (lane activation height " + activation + ") but " + dir + " is missing");
+            throw new IllegalStateException("CHAIN_L1 snapshot required at height " + snapshotHeight
+                    + " (chain activation height " + activation + ") but " + dir + " is missing");
         }
         RocksdbKVSource source = new RocksdbKVSource(SNAPSHOT_DB_NAME);
         source.setConfig(config);
@@ -5364,38 +5364,38 @@ public final class LaneL1SnapshotGate {
 
 - [ ] **Step 4: 接入 `XdagCli.makeSnapshot` 与 `BlockchainImpl.initSnapshotJ`**
 
-`XdagCli.makeSnapshot(boolean b)`：在 `copyDir(source.toString(),target.toString());` 之后追加（import `io.xdag.lane.l1.LaneL1Store`、`io.xdag.lane.l1.LaneL1SnapshotGate`）：
+`XdagCli.makeSnapshot(boolean b)`：在 `copyDir(source.toString(),target.toString());` 之后追加（import `io.xdag.chain.l1.ChainL1Store`、`io.xdag.chain.l1.ChainL1SnapshotGate`）：
 
 ```java
-        RocksdbKVSource laneSource = new RocksdbKVSource(DatabaseName.LANE_L1.toString());
-        laneSource.setConfig(getConfig());
-        LaneL1Store laneStore = new LaneL1Store(laneSource);
-        laneStore.start();
-        LaneL1SnapshotGate.export(getConfig(), laneStore);
-        laneStore.stop();
-        System.out.println("lane state snapshot written to " + LaneL1SnapshotGate.snapshotDir(getConfig()));
+        RocksdbKVSource chainSource = new RocksdbKVSource(DatabaseName.CHAIN_L1.toString());
+        chainSource.setConfig(getConfig());
+        ChainL1Store chainStore = new ChainL1Store(chainSource);
+        chainStore.start();
+        ChainL1SnapshotGate.export(getConfig(), chainStore);
+        chainStore.stop();
+        System.out.println("chain state snapshot written to " + ChainL1SnapshotGate.snapshotDir(getConfig()));
 ```
 
-`BlockchainImpl.initSnapshotJ()`：在 `XAmount allBalance = ...` 之前追加（import `io.xdag.lane.l1.LaneL1SnapshotGate`）：
+`BlockchainImpl.initSnapshotJ()`：在 `XAmount allBalance = ...` 之前追加（import `io.xdag.chain.l1.ChainL1SnapshotGate`）：
 
 ```java
-        // Lane contracts: the LANE_L1 snapshot is mandatory once the snapshot height is past activation
-        LaneL1SnapshotGate.checkAndImport(kernel.getConfig(), snapshotHeight, kernel.getLaneL1Store());
+        // Chain contracts: the CHAIN_L1 snapshot is mandatory once the snapshot height is past activation
+        ChainL1SnapshotGate.checkAndImport(kernel.getConfig(), snapshotHeight, kernel.getChainL1Store());
 ```
 
 - [ ] **Step 5: 运行测试，确认通过**
 
-Run: `mvn -q -Dtest=io.xdag.lane.l1.LaneL1SnapshotTest -Dsurefire.failIfNoSpecifiedTests=false test`
+Run: `mvn -q -Dtest=io.xdag.chain.l1.ChainL1SnapshotTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `Tests run: 4, Failures: 0`
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add src/main/java/io/xdag/lane/l1/LaneL1SnapshotGate.java src/main/java/io/xdag/cli/XdagCli.java src/main/java/io/xdag/core/BlockchainImpl.java src/test/java/io/xdag/lane/l1/LaneL1SnapshotTest.java
-git commit -m "Carry LANE_L1 state in snapshots with a verified state hash
+git add src/main/java/io/xdag/chain/l1/ChainL1SnapshotGate.java src/main/java/io/xdag/cli/XdagCli.java src/main/java/io/xdag/core/BlockchainImpl.java src/test/java/io/xdag/chain/l1/ChainL1SnapshotTest.java
+git commit -m "Carry CHAIN_L1 state in snapshots with a verified state hash
 
-Snapshot creation exports SNAPSHOT/LANE_L1 next to SNAPSHOT/BLOCKS and
-SNAPSHOT/ADDRESS; snapshot bootstrap refuses to start past the lane
+Snapshot creation exports SNAPSHOT/CHAIN_L1 next to SNAPSHOT/BLOCKS and
+SNAPSHOT/ADDRESS; snapshot bootstrap refuses to start past the chain
 activation height without it and rejects a hash mismatch.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
@@ -5407,8 +5407,8 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 ### Task 18: 全量验证、文档与规格同步
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-09-13-xdag-lane-sp0a-block-format-and-l1-hooks-design.md`（§6.3 索引语义同步）
-- Create: `.claude/docs/lane-l1-foundation.md`（本地文档，不进 git）
+- Modify: `docs/superpowers/specs/2026-09-13-xdag-chain-sp0a-block-format-and-l1-hooks-design.md`（§6.3 索引语义同步）
+- Create: `.claude/docs/chain-l1-foundation.md`（本地文档，不进 git）
 
 - [ ] **Step 1: 许可证头检查**
 
@@ -5418,11 +5418,11 @@ Expected: 退出码 0。若列出缺头文件，把 §0.3 的头加到该文件�
 - [ ] **Step 2: 全量回归**
 
 Run: `mvn -q test 2>&1 | tail -40`
-Expected: 末尾 `BUILD SUCCESS`；`Tests run: N, Failures: 0, Errors: 0`。先 `df -h .` 确认磁盘未满（历史上磁盘满会伪装成各种奇怪失败）。若 `LaneL1*` 之外的既有测试失败，先用 `git stash` 验证它在本分支起点是否已失败（既有不稳定测试不归本 SP 修）。
+Expected: 末尾 `BUILD SUCCESS`；`Tests run: N, Failures: 0, Errors: 0`。先 `df -h .` 确认磁盘未满（历史上磁盘满会伪装成各种奇怪失败）。若 `ChainL1*` 之外的既有测试失败，先用 `git stash` 验证它在本分支起点是否已失败（既有不稳定测试不归本 SP 修）。
 
 - [ ] **Step 3: 同步 SP0a 规格的索引语义**
 
-实现中 `index` 是**每 (lane, height) 内从 0 递增的序号**（执行者可按 `0..callCount-1` 枚举），而不是主块级全局 DFS 序号。把 SP0a 规格 §6.3 中
+实现中 `index` 是**每 (chain, height) 内从 0 递增的序号**（执行者可按 `0..callCount-1` 枚举），而不是主块级全局 DFS 序号。把 SP0a 规格 §6.3 中
 
 ```
 - `onBlockApplied`：`if ctx == null: return`；按 §4.2 判定；每条 `record(...)` 写 0x0C（index = ctx.dfsIndex++）、0x0E、0x07 递增；DEPLOY 成功再写 0x01/0x02/0x03；全部进入 `ctx.batch`。
@@ -5431,14 +5431,14 @@ Expected: 末尾 `BUILD SUCCESS`；`Tests run: N, Failures: 0, Errors: 0`。先 
 改为
 
 ```
-- `onBlockApplied`：`if ctx == null: return`；按 §4.2 判定；每条 `record(...)` 写 0x0C（index = 该 (lane, height) 的当前 callCount，即每通道每高度从 0 递增，执行者按 0..callCount−1 枚举）、0x0E、0x07 递增；DEPLOY 成功再写 0x01/0x02/0x03；同一块的所有写入组成一个 batch。
+- `onBlockApplied`：`if ctx == null: return`；按 §4.2 判定；每条 `record(...)` 写 0x0C（index = 该 (chain, height) 的当前 callCount，即每链每高度从 0 递增，执行者按 0..callCount−1 枚举）、0x0E、0x07 递增；DEPLOY 成功再写 0x01/0x02/0x03；同一块的所有写入组成一个 batch。
 ```
 
 并把 §6.3 `onSetMainBegin` 一句中的 `dfsIndex = 0` 删掉（`ApplyContext` 只含 height 与主块哈希）。
 
 ```bash
-git add -f docs/superpowers/specs/2026-09-13-xdag-lane-sp0a-block-format-and-l1-hooks-design.md
-git commit -m "Sync SP0a spec: input index is per lane and height
+git add -f docs/superpowers/specs/2026-09-13-xdag-chain-sp0a-block-format-and-l1-hooks-design.md
+git commit -m "Sync SP0a spec: input index is per chain and height
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
@@ -5446,11 +5446,11 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 
 - [ ] **Step 4: 写本地架构说明（不进 git）**
 
-`.claude/docs/lane-l1-foundation.md`，沿用 `.claude/docs` 其他文档的格式（标题、适用版本、关注范围、分节、末尾"关键不变量与易错点"+"源码索引"表）。内容要点：EXT 字段规则与 `Block` 改动；七种 kind 的字节布局（引用总规格 §5.2，注明 CHUNK 11 字段）；分片链导入顺序与 `NO_PARENT` 的 DA 保证；`LANE_L1` 前缀表；五个钩子的调用点与 `LaneL1Processor` 的归属规则；激活高度；快照门；测试基座的"受控难度伪主块"技巧与 §0.5 的陷阱。
+`.claude/docs/chain-l1-foundation.md`，沿用 `.claude/docs` 其他文档的格式（标题、适用版本、关注范围、分节、末尾"关键不变量与易错点"+"源码索引"表）。内容要点：EXT 字段规则与 `Block` 改动；七种 kind 的字节布局（引用总规格 §5.2，注明 CHUNK 11 字段）；分片链导入顺序与 `NO_PARENT` 的 DA 保证；`CHAIN_L1` 前缀表；五个钩子的调用点与 `ChainL1Processor` 的归属规则；激活高度；快照门；测试基座的"受控难度伪主块"技巧与 §0.5 的陷阱。
 
 - [ ] **Step 5: 更新记忆并汇报**
 
-在 `/Users/tron/.claude/projects/-Users-tron-IDEAProject-xdagj/memory/xdag-lane-contracts.md` 的 Status 段追加：SP0a 实施完成的提交范围、测试数、发现的既有 L1 不对称（若有）、下一步 SP1 或 SP0b。
+在 `/Users/tron/.claude/projects/-Users-tron-IDEAProject-xdagj/memory/xdag-chain-contracts.md` 的 Status 段追加：SP0a 实施完成的提交范围、测试数、发现的既有 L1 不对称（若有）、下一步 SP1 或 SP0b。
 
 最终汇报给用户：分支、提交列表、`mvn test` 结果、任何偏离计划之处。
 
@@ -5458,8 +5458,8 @@ Claude-Session: https://claude.ai/code/session_015vKPFi9TPWtHk12kmtvqX6"
 
 ## 3. 自审记录
 
-**规格覆盖**：§3 Block/EXT → Task 1；§3.4–3.6 编解码与分片链 → Task 2–8；`LaneBlockBuilder` → Task 9；§4 分类与归属 → Task 7、13；§5 存储与 `batchWrite` → Task 10–11；§6 钩子与调用点 → Task 13–14；§7 配置与激活 → Task 12；§8 快照 → Task 17；§9 测试矩阵 → Task 1–17 各自测试 + Task 18 回归（属性测试以 Task 15 的"apply→unwind→re-apply"等价断言实现，随机序列版本留待 SP0b 基准基础设施就绪后补充）；§10 总规格同步已在 spec 提交中完成；§11 文件清单与 §1 一致。
+**规格覆盖**：§3 Block/EXT → Task 1；§3.4–3.6 编解码与分片链 → Task 2–8；`ChainBlockBuilder` → Task 9；§4 分类与归属 → Task 7、13；§5 存储与 `batchWrite` → Task 10–11；§6 钩子与调用点 → Task 13–14；§7 配置与激活 → Task 12；§8 快照 → Task 17；§9 测试矩阵 → Task 1–17 各自测试 + Task 18 回归（属性测试以 Task 15 的"apply→unwind→re-apply"等价断言实现，随机序列版本留待 SP0b 基准基础设施就绪后补充）；§10 总规格同步已在 spec 提交中完成；§11 文件清单与 §1 一致。
 
-**类型一致性**：`ExtResult<T>(value, error)`、`Classified(kind, value, error)`、`ChunkChain.RawBlockLookup.get(Bytes32)`、`LaneBlockBuilder.Built(block, chunks)`、`LaneL1Store` 的 `getCallCount/getInput/getReverse/getCodeRefCount/getCode/commit/exportSnapshot/importSnapshot/stateHash/sortedKeys/schemaVersion`、`LaneL1Batch` 的 `put*/delete*`、`LaneL1Hooks` 五方法、`LaneSpec` 六方法、`LaneL1SnapshotGate.export/checkAndImport/snapshotDir/SNAPSHOT_DB_NAME` 在所有任务中保持同名同签名。
+**类型一致性**：`ExtResult<T>(value, error)`、`Classified(kind, value, error)`、`ChunkChain.RawBlockLookup.get(Bytes32)`、`ChainBlockBuilder.Built(block, chunks)`、`ChainL1Store` 的 `getCallCount/getInput/getReverse/getCodeRefCount/getCode/commit/exportSnapshot/importSnapshot/stateHash/sortedKeys/schemaVersion`、`ChainL1Batch` 的 `put*/delete*`、`ChainL1Hooks` 五方法、`ChainSpec` 六方法、`ChainL1SnapshotGate.export/checkAndImport/snapshotDir/SNAPSHOT_DB_NAME` 在所有任务中保持同名同签名。
 
 **已知取舍**：(1) 测试伪主块的难度区间 `[2^46, 2^47)` 与分片块难度 `~2^33` 的分离依赖确定性内容，冲突时改 seed；(2) `TestnetConfig`/`MainnetConfig` 在测试类路径下若缺必填 conf 键，Task 12 的第二个用例按说明降级；(3) `unApplyBlock` 既有的 `allBalance` 回滚不对称不在本 SP 范围。
