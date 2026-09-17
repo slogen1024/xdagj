@@ -30,9 +30,11 @@ import io.xdag.core.Block;
 import io.xdag.core.XdagStats;
 import io.xdag.db.BlockStore;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.tuweni.bytes.Bytes32;
 
@@ -42,14 +44,21 @@ import org.apache.tuweni.bytes.Bytes32;
  * CHAIN_L1 record it should have produced exists). Read-only; the caller decides whether a
  * non-clean report is fatal (normal boot) or merely recorded (repair mode).
  *
- * <p>Three failure shapes are detected: (1) a {@code MAIN_IN_FLIGHT} record is present — a
- * {@code setMain}/{@code unSetMain} was entered and never observed to finish, which is the only
- * evidence a half-done {@code unSetMain} leaves behind; (2) the {@code LAST_COMPLETED_MAIN} marker
- * is behind the persisted tip, or a main block is stored above the persisted tip — a setMain that
- * did not finish; (3) a main block inside the window carries {@code BI_MAIN} but no ref — the shape
- * a pre-SP0b-1 crash left behind (SP0b-1 sets the ref before the DFS, so new crashes no longer
- * produce it). A store without a marker (first boot after upgrading) is initialized to the tip with
- * a warning: its history cannot be verified.
+ * <p>Four failure shapes are detected: (1) a {@code MAIN_IN_FLIGHT} record is present — a
+ * {@code setMain} or an {@code unSetMain} was entered and never observed to finish, which is the
+ * only evidence a half-done {@code unSetMain} leaves behind (the record says which of the two it
+ * was, see {@link Report#inFlightUnwind()}); (2) the {@code LAST_COMPLETED_MAIN} marker is behind
+ * the persisted tip — a setMain that did not finish; (3) a main block is stored above the persisted
+ * tip — a setMain that crashed before its stats were saved; (4) a main block inside the window
+ * carries {@code BI_MAIN} but no ref — the shape a pre-SP0b-1 crash left behind (SP0b-1 sets the
+ * ref before the DFS, so new crashes no longer produce it). A store without a marker (first boot
+ * after upgrading) is initialized to the tip with a warning: its history cannot be verified.
+ *
+ * <p>Rules (3) and (4) are statements about the MAIN CHAIN, not about the chain protocol, so the
+ * scan is never clamped to the chain activation height: a {@code BI_MAIN} block that carries no ref
+ * can never be unwound on any network, and that legacy shape is exactly what exists on the shared
+ * nets — whose activation height is still {@link Long#MAX_VALUE}, which used to zero the scan on
+ * precisely the stores that need it. Only {@code window} bounds how far back the scan reaches.
  *
  * <p>At most one entry is reported per height: the first rule to reach a height owns it, so the
  * most direct evidence (an in-flight record, then an incomplete setMain) is what an operator reads.
@@ -67,12 +76,19 @@ public final class ChainConsistencyCheck {
     public record Stuck(long height, Bytes32 hash, String reason) {
     }
 
-    public record Report(long nmain, long marker, List<Stuck> stuck, boolean markerInitialized) {
+    public record Report(long nmain, long marker, List<Stuck> stuck, boolean markerInitialized,
+                         boolean inFlightUnwind) {
+
+        public Report {
+            Objects.requireNonNull(stuck, "stuck");
+            stuck = List.copyOf(stuck);
+        }
+
         public boolean clean() {
             return stuck.isEmpty();
         }
 
-        /** Human-readable summary, one stuck block per line. */
+        /** Human-readable summary, one stuck block per line. Says what is wrong, not what to do. */
         public String describe() {
             StringBuilder sb = new StringBuilder("main chain consistency: nmain=" + nmain + ", lastCompletedMain="
                     + marker + (markerInitialized ? " (initialized on this boot)" : ""));
@@ -84,13 +100,25 @@ public final class ChainConsistencyCheck {
                 sb.append("\n  height ").append(s.height()).append(" ")
                         .append(s.hash() == null ? "?" : s.hash().toHexString()).append(": ").append(s.reason());
             }
-            return sb.append(REPAIR_HINT).toString();
+            return sb.toString();
+        }
+
+        /**
+         * {@link #describe()} plus the operator hint, for the boot path that refuses to start on a
+         * non-clean report. A clean report gets no hint: there is nothing to repair.
+         */
+        public String describeForBoot() {
+            return clean() ? describe() : describe() + REPAIR_HINT;
         }
 
         /**
          * Height to unwind to: everything above it is suspect. The earliest stuck height is itself
          * suspect — including an in-flight one, which may be a half-done {@code unSetMain} — so the
          * target sits one below it, and never above the completion marker.
+         *
+         * <p>A half-finished {@code unSetMain} ({@link #inFlightUnwind()}) is the one shape this
+         * target cannot express: unwinding further does not finish an unwind that was already under
+         * way, so the repair tool has to treat that case separately.
          */
         public long repairTarget() {
             long earliestStuck = stuck.stream().mapToLong(Stuck::height).min().orElse(nmain + 1);
@@ -101,6 +129,12 @@ public final class ChainConsistencyCheck {
     private ChainConsistencyCheck() {
     }
 
+    /**
+     * Runs the check against a store. {@code spec} is not consulted by the scan — the rules are
+     * about the main chain, not about the chain protocol — but it is kept in the signature because
+     * every caller already holds it and the boot-time policy built on top of this report is
+     * expected to consult it.
+     */
     public static Report run(BlockStore blockStore, XdagStats stats, ChainSpec spec, int window) {
         long nmain = stats.nmain;
         long marker = blockStore.getLastCompletedMain();
@@ -119,13 +153,17 @@ public final class ChainConsistencyCheck {
         // height the node died in, and unlike the marker it also catches a half-done unSetMain
         // (which leaves marker > nmain, a shape that on its own is only a warning).
         long inFlight = blockStore.getMainInFlight();
+        boolean inFlightUnwind = false;
         if (inFlight >= 0) {
+            inFlightUnwind = blockStore.getMainInFlightOp() == BlockStore.IN_FLIGHT_UNSET_MAIN;
             add(stuck, new Stuck(inFlight, hashAt(blockStore, inFlight),
-                    "setMain/unSetMain in flight when the node stopped"));
+                    (inFlightUnwind ? "unSetMain" : "setMain") + " in flight when the node stopped"));
         }
 
-        // (2) the last setMain did not finish
-        for (long h = marker + 1; h <= nmain; h++) {
+        // (2) the last setMain did not finish. Bounded by the window like the scan below, so a
+        // marker left far behind (or never written by an old store) cannot enumerate the whole
+        // chain; the guard on marker also keeps marker + 1 from overflowing.
+        for (long h = Math.max(marker + 1, nmain - window); h <= nmain && marker < nmain; h++) {
             add(stuck, new Stuck(h, hashAt(blockStore, h), "setMain incomplete (completion marker " + marker
                     + " is behind persisted nmain " + nmain + ")"));
         }
@@ -134,8 +172,8 @@ public final class ChainConsistencyCheck {
                     nmain);
         }
 
-        // (3) main blocks in the window without a self reference; (4) main blocks above the persisted tip
-        long from = Math.max(1, Math.max(spec.getChainActivationHeight(), nmain - window));
+        // (3) main blocks above the persisted tip; (4) main blocks in the window without a self reference
+        long from = Math.max(1, nmain - window);
         for (long h = from; h <= nmain + ABOVE_TIP_SCAN; h++) {
             Block b = blockStore.getBlockByHeight(h);
             if (b == null) {
@@ -147,6 +185,13 @@ public final class ChainConsistencyCheck {
             if ((b.getInfo().getFlags() & BI_MAIN) == 0) {
                 continue;
             }
+            if (b.getInfo().getHeight() != h) {
+                // A stale height index entry: saveBlockInfo never deletes the old key, so a block
+                // unwound at h and re-confirmed lower down is still reachable from key(h) with
+                // BI_MAIN set. A genuinely stuck block always agrees with its index height —
+                // setMain writes setHeight(mainNumber) before the DFS it may die in.
+                continue;
+            }
             if (h > nmain) {
                 add(stuck, new Stuck(h, hashLow(b), "main block above persisted stats (setMain crashed before "
                         + "stats were saved)"));
@@ -155,8 +200,8 @@ public final class ChainConsistencyCheck {
             }
         }
         List<Stuck> sorted = new ArrayList<>(stuck.values());
-        sorted.sort((a, c) -> Long.compare(a.height(), c.height()));
-        return new Report(nmain, marker, List.copyOf(sorted), initialized);
+        sorted.sort(Comparator.comparingLong(Stuck::height));
+        return new Report(nmain, marker, sorted, initialized, inFlightUnwind);
     }
 
     private static void add(Map<Long, Stuck> stuck, Stuck s) {

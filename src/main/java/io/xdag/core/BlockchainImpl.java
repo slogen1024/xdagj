@@ -1331,9 +1331,10 @@ public class BlockchainImpl implements Blockchain {
             // Set reward
             long mainNumber = xdagStats.nmain + 1;
             // I3 (SP0b-1): record the transition as in flight before ANY other store write, so a
-            // setMain that dies half way through leaves proof of it at this height. Cleared on both
+            // setMain that dies half way through leaves proof of it at this height, tagged with the
+            // operation so a repair tool can tell it from a half-done unSetMain. Cleared on both
             // normal exits, right after the completion marker.
-            blockStore.saveMainInFlight(mainNumber);
+            blockStore.saveMainInFlight(mainNumber, BlockStore.IN_FLIGHT_SET_MAIN);
             log.debug("mainNumber = {},hash = {}", mainNumber, Hex.toHexString(block.getInfo().getHash()));
             XAmount reward = getReward(mainNumber);
             block.getInfo().setHeight(mainNumber);
@@ -1406,8 +1407,9 @@ public class BlockchainImpl implements Blockchain {
             log.debug("UnSet main,{}, mainnumber = {}", block.getHash().toHexString(), xdagStats.nmain);
             // Height is still the confirmed height here; it is zeroed at the end of this method.
             long height = block.getInfo().getHeight();
-            // I3 (SP0b-1): as in setMain, flag the transition before touching anything else.
-            blockStore.saveMainInFlight(height);
+            // I3 (SP0b-1): as in setMain, flag the transition before touching anything else — and
+            // tag it as an unwind, which a repair tool cannot fix by unwinding further.
+            blockStore.saveMainInFlight(height, BlockStore.IN_FLIGHT_UNSET_MAIN);
             // I4 (SP0b-1): randomXSetForkTime runs only AFTER the apply DFS, so a setMain that threw
             // never set this height's fork time, and unsetting it anyway would corrupt the seed
             // epoch bookkeeping (randomXHashEpochIndex is decremented by the unset). The completion

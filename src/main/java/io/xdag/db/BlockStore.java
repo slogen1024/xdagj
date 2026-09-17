@@ -52,10 +52,15 @@ public interface BlockStore extends XdagLifecycle {
      */
     byte LAST_COMPLETED_MAIN = (byte) 0xb0;
     /**
-     * Node-local: height of a {@code setMain}/{@code unSetMain} that started but has not been
-     * observed to finish. See {@link #getMainInFlight()} for exactly what the value proves.
+     * Node-local: which operation ({@link #IN_FLIGHT_SET_MAIN} / {@link #IN_FLIGHT_UNSET_MAIN}) and
+     * which height a {@code setMain}/{@code unSetMain} that started but has not been observed to
+     * finish belongs to. See {@link #getMainInFlight()} for exactly what the value proves.
      */
     byte MAIN_IN_FLIGHT = (byte) 0xc0;
+    /** {@link #getMainInFlightOp()}: the in-flight transition is a {@code setMain}. */
+    byte IN_FLIGHT_SET_MAIN = 1;
+    /** {@link #getMainInFlightOp()}: the in-flight transition is an {@code unSetMain}. */
+    byte IN_FLIGHT_UNSET_MAIN = 2;
     String SUM_FILE_NAME = "sums.dat";
 
     void reset();
@@ -130,6 +135,9 @@ public interface BlockStore extends XdagLifecycle {
      * Height of a {@code setMain}/{@code unSetMain} that was entered but whose completion was never
      * recorded, or {@code -1} when no such call is outstanding.
      *
+     * <p>The stored record also carries which of the two operations it is; read it with
+     * {@link #getMainInFlightOp()}.
+     *
      * <p><b>What it proves:</b> the key is written as the first INDEX write of {@code setMain} and
      * of {@code unSetMain}, and cleared immediately after the matching {@link #saveLastCompletedMain}
      * on every normal exit. A boot that finds it present therefore knows the process died — or a
@@ -140,7 +148,22 @@ public interface BlockStore extends XdagLifecycle {
      */
     long getMainInFlight();
 
-    void saveMainInFlight(long height);
+    /**
+     * Which transition the outstanding in-flight record belongs to: {@link #IN_FLIGHT_SET_MAIN},
+     * {@link #IN_FLIGHT_UNSET_MAIN}, or {@code 0} when nothing is in flight. The distinction
+     * matters to a repair tool: a half-finished {@code setMain} is undone by unwinding that height,
+     * while a half-finished {@code unSetMain} was already unwinding and cannot be finished by
+     * unwinding further. A record written before the op byte existed cannot say which it was and
+     * reads as {@link #IN_FLIGHT_SET_MAIN}, the reading that keeps the repair path open.
+     */
+    int getMainInFlightOp();
+
+    void saveMainInFlight(long height, byte op);
+
+    /** Records a {@code setMain} in flight. */
+    default void saveMainInFlight(long height) {
+        saveMainInFlight(height, IN_FLIGHT_SET_MAIN);
+    }
 
     void clearMainInFlight();
 

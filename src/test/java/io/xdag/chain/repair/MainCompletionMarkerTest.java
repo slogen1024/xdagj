@@ -41,6 +41,7 @@ import io.xdag.core.Address;
 import io.xdag.core.Block;
 import io.xdag.core.XAmount;
 import io.xdag.core.XdagBlock;
+import io.xdag.db.BlockStore;
 import java.util.List;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
@@ -97,6 +98,7 @@ public class MainCompletionMarkerTest extends ChainL1TestBase {
     public void markerFollowsNormalConfirmationAndUnwind() {
         assertEquals("fresh store carries no marker", -1L, kernel.getBlockStore().getLastCompletedMain());
         assertEquals("fresh store has nothing in flight", -1L, kernel.getBlockStore().getMainInFlight());
+        assertEquals("and no operation to report", 0, kernel.getBlockStore().getMainInFlightOp());
         for (int i = 0; i < 6; i++) {
             mineMain(List.of());
         }
@@ -150,8 +152,9 @@ public class MainCompletionMarkerTest extends ChainL1TestBase {
         assertEquals(stuck.getHashLow(), Bytes32.wrap(stuck.getInfo().getRef()));
         // G2 marker: a setMain that did not finish never advances the marker
         assertEquals(completed, kernel.getBlockStore().getLastCompletedMain());
-        // I3 record: and it leaves proof of the height it died at
+        // I3 record: and it leaves proof of the height it died at, tagged as a setMain
         assertEquals(failedHeight, kernel.getBlockStore().getMainInFlight());
+        assertEquals(BlockStore.IN_FLIGHT_SET_MAIN, kernel.getBlockStore().getMainInFlightOp());
     }
 
     /**

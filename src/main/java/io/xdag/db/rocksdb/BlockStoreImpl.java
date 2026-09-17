@@ -631,15 +631,36 @@ public class BlockStoreImpl implements BlockStore {
     @Override
     public long getMainInFlight() {
         byte[] data = indexSource.get(new byte[]{MAIN_IN_FLIGHT});
-        if (data == null || data.length != 8) {
+        if (data == null) {
             return -1L;
         }
-        return BytesUtils.bytesToLong(data, 0, false);
+        if (data.length == 8) {
+            return BytesUtils.bytesToLong(data, 0, false); // legacy record, written without an op byte
+        }
+        if (data.length != 9) {
+            return -1L;
+        }
+        return BytesUtils.bytesToLong(data, 1, false);
     }
 
     @Override
-    public void saveMainInFlight(long height) {
-        indexSource.put(new byte[]{MAIN_IN_FLIGHT}, BytesUtils.longToBytes(height, false));
+    public int getMainInFlightOp() {
+        byte[] data = indexSource.get(new byte[]{MAIN_IN_FLIGHT});
+        if (data == null) {
+            return 0;
+        }
+        if (data.length == 8) {
+            return IN_FLIGHT_SET_MAIN; // legacy record: only setMain ever wrote one
+        }
+        if (data.length != 9) {
+            return 0;
+        }
+        return data[0];
+    }
+
+    @Override
+    public void saveMainInFlight(long height, byte op) {
+        indexSource.put(new byte[]{MAIN_IN_FLIGHT}, BytesUtils.merge(op, BytesUtils.longToBytes(height, false)));
     }
 
     @Override
