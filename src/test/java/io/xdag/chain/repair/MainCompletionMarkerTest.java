@@ -225,4 +225,20 @@ public class MainCompletionMarkerTest extends ChainL1TestBase {
         assertEquals("the marker follows nmain, not the configured snapshot height",
                 0L, kernel.getBlockStore().getLastCompletedMain());
     }
+
+    @Test
+    public void unSetMainOnANonMainBlockLeavesTheMarkerAlone() {
+        for (int i = 0; i < 4; i++) {
+            mineMain(List.of());
+        }
+        long completed = kernel.getBlockStore().getLastCompletedMain();
+        long nmain = blockchain.getXdagStats().nmain;
+        Block tip = blockchain.getBlockByHeight(nmain);
+        blockchain.unSetMain(tip);                 // legitimate unwind: marker and nmain move down
+        assertEquals(completed - 1, kernel.getBlockStore().getLastCompletedMain());
+        blockchain.unSetMain(tip);                 // second call on the same, now non-main block: no-op
+        assertEquals(completed - 1, kernel.getBlockStore().getLastCompletedMain());
+        assertEquals(nmain - 1, blockchain.getXdagStats().nmain);
+        assertEquals(-1L, kernel.getBlockStore().getMainInFlight());
+    }
 }

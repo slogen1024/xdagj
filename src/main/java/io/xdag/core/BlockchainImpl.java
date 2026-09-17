@@ -1111,8 +1111,10 @@ public class BlockchainImpl implements Blockchain {
                 execLog.info("{} | Hash: {} | State: {}", blockType, ref.getHashLow().toHexString(), executionState);
 
                 if (childGas.equals(XAmount.ZERO.subtract(XAmount.ONE))) {
-                    // rejected: restore the pre-call state the trailing restore loop in
-                    // unApplyBlock relies on (it only clears BI_MAIN_REF on a ref == null block)
+                    // rejected: restore the pre-call state. Two readers depend on it: unApplyBlock's
+                    // trailing loop only clears BI_MAIN_REF on a ref == null tx block, and its
+                    // recursive branch would otherwise descend into this rejected child (ref == M)
+                    // and unwind a subtree that was never applied.
                     updateBlockRef(ref, null);
                 } else {
                     gasCollected = gasCollected.add(childGas);
@@ -1354,7 +1356,7 @@ public class BlockchainImpl implements Blockchain {
                 XAmount mainBlockFee = applyBlock(true, block); //the mainBlock may have tx, return the fee to itself.
                 if (mainBlockFee.compareTo(XAmount.ZERO) < 0) {
                     // Reachable: a tx block promoted to main whose own input fails the nonce or
-                    // sync-status checks in applyBlock (see BlockchainTest's TxBlockTobeMain cases).
+                    // sync-status checks in applyBlock (no test currently exercises this path).
                     // The block keeps BI_MAIN with no fee accepted, and setMain is DONE — this is a
                     // normal exit, so the completion marker advances here exactly as it does below.
                     blockStore.saveLastCompletedMain(mainNumber);
