@@ -107,7 +107,8 @@ public final class ChainRepairTool {
     /**
      * What the repair did, or refused to do. The CLI maps this onto its exit code: {@link #CLEAN},
      * {@link #REPAIRED} and {@link #PLANNED} exit 0, {@link #REFUSED} exits 1,
-     * {@link #UNREPAIRABLE} exits 2, and an exception out of {@code repair} exits 3.
+     * {@link #UNREPAIRABLE} exits 2, and an exception out of {@code repair} exits 4 (the CLI keeps
+     * 3 for a command that could not start at all, before any store was opened).
      */
     public enum Status {
         /** The store needed no repair; nothing was written. */
@@ -263,10 +264,20 @@ public final class ChainRepairTool {
      * persisted tip, or a {@code BI_MAIN} block with no ref, survives this and leaves the report
      * non-clean, because moving the marker says nothing about either.
      *
+     * <p>An in-flight {@code unSetMain} is refused, not adopted. That record is the only evidence of
+     * an unwind the node died in the middle of — the shape {@link #repair} hands to its
+     * interrupted-unwind branch, which either finishes the unwind or refuses it with
+     * {@link #INTERRUPTED_UNWIND_REASON}. Clearing it here would leave the re-check clean and this
+     * method vouching for a store it cannot. Nothing is written in that case; the entry report is
+     * filed and returned, and it is non-clean. An in-flight {@code setMain} (op 1) IS discarded as
+     * before: adopting the tip already asserts that every height up to it, that one included, was
+     * confirmed completely.
+     *
      * @param kernel     the repair-mode kernel owning the stores; the fresh report is filed back on it
      * @param blockchain a blockchain built by that kernel, i.e. loaded from the same stores
      * @param out        where the operator-facing lines go; every line is mirrored into the log
-     * @return the report the re-check leaves behind; clean means the store is startable again
+     * @return the report the re-check leaves behind (the entry report when refused); clean means the
+     *         store is startable again
      * @throws IllegalStateException if {@code kernel} is not in repair mode
      */
     public static ChainConsistencyCheck.Report reinitMarker(Kernel kernel, BlockchainImpl blockchain,
@@ -281,9 +292,27 @@ public final class ChainRepairTool {
         long nmain = blockchain.getXdagStats().nmain;
         long marker = blockStore.getLastCompletedMain();
         long inFlight = blockStore.getMainInFlight();
+        // C1: decided before ANY write. An in-flight unSetMain is what repair() routes to
+        // finishInterruptedUnwind — finished if the reversal never started, UNREPAIRABLE with
+        // INTERRUPTED_UNWIND_REASON if it did. clearMainInFlight() below would erase the only record
+        // of it, the re-check would come out clean, and the CLI would exit 0 on a store that a plain
+        // --repairchain refuses to touch.
+        if (inFlight >= 0 && blockStore.getMainInFlightOp() == BlockStore.IN_FLIGHT_UNSET_MAIN) {
+            ChainConsistencyCheck.Report entry = ChainConsistencyCheck.run(blockStore, blockchain.getXdagStats(),
+                    kernel.getConfig().getChainSpec(), window);
+            kernel.recordConsistencyReport(entry);
+            say(out, entry.describe());
+            say(out, "refusing: an unSetMain is in flight at height " + inFlight + ", and moving the completion "
+                    + "marker would erase the only record of it. That record is what the ordinary repair reads "
+                    + "to finish the unwind, or to refuse it as: \"" + INTERRUPTED_UNWIND_REASON + "\". Run "
+                    + "`--repairchain` with no argument to finish or diagnose the unwind, or re-seed from a "
+                    + "snapshot.");
+            log.warn("repair: reinit-marker refused, unSetMain in flight at height {}", inFlight);
+            return entry;
+        }
         say(out, "WARNING: --repairchain reinit-marker verifies nothing and unwinds nothing. It moves the "
                 + "completion marker from " + marker + " to the persisted tip " + nmain
-                + (inFlight < 0 ? "" : " and discards the in-flight record at height " + inFlight)
+                + (inFlight < 0 ? "" : " and discards the in-flight setMain record at height " + inFlight)
                 + ", i.e. YOU are asserting that every main block up to " + nmain + " was confirmed "
                 + "completely. This is only ever right after a downgrade to a pre-SP0b-1 binary froze "
                 + "the marker while the node kept confirming. If any of those heights really was "

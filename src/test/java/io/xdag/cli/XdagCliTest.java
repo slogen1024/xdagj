@@ -560,4 +560,21 @@ public class XdagCliTest {
         verify(xdagCLI, never()).startKernel(any(), any());
     }
 
+    /**
+     * SP0b-1: a non-zero code from {@link XdagCli#repairChain(String)} (here REFUSED, 1) reaches
+     * {@link XdagCli#exit(int)} verbatim, and the node still does not start on that store.
+     */
+    @Test
+    public void testRepairChainExitsWithTheToolsCode() throws Exception {
+        XdagCli xdagCLI = spy(new XdagCli());
+        xdagCLI.setConfig(config);
+        doReturn(1).when(xdagCLI).repairChain(nullable(String.class));
+        doNothing().when(xdagCLI).exit(anyInt());
+
+        xdagCLI.start(new String[]{"--repairchain"});
+
+        verify(xdagCLI).exit(1);
+        verify(xdagCLI, never()).startKernel(any(), any());
+    }
+
 }

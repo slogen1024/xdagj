@@ -52,6 +52,7 @@ import io.xdag.db.rocksdb.RocksdbKVSource;
 import io.xdag.db.rocksdb.SnapshotStoreImpl;
 import io.xdag.utils.BytesUtils;
 import io.xdag.utils.XdagTime;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.Option;
@@ -65,10 +66,12 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Scanner;
 import org.apache.commons.lang3.Strings;
+import org.apache.commons.lang3.exception.ExceptionUtils;
 
 import static io.xdag.crypto.keys.AddressUtils.toBytesAddress;
 import static io.xdag.utils.WalletUtils.WALLET_PASSWORD_PROMPT;
 
+@Slf4j
 public class XdagCli extends Launcher {
 
     private static final Scanner scanner = new Scanner(new InputStreamReader(System.in, StandardCharsets.UTF_8));
@@ -532,8 +535,10 @@ public class XdagCli extends Launcher {
         System.out.println("convertXAmount = " + b);
         long start = System.currentTimeMillis();
         this.getConfig().getSnapshotSpec().setSnapshotJ(true);
-        // TIME, not BLOCK: the raw blocks a node wrote are in the database NAMED TIME — the same
-        // node layout BlockStoreImpl.forNode encodes. This source is the snapshot's block source.
+        // TIME, not BLOCK: the raw blocks a node wrote are in the database NAMED TIME, so this source
+        // is the snapshot's block source. Only the directory choice matches BlockStoreImpl.forNode:
+        // the node opens TIME through RocksdbFactory with a 9-byte prefix extractor and this source
+        // is opened with none, which is irrelevant to the point gets the snapshot performs.
         RocksdbKVSource blockSource = new RocksdbKVSource(DatabaseName.TIME.toString());
         blockSource.setConfig(getConfig());
         blockSource.init();
@@ -597,10 +602,15 @@ public class XdagCli extends Launcher {
      * persisted tip as the last complete height without unwinding (the downgrade trap — see
      * {@link ChainRepairTool#reinitMarker}); no argument runs the ordinary repair.
      *
-     * <p>Exit codes: 0 the store is startable (clean, repaired, or a dry run that would have
-     * proceeded); 1 refused, pass {@code force} (a dry run reports this too); 2 unrepairable from
-     * local state — restore from a snapshot; 3 the command could not run at all (no usable wallet,
-     * an unknown mode, or an exception).
+     * <p>Exit codes: 0 the store is startable (clean, repaired, a dry run that would have
+     * proceeded, or a {@code reinit-marker} whose re-check came out clean); 1 refused, pass
+     * {@code force} (a dry run reports this too); 2 unrepairable from local state — restore from a
+     * snapshot (also a {@code reinit-marker} whose re-check is still not clean, and one refused over
+     * an in-flight {@code unSetMain}); 3 the command could not start (an unknown mode, or no usable
+     * wallet — missing, locked, or one that could not be opened at all); 4 the command failed while
+     * running, i.e. an exception after the stores were opened.
+     *
+     * <p>The wallet is needed only to construct the kernel; the repair signs nothing.
      *
      * @param mode {@code dry-run}, {@code force}, {@code reinit-marker}, or {@code null}/empty
      * @return the process exit code
@@ -618,9 +628,19 @@ public class XdagCli extends Launcher {
             return 3;
         }
 
-        Wallet wallet = loadWallet().exists() ? loadAndUnlockWallet() : null;
-        if (wallet == null || !wallet.isUnlocked()) {
-            System.out.println("wallet not found or locked; --repairchain needs the node wallet");
+        Wallet wallet;
+        try {
+            wallet = loadWallet().exists() ? loadAndUnlockWallet() : null;
+            if (wallet == null || !wallet.isUnlocked()) {
+                System.out.println("wallet not found or locked; --repairchain needs the node wallet");
+                return 3;
+            }
+        } catch (Exception e) {
+            // Headless, readPassword falls through to stdin, and a closed stdin surfaces as a
+            // NoSuchElementException; uncaught, that is a stack trace and exit 1 — the code this
+            // command documents as REFUSED.
+            System.out.println("--repairchain could not open the wallet (no console for the password prompt? "
+                    + "pass --password): " + e);
             return 3;
         }
 
@@ -665,13 +685,19 @@ public class XdagCli extends Launcher {
                 case UNREPAIRABLE -> 2;
             };
         } catch (Exception e) {
-            // e, not e.getMessage(): a RocksDB failure may carry no message at all.
-            System.out.println("--repairchain failed: " + e);
-            return 3;
+            // The root cause, not e: RocksDB's refusal to open a store another process holds arrives
+            // wrapped as RuntimeException("Failed to initialize database", cause), and "" + e drops
+            // the cause the operator needs. 4, not 3: the stores were open when this happened.
+            System.out.println("--repairchain failed: " + ExceptionUtils.getRootCauseMessage(e));
+            System.out.println("if the node is running on this store, stop it first: RocksDB allows only one "
+                    + "process to open " + getConfig().getNodeSpec().getStoreDir() + " at a time");
+            log.error("--repairchain failed", e);
+            return 4;
         } finally {
             if (blockchain != null) {
-                // Also stops the cleaner the constructor started on a non-daemon thread; without
-                // this the JVM would never exit.
+                // Also stops the cleaner the constructor started on a non-daemon thread. The guard
+                // leaves that thread alive when the constructor throws AFTER startCleaner(), but that
+                // path returns non-zero, which start() turns into System.exit, so the JVM still ends.
                 blockchain.stopCheckMain();
             }
             if (chainStore != null) {
