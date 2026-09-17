@@ -247,6 +247,64 @@ public final class ChainRepairTool {
     }
 
     /**
+     * Declares the main chain sound: re-initializes {@code LAST_COMPLETED_MAIN} to the persisted
+     * {@code nmain} and drops any {@code MAIN_IN_FLIGHT} record, without unwinding anything, then
+     * re-checks and returns the fresh report.
+     *
+     * <p>This exists for one situation only — the downgrade trap. A node rolled back to a binary
+     * from before SP0b-1 keeps confirming main blocks with the marker frozen where the last
+     * SP0b-1 boot left it; on re-upgrade the gate sees a marker hundreds of heights behind the tip
+     * and demands an unwind of everything above it, none of which is actually broken. Adopting the
+     * tip is the right answer there and the wrong answer everywhere else: it VERIFIES NOTHING. The
+     * operator, not this code, is asserting that every main block up to {@code nmain} was confirmed
+     * completely.
+     *
+     * <p>What the re-check still reports is deliberately not suppressed: a main block above the
+     * persisted tip, or a {@code BI_MAIN} block with no ref, survives this and leaves the report
+     * non-clean, because moving the marker says nothing about either.
+     *
+     * @param kernel     the repair-mode kernel owning the stores; the fresh report is filed back on it
+     * @param blockchain a blockchain built by that kernel, i.e. loaded from the same stores
+     * @param out        where the operator-facing lines go; every line is mirrored into the log
+     * @return the report the re-check leaves behind; clean means the store is startable again
+     * @throws IllegalStateException if {@code kernel} is not in repair mode
+     */
+    public static ChainConsistencyCheck.Report reinitMarker(Kernel kernel, BlockchainImpl blockchain,
+                                                            Consumer<String> out) {
+        // Same reason as repair(): these are writes to a main chain, and only repair mode guarantees
+        // that nothing confirms a block while they happen.
+        if (!kernel.isRepairMode()) {
+            throw new IllegalStateException("ChainRepairTool requires a kernel in repair mode");
+        }
+        BlockStore blockStore = kernel.getBlockStore();
+        int window = kernel.getConfig().getChainSpec().getChainConsistencyWindow();
+        long nmain = blockchain.getXdagStats().nmain;
+        long marker = blockStore.getLastCompletedMain();
+        long inFlight = blockStore.getMainInFlight();
+        say(out, "WARNING: --repairchain reinit-marker verifies nothing and unwinds nothing. It moves the "
+                + "completion marker from " + marker + " to the persisted tip " + nmain
+                + (inFlight < 0 ? "" : " and discards the in-flight record at height " + inFlight)
+                + ", i.e. YOU are asserting that every main block up to " + nmain + " was confirmed "
+                + "completely. This is only ever right after a downgrade to a pre-SP0b-1 binary froze "
+                + "the marker while the node kept confirming. If any of those heights really was "
+                + "incomplete, its chain records are missing for good and no later repair can tell: "
+                + "re-seed from a snapshot instead.");
+        blockStore.saveLastCompletedMain(nmain);
+        blockStore.clearMainInFlight();
+        log.warn("repair: completion marker re-initialized from {} to nmain={} by operator assertion", marker, nmain);
+        ChainConsistencyCheck.Report after = ChainConsistencyCheck.run(blockStore, blockchain.getXdagStats(),
+                kernel.getConfig().getChainSpec(), window);
+        kernel.recordConsistencyReport(after);
+        say(out, after.describe());
+        if (!after.clean()) {
+            say(out, "the completion marker was re-initialized but the chain is still inconsistent: what is "
+                    + "left is not something a marker can express, and an unwind (`--repairchain`) or a "
+                    + "snapshot re-seed is what fixes it");
+        }
+        return after;
+    }
+
+    /**
      * The {@code unSetMain} branch. The block at the in-flight height either still carries
      * {@code BI_MAIN} — the crash landed before {@code unSetMain} cleared the flag, so nothing it
      * does had been applied and running it now is exactly the operation that was interrupted — or

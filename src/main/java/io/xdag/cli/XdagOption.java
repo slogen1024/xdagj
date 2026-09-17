@@ -82,7 +82,12 @@ public enum XdagOption {
     /**
      * Create a new snapshot
      */
-    MAKE_SNAPSHOT("makesnapshot");
+    MAKE_SNAPSHOT("makesnapshot"),
+
+    /**
+     * Offline main chain repair (SP0b-1)
+     */
+    REPAIR_CHAIN("repairchain");
 
     private final String name;
 

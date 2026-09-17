@@ -30,14 +30,24 @@ import io.xdag.Launcher;
 import io.xdag.Wallet;
 import io.xdag.chain.l1.ChainL1SnapshotGate;
 import io.xdag.chain.l1.ChainL1Store;
+import io.xdag.chain.repair.ChainRepairTool;
 import io.xdag.config.Config;
 import io.xdag.config.Constants;
+import io.xdag.core.BlockchainImpl;
 import io.xdag.crypto.bip.Bip39Mnemonic;
 import io.xdag.crypto.encoding.Base58;
 import io.xdag.crypto.keys.AddressUtils;
 import io.xdag.crypto.keys.ECKeyPair;
+import io.xdag.db.AddressStore;
+import io.xdag.db.BlockStore;
+import io.xdag.db.OrphanBlockStore;
 import io.xdag.db.SnapshotStore;
+import io.xdag.db.rocksdb.AddressStoreImpl;
+import io.xdag.db.rocksdb.BlockStoreImpl;
+import io.xdag.db.rocksdb.DatabaseFactory;
 import io.xdag.db.rocksdb.DatabaseName;
+import io.xdag.db.rocksdb.OrphanBlockStoreImpl;
+import io.xdag.db.rocksdb.RocksdbFactory;
 import io.xdag.db.rocksdb.RocksdbKVSource;
 import io.xdag.db.rocksdb.SnapshotStoreImpl;
 import io.xdag.utils.BytesUtils;
@@ -133,6 +143,14 @@ public class XdagCli extends Launcher {
                 .hasArg(true).optionalArg(true).argName("covertuint").type(String.class)
                 .build();
         addOption(makeSnapshotOption);
+
+        Option repairChainOption = Option.builder()
+                .longOpt(XdagOption.REPAIR_CHAIN.toString())
+                .desc("unwind to the last complete main height; mode = dry-run|force|reinit-marker; "
+                        + "dry-run may still initialize an absent completion marker")
+                .hasArg(true).optionalArg(true).argName("mode").type(String.class)
+                .build();
+        addOption(repairChainOption);
     }
 
     public static void main(String[] args, XdagCli cli) throws Exception {
@@ -196,6 +214,13 @@ public class XdagCli extends Launcher {
                 convertXAmount = true;
             }
             makeSnapshot(convertXAmount);
+        } else if (cmd.hasOption(XdagOption.REPAIR_CHAIN.toString())) {
+            // Never falls through to start(): the whole point of the command is that the node must
+            // not run on this store until the repair has been accepted.
+            int code = repairChain(cmd.getOptionValue(XdagOption.REPAIR_CHAIN.toString()));
+            if (code != 0) {
+                exit(code);
+            }
         } else {
             if (cmd.hasOption(XdagOption.ENABLE_SNAPSHOT.toString())) {
                 String[] values = cmd.getOptionValues(XdagOption.ENABLE_SNAPSHOT.toString().trim());
@@ -555,6 +580,106 @@ public class XdagCli extends Launcher {
         if (chainFailure != null) {
             System.out.println(chainFailure + " -- this snapshot cannot boot a node at or past the chain "
                     + "activation height; fix the cause and export SNAPSHOT/CHAIN_L1 again");
+        }
+    }
+
+    /**
+     * SP0b-1: offline main chain repair. Opens the stores exactly like a node would, builds the
+     * blockchain on a kernel in {@link Kernel#enterRepairMode() repair mode} — so the boot
+     * consistency check records its report instead of refusing to start, and no check-main loop can
+     * confirm a block while the tool works — then hands over to {@link ChainRepairTool}.
+     *
+     * <p>Modes: {@code dry-run} prints the plan and writes nothing (bar the completion marker the
+     * boot itself initializes when the store carries none at all); {@code force} unwinds further
+     * below the tip than {@code chain.consistency.window} allows; {@code reinit-marker} adopts the
+     * persisted tip as the last complete height without unwinding (the downgrade trap — see
+     * {@link ChainRepairTool#reinitMarker}); no argument runs the ordinary repair.
+     *
+     * <p>Exit codes: 0 the store is startable (clean, repaired, or a dry run that would have
+     * proceeded); 1 refused, pass {@code force} (a dry run reports this too); 2 unrepairable from
+     * local state — restore from a snapshot; 3 the command could not run at all (no usable wallet,
+     * an unknown mode, or an exception).
+     *
+     * @param mode {@code dry-run}, {@code force}, {@code reinit-marker}, or {@code null}/empty
+     * @return the process exit code
+     */
+    protected int repairChain(String mode) {
+        String action = mode == null ? "" : mode.trim();
+        boolean dryRun = "dry-run".equals(action);
+        boolean force = "force".equals(action);
+        boolean reinit = "reinit-marker".equals(action);
+        // A typo must not silently become the most destructive of the four: without this, anything
+        // that is not "dry-run" or "force" would read as "no argument" and unwind for real.
+        if (!action.isEmpty() && !dryRun && !force && !reinit) {
+            System.out.println("unknown --repairchain mode '" + action
+                    + "'; expected dry-run, force or reinit-marker, or no argument at all");
+            return 3;
+        }
+
+        Wallet wallet = loadWallet().exists() ? loadAndUnlockWallet() : null;
+        if (wallet == null || !wallet.isUnlocked()) {
+            System.out.println("wallet not found or locked; --repairchain needs the node wallet");
+            return 3;
+        }
+
+        Kernel kernel = new Kernel(getConfig(), wallet);
+        kernel.enterRepairMode();
+        DatabaseFactory dbFactory = new RocksdbFactory(getConfig());
+        BlockchainImpl blockchain = null;
+        ChainL1Store chainStore = null;
+        try {
+            // Argument order per BlockStoreImpl(index, time, block, txHistory). Note that
+            // Kernel.testStart passes BLOCK and TIME the other way round, so a running node's raw
+            // blocks and time index live in each other's directory (and the TIME source's fixed
+            // 9-byte prefix lands on the wrong one); this opens the stores by the signature.
+            BlockStore blockStore = new BlockStoreImpl(
+                    dbFactory.getDB(DatabaseName.INDEX),
+                    dbFactory.getDB(DatabaseName.TIME),
+                    dbFactory.getDB(DatabaseName.BLOCK),
+                    dbFactory.getDB(DatabaseName.TXHISTORY));
+            blockStore.start();
+            AddressStore addressStore = new AddressStoreImpl(dbFactory.getDB(DatabaseName.ADDRESS));
+            addressStore.start();
+            OrphanBlockStore orphanBlockStore = new OrphanBlockStoreImpl(dbFactory.getDB(DatabaseName.ORPHANIND),
+                    kernel);
+            orphanBlockStore.start();
+            chainStore = new ChainL1Store(dbFactory.getDB(DatabaseName.CHAIN_L1));
+            chainStore.start();
+            kernel.setBlockStore(blockStore);
+            kernel.setAddressStore(addressStore);
+            kernel.setOrphanBlockStore(orphanBlockStore);
+            kernel.setChainL1Store(chainStore);
+
+            // The consistency check runs inside this constructor; in repair mode it records rather
+            // than throws, and the tool re-scans the stores for itself anyway.
+            blockchain = new BlockchainImpl(kernel);
+            if (reinit) {
+                return ChainRepairTool.reinitMarker(kernel, blockchain, System.out::println).clean() ? 0 : 2;
+            }
+            ChainRepairTool.Outcome outcome = ChainRepairTool.repair(kernel, blockchain,
+                    new ChainRepairTool.Options(dryRun, force), System.out::println);
+            if (outcome.reason() != null) {
+                System.out.println("--repairchain: " + outcome.reason());
+            }
+            return switch (outcome.status()) {
+                case CLEAN, REPAIRED, PLANNED -> 0;
+                case REFUSED -> 1;
+                case UNREPAIRABLE -> 2;
+            };
+        } catch (Exception e) {
+            // e, not e.getMessage(): a RocksDB failure may carry no message at all.
+            System.out.println("--repairchain failed: " + e);
+            return 3;
+        } finally {
+            if (blockchain != null) {
+                // Also stops the cleaner the constructor started on a non-daemon thread; without
+                // this the JVM would never exit.
+                blockchain.stopCheckMain();
+            }
+            if (chainStore != null) {
+                chainStore.stop();
+            }
+            dbFactory.close();
         }
     }
 

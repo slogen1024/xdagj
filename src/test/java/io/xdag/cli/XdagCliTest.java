@@ -34,10 +34,12 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -101,6 +103,7 @@ public class XdagCliTest {
                     --importprivatekey <key>          import hex key
                     --makesnapshot <covertuint>       make snapshot
                     --password <password>             wallet password
+                    --repairchain <mode>              unwind to the last complete main height; mode = dry-run|force|reinit-marker; dry-run may still initialize an absent completion marker
                     --version                         show version
                 """;
         assertEquals(helpStr.replaceAll("\\R", ""),
@@ -528,6 +531,33 @@ public class XdagCliTest {
         // execution
         assertFalse(xdagCLI.importMnemonic(errorMnemonic));
         assertTrue(xdagCLI.importMnemonic(rightMnemonic));
+    }
+
+    /**
+     * SP0b-1: every {@code --repairchain} mode reaches {@link XdagCli#repairChain(String)} verbatim,
+     * and the command never falls through to {@code start()}. {@code nullable(String.class)} rather
+     * than {@code anyString()}: the no-argument form passes null, which anyString() does not match.
+     */
+    @Test
+    public void testRepairChain() throws Exception {
+        XdagCli xdagCLI = spy(new XdagCli());
+        xdagCLI.setConfig(config);
+        doReturn(0).when(xdagCLI).repairChain(nullable(String.class));
+
+        xdagCLI.start(new String[]{"--repairchain", "dry-run"});
+        verify(xdagCLI).repairChain("dry-run");
+
+        xdagCLI.start(new String[]{"--repairchain", "force"});
+        verify(xdagCLI).repairChain("force");
+
+        xdagCLI.start(new String[]{"--repairchain", "reinit-marker"});
+        verify(xdagCLI).repairChain("reinit-marker");
+
+        // optionalArg: commons-cli hands back null, and the tool reads that as the ordinary repair
+        xdagCLI.start(new String[]{"--repairchain"});
+        verify(xdagCLI).repairChain((String) null);
+
+        verify(xdagCLI, never()).startKernel(any(), any());
     }
 
 }
