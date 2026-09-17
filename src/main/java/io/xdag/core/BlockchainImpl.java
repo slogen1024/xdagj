@@ -1391,6 +1391,23 @@ public class BlockchainImpl implements Blockchain {
 //            if (!block.getInputs().isEmpty() && block.getFee().equals(XAmount.ZERO)) {
 //                block.getInfo().setFee(getTxFee(block));
 //            }
+            // applyBlock credited every OUTPUT address link amount - L (L = outPutLimit) and
+            // persisted fee = k * L for the k OUTPUT address links, so the exact reversal of each
+            // credit is amount - fee / k (exact in nano). The persisted fee is the ground truth of
+            // what was charged; outPutLimit(block) is not usable here since it needs the raw
+            // header and returns MIN_GAS when only the BlockInfo is at hand. Dividing by
+            // outPutNum(block) instead was wrong for any block that also carries XDAG_FIELD_OUT
+            // block links (chain DEPLOY/CALL with chunk-chain heads): those count as outputs in
+            // outPutLimit's denominator but were never credited, so the unwind over-debited each
+            // OUTPUT by fee * m / (k * (k + m)) and could even skip it when the balance went
+            // below zero. For m = 0 (every legacy wallet or pool transfer) fee / k == fee / outPutNum.
+            int outputAddresses = 0;
+            for (Address link : links) {
+                if (link.isAddress && link.getType() == XDAG_FIELD_OUTPUT) {
+                    outputAddresses++;
+                }
+            }
+            XAmount perOutput = outputAddresses == 0 ? XAmount.ZERO : block.getFee().divide(outputAddresses);
             for (Address link : links) {
                 if (!link.isAddress) {
                     Block ref = getBlockByHash(link.getAddress(), false);
@@ -1415,8 +1432,8 @@ public class BlockchainImpl implements Blockchain {
                         addressStore.updateTxQuantity(address, exeNonce.subtract(UInt64.ONE));
                         log.info("current nonce subtract one");
                     } else if (link.getType() == XDAG_FIELD_OUTPUT) {
-                        // When add amount in 'Apply' subtract fee, so unApply also subtract fee
-                        subtractAmount(BasicUtils.hash2byte(link.getAddress()), link.getAmount().subtract(block.getFee().divide(outPutNum(block))), block);
+                        // Reverse exactly the credit applyBlock made: amount - fee / k.
+                        subtractAmount(BasicUtils.hash2byte(link.getAddress()), link.getAmount().subtract(perOutput), block);
                     }
                 }
 
