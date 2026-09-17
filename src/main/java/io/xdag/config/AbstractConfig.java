@@ -160,6 +160,7 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected int chainMaxWasmBytes = 1024 * 1024;
     @Setter(AccessLevel.NONE)
     protected XAmount chainChunkFee = XAmount.of(10, XUnit.MILLI_XDAG);
+    @Setter(AccessLevel.NONE)
     protected int chainConsistencyWindow = ChainSpec.DEFAULT_CONSISTENCY_WINDOW;
 
     // RandomX configuration
@@ -402,6 +403,8 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
                     "Invalid combination of chain.chunk.feeMilliXdag and chain.chunk.maxPerChain: " + chainChunkFee
                             + " x 2 x " + chainMaxChunksPerChain + " overflows a long", e);
         }
+        // Node-local (not consensus): only sizes this node's startup self-check, so no override
+        // warning and no place in the "never set on a shared network" list above.
         if (config.hasPath("chain.consistency.window")) {
             chainConsistencyWindow = config.getInt("chain.consistency.window");
         }

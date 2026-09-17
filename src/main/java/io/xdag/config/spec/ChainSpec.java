@@ -29,7 +29,8 @@ import io.xdag.core.XAmount;
 /**
  * Chain (DAG-native channel contract) protocol parameters.
  *
- * <p>These parameters gate every chain hook wired into {@code setMain}/{@code applyBlock}
+ * <p>With one node-local exception ({@link #getChainConsistencyWindow()}), these parameters gate
+ * every chain hook wired into {@code setMain}/{@code applyBlock}
  * (see the SP0a design: principle P2, "channel semantics only activate in setMain, gated
  * by main-block height"). None of them ever change L1 block validity ({@code tryToConnect}
  * is untouched by chain semantics, per principle P1) — they only affect whether/how the
@@ -55,6 +56,9 @@ public interface ChainSpec {
      * two never drift apart.
      */
     int DEFAULT_MAX_CHUNKS_PER_CHAIN = 4096;
+
+    /** Node-local default for {@code chain.consistency.window} (main blocks scanned below the tip at boot). */
+    int DEFAULT_CONSISTENCY_WINDOW = 128;
 
     /**
      * The maximum size, in bytes, of the inline argument payload a CALL/DEPLOY ext may
@@ -168,13 +172,17 @@ public interface ChainSpec {
      */
     XAmount getChainChunkFee();
 
-    /** Protocol-independent default for {@code chain.consistency.window}. */
-    int DEFAULT_CONSISTENCY_WINDOW = 128;
-
     /**
      * How many main heights below the tip the startup consistency check scans for main blocks
-     * left without a self reference. Node-local (not consensus): may be set in the conf as
-     * {@code chain.consistency.window}; must be positive.
+     * left without a self reference (see {@code io.xdag.chain.repair.ChainConsistencyCheck}).
+     *
+     * <p>Unit: main blocks. Default: {@link #DEFAULT_CONSISTENCY_WINDOW}. May be set in the conf
+     * as {@code chain.consistency.window}; must be positive.
+     *
+     * <p><b>Consensus-relevant:</b> no (node-local) — it changes only what this node inspects at
+     * boot, never a judgement other nodes must share.
+     *
+     * @return the scan window in main blocks, always positive
      */
     int getChainConsistencyWindow();
 }
