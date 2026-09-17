@@ -52,6 +52,7 @@ import io.xdag.pool.PoolAwardManagerImpl;
 import io.xdag.rpc.api.XdagApi;
 import io.xdag.rpc.api.impl.XdagApiImpl;
 import io.xdag.utils.XdagTime;
+import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -94,15 +95,19 @@ public class Kernel {
      * SP0b-1: when true, {@code BlockchainImpl}'s constructor records a non-clean consistency report
      * in {@link #consistencyReport} instead of throwing, and does not start the check-main loop —
      * nothing may be confirmed behind the repair tool's back while the main chain is being fixed.
-     * Set by the offline repair tool ({@code --repairchain}) only.
+     * Entered by the offline repair tool ({@code --repairchain}) only, through
+     * {@link #enterRepairMode()}; there is deliberately no generated setter and no way back.
      */
+    @Setter(AccessLevel.NONE)
     protected boolean repairMode;
 
     /**
      * SP0b-1: the startup consistency report of the most recent {@code BlockchainImpl} construction.
-     * Always set by that constructor, clean or not; the repair tool reads it instead of scanning the
-     * store a second time. Null before the blockchain has been built.
+     * Always filed by that constructor, clean or not, through {@link #recordConsistencyReport};
+     * the repair tool reads it instead of scanning the store a second time. Null before the
+     * blockchain has been built.
      */
+    @Setter(AccessLevel.NONE)
     protected ChainConsistencyCheck.Report consistencyReport;
 
     protected SnapshotStore snapshotStore;
@@ -289,6 +294,26 @@ public class Kernel {
     }
 
     /**
+     * SP0b-1: enters repair mode. A one-way transition, entered by the offline repair tool
+     * ({@code --repairchain}) before it builds a {@code BlockchainImpl} — from here on that
+     * constructor records a non-clean consistency report instead of throwing, and starts no
+     * check-main loop. A node that has decided to repair is restarted to run normally again, so
+     * there is no way back out of this state.
+     */
+    public void enterRepairMode() {
+        this.repairMode = true;
+    }
+
+    /**
+     * SP0b-1: files the startup consistency report of a {@code BlockchainImpl} construction.
+     * Public rather than package-visible because that constructor lives in {@code io.xdag.core};
+     * named for what it is — a report being recorded, not a knob being set.
+     */
+    public void recordConsistencyReport(ChainConsistencyCheck.Report report) {
+        this.consistencyReport = report;
+    }
+
+    /**
      * Stops the kernel in an orderly fashion.
      */
     public synchronized void testStop() {
@@ -321,6 +346,14 @@ public class Kernel {
 
         // Stop data layer
         blockchain.stopCheckMain();
+
+        // I3 (SP0b-1): the check-main loop was the only thing persisting XdagStats and it has just
+        // been stopped, so flush them once more before the databases close. Without this a clean
+        // shutdown could still leave the completion marker written by the last setMain ahead of the
+        // stats the next boot loads — the shape the boot consistency check reports as a crash.
+        if (blockStore != null && blockchain != null && blockchain.getXdagStats() != null) {
+            blockStore.saveXdagStatus(blockchain.getXdagStats());
+        }
 
         // Stop the chain store before its database is closed below
         if (chainL1Store != null) {

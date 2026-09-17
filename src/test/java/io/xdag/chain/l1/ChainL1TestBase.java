@@ -122,14 +122,16 @@ public abstract class ChainL1TestBase {
 
         /**
          * Deliberately without the {@code try/catch} of the real {@link BlockchainImpl#checkMain()}:
-         * an exception out of {@code setMain} must reach the test (plan §0.5). The stats save is
-         * kept, because the real {@code checkMain} does it too and {@code setMain} itself only
-         * bumps {@code nmain} in memory — without it every "restart" in a test would load stats
-         * lagging the confirmed tip, a shape the SP0b-1 boot check rightly reports as a crash.
+         * an exception out of {@code setMain} must reach the test (plan §0.5). Nothing else — and
+         * in particular no stats save: since SP0b-1 {@code setMain} and {@code unSetMain} persist
+         * the stats themselves, immediately before the completion marker, so a "restart" in a test
+         * loads stats that already agree with the marker. That the marker and gate tests still pass
+         * with this override reduced to {@code checkNewMain()} is what proves the window between
+         * {@code setMain} and {@code checkMain}'s own save is closed at the source.
          */
+        @Override
         public void checkMain() {
             checkNewMain();
-            getBlockStore().saveXdagStatus(getXdagStats());
         }
     }
 

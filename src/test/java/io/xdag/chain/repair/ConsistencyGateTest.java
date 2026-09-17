@@ -94,9 +94,8 @@ public class ConsistencyGateTest extends ChainL1TestBase {
     public void repairModeConstructsWithoutStartingCheckMain() {
         mine(4);
         kernel.getBlockStore().saveLastCompletedMain(blockchain.getXdagStats().nmain - 1);
-        kernel.setRepairMode(true);
+        kernel.enterRepairMode();
         RecordingBlockchain repair = new RecordingBlockchain(kernel);
-        assertNotNull(repair);
         assertFalse("repair mode must not confirm anything behind the repair tool's back",
                 repair.checkMainStarted);
         assertFalse(kernel.getConsistencyReport().clean());
@@ -113,11 +112,33 @@ public class ConsistencyGateTest extends ChainL1TestBase {
         assertTrue(e.getMessage(), e.getMessage().contains("in flight"));
         assertTrue(e.getMessage(), e.getMessage().contains("--repairchain"));
 
-        kernel.setRepairMode(true);
+        kernel.enterRepairMode();
         RecordingBlockchain repair = new RecordingBlockchain(kernel);
         assertFalse(repair.checkMainStarted);
         assertFalse(kernel.getConsistencyReport().clean());
         assertEquals(tip - 1, kernel.getConsistencyReport().repairTarget());
+    }
+
+    /**
+     * The other in-flight shape: a half-done {@code unSetMain}. It is fatal in the same way, but the
+     * report has to say which transition it was — unwinding further does not finish an unwind that
+     * was already under way, so the repair tool treats this case separately.
+     */
+    @Test
+    public void inFlightUnwindRecordIsReportedAsAnUnwind() {
+        mine(4);
+        long tip = blockchain.getXdagStats().nmain;
+        kernel.getBlockStore().saveMainInFlight(tip, BlockStore.IN_FLIGHT_UNSET_MAIN);
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> new MockBlockchain(kernel));
+        assertTrue(e.getMessage(), e.getMessage().contains("unSetMain"));
+        assertTrue(e.getMessage(), e.getMessage().contains("--repairchain"));
+
+        kernel.enterRepairMode();
+        RecordingBlockchain repair = new RecordingBlockchain(kernel);
+        assertFalse(repair.checkMainStarted);
+        assertFalse(kernel.getConsistencyReport().clean());
+        assertTrue("the repair tool must be told this was an unwind, not a setMain",
+                kernel.getConsistencyReport().inFlightUnwind());
     }
 
     @Test

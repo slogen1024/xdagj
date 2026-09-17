@@ -36,6 +36,7 @@ import io.xdag.chain.l1.ChainL1SnapshotGate;
 import io.xdag.chain.l1.ChainL1Store;
 import io.xdag.chain.repair.ChainConsistencyCheck;
 import io.xdag.config.MainnetConfig;
+import io.xdag.config.spec.ChainSpec;
 import io.xdag.core.XdagField.FieldType;
 import io.xdag.consensus.RandomX;
 import io.xdag.crypto.core.CryptoProvider;
@@ -208,6 +209,10 @@ public class BlockchainImpl implements Blockchain {
             // SnapshotJ is off nothing was imported and nmain is still 0 — claiming snapshotHeight
             // there would mark a completion that never happened.
             blockStore.saveLastCompletedMain(xdagStats.nmain);
+            // I2 (SP0b-1): the re-seeded chain supersedes whatever the store was in the middle of,
+            // so a stale MAIN_IN_FLIGHT record from before the re-seed must not outlive it. (A
+            // re-seed belongs in an empty store directory; this only covers re-seeding in place.)
+            blockStore.clearMainInFlight();
 
         } else {
             // Load existing state
@@ -243,24 +248,33 @@ public class BlockchainImpl implements Blockchain {
         // SP0b-1: refuse to run on a main chain the chain hooks cannot trust. Both boot paths reach
         // this point with xdagStats loaded (the snapshot branch wrote the marker itself, so it never
         // reports markerInitialized here), and both reach it before anything can confirm a block.
-        ChainConsistencyCheck.Report report = ChainConsistencyCheck.run(blockStore, xdagStats,
-                kernel.getConfig().getChainSpec(), kernel.getConfig().getChainSpec().getChainConsistencyWindow());
+        ChainSpec spec = kernel.getConfig().getChainSpec();
+        ChainConsistencyCheck.Report report = ChainConsistencyCheck.run(blockStore, xdagStats, spec,
+                spec.getChainConsistencyWindow());
         if (report.markerInitialized()) {
-            // A store from before SP0b-1: adopt the tip as the last complete height, once, so the
-            // next boot has a marker to verify against (the check already warned that the history
-            // below it cannot be verified).
-            blockStore.saveLastCompletedMain(xdagStats.nmain);
+            // A store from before SP0b-1, or a brand-new one: adopt the tip as the last complete
+            // height, once, so the next boot has a marker to verify against (the check already
+            // warned that the history below it cannot be verified). The value written is the one
+            // the check adopted, so the store can never disagree with the report just logged.
+            blockStore.saveLastCompletedMain(report.marker());
         }
-        kernel.setConsistencyReport(report);
+        kernel.recordConsistencyReport(report);
         if (!report.clean()) {
             if (kernel.isRepairMode()) {
                 log.warn("repair mode: {}", report.describe());
             } else {
+                // Logged as well as thrown: the exception reaches the operator's terminal through
+                // XdagCli.start(), the log line is what survives in the node's log for forensics.
+                log.error("main chain consistency check failed: {}", report.describeForBoot());
                 // Deliberately not swallowed: on the kernel path this aborts startup, and
                 // XdagCli.start() catches Exception around startKernel(), prints getMessage() and
                 // exits -1 -- so describeForBoot()'s repair hint is what the operator actually sees.
                 throw new IllegalStateException(report.describeForBoot());
             }
+        } else {
+            // Every boot leaves nmain and the marker in the log, clean or not: the cheapest
+            // forensics there is when a later boot does turn out to be inconsistent.
+            log.info("{}", report.describe());
         }
 
         // Chain contracts (SP0a): install the hooks before the check-main loop can confirm anything.
@@ -270,7 +284,7 @@ public class BlockchainImpl implements Blockchain {
         // new BlockchainImpl(kernel).
         ChainL1Store chainStore = kernel.getChainL1Store();
         if (chainStore != null) {
-            ChainL1Processor processor = new ChainL1Processor(chainStore, kernel.getConfig().getChainSpec(),
+            ChainL1Processor processor = new ChainL1Processor(chainStore, spec,
                     hash -> getBlockByHash(hash, true));
             kernel.getChainKindHandlers().forEach(processor::registerHandler);
             this.chainHooks = processor;
@@ -1387,6 +1401,11 @@ public class BlockchainImpl implements Blockchain {
                     // sync-status checks in applyBlock (no test currently exercises this path).
                     // The block keeps BI_MAIN with no fee accepted, and setMain is DONE — this is a
                     // normal exit, so the completion marker advances here exactly as it does below.
+                    // I3 (SP0b-1): stats first. The marker must never be ahead of the persisted
+                    // stats: checkMain saves them only after setMain returns, so a benign crash in
+                    // that gap used to leave a confirmed main block above the persisted nmain --
+                    // which the boot check rightly reads as "main block above persisted stats".
+                    blockStore.saveXdagStatus(xdagStats);
                     blockStore.saveLastCompletedMain(mainNumber);
                     blockStore.clearMainInFlight();
                     return;
@@ -1405,6 +1424,10 @@ public class BlockchainImpl implements Blockchain {
                 // surfaces as an exception thrown from an otherwise complete setMain; that is
                 // accepted, because the next boot then sees the marker sitting behind nmain and
                 // unwinds that height, which is safe (it undoes work that did land).
+                // I3 (SP0b-1): stats first, as on the early-return exit above -- the marker must
+                // never be ahead of the persisted stats, or a benign crash between setMain and
+                // checkMain's own save reads as "main block above persisted stats" on the next boot.
+                blockStore.saveXdagStatus(xdagStats);
                 blockStore.saveLastCompletedMain(mainNumber);
                 blockStore.clearMainInFlight();
             } finally {
@@ -1472,6 +1495,9 @@ public class BlockchainImpl implements Blockchain {
             // G2 marker (SP0b-1): unSetMain removes the top main block, so completion now sits one
             // height lower — clamped at 0, since "completed up to height 0" (the genesis state, no
             // main block) is the floor and a negative marker would be read back as "never written".
+            // I3 (SP0b-1): stats first here too, so the lowered marker is never ahead of the
+            // persisted nmain it belongs to.
+            blockStore.saveXdagStatus(xdagStats);
             blockStore.saveLastCompletedMain(Math.max(0, height - 1));
             blockStore.clearMainInFlight();
         }
@@ -2188,6 +2214,8 @@ public class BlockchainImpl implements Blockchain {
         } catch (InterruptedException e) {
             log.error(e.getMessage(), e);
         }
+        // M5 (SP0b-1): outside the try, so an interrupt above cannot leave the cleaner running.
+        stopCleaner();
     }
 
     public XAmount getStartAmount(long nmain) {
@@ -2377,6 +2405,18 @@ public class BlockchainImpl implements Blockchain {
     // Regularly delete the data of transactions packaged in the main block.
     private void startCleaner() {
         rollBackLoop.scheduleAtFixedRate(() -> cleanMBlockTimeOut(10 * 60 * 1000L), 10, 5, TimeUnit.SECONDS);
+    }
+
+    /**
+     * M5 (SP0b-1): stops the cleaner the constructor started. Its scheduler owns a non-daemon
+     * thread, so a short-lived process that only builds a blockchain (the offline repair tool)
+     * would never exit without this. Called from {@link #stopCheckMain()}; {@code shutdownNow} is
+     * idempotent, so calling it twice is harmless.
+     */
+    public void stopCleaner() {
+        if (rollBackLoop != null) {
+            rollBackLoop.shutdownNow();
+        }
     }
 
     private void cleanMBlockTimeOut(long maxAgeMillis) {
