@@ -27,6 +27,7 @@ import static io.xdag.chain.ext.ChunkChainTest.payload;
 import static io.xdag.config.Constants.BI_MAIN;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
@@ -47,7 +48,9 @@ import io.xdag.core.Block;
 import io.xdag.core.BlockchainImpl;
 import io.xdag.core.XAmount;
 import io.xdag.core.XdagBlock;
+import io.xdag.core.XdagStats;
 import io.xdag.db.BlockStore;
+import io.xdag.db.rocksdb.DatabaseName;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.tuweni.bytes.Bytes;
@@ -56,8 +59,8 @@ import org.junit.After;
 import org.junit.Test;
 
 /**
- * The offline repair core: {@link ChainRepairTool#repair} acting on the report the boot check
- * refused to start on, against a real blockchain rebuilt from the same stores in repair mode.
+ * The offline repair core: {@link ChainRepairTool#repair} acting on the stores the boot check
+ * refused to start on, against a real blockchain rebuilt from those same stores in repair mode.
  */
 public class ChainRepairToolTest extends ChainL1TestBase {
 
@@ -95,6 +98,9 @@ public class ChainRepairToolTest extends ChainL1TestBase {
     /** Every blockchain built on top of the fixture's own, so the @After can stop its threads. */
     private final List<BlockchainImpl> restarts = new ArrayList<>();
 
+    /** Everything the tool printed, so a test can assert on what the operator was told. */
+    private final List<String> said = new ArrayList<>();
+
     public ChainRepairToolTest() {
         config = new DevnetConfig() {
             @Override
@@ -121,6 +127,15 @@ public class ChainRepairToolTest extends ChainL1TestBase {
         MockBlockchain restarted = new MockBlockchain(kernel);
         restarts.add(restarted);
         return restarted;
+    }
+
+    /** The tool under test, with its output captured instead of printed. */
+    private ChainRepairTool.Outcome repair(BlockchainImpl chain, boolean dryRun, boolean force) {
+        return ChainRepairTool.repair(kernel, chain, new ChainRepairTool.Options(dryRun, force), said::add);
+    }
+
+    private boolean saidSomethingAbout(String fragment) {
+        return said.stream().anyMatch(line -> line.contains(fragment));
     }
 
     @After
@@ -183,16 +198,15 @@ public class ChainRepairToolTest extends ChainL1TestBase {
         assertFalse(report.describe(), report.clean());
         assertEquals(failed - 1, report.repairTarget());
 
-        ChainRepairTool.Outcome dry = ChainRepairTool.repair(kernel, repair, report, true, false);
-        assertTrue(dry.dryRun());
-        assertFalse(dry.refused());
+        ChainRepairTool.Outcome dry = repair(repair, true, false);
+        assertEquals(ChainRepairTool.Status.PLANNED, dry.status());
+        assertNull(dry.reason());
         assertEquals(failed - 1, dry.target());
         assertEquals("a dry run writes nothing", failed, repair.getXdagStats().nmain);
         assertEquals(1L, chainStore.getCallCount(chainId, failed));
 
-        ChainRepairTool.Outcome done = ChainRepairTool.repair(kernel, repair, report, false, false);
-        assertFalse(done.dryRun());
-        assertFalse(done.refused());
+        ChainRepairTool.Outcome done = repair(repair, false, false);
+        assertEquals(ChainRepairTool.Status.REPAIRED, done.status());
         assertNull(done.reason());
         assertTrue(done.after().describe(), done.after().clean());
         assertEquals(failed - 1, repair.getXdagStats().nmain);
@@ -235,12 +249,46 @@ public class ChainRepairToolTest extends ChainL1TestBase {
         assertFalse(report.describe(), report.clean());
         assertEquals(h - 1, report.repairTarget());
 
-        ChainRepairTool.Outcome done = ChainRepairTool.repair(kernel, repair, report, false, false);
-        assertFalse(done.refused());
+        ChainRepairTool.Outcome done = repair(repair, false, false);
+        assertEquals(ChainRepairTool.Status.REPAIRED, done.status());
         assertTrue(done.after().describe(), done.after().clean());
         assertEquals(h - 1, repair.getXdagStats().nmain);
         assertEquals(h - 1, kernel.getBlockStore().getLastCompletedMain());
         assertEquals(-1L, kernel.getBlockStore().getMainInFlight());
+    }
+
+    /**
+     * Failure shape 3: {@code setMain} flagged and saved its main block, then died before its stats
+     * write landed (or the write was torn). The persisted tip is one below a block that is still
+     * confirmed — and the boot pins the top to the persisted tip, so that block sits ABOVE anything
+     * {@code unWindMain} can walk. Without the reconciliation the repair would unwind nothing, claim
+     * success, and leave the chain exactly as broken as it found it.
+     */
+    @Test
+    public void mainBlockAboveThePersistedTipIsReconciledThenUnwound() {
+        mine(6);
+        long tip = blockchain.getXdagStats().nmain;
+        assertEquals("the marker agrees with the tip before the crash is simulated", tip,
+                kernel.getBlockStore().getLastCompletedMain());
+        XdagStats torn = new XdagStats(blockchain.getXdagStats());
+        torn.nmain = tip - 1;
+        kernel.getBlockStore().saveXdagStatus(torn);
+
+        MockBlockchain repair = restartInRepairMode();
+        assertEquals("the restart boots on the torn stats", tip - 1, repair.getXdagStats().nmain);
+        ChainConsistencyCheck.Report report = kernel.getConsistencyReport();
+        assertFalse(report.describe(), report.clean());
+        assertEquals(tip - 1, report.repairTarget());
+
+        ChainRepairTool.Outcome done = repair(repair, false, false);
+        assertEquals(ChainRepairTool.Status.REPAIRED, done.status());
+        assertTrue(done.after().describe(), done.after().clean());
+        assertEquals(tip - 1, repair.getXdagStats().nmain);
+        assertEquals(tip - 1, kernel.getBlockStore().getLastCompletedMain());
+        assertEquals("the block above the torn tip is no longer confirmed", 0,
+                kernel.getBlockStore().getBlockByHeight(tip).getInfo().getFlags() & BI_MAIN);
+        assertTrue("the operator is told the tip was reconciled", saidSomethingAbout("reconciled the persisted tip"));
+        assertTrue("and what it costs the local balance figure", saidSomethingAbout("xdagStats.balance"));
     }
 
     /** Unwinding further below the tip than the consistency window is an operator's decision. */
@@ -255,15 +303,30 @@ public class ChainRepairToolTest extends ChainL1TestBase {
         ChainConsistencyCheck.Report report = kernel.getConsistencyReport();
         assertEquals(1L, report.repairTarget());
 
-        ChainRepairTool.Outcome refused = ChainRepairTool.repair(kernel, repair, report, false, false);
-        assertTrue(refused.refused());
+        ChainRepairTool.Outcome refused = repair(repair, false, false);
+        assertEquals(ChainRepairTool.Status.REFUSED, refused.status());
         assertNotNull(refused.reason());
         assertEquals("a refusal writes nothing", nmain, repair.getXdagStats().nmain);
 
-        ChainRepairTool.Outcome forced = ChainRepairTool.repair(kernel, repair, report, false, true);
-        assertFalse(forced.refused());
+        ChainRepairTool.Outcome forced = repair(repair, false, true);
+        assertEquals(ChainRepairTool.Status.REPAIRED, forced.status());
         assertTrue(forced.after().describe(), forced.after().clean());
         assertEquals(1L, repair.getXdagStats().nmain);
+        assertEquals(1L, kernel.getBlockStore().getLastCompletedMain());
+    }
+
+    /** The same refusal, on a dry run: the plan an operator asks for has to include what blocks it. */
+    @Test
+    public void dryRunSurfacesTheForceRefusal() {
+        mine(6);
+        long nmain = blockchain.getXdagStats().nmain;
+        kernel.getBlockStore().saveLastCompletedMain(1L);
+
+        MockBlockchain repair = restartInRepairMode();
+        ChainRepairTool.Outcome dry = repair(repair, true, false);
+        assertEquals(ChainRepairTool.Status.REFUSED, dry.status());
+        assertTrue(dry.reason(), dry.reason().contains("--force"));
+        assertEquals("a dry run writes nothing either", nmain, repair.getXdagStats().nmain);
         assertEquals(1L, kernel.getBlockStore().getLastCompletedMain());
     }
 
@@ -282,14 +345,13 @@ public class ChainRepairToolTest extends ChainL1TestBase {
         ChainConsistencyCheck.Report report = kernel.getConsistencyReport();
         assertTrue(report.describe(), report.inFlightUnwind());
 
-        ChainRepairTool.Outcome dry = ChainRepairTool.repair(kernel, repair, report, true, false);
-        assertTrue(dry.dryRun());
-        assertFalse(dry.refused());
+        ChainRepairTool.Outcome dry = repair(repair, true, false);
+        assertEquals(ChainRepairTool.Status.PLANNED, dry.status());
         assertEquals("a dry run writes nothing", tip, repair.getXdagStats().nmain);
         assertEquals(tip, kernel.getBlockStore().getMainInFlight());
 
-        ChainRepairTool.Outcome done = ChainRepairTool.repair(kernel, repair, report, false, false);
-        assertFalse(done.reason(), done.refused());
+        ChainRepairTool.Outcome done = repair(repair, false, false);
+        assertEquals(ChainRepairTool.Status.REPAIRED, done.status());
         assertTrue(done.after().describe(), done.after().clean());
         assertEquals(tip - 1, repair.getXdagStats().nmain);
         assertEquals(tip - 1, done.target());
@@ -297,6 +359,48 @@ public class ChainRepairToolTest extends ChainL1TestBase {
         assertEquals(-1L, kernel.getBlockStore().getMainInFlight());
         assertEquals("the height is no longer a main block", 0,
                 kernel.getBlockStore().getBlockByHeight(tip).getInfo().getFlags() & BI_MAIN);
+    }
+
+    /**
+     * The same interrupted unwind, on the legacy shape whose ref was never written. {@code
+     * unApplyBlock} returns immediately on a null ref, so finishing the unwind without patching it
+     * first would clear {@code BI_MAIN}, drop {@code nmain} — and reverse none of the height's
+     * CHAIN_L1 records. The state hash is what proves the children really were unapplied.
+     */
+    @Test
+    public void interruptedUnwindOfARefLessBlockStillUnappliesItsChildren() {
+        mine(6);
+        ChainBlockBuilder.Built deploy = deployNewChain(payload(600, 41), payload(10, 42));
+        importBuilt(deploy);
+        mineMain(List.of(hashLow(deploy.block())));
+        confirm(deploy.block());
+        Bytes chainId = ChainIds.chainIdOf(deploy.block().getHash());
+        Bytes32 before = chainStore.stateHash();
+
+        ChainBlockBuilder.Built call = call(chainId, ChainIds.contractIdOf(deploy.block().getHash()),
+                payload(20, 43), FEE);
+        importBuilt(call);
+        Block applying = mineMain(List.of(hashLow(call.block())));
+        mine(1); // the setMain that descends into the CALL
+        long h = blockchain.getXdagStats().nmain;
+        assertEquals(h, heightOf(applying));
+        assertEquals(1L, chainStore.getCallCount(chainId, h));
+        assertNotEquals("the CALL really was recorded", before, chainStore.stateHash());
+
+        blockchain.updateBlockRef(blockchain.getBlockByHeight(h), null);
+        kernel.getBlockStore().saveMainInFlight(h, BlockStore.IN_FLIGHT_UNSET_MAIN);
+
+        MockBlockchain repair = restartInRepairMode();
+        assertTrue(kernel.getConsistencyReport().describe(), kernel.getConsistencyReport().inFlightUnwind());
+
+        ChainRepairTool.Outcome done = repair(repair, false, false);
+        assertEquals(ChainRepairTool.Status.REPAIRED, done.status());
+        assertTrue(done.after().describe(), done.after().clean());
+        assertEquals("the children of the unwound main block were unapplied", before, chainStore.stateHash());
+        assertEquals(0L, chainStore.getCallCount(chainId, h));
+        assertEquals(h - 1, repair.getXdagStats().nmain);
+        assertEquals(h - 1, kernel.getBlockStore().getLastCompletedMain());
+        assertEquals(-1L, kernel.getBlockStore().getMainInFlight());
     }
 
     /**
@@ -315,15 +419,71 @@ public class ChainRepairToolTest extends ChainL1TestBase {
         ChainConsistencyCheck.Report report = kernel.getConsistencyReport();
         assertTrue(report.describe(), report.inFlightUnwind());
 
-        ChainRepairTool.Outcome refused = ChainRepairTool.repair(kernel, repair, report, false, false);
-        assertTrue(refused.refused());
+        ChainRepairTool.Outcome refused = repair(repair, false, false);
+        assertEquals(ChainRepairTool.Status.UNREPAIRABLE, refused.status());
         assertEquals(ChainRepairTool.INTERRUPTED_UNWIND_REASON, refused.reason());
         assertTrue(refused.reason().contains("restore the block store from a snapshot"));
 
-        ChainRepairTool.Outcome forced = ChainRepairTool.repair(kernel, repair, report, false, true);
-        assertTrue("a partial reversal cannot be forced through", forced.refused());
+        ChainRepairTool.Outcome forced = repair(repair, false, true);
+        assertEquals("a partial reversal cannot be forced through", ChainRepairTool.Status.UNREPAIRABLE,
+                forced.status());
         assertEquals(ChainRepairTool.INTERRUPTED_UNWIND_REASON, forced.reason());
         assertEquals("nothing was written", tip, repair.getXdagStats().nmain);
         assertEquals(tip, kernel.getBlockStore().getMainInFlight());
+    }
+
+    /**
+     * An unwind that cannot reach its target because the raw bytes it walks are gone. The walk ends
+     * silently, so only the postcondition catches it — and the completion marker must NOT be moved
+     * down behind a repair that did not happen.
+     */
+    @Test
+    public void unwindThatCannotReachItsTargetIsUnrepairable() {
+        mine(6);
+        long nmain = blockchain.getXdagStats().nmain;
+        long h = nmain - 1;
+        blockchain.updateBlockRef(blockchain.getBlockByHeight(h), null); // something to repair
+        long marker = kernel.getBlockStore().getLastCompletedMain();
+        Block tip = blockchain.getBlockByHeight(nmain);
+        assertNotNull(tip);
+        dbFactory.getDB(DatabaseName.BLOCK).delete(tip.getHashLow().toArray());
+
+        MockBlockchain repair = restartInRepairMode();
+        ChainRepairTool.Outcome done = repair(repair, false, false);
+        assertEquals(ChainRepairTool.Status.UNREPAIRABLE, done.status());
+        assertTrue(done.reason(), done.reason().contains("block data is incomplete"));
+        assertEquals("the marker is evidence, not a casualty", marker,
+                kernel.getBlockStore().getLastCompletedMain());
+        assertEquals("and nothing new was put in flight", -1L, kernel.getBlockStore().getMainInFlight());
+    }
+
+    /** A repair that worked leaves nothing to repair: the second run re-reads the stores and stops. */
+    @Test
+    public void aSecondRepairFindsNothingToDo() {
+        mine(6);
+        long h = blockchain.getXdagStats().nmain - 1;
+        blockchain.updateBlockRef(blockchain.getBlockByHeight(h), null);
+
+        MockBlockchain repair = restartInRepairMode();
+        assertEquals(ChainRepairTool.Status.REPAIRED, repair(repair, false, false).status());
+        long marker = kernel.getBlockStore().getLastCompletedMain();
+        assertEquals(h - 1, marker);
+
+        ChainRepairTool.Outcome second = repair(repair, false, false);
+        assertEquals(ChainRepairTool.Status.CLEAN, second.status());
+        assertTrue(second.after().describe(), second.after().clean());
+        assertEquals("a clean store is written to by nobody", marker,
+                kernel.getBlockStore().getLastCompletedMain());
+        assertEquals(-1L, kernel.getBlockStore().getMainInFlight());
+        assertEquals(h - 1, repair.getXdagStats().nmain);
+    }
+
+    /** The tool only ever runs against a kernel nothing else can confirm a block on. */
+    @Test
+    public void repairRefusesToRunOutsideRepairMode() {
+        mine(1);
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> repair(blockchain, true, false));
+        assertTrue(e.getMessage(), e.getMessage().contains("repair mode"));
     }
 }

@@ -1097,45 +1097,131 @@ public class BlockchainImpl implements Blockchain {
     }
 
     /**
-     * SP0b-1 offline repair: unwinds every main block above {@code height} exactly the way a fork
-     * does, then re-flags the surviving branch so the ordinary check-main loop can confirm those
-     * same blocks again once the node is restarted normally.
+     * SP0b-1 offline repair: adopts a main block the store carries ABOVE the persisted tip as the
+     * tip, so that block can be unwound at all.
      *
-     * <p>Two steps, in this order. {@link #unWindMain} walks the top down to {@code height},
-     * clearing {@code BI_MAIN_CHAIN} and running {@code unSetMain} on every main block it passes —
-     * which is what actually reverses state and moves {@code nmain} and the completion marker back.
-     * {@link #updateNewChain}{@code (top, true)} then re-marks that branch as main-chain candidates,
-     * because {@code checkNewMain} only ever promotes a {@code BI_MAIN_CHAIN} block: without it the
-     * unwound heights would never be re-confirmed and the node would stall at {@code height}. The
-     * walk stops at the first block that still carries the flag, i.e. at {@code height} itself, so
-     * it re-flags exactly the range that was just unwound. When the unwind had nothing to do the
-     * top still carries {@code BI_MAIN_CHAIN}, and {@code updateNewChain}'s loop would not execute
-     * at all; the walk then starts one link down, where it is equally harmless.
+     * <p>Failure shape 3 of {@link io.xdag.chain.repair.ChainConsistencyCheck}: a {@code setMain}
+     * that flagged and saved its block but died before (or during) its {@code saveXdagStatus} leaves
+     * a {@code BI_MAIN} block above {@code xdagStats.nmain}. This class's constructor pins
+     * {@code xdagTopStatus.top} to {@code getBlockByHeight(nmain)}, and {@link #unWindMain} only
+     * ever walks down from that top — so such a block is invisible to the unwind, which would then
+     * report success while leaving it confirmed. Reconciling the tip up to it first is what puts it
+     * back on the path the unwind walks.
+     *
+     * <p>What is restored is what the constructor's "load existing state" branch derives from the
+     * tip block: {@code nmain}, the chain difficulty pair, and the top hash and difficulty. The
+     * pre-top is deliberately left alone — the constructor does not derive it either, it is only a
+     * link candidate, and pointing it at a block that the caller is about to unwind would be worse
+     * than keeping the persisted one.
+     *
+     * <p>One residual cannot be fixed from local state: {@code xdagStats.balance} — a node-local
+     * statistic, not consensus — was persisted before that {@code setMain} credited its reward, so
+     * unwinding a {@code BI_OURS} main block out of the torn window subtracts a reward the persisted
+     * balance never carried, and the figure drifts by one reward per such block. It settles when the
+     * node re-confirms those heights.
      *
      * <p>Only meaningful in repair mode, where the check-main loop is not running and nothing can
-     * confirm a block behind the repair tool's back. Stats and top status are persisted here; the
-     * caller is responsible for the completion marker and the in-flight record.
+     * confirm a block behind the repair tool's back.
+     *
+     * @param height  the main height to adopt as the tip
+     * @param hashLow the hash of the main block stored at that height
+     * @throws IllegalStateException if that block is missing, is not a main block, or does not agree
+     *                               that it sits at {@code height}
+     */
+    public void reconcileTipTo(long height, Bytes32 hashLow) {
+        synchronized (this) {
+            Block block = hashLow == null ? null : getBlockByHash(hashLow, false);
+            if (block == null || block.getInfo().getHeight() != height
+                    || (block.getInfo().flags & BI_MAIN) == 0) {
+                throw new IllegalStateException("no main block stored at height " + height
+                        + " to reconcile the tip to");
+            }
+            log.info("repair: reconciling the persisted tip from nmain={} up to {} ({})", xdagStats.nmain, height,
+                    hashLow.toHexString());
+            xdagStats.nmain = height;
+            xdagStats.setMaxdifficulty(block.getInfo().getDifficulty());
+            xdagStats.setDifficulty(block.getInfo().getDifficulty());
+            xdagTopStatus.setTop(block.getHashLow().toArray());
+            xdagTopStatus.setTopDiff(block.getInfo().getDifficulty());
+            blockStore.saveXdagStatus(xdagStats);
+            blockStore.saveXdagTopStatus(xdagTopStatus);
+        }
+    }
+
+    /**
+     * SP0b-1 offline repair: unwinds every main block above {@code height} exactly the way a fork
+     * does, then re-flags the surviving branch so those same blocks can be confirmed again.
+     *
+     * <p>Three steps, in this order. {@link #unWindMain} walks the top down to {@code height},
+     * clearing {@code BI_MAIN_CHAIN} and running {@code unSetMain} on every main block it passes —
+     * which is what actually reverses state and moves {@code nmain} and the completion marker back.
+     * The result is then verified: that walk fetches raw blocks and ends silently at the first one
+     * whose bytes are missing, so "the unwind returned" is not the same as "the unwind arrived", and
+     * only {@code nmain == height} proves it did. {@link #updateNewChain}{@code (top, true)} finally
+     * re-marks the unwound branch as main-chain candidates, because {@code checkNewMain} only ever
+     * promotes a {@code BI_MAIN_CHAIN} block: without it those heights could never be confirmed
+     * again. It runs only when something really was unwound, which is also the case in which
+     * {@code unWindMain} is guaranteed to have cleared the flag off the top itself (its walk starts
+     * there), so the loop has the range it needs.
+     *
+     * <p>The top is deliberately left where the unwind left it — pointing at a block that is no
+     * longer main — and is not persisted here (M6). The alternative, moving it down to
+     * {@code height}, is actively wrong: the ordinary fork path answers a better branch with
+     * {@code unWindMain(findAncestor(block))}, and that walk only ever goes DOWN from the top, so a
+     * top sitting BELOW the ancestor never meets it and unwinds the entire chain to genesis. That is
+     * exactly the shape here, because the branch this method re-flags lies above {@code height}: the
+     * first block a peer sends would take the whole main chain with it. Nothing is lost by leaving
+     * the top alone either — the in-memory and the persisted top already agree ({@code unWindMain}
+     * never touches it), and the next boot re-derives the top from {@code getBlockByHeight(nmain)}
+     * regardless of what is stored.
+     *
+     * <p>What the node cannot do afterwards is walk its own chain back up: {@code checkNewMain}
+     * promotes a candidate only when it has seen more than one above the confirmed tip, so a node
+     * repaired in isolation stays at {@code height} until new blocks from its peers push the top
+     * back above those heights — which is when the unwound heights are confirmed again.
+     *
+     * <p>Only meaningful in repair mode, where the check-main loop is not running and nothing can
+     * confirm a block behind the repair tool's back. The stats are persisted here; the caller is
+     * responsible for the completion marker and the in-flight record.
      *
      * @param height the last main height to keep; {@code 0} unwinds the whole main chain
-     * @throws IllegalStateException if no main block is stored at {@code height}
+     * @throws IllegalStateException if {@code height} carries no main block of its own; if the
+     *                               unwind did not reach {@code height}, i.e. the block data is
+     *                               incomplete; or if the raw bytes of the top are missing when the
+     *                               unwound branch has to be re-flagged. Whatever the unwind did
+     *                               reach stays reversed — each of those heights is an ordinary
+     *                               completed {@code unSetMain} — but the completion marker and the
+     *                               in-flight record are the caller's business and are untouched, so
+     *                               a failed repair leaves its evidence behind.
      */
     public void repairUnwindTo(long height) {
         synchronized (this) {
             Block target = height <= 0 ? null : blockStore.getBlockByHeight(height);
-            if (height > 0 && target == null) {
+            // I1: the height index is not authoritative -- saveBlockInfo never deletes a stale key,
+            // so getBlockByHeight can hand back a block that was unwound and re-confirmed lower down.
+            // Unwinding "to" such a block would walk straight past it and empty the whole chain.
+            if (height > 0 && (target == null || target.getInfo().getHeight() != height
+                    || (target.getInfo().flags & BI_MAIN) == 0)) {
                 throw new IllegalStateException("no main block stored at height " + height);
             }
+            long before = xdagStats.nmain;
             unWindMain(target);
-            Block top = xdagTopStatus.getTop() == null ? null
-                    : getBlockByHash(Bytes32.wrap(xdagTopStatus.getTop()), true);
-            if (top != null && (top.getInfo().flags & BI_MAIN_CHAIN) != 0) {
-                top = getMaxDiffLink(top, true);
+            // C3: checked before the caller writes the completion marker, so an unwind that stopped
+            // short can never be recorded as a completed repair.
+            if (xdagStats.nmain != height) {
+                throw new IllegalStateException("unwind stopped at nmain=" + xdagStats.nmain + ", expected "
+                        + height + "; block data is incomplete (raw bytes missing?)");
             }
-            if (top != null) {
+            if (xdagStats.nmain < before) {
+                Block top = xdagTopStatus.getTop() == null ? null
+                        : getBlockByHash(Bytes32.wrap(xdagTopStatus.getTop()), true);
+                if (top == null) {
+                    throw new IllegalStateException(
+                            "cannot re-flag the unwound branch: raw block data for the top is missing");
+                }
                 updateNewChain(top, true);
             }
             blockStore.saveXdagStatus(xdagStats);
-            blockStore.saveXdagTopStatus(xdagTopStatus);
         }
     }
 
