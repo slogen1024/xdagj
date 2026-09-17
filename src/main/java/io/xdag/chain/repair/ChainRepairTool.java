@@ -371,6 +371,10 @@ public final class ChainRepairTool {
             say(out, "cannot repair: " + reason);
             return new Outcome(Status.UNREPAIRABLE, reason, target, report);
         }
+        // Block.parse() replaces info.fee with the header fee; unSetMain reverses the reward with
+        // block.getFee() and unApplyBlock reverses each OUTPUT credit from the persisted fee, so
+        // hand in the value the store holds, exactly as unWindMain does before calling unSetMain.
+        raw.getInfo().setFee(stored.getInfo().getFee());
         // C2: unApplyBlock skips a block whose ref is null, so finishing the unwind of a legacy
         // ref-less main block would clear BI_MAIN and decrement nmain while reversing nothing at all.
         // The same self ref patchStuckRefs writes, written here for the same reason.

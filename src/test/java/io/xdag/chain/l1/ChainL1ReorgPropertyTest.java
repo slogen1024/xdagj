@@ -111,7 +111,12 @@ public class ChainL1ReorgPropertyTest extends ChainL1TestBase {
         String extra = System.getProperty("xdag.reorg.seeds");
         if (extra != null && !extra.isBlank()) {
             for (String s : extra.split(",")) {
-                out.add(Long.parseLong(s.trim()));
+                try {
+                    out.add(Long.parseLong(s.trim()));
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException("-Dxdag.reorg.seeds must be a comma-separated list of"
+                            + " longs, got '" + s + "'", e);
+                }
             }
         }
         return out.stream().mapToLong(Long::longValue).toArray();
@@ -237,11 +242,13 @@ public class ChainL1ReorgPropertyTest extends ChainL1TestBase {
     /** Applies the scenario's heights in order, recording per height the refs linked and the mains mined. */
     private void apply(ReorgScenario sc, String tag) {
         for (List<ReorgScenario.Step> steps : sc.heights) {
-            // The generator already emits a height's steps stably sorted by sender (applyBlock walks
+            // The generator must emit a height's steps stably sorted by sender (applyBlock walks
             // the links in list order and enforces strict per-sender nonce sequencing, and nonces are
-            // handed out in execution order); this stable sort is a no-op guard restating that.
+            // handed out in execution order); assert it rather than silently re-sorting, so a
+            // generator that stops sorting fails here instead of being papered over.
             List<ReorgScenario.Step> ordered = new ArrayList<>(steps);
             ordered.sort(Comparator.comparingInt(ReorgScenario.Step::sender));
+            assertEquals(tag + ": generator emitted a height out of sender order", ordered, steps);
             List<Bytes32> refs = new ArrayList<>();
             Block last = null;
             for (ReorgScenario.Step s : ordered) {
@@ -362,6 +369,9 @@ public class ChainL1ReorgPropertyTest extends ChainL1TestBase {
     /**
      * Tears the fixture down and builds a fresh one on the same mining timeline, so a run reproduces
      * another run's paying blocks byte for byte (RFC 6979 signatures, same keys, nonces, timestamps).
+     * The base fixture's fork salt deliberately survives, so the main blocks differ across runs;
+     * only the paying blocks, which are what the state hash and the balances depend on, are
+     * reproduced byte for byte.
      */
     private void freshFixture(long fixtureStart) throws Exception {
         tearDownChain();
@@ -383,6 +393,9 @@ public class ChainL1ReorgPropertyTest extends ChainL1TestBase {
             out.put(c.toHexString(), balanceOf(c).toString());
         }
         out.put(UNKNOWN_VAULT.toHexString(), balanceOf(UNKNOWN_VAULT).toString());
+        // The fixture's mining key: mining must never touch its address balance (the coinbase link
+        // carries amount zero), so comparing it turns that assumption into an asserted invariant.
+        out.put("poolKey", balanceOf(poolKey.toAddress()).toString());
         return out;
     }
 

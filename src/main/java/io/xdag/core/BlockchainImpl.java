@@ -1393,14 +1393,22 @@ public class BlockchainImpl implements Blockchain {
 //            }
             // applyBlock credited every OUTPUT address link amount - L (L = outPutLimit) and
             // persisted fee = k * L for the k OUTPUT address links, so the exact reversal of each
-            // credit is amount - fee / k (exact in nano). The persisted fee is the ground truth of
-            // what was charged; outPutLimit(block) is not usable here since it needs the raw
-            // header and returns MIN_GAS when only the BlockInfo is at hand. Dividing by
-            // outPutNum(block) instead was wrong for any block that also carries XDAG_FIELD_OUT
-            // block links (chain DEPLOY/CALL with chunk-chain heads): those count as outputs in
-            // outPutLimit's denominator but were never credited, so the unwind over-debited each
-            // OUTPUT by fee * m / (k * (k + m)) and could even skip it when the balance went
-            // below zero. For m = 0 (every legacy wallet or pool transfer) fee / k == fee / outPutNum.
+            // credit is amount - fee / k (exact in nano). outPutLimit(block) would also work here
+            // (every unwind path hands in a raw block, and an info-only block has no links at all),
+            // but the persisted fee is what was actually charged and stays exact across a future
+            // change to the fee rule, where re-deriving L at unwind time would apply the new rule
+            // to an old block. Precondition: the caller must hand in a raw block whose info.fee was
+            // restored from the store, because Block.parse() replaces it with the header fee
+            // (unWindMain, the recursive call below and ChainRepairTool all do so). The one shape
+            // where fee != k * L is flag == true: setMain persists gasCollected for a tx block that
+            // was itself promoted to main, so such a block with fee-paying children reverses only
+            // approximately, exactly as before; unreachable today, since createMainBlock emits no
+            // XDAG_FIELD_IN and no XDAG_FIELD_OUTPUT. Dividing by outPutNum(block) instead was
+            // wrong for any block that also carries XDAG_FIELD_OUT block links (chain DEPLOY/CALL
+            // with chunk-chain heads): those count as outputs in outPutLimit's denominator but were
+            // never credited, so the unwind over-debited each OUTPUT by fee * m / (k * (k + m)) and
+            // could even skip it when the balance went below zero. For m = 0 (every legacy wallet
+            // or pool transfer) fee / k == fee / outPutNum, byte for byte.
             int outputAddresses = 0;
             for (Address link : links) {
                 if (link.isAddress && link.getType() == XDAG_FIELD_OUTPUT) {
