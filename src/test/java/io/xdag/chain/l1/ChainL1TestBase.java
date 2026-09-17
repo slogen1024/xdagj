@@ -39,6 +39,7 @@ import io.xdag.Wallet;
 import io.xdag.chain.ext.ChainBlockBuilder;
 import io.xdag.chain.ext.ChainConfigExt;
 import io.xdag.chain.ext.ExtCodec;
+import io.xdag.config.AbstractConfig;
 import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
 import io.xdag.core.Address;
@@ -137,7 +138,10 @@ public abstract class ChainL1TestBase {
 
     @Before
     public void setUpChain() throws Exception {
-        config.getNodeSpec().setStoreDir(root.newFolder().getAbsolutePath());
+        String rootDir = root.newFolder("node").getAbsolutePath();
+        // Cast: setRootDir is a Lombok setter on AbstractConfig, not part of the Config interface.
+        ((AbstractConfig) config).setRootDir(rootDir);                  // XdagCli.makeSnapshot derives paths from it
+        config.getNodeSpec().setStoreDir(rootDir + "/rocksdb/xdagdb"); // RocksdbKVSource derives paths from this
         config.getNodeSpec().setStoreBackupDir(root.newFolder().getAbsolutePath());
         // Explicit, not inherited from the devnet default: another test in this JVM may have left a
         // chain.activation.height system-property override behind (ChainSpecTest), and Task 16 flips it.
