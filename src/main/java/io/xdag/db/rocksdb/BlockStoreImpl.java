@@ -56,6 +56,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
@@ -164,6 +165,7 @@ public class BlockStoreImpl implements BlockStore {
 
     @Override
     public void stop() {
+        flushSums();
         indexSource.close();
         timeSource.close();
         blockSource.close();
@@ -183,6 +185,7 @@ public class BlockStoreImpl implements BlockStore {
     }
 
     public void saveXdagStatus(XdagStats status) {
+        flushSums();
         byte[] value = null;
         try {
             value = serialize(status);
@@ -363,6 +366,40 @@ public class BlockStoreImpl implements BlockStore {
         });
     }
 
+    /** Sums are rewritten in memory per block and written back every this many saved blocks (and at every stats save). */
+    public static final int SUMS_FLUSH_EVERY = 256;
+    private final ConcurrentHashMap<String, MutableBytes> sumsCache = new ConcurrentHashMap<>();
+    private final Set<String> dirtySums = ConcurrentHashMap.newKeySet();
+    private final AtomicInteger sumsSinceFlush = new AtomicInteger();
+
+    /**
+     * Writes every dirty sums array to the index. Called every {@link #SUMS_FLUSH_EVERY} saved
+     * blocks, before every stats save and at stop, so a crash loses at most that many blocks'
+     * contributions — the same window as the write-behind stream, and sums are advisory (they only
+     * steer the legacy sync protocol's range requests).
+     */
+    public void flushSums() {
+        for (String key : dirtySums) {
+            MutableBytes sums = sumsCache.get(key);
+            if (sums != null) {
+                writeSums(key, sums);
+            }
+            dirtySums.remove(key);
+        }
+        sumsSinceFlush.set(0);
+    }
+
+    private void writeSums(String key, Bytes sums) {
+        byte[] value = null;
+        try {
+            value = serialize(sums.toArray());
+        } catch (SerializationException e) {
+            log.error(e.getMessage(), e);
+        }
+        indexSource.put(BytesUtils.merge(SUMS_BLOCK_INFO, key.getBytes(StandardCharsets.UTF_8)), value);
+    }
+
+    @Override
     public void saveBlockSums(Block block) {
         long size = 512;
         long sum = block.getXdagBlock().getSum();
@@ -371,31 +408,35 @@ public class BlockStoreImpl implements BlockStore {
         for (int i = 0; i < filename.size(); i++) {
             updateSum(filename.get(i), sum, size, (time >> (40 - 8 * i)) & 0xff);
         }
+        if (sumsSinceFlush.incrementAndGet() >= SUMS_FLUSH_EVERY) {
+            flushSums();
+        }
     }
 
+    @Override
     public MutableBytes getSums(String key) {
+        MutableBytes cached = sumsCache.get(key);
+        if (cached != null) {
+            return cached.mutableCopy();
+        }
         byte[] value = indexSource.get(BytesUtils.merge(SUMS_BLOCK_INFO, key.getBytes(StandardCharsets.UTF_8)));
         if (value == null) {
             return null;
-        } else {
-            MutableBytes sums = null;
-            try {
-                sums = MutableBytes.wrap((byte[]) deserialize(value, byte[].class));
-            } catch (DeserializationException e) {
-                log.error(e.getMessage(), e);
-            }
+        }
+        try {
+            MutableBytes sums = MutableBytes.wrap((byte[]) deserialize(value, byte[].class));
+            sumsCache.putIfAbsent(key, sums.mutableCopy());
             return sums;
+        } catch (DeserializationException e) {
+            log.error(e.getMessage(), e);
+            return null;
         }
     }
 
+    @Override
     public void putSums(String key, Bytes sums) {
-        byte[] value = null;
-        try {
-            value = serialize(sums.toArray());
-        } catch (SerializationException e) {
-            log.error(e.getMessage(), e);
-        }
-        indexSource.put(BytesUtils.merge(SUMS_BLOCK_INFO, key.getBytes(StandardCharsets.UTF_8)), value);
+        sumsCache.put(key, sums.mutableCopy());
+        dirtySums.add(key);
     }
 
     public void updateSum(String key, long sum, long size, long index) {
