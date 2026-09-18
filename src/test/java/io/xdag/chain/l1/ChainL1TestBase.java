@@ -62,6 +62,7 @@ import io.xdag.db.rocksdb.DatabaseFactory;
 import io.xdag.db.rocksdb.DatabaseName;
 import io.xdag.db.rocksdb.OrphanBlockStoreImpl;
 import io.xdag.db.rocksdb.RocksdbFactory;
+import io.xdag.db.rocksdb.WriteBehindFactory;
 import io.xdag.utils.BasicUtils;
 import io.xdag.utils.XdagTime;
 import java.io.IOException;
@@ -158,7 +159,10 @@ public abstract class ChainL1TestBase {
         wallet.flush();
 
         kernel = new Kernel(config, poolKey);
-        dbFactory = new RocksdbFactory(config);
+        dbFactory = wrapFactory(new RocksdbFactory(config));
+        if (dbFactory instanceof WriteBehindFactory wb) {
+            kernel.setPersist(wb.queue()); // BlockchainImpl reads it once, in its constructor
+        }
         BlockStore blockStore = BlockStoreImpl.forNode(dbFactory);
         blockStore.reset();
         OrphanBlockStore orphanBlockStore = new OrphanBlockStoreImpl(dbFactory.getDB(DatabaseName.ORPHANIND), kernel);
@@ -231,6 +235,16 @@ public abstract class ChainL1TestBase {
             dbFactory.close();
             dbFactory = null;
         }
+    }
+
+    /**
+     * Lets a subclass put the node's write-behind layer (SP0b-2) under the block, time, index and
+     * orphan databases. The default is the raw factory: every SP0a/SP0b-1 test keeps running on
+     * synchronous writes, which is also what {@code Kernel} does when {@code chain.persist.maxPending}
+     * is 0.
+     */
+    protected DatabaseFactory wrapFactory(DatabaseFactory raw) {
+        return raw;
     }
 
     /**

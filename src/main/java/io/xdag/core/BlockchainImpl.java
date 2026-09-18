@@ -112,6 +112,14 @@ public class BlockchainImpl implements Blockchain {
     // Store for non-Extra orphan blocks
     private final OrphanBlockStore orphanBlockStore;
 
+    /**
+     * SP0b-2 §3.2: a consensus state transition drains the write-behind stream and then writes
+     * straight to the databases, so the on-disk state a transition leaves behind is exactly the one
+     * it would leave without the write-behind layer. {@link PersistControl#NONE} when there is no
+     * such layer, which makes every wrapper below a plain call.
+     */
+    private final PersistControl persist;
+
     // In-memory pools and maps
     private final LinkedHashMap<Bytes, Block> memOrphanPool = new LinkedHashMap<>();
     private final Map<Bytes, Integer> memOurBlocks = new ConcurrentHashMap<>();
@@ -177,6 +185,12 @@ public class BlockchainImpl implements Blockchain {
         this.blockStore = kernel.getBlockStore();
         this.orphanBlockStore = kernel.getOrphanBlockStore();
         this.txHistoryStore = kernel.getTxHistoryStore();
+        // SP0b-2: read exactly here, before anything that can run a consensus transition — the
+        // snapshot branch below calls initSnapshotJ(), and the check-main loop started at the end of
+        // this constructor can reach setMain before the caller gets control back. NONE (a no-op both
+        // ways) whenever no write-behind layer is installed.
+        PersistControl control = kernel.getPersist();
+        this.persist = control == null ? PersistControl.NONE : control;
         snapshotHeight = kernel.getConfig().getSnapshotSpec().getSnapshotHeight();
 
         // Initialize snapshot if enabled
@@ -309,7 +323,11 @@ public class BlockchainImpl implements Blockchain {
     }
 
     // Initialize snapshot data
-    public void initSnapshotJ() {
+    public synchronized void initSnapshotJ() {
+        persist.direct(this::initSnapshotJDirect);
+    }
+
+    private void initSnapshotJDirect() {
         long start = System.currentTimeMillis();
         System.out.println("init snapshot...");
 
@@ -1067,7 +1085,11 @@ public class BlockchainImpl implements Blockchain {
     /**
      * Rollback to specified block
      */
-    public void unWindMain(Block block) {
+    public synchronized void unWindMain(Block block) {
+        persist.direct(() -> unWindMainDirect(block));
+    }
+
+    private void unWindMainDirect(Block block) {
         log.debug("Unwind main to block,{}", block == null ? "null" : block.getHashLow().toHexString());
         if (xdagTopStatus.getTop() != null) {
             log.debug("now pretop : {}", xdagTopStatus.getPreTop() == null ? "null" : Bytes32.wrap(xdagTopStatus.getPreTop()).toHexString());
@@ -1128,7 +1150,11 @@ public class BlockchainImpl implements Blockchain {
      * @throws IllegalStateException if that block is missing, is not a main block, or does not agree
      *                               that it sits at {@code height}
      */
-    public void reconcileTipTo(long height, Bytes32 hashLow) {
+    public synchronized void reconcileTipTo(long height, Bytes32 hashLow) {
+        persist.direct(() -> reconcileTipToDirect(height, hashLow));
+    }
+
+    private void reconcileTipToDirect(long height, Bytes32 hashLow) {
         synchronized (this) {
             Block block = hashLow == null ? null : getBlockByHash(hashLow, false);
             if (block == null || block.getInfo().getHeight() != height
@@ -1189,7 +1215,11 @@ public class BlockchainImpl implements Blockchain {
      *                               in-flight record are the caller's business and are untouched, so
      *                               a failed repair leaves its evidence behind.
      */
-    public void repairUnwindTo(long height) {
+    public synchronized void repairUnwindTo(long height) {
+        persist.direct(() -> repairUnwindToDirect(height));
+    }
+
+    private void repairUnwindToDirect(long height) {
         synchronized (this) {
             Block target = height <= 0 ? null : blockStore.getBlockByHeight(height);
             // I1: the height index is not authoritative -- saveBlockInfo never deletes a stale key,
@@ -1505,7 +1535,11 @@ public class BlockchainImpl implements Blockchain {
     /**
      * Set the main chain with block as the main block - either fork or extend
      */
-    public void setMain(Block block) {
+    public synchronized void setMain(Block block) {
+        persist.direct(() -> setMainDirect(block));
+    }
+
+    private void setMainDirect(Block block) {
 
         synchronized (this) {
             // Set reward
@@ -1582,7 +1616,11 @@ public class BlockchainImpl implements Blockchain {
      * Cancel Block main block status
      */
     // TODO: Change to new way to cancel main block reward
-    public void unSetMain(Block block) {
+    public synchronized void unSetMain(Block block) {
+        persist.direct(() -> unSetMainDirect(block));
+    }
+
+    private void unSetMainDirect(Block block) {
 
         synchronized (this) {
 

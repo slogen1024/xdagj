@@ -35,6 +35,7 @@ import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
 import io.xdag.config.MainnetConfig;
 import io.xdag.config.TestnetConfig;
+import io.xdag.config.spec.ChainSpec;
 import io.xdag.consensus.SyncManager;
 import io.xdag.consensus.XdagPow;
 import io.xdag.consensus.XdagSync;
@@ -74,6 +75,15 @@ public class Kernel {
     protected Wallet wallet;
     protected ECKeyPair coinbase;
     protected DatabaseFactory dbFactory;
+    /**
+     * SP0b-2: what a consensus state transition needs from the persistence layer — drain the
+     * queued writes, then run the transition in direct-write mode. {@link PersistControl#NONE}
+     * (both a no-op) whenever no write-behind layer is installed: {@code chain.persist.maxPending}
+     * is 0, or the stores were built by something other than {@link #testStart()} (the offline
+     * tools and the test fixtures). Read once, by {@code BlockchainImpl}'s constructor, so it has
+     * to be set before the blockchain is built.
+     */
+    protected PersistControl persist = PersistControl.NONE;
     protected AddressStore addressStore;
     protected BlockStore blockStore;
     protected OrphanBlockStore orphanBlockStore;
@@ -176,120 +186,160 @@ public class Kernel {
 
         // Initialize database components
         dbFactory = new RocksdbFactory(this.config);
-        // BlockStoreImpl.forNode, not the constructor: the databases named BLOCK and TIME go into
-        // swapped roles here, and that is the on-disk layout of every node (see forNode's javadoc).
-        blockStore = BlockStoreImpl.forNode(dbFactory);
-        log.info("Block Store init.");
-        blockStore.start();
 
-        addressStore = new AddressStoreImpl(dbFactory.getDB(DatabaseName.ADDRESS));
-        addressStore.start();
-
-
-        orphanBlockStore = new OrphanBlockStoreImpl(dbFactory.getDB(DatabaseName.ORPHANIND) , this);
-        orphanBlockStore.start();
-
-        // Chain contracts (SP0a): CHAIN_L1 index consumed by the chain hooks. Must exist before
-        // new BlockchainImpl(this) below, whose constructor installs the ChainL1Processor from it.
-        // Stopped in testStop() before the databases are closed, so isRunning() stays truthful.
-        chainL1Store = new ChainL1Store(dbFactory.getDB(DatabaseName.CHAIN_L1));
-        chainL1Store.start();
-
-        if (config.getEnableTxHistory()) {
-            long txPageSizeLimit = config.getTxPageSizeLimit();
-            txHistoryStore = new TransactionHistoryStoreImpl(txPageSizeLimit);
-            log.info("Transaction History Store init.");
+        // SP0b-2: the write-behind layer, when the node is configured for it. Installed here, before
+        // any store is built from the factory, so BLOCK/TIME/INDEX/ORPHANIND are wrapped for every
+        // store at once; the queue's writer thread is owned by this kernel and is stopped by
+        // dbFactory.close() (WriteBehindFactory.close() flushes first).
+        ChainSpec chainSpec = config.getChainSpec();
+        if (chainSpec.getChainPersistMaxPending() > 0) {
+            WriteBehindQueue persistQueue = new WriteBehindQueue(chainSpec.getChainPersistMaxPending(),
+                    chainSpec.getChainPersistFlushEntries(), chainSpec.getChainPersistFlushMs(), true);
+            persistQueue.start();
+            dbFactory = new WriteBehindFactory(dbFactory, persistQueue, chainSpec.getChainPersistReadCache());
+            persist = persistQueue;
+            log.info("Write-behind persistence on: maxPending={}, flushEntries={}, flushMs={}, readCache={}",
+                    chainSpec.getChainPersistMaxPending(), chainSpec.getChainPersistFlushEntries(),
+                    chainSpec.getChainPersistFlushMs(), chainSpec.getChainPersistReadCache());
         }
 
-        // Initialize network components
-        netDB = new NetDB();
+        try {
+            // BlockStoreImpl.forNode, not the constructor: the databases named BLOCK and TIME go into
+            // swapped roles here, and that is the on-disk layout of every node (see forNode's javadoc).
+            blockStore = BlockStoreImpl.forNode(dbFactory);
+            log.info("Block Store init.");
+            blockStore.start();
 
-        // Initialize RandomX
-        randomx = new RandomX(config);
-        randomx.start();
+            addressStore = new AddressStoreImpl(dbFactory.getDB(DatabaseName.ADDRESS));
+            addressStore.start();
 
-        // Initialize blockchain
-        blockchain = new BlockchainImpl(this);
-        XdagStats xdagStats = blockchain.getXdagStats();
+
+            orphanBlockStore = new OrphanBlockStoreImpl(dbFactory.getDB(DatabaseName.ORPHANIND) , this);
+            orphanBlockStore.start();
+
+            // Chain contracts (SP0a): CHAIN_L1 index consumed by the chain hooks. Must exist before
+            // new BlockchainImpl(this) below, whose constructor installs the ChainL1Processor from it.
+            // Stopped in testStop() before the databases are closed, so isRunning() stays truthful.
+            chainL1Store = new ChainL1Store(dbFactory.getDB(DatabaseName.CHAIN_L1));
+            chainL1Store.start();
+
+            if (config.getEnableTxHistory()) {
+                long txPageSizeLimit = config.getTxPageSizeLimit();
+                txHistoryStore = new TransactionHistoryStoreImpl(txPageSizeLimit);
+                log.info("Transaction History Store init.");
+            }
+
+            // Initialize network components
+            netDB = new NetDB();
+
+            // Initialize RandomX
+            randomx = new RandomX(config);
+            randomx.start();
+
+            // Initialize blockchain
+            blockchain = new BlockchainImpl(this);
+            XdagStats xdagStats = blockchain.getXdagStats();
         
-        // Create genesis block if first startup
-        if (xdagStats.getOurLastBlockHash() == null) {
-            firstAccount = toBytesAddress(wallet.getDefKey().getPublicKey());
-            firstBlock = new Block(config, XdagTime.getCurrentTimestamp(), null, null, false,
-                    null, null, -1, XAmount.ZERO, null);
-            firstBlock.signOut(wallet.getDefKey());
-            xdagStats.setOurLastBlockHash(firstBlock.getHashLow().toArray());
-            if (xdagStats.getGlobalMiner() == null) {
-                xdagStats.setGlobalMiner(firstAccount.toArray());
-            }
-            blockchain.tryToConnect(new Block(firstBlock.getXdagBlock()));
-        } else {
-            firstAccount = toBytesAddress(wallet.getDefKey().getPublicKey());
-        }
-
-        // Initialize RandomX based on snapshot configuration
-        if (config.getSnapshotSpec().isSnapshotJ()) {
-            randomx.randomXLoadingSnapshotJ();
-            blockStore.setSnapshotBoot();
-        } else {
-            if (config.getSnapshotSpec().isSnapshotEnabled() && !blockStore.isSnapshotBoot()) {
-                System.out.println("pre seed:" + Bytes.wrap(blockchain.getPreSeed()).toHexString());
-                randomx.randomXLoadingSnapshot(blockchain.getPreSeed(), 0);
-                blockStore.setSnapshotBoot();
-            } else if (config.getSnapshotSpec().isSnapshotEnabled() && blockStore.isSnapshotBoot()) {
-                System.out.println("pre seed:" + Bytes.wrap(blockchain.getPreSeed()).toHexString());
-                randomx.randomXLoadingForkTimeSnapshot(blockchain.getPreSeed(), 0);
+            // Create genesis block if first startup
+            if (xdagStats.getOurLastBlockHash() == null) {
+                firstAccount = toBytesAddress(wallet.getDefKey().getPublicKey());
+                firstBlock = new Block(config, XdagTime.getCurrentTimestamp(), null, null, false,
+                        null, null, -1, XAmount.ZERO, null);
+                firstBlock.signOut(wallet.getDefKey());
+                xdagStats.setOurLastBlockHash(firstBlock.getHashLow().toArray());
+                if (xdagStats.getGlobalMiner() == null) {
+                    xdagStats.setGlobalMiner(firstAccount.toArray());
+                }
+                blockchain.tryToConnect(new Block(firstBlock.getXdagBlock()));
             } else {
-                randomx.randomXLoadingForkTime();
+                firstAccount = toBytesAddress(wallet.getDefKey().getPublicKey());
             }
+
+            // Initialize RandomX based on snapshot configuration
+            if (config.getSnapshotSpec().isSnapshotJ()) {
+                randomx.randomXLoadingSnapshotJ();
+                blockStore.setSnapshotBoot();
+            } else {
+                if (config.getSnapshotSpec().isSnapshotEnabled() && !blockStore.isSnapshotBoot()) {
+                    System.out.println("pre seed:" + Bytes.wrap(blockchain.getPreSeed()).toHexString());
+                    randomx.randomXLoadingSnapshot(blockchain.getPreSeed(), 0);
+                    blockStore.setSnapshotBoot();
+                } else if (config.getSnapshotSpec().isSnapshotEnabled() && blockStore.isSnapshotBoot()) {
+                    System.out.println("pre seed:" + Bytes.wrap(blockchain.getPreSeed()).toHexString());
+                    randomx.randomXLoadingForkTimeSnapshot(blockchain.getPreSeed(), 0);
+                } else {
+                    randomx.randomXLoadingForkTime();
+                }
+            }
+
+            // Set initial state based on network type
+            if (config instanceof MainnetConfig) {
+                xdagState = XdagState.WAIT;
+            } else if (config instanceof TestnetConfig) {
+                xdagState = XdagState.WTST;
+            } else if (config instanceof DevnetConfig) {
+                xdagState = XdagState.WDST;
+            }
+
+            // Initialize P2P networking
+            p2p = new PeerServer(this);
+            p2p.start();
+            client = new PeerClient(this.config, this.coinbase);
+
+            // Initialize node management
+            nodeMgr = new NodeManager(this);
+            nodeMgr.start();
+
+            // Initialize synchronization
+            sync = new XdagSync(this);
+            sync.start();
+
+            syncMgr = new SyncManager(this);
+            syncMgr.start();
+
+            poolAwardManager = new PoolAwardManagerImpl(this);
+
+            // Initialize mining
+            pow = new XdagPow(this);
+
+            if (webSocketServer == null) {
+                webSocketServer = new WebSocketServer(this, config.getPoolWhiteIPList(), config.getWebsocketServerPort());
+            }
+            webSocketServer.start();
+
+            // Start RPC
+            api = new XdagApiImpl(this);
+            api.start();
+
+            // Start Telnet Server
+            telnetServer = new TelnetServer(this);
+            telnetServer.start();
+
+            blockchain.registerListener(pow);
+
+            Launcher.registerShutdownHook("kernel", this::testStop);
+        } catch (RuntimeException | Error e) {
+            // G3 (SP0a §12.2): a failure anywhere after the databases opened used to leak every
+            // store — and with SP0b-2 the write-behind writer thread, which is not a daemon. Closing
+            // the factory stops the queue (flushing what it holds) and closes the databases, so the
+            // next attempt in this JVM can open the same directory again.
+            log.error("kernel start failed; closing the stores", e);
+            if (chainL1Store != null) {
+                try {
+                    chainL1Store.stop();
+                } catch (RuntimeException ignored) {
+                    // already reported by the throw below
+                }
+            }
+            if (dbFactory != null) {
+                try {
+                    dbFactory.close();
+                } catch (RuntimeException ignored) {
+                    // already reported by the throw below
+                }
+            }
+            throw e;
         }
-
-        // Set initial state based on network type
-        if (config instanceof MainnetConfig) {
-            xdagState = XdagState.WAIT;
-        } else if (config instanceof TestnetConfig) {
-            xdagState = XdagState.WTST;
-        } else if (config instanceof DevnetConfig) {
-            xdagState = XdagState.WDST;
-        }
-
-        // Initialize P2P networking
-        p2p = new PeerServer(this);
-        p2p.start();
-        client = new PeerClient(this.config, this.coinbase);
-
-        // Initialize node management
-        nodeMgr = new NodeManager(this);
-        nodeMgr.start();
-
-        // Initialize synchronization
-        sync = new XdagSync(this);
-        sync.start();
-
-        syncMgr = new SyncManager(this);
-        syncMgr.start();
-
-        poolAwardManager = new PoolAwardManagerImpl(this);
-
-        // Initialize mining
-        pow = new XdagPow(this);
-
-        if (webSocketServer == null) {
-            webSocketServer = new WebSocketServer(this, config.getPoolWhiteIPList(), config.getWebsocketServerPort());
-        }
-        webSocketServer.start();
-
-        // Start RPC
-        api = new XdagApiImpl(this);
-        api.start();
-
-        // Start Telnet Server
-        telnetServer = new TelnetServer(this);
-        telnetServer.start();
-
-        blockchain.registerListener(pow);
-
-        Launcher.registerShutdownHook("kernel", this::testStop);
     }
 
     /**
@@ -365,10 +415,12 @@ public class Kernel {
             chainL1Store.stop();
         }
 
-        // Close all databases
-        for (DatabaseName name : DatabaseName.values()) {
-            dbFactory.getDB(name).close();
-        }
+        // Close all databases. Through the factory, not by closing each DatabaseName in turn: with
+        // SP0b-2 the factory may be a WriteBehindFactory, whose close() stops the writer thread
+        // (flushing what it still holds) before the databases go. That thread is not a daemon, so
+        // leaving it running would outlive the kernel. Closing the factory also stops opening
+        // databases this node never used just to close them again.
+        dbFactory.close();
 
         // Stop remaining services
         if(webSocketServer != null) {
