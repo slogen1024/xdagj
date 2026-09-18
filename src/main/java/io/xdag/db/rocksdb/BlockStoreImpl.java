@@ -53,6 +53,7 @@ import java.io.ByteArrayOutputStream;
 import java.math.BigInteger;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -70,7 +71,7 @@ import static io.xdag.utils.BytesUtils.equalBytes;
  * written back in batches; {@link #flushSums()} documents the triggers and the loss bound. The
  * cache is bounded: reads never populate it, and after every flush it keeps only the arrays that are
  * still dirty plus the four keys of the last saved block. There is one key per deepest bucket of
- * 2^24 ms (about 4.66 h) plus three shallower levels — about 1,900 keys a year at 4 KB each, so an
+ * 2^24 XDAG ticks of 1/1024 s (about 4.55 h) plus three shallower levels — about 1,900 keys a year at 4 KB each, so an
  * unbounded cache would retain on the order of 60 MB after a full historical sync.
  */
 @Slf4j
@@ -400,8 +401,10 @@ public class BlockStoreImpl implements BlockStore {
      * Writes every dirty sums array to the index and drops the clean entries the next block will not
      * reuse. Triggers: every {@value #SUMS_FLUSH_EVERY} saved blocks, the first saved block whose
      * deepest bucket differs from the previous saved block's, {@code Kernel.testStop()} before its
-     * final stats save, and {@link #stop()}. {@link #saveXdagStatus(XdagStats)} runs once per import
-     * and therefore is not a trigger. Safe to call with nothing dirty.
+     * final stats save, and {@link #stop()} (a lifecycle path the node does not currently take:
+     * {@code Kernel.testStop} calls {@link #flushSums()} explicitly, so do not delete that call on the
+     * assumption that {@code stop()} covers shutdown). {@link #saveXdagStatus(XdagStats)} runs once per
+     * import and therefore is not a trigger. Safe to call with nothing dirty.
      *
      * <p>Loss bound: a crash — any stop that reaches none of those triggers — loses the contributions
      * of the blocks saved since the last flush: fewer than {@value #SUMS_FLUSH_EVERY} of them, all in
@@ -415,15 +418,19 @@ public class BlockStoreImpl implements BlockStore {
      */
     @Override
     public void flushSums() {
+        // Keys that could not be written stay dirty; collected and re-added after the loop so the
+        // weakly consistent iterator is never asked to revisit a key re-added during iteration.
+        List<String> failed = new ArrayList<>();
         for (String key : dirtySums) {
             // Un-mark before writing: a putSums racing with this write re-marks the key and the next
             // flush rewrites it, so a concurrent update is written twice rather than lost.
             dirtySums.remove(key);
             MutableBytes sums = sumsCache.get(key);
-            if (sums != null && !writeSums(key, sums)) {
-                dirtySums.add(key);
+            if (sums == null || !writeSums(key, sums)) {
+                failed.add(key);
             }
         }
+        dirtySums.addAll(failed);
         // May swallow increments made concurrently with this flush; acceptable, saves run under the blockchain lock.
         sumsSinceFlush.set(0);
         // Bound the cache: keep what is still dirty and the last block's four keys, which the next block almost always reuses.
@@ -487,8 +494,10 @@ public class BlockStoreImpl implements BlockStore {
 
     @Override
     public void putSums(String key, Bytes sums) {
-        sumsCache.put(key, sums.mutableCopy());
+        // Mark dirty BEFORE installing the value: flushSums' eviction tests the dirty set, so the
+        // opposite order could evict a freshly put array in the window between the two statements.
         dirtySums.add(key);
+        sumsCache.put(key, sums.mutableCopy());
     }
 
     public void updateSum(String key, long sum, long size, long index) {

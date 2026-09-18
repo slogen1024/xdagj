@@ -58,7 +58,7 @@ import org.junit.rules.TemporaryFolder;
 
 public class SumsCacheTest {
 
-    /** One deepest sums bucket: the level-3 key changes every 2^24 ms. */
+    /** One deepest sums bucket: the level-3 key changes every 2^24 XDAG ticks (1/1024 s each, about 4.55 h). */
     private static final long BUCKET = 1L << 24;
     /** A bucket-aligned start, so a run of blocks with a small stride stays in one deepest bucket. */
     private static final long T0 = 1_700_000_000_000L & ~(BUCKET - 1);
@@ -168,7 +168,7 @@ public class SumsCacheTest {
      */
     @Test
     public void aStatsSavePerImportDoesNotFlushBeforeTheTwoHundredFiftySixthBlock() {
-        List<Block> bs = blocks(300, T0, EPOCH / 2); // 300 * 32768 ms stays inside one deepest bucket
+        List<Block> bs = blocks(300, T0, EPOCH / 2); // 300 * 32768 ticks stays inside one deepest bucket
         XdagStats stats = new XdagStats();
         String rootKey = rootKey(bs.get(0));
         for (int i = 0; i < bs.size(); i++) {
@@ -203,6 +203,21 @@ public class SumsCacheTest {
                 expected(List.of(first)).get(rootKey(first)).toArray(), fresh.getSums(rootKey(first)).toArray());
         assertArrayEquals("while the cache already has both",
                 expected(List.of(first, next)).get(rootKey(first)).toArray(), store.getSums(rootKey(first)).toArray());
+    }
+
+    /** The eviction's one load-bearing invariant: a bucket that was flushed and evicted accumulates on top of the disk value. */
+    @Test
+    public void aBlockReturningToAnEvictedBucketAccumulatesOnTheDiskValue() {
+        Block first = blocks(1, T0, EPOCH).get(0);
+        Block other = blocks(1, T0 + BUCKET, EPOCH).get(0);
+        Block third = blocks(1, T0 + EPOCH, EPOCH).get(0);
+        store.saveBlock(first);
+        store.saveBlock(other);   // rolls: flushes and evicts first's bucket (getSums cannot observe that: it reads disk on a miss)
+        store.saveBlock(third);   // back in first's bucket: must reload from disk, not start from zero
+        store.flushSums();
+        BlockStoreImpl fresh = BlockStoreImpl.forNode(factory);
+        assertArrayEquals(expected(List.of(first, third)).get(deepestKey(first)).toArray(),
+                fresh.getSums(deepestKey(first)).toArray());
     }
 
     @Test
