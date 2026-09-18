@@ -29,8 +29,9 @@ import io.xdag.core.XAmount;
 /**
  * Chain (DAG-native channel contract) protocol parameters.
  *
- * <p>With one node-local exception ({@link #getChainConsistencyWindow()}), these parameters gate
- * every chain hook wired into {@code setMain}/{@code applyBlock}
+ * <p>With the node-local exceptions ({@link #getChainConsistencyWindow()} and the SP0b-2 ingest and
+ * persistence keys, {@link #getChainIngestThreads()} through {@link #getChainPersistReadCache()}),
+ * these parameters gate every chain hook wired into {@code setMain}/{@code applyBlock}
  * (see the SP0a design: principle P2, "channel semantics only activate in setMain, gated
  * by main-block height"). None of them ever change L1 block validity ({@code tryToConnect}
  * is untouched by chain semantics, per principle P1) — they only affect whether/how the
