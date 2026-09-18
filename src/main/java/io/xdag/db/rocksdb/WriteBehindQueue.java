@@ -238,6 +238,19 @@ public final class WriteBehindQueue implements PersistControl {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+            if (t.isAlive()) {
+                log.warn("write-behind writer did not exit within 5 s of abandon(); a delegate write is still in flight");
+            }
+        }
+    }
+
+    /** Runs {@code body} under the queue lock: sources use it to order cache bookkeeping with enqueue. */
+    void runLocked(Runnable body) {
+        lock.lock();
+        try {
+            body.run();
+        } finally {
+            lock.unlock();
         }
     }
 

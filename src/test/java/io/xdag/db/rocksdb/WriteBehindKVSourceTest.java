@@ -40,7 +40,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.commons.lang3.tuple.Pair;
 import org.junit.After;
 import org.junit.Before;
@@ -233,6 +236,66 @@ public class WriteBehindKVSourceTest {
         assertArrayEquals("second get is served by the read cache", b("disk"), source.get(b("k")));
         source.delete(b("k"));
         assertNull("a delete evicts the cache entry", source.get(b("k")));
+    }
+
+    /** A delegate whose {@code get} reads the value, then parks until released: a read miss caught mid-flight. */
+    private static final class ParkingReadDelegate extends ForwardingKVSource {
+        final CountDownLatch inRead = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+
+        ParkingReadDelegate(KVSource<byte[], byte[]> delegate) {
+            super(delegate);
+        }
+
+        @Override
+        public byte[] get(byte[] key) {
+            byte[] value = super.get(key);
+            inRead.countDown();
+            try {
+                release.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+            return value;
+        }
+    }
+
+    @Test(timeout = 30_000)
+    public void aReadMissThatRacesAQueuedWriteDoesNotPoisonTheReadCache() throws Exception {
+        raw.put(b("k"), b("old"));
+        ParkingReadDelegate parking = new ParkingReadDelegate(raw);
+        WriteBehindKVSource cached = new WriteBehindKVSource(parking, queue, 16);
+        AtomicReference<byte[]> seen = new AtomicReference<>();
+        Thread reader = new Thread(() -> seen.set(cached.get(b("k"))), "reader");
+        reader.start();
+        assertTrue(parking.inRead.await(10, TimeUnit.SECONDS)); // missed pending and cache, holds "old"
+        cached.put(b("k"), b("new")); // queued: pending map and cache now say "new"
+        parking.release.countDown();
+        reader.join(10_000);
+        assertFalse(reader.isAlive());
+        assertArrayEquals("the reader itself saw the pre-write value", b("old"), seen.get());
+        queue.flushSync(); // the write lands and the pending entry is retired: only the cache is left
+        assertArrayEquals("a stale read miss must not repopulate the cache over a newer write", b("new"), cached.get(b("k")));
+        assertArrayEquals(b("new"), raw.get(b("k")));
+    }
+
+    @Test(timeout = 30_000)
+    public void aReadMissThatRacesADirectDeleteDoesNotPoisonTheReadCache() throws Exception {
+        raw.put(b("k"), b("old"));
+        ParkingReadDelegate parking = new ParkingReadDelegate(raw);
+        WriteBehindKVSource cached = new WriteBehindKVSource(parking, queue, 16);
+        AtomicReference<byte[]> seen = new AtomicReference<>();
+        Thread reader = new Thread(() -> seen.set(cached.get(b("k"))), "reader");
+        reader.start();
+        assertTrue(parking.inRead.await(10, TimeUnit.SECONDS));
+        queue.direct(() -> cached.delete(b("k"))); // no pending entry: only the write epoch can catch this
+        parking.release.countDown();
+        reader.join(10_000);
+        assertFalse(reader.isAlive());
+        assertArrayEquals(b("old"), seen.get());
+        assertNull("a stale read miss must not resurrect a directly deleted key", cached.get(b("k")));
+        assertNull(raw.get(b("k")));
     }
 
     @Test

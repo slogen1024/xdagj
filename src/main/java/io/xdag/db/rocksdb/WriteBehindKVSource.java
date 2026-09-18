@@ -62,6 +62,12 @@ public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
     private final WriteBehindQueue queue;
     private final ConcurrentHashMap<Bytes, Pending> pending = new ConcurrentHashMap<>();
     private final Map<Bytes, byte[]> readCache; // null when disabled
+    /**
+     * Bumped under the queue lock by every write that touches the pending map or the read cache.
+     * A read miss repopulates the cache only if no such write happened while it was reading the
+     * delegate: otherwise the value it holds may be older than what the writer just recorded.
+     */
+    private volatile long writes;
 
     public WriteBehindKVSource(KVSource<byte[], byte[]> delegate, WriteBehindQueue queue, int readCacheEntries) {
         this.delegate = delegate;
@@ -103,6 +109,7 @@ public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
             pending.put(Bytes.wrap(key), new Pending(value, version));
             cachePut(key, value);
         }
+        writes++;
     }
 
     /** Called by the queue once the write with this version is in the database. */
@@ -110,13 +117,19 @@ public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
         pending.computeIfPresent(Bytes.wrap(key), (k, p) -> p.version() == version ? null : p);
     }
 
-    private void directWrite(byte[] key, byte[] value) {
+    /** Bookkeeping for a write that already went to the delegate; must run under the queue lock. */
+    private void recordDirect(byte[] key, byte[] value) {
         pending.remove(Bytes.wrap(key));
         if (value == null) {
             cacheRemove(key);
         } else {
             cachePut(key, value);
         }
+        writes++;
+    }
+
+    private void directWrite(byte[] key, byte[] value) {
+        queue.runLocked(() -> recordDirect(key, value));
     }
 
     @Override
@@ -152,9 +165,18 @@ public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
                 return cached;
             }
         }
+        long seen = writes;
         byte[] value = delegate.get(key);
-        if (value != null) {
-            cachePut(key, value);
+        if (value != null && readCache != null) {
+            // Repopulate under the queue lock, and only if nothing was written to this source
+            // meanwhile: a queued write left a pending entry (and put its value in the cache), a
+            // direct write updated or evicted the cache — either would be overwritten by the
+            // possibly stale value read from the delegate, and served until the next write.
+            queue.runLocked(() -> {
+                if (writes == seen && !pending.containsKey(k)) {
+                    cachePut(key, value);
+                }
+            });
         }
         return value;
     }
@@ -164,12 +186,14 @@ public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
     public void batchWrite(List<Pair<byte[], byte[]>> puts, List<byte[]> deletes) {
         if (queue.isBypass()) {
             delegate.batchWrite(puts, deletes);
-            for (Pair<byte[], byte[]> p : puts) {
-                directWrite(p.getKey(), p.getValue());
-            }
-            for (byte[] d : deletes) {
-                directWrite(d, null);
-            }
+            queue.runLocked(() -> {
+                for (Pair<byte[], byte[]> p : puts) {
+                    recordDirect(p.getKey(), p.getValue());
+                }
+                for (byte[] d : deletes) {
+                    recordDirect(d, null);
+                }
+            });
             return;
         }
         for (Pair<byte[], byte[]> p : puts) {
@@ -249,10 +273,13 @@ public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
     @Override
     public void reset() {
         queue.flushSync();
-        pending.clear();
-        if (readCache != null) {
-            readCache.clear();
-        }
+        queue.runLocked(() -> {
+            pending.clear();
+            if (readCache != null) {
+                readCache.clear();
+            }
+            writes++;
+        });
         delegate.reset();
     }
 }
