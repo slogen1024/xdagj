@@ -38,9 +38,8 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.commons.lang3.tuple.Pair;
 import org.junit.After;
@@ -71,7 +70,7 @@ public class WriteBehindKVSourceTest {
         raw = new RocksdbKVSource("WB");
         raw.setConfig(config);
         raw.init();
-        queue = new WriteBehindQueue(8, 4, 1_000_000L); // manual: never started, flushed by drainOnce()/flushSync()
+        queue = new WriteBehindQueue(8, 4, 1_000_000L, false); // manual: drained by drainOnce()/flushSync()
         source = new WriteBehindKVSource(raw, queue, 16);
     }
 
@@ -175,25 +174,36 @@ public class WriteBehindKVSourceTest {
     }
 
     @Test
-    public void backpressureBlocksAtMaxPendingAndWakesAfterADrain() throws Exception {
+    public void batchWriteTreatsANullValuedPairAsADeleteOnBothPaths() {
+        raw.put(b("q"), b("1"));
+        raw.put(b("d"), b("1"));
+        assertArrayEquals(b("1"), source.get(b("q")));
+        assertArrayEquals(b("1"), source.get(b("d")));
+        source.batchWrite(List.of(Pair.of(b("q"), null)), List.of());
+        assertNull("queued: tombstone, cache evicted", source.get(b("q")));
+        queue.flushSync();
+        assertNull(raw.get(b("q")));
+        queue.direct(() -> source.batchWrite(List.of(Pair.of(b("d"), null)), List.of()));
+        assertNull("direct: delegate delete, cache evicted", source.get(b("d")));
+        assertNull(raw.get(b("d")));
+    }
+
+    @Test
+    public void backpressureInManualModeDrainsAGroupOnTheCallerInsteadOfParking() {
         for (int i = 0; i < 8; i++) {
             source.put(b("k" + i), b("v"));
         }
-        AtomicBoolean unblocked = new AtomicBoolean();
-        CountDownLatch started = new CountDownLatch(1);
-        Thread t = new Thread(() -> {
-            started.countDown();
-            source.put(b("k8"), b("v"));
-            unblocked.set(true);
-        });
-        t.start();
-        assertTrue(started.await(5, TimeUnit.SECONDS));
-        Thread.sleep(100);
-        assertFalse("put must block while pending >= maxPending", unblocked.get());
-        assertTrue(queue.drainOnce());
-        t.join(5_000);
-        assertTrue(unblocked.get());
+        assertEquals(8, queue.pending());
+        assertEquals(0, queue.writtenCount());
+        source.put(b("k8"), b("v")); // full: this thread writes one group, then appends
+        assertEquals(5, queue.pending());
+        assertEquals(4, queue.writtenCount());
+        assertArrayEquals(b("v"), raw.get(b("k0")));
+        assertArrayEquals(b("v"), raw.get(b("k3")));
+        assertNull("only one group was drained", raw.get(b("k4")));
+        assertArrayEquals(b("v"), source.get(b("k8")));
         queue.flushSync();
+        assertEquals(0, queue.pending());
         assertArrayEquals(b("v"), raw.get(b("k8")));
     }
 
@@ -205,6 +215,7 @@ public class WriteBehindKVSourceTest {
         assertNotNull(queue.failure());
         assertThrows(IllegalStateException.class, () -> source.put(b("k2"), b("v")));
         assertThrows(IllegalStateException.class, queue::flushSync);
+        assertThrows("a manual queue has no writer to start", IllegalStateException.class, queue::start);
     }
 
     @Test
@@ -245,9 +256,97 @@ public class WriteBehindKVSourceTest {
     }
 
     @Test
+    public void twoSourcesOnOneQueueAreWrittenInStreamOrderAsSeparateRuns() {
+        RocksdbKVSource raw2 = new RocksdbKVSource("WB2");
+        raw2.setConfig(config);
+        raw2.init();
+        try {
+            List<String> calls = Collections.synchronizedList(new ArrayList<>());
+            KVSource<byte[], byte[]> a = new ForwardingKVSource(raw) {
+                @Override
+                public void batchWrite(List<Pair<byte[], byte[]>> puts, List<byte[]> deletes) {
+                    calls.add("A:" + puts.size() + "/" + deletes.size());
+                    super.batchWrite(puts, deletes);
+                }
+            };
+            KVSource<byte[], byte[]> bb = new ForwardingKVSource(raw2) {
+                @Override
+                public void batchWrite(List<Pair<byte[], byte[]>> puts, List<byte[]> deletes) {
+                    calls.add("B:" + puts.size() + "/" + deletes.size());
+                    super.batchWrite(puts, deletes);
+                }
+            };
+            WriteBehindKVSource sa = new WriteBehindKVSource(a, queue, 0);
+            WriteBehindKVSource sb = new WriteBehindKVSource(bb, queue, 0);
+            sa.put(b("k"), b("a1"));
+            sb.put(b("k"), b("b1"));
+            sa.delete(b("k"));
+            sb.put(b("k"), b("b2"));
+            assertNull(sa.get(b("k")));
+            assertArrayEquals(b("b2"), sb.get(b("k")));
+            assertTrue(queue.drainOnce()); // one group of four entries
+            assertEquals("a run ends whenever the source changes", List.of("A:1/0", "B:1/0", "A:0/1", "B:1/0"), calls);
+            assertNull(raw.get(b("k")));
+            assertArrayEquals(b("b2"), raw2.get(b("k")));
+            assertEquals(0, queue.pending());
+            assertNull(sa.get(b("k")));
+            assertArrayEquals(b("b2"), sb.get(b("k")));
+        } finally {
+            raw2.close();
+        }
+    }
+
+    @Test
+    public void resetFlushesThenClearsPendingAndCacheAndResetsTheDelegate() {
+        raw.put(b("c"), b("disk"));
+        assertArrayEquals(b("disk"), source.get(b("c"))); // now in the read cache
+        source.put(b("q"), b("v"));
+        source.reset();
+        assertEquals(0, queue.pending());
+        assertTrue(raw.isAlive());
+        assertNull("the delegate was wiped", raw.get(b("c")));
+        assertNull("the read cache was cleared", source.get(b("c")));
+        assertNull("the pending map was cleared", source.get(b("q")));
+    }
+
+    @Test
+    public void closeFlushesThenClosesTheDelegate() {
+        source.put(b("k"), b("v"));
+        source.close();
+        assertFalse(raw.isAlive());
+        assertEquals(0, queue.pending());
+        raw.init(); // reopen to see what was flushed before the close
+        assertArrayEquals(b("v"), raw.get(b("k")));
+    }
+
+    @Test
+    public void closeAfterAFailureStillClosesTheDelegate() {
+        AtomicBoolean closed = new AtomicBoolean();
+        KVSource<byte[], byte[]> dead = new ForwardingKVSource(raw) {
+            @Override
+            public void batchWrite(List<Pair<byte[], byte[]>> puts, List<byte[]> deletes) {
+                throw new RuntimeException("boom");
+            }
+
+            @Override
+            public void close() {
+                closed.set(true);
+                super.close();
+            }
+        };
+        WriteBehindKVSource s2 = new WriteBehindKVSource(dead, queue, 0);
+        s2.put(b("k"), b("v"));
+        assertFalse(queue.drainOnce());
+        assertNotNull(queue.failure());
+        s2.close(); // must not throw
+        assertTrue("the delegate is closed even though the flush failed", closed.get());
+        assertFalse(raw.isAlive());
+    }
+
+    @Test
     public void factoryWrapsOnlyTheFourImportDatabases() {
         RocksdbFactory rawFactory = new RocksdbFactory(config);
-        WriteBehindQueue q = new WriteBehindQueue(8, 4, 1_000_000L);
+        WriteBehindQueue q = new WriteBehindQueue(8, 4, 1_000_000L, false);
         WriteBehindFactory factory = new WriteBehindFactory(rawFactory, q, 16);
         try {
             assertTrue(factory.getDB(DatabaseName.INDEX) instanceof WriteBehindKVSource);
@@ -262,5 +361,33 @@ public class WriteBehindKVSourceTest {
             q.abandon();
             factory.close();
         }
+    }
+
+    @Test
+    public void factoryCloseClosesTheDelegateEvenWhenTheQueueHasFailed() {
+        AtomicBoolean closed = new AtomicBoolean();
+        DatabaseFactory rawFactory = new DatabaseFactory() {
+            @Override
+            public KVSource<byte[], byte[]> getDB(DatabaseName name) {
+                return new ForwardingKVSource(raw) {
+                    @Override
+                    public void batchWrite(List<Pair<byte[], byte[]>> puts, List<byte[]> deletes) {
+                        throw new RuntimeException("boom");
+                    }
+                };
+            }
+
+            @Override
+            public void close() {
+                closed.set(true);
+            }
+        };
+        WriteBehindQueue q = new WriteBehindQueue(8, 4, 1_000_000L, false);
+        WriteBehindFactory factory = new WriteBehindFactory(rawFactory, q, 0);
+        factory.getDB(DatabaseName.BLOCK).put(b("k"), b("v"));
+        assertFalse(q.drainOnce());
+        factory.close(); // stop() throws after a failure; the delegate must still be closed
+        assertTrue(closed.get());
+        assertNotNull(q.failure());
     }
 }

@@ -34,13 +34,22 @@ import java.util.function.Supplier;
  */
 public interface PersistControl {
 
-    /** Blocks until every write queued before the call is on disk. Throws if the writer has failed. */
+    /**
+     * Blocks until every write queued before the call is in the database (RocksDB WAL, not
+     * fsync'd; durability is unchanged from before SP0b-2). Throws {@link IllegalStateException}
+     * if the writer has failed.
+     */
     void flushSync();
 
     /**
      * {@link #flushSync()} then runs {@code body} on the calling thread in direct-write mode:
-     * its writes bypass the queue (and are therefore on disk when it returns, in program
+     * its writes bypass the queue (and are therefore in the database when it returns, in program
      * order). Re-entrant: a body already in direct mode runs the nested body as is.
+     *
+     * <p>Precondition: the caller holds the lock that excludes every other writer of the wrapped
+     * sources (on the node, the blockchain lock). {@code direct} does not block concurrent
+     * producers: a write queued by another thread during the body is ordered after the drain and
+     * would land after — and could overwrite — the body's direct writes.
      */
     <T> T direct(Supplier<T> body);
 
@@ -51,7 +60,10 @@ public interface PersistControl {
         });
     }
 
-    /** True while the calling thread is inside {@link #direct}. */
+    /**
+     * True while writes on the calling thread go straight to the database: inside {@link #direct},
+     * or always when no write-behind layer is installed ({@link #NONE} returns {@code true}).
+     */
     boolean isBypass();
 
     PersistControl NONE = new PersistControl() {

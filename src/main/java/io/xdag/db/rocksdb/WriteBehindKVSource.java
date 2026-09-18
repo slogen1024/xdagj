@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.tuweni.bytes.Bytes;
 
@@ -39,7 +40,14 @@ import org.apache.tuweni.bytes.Bytes;
  * see them immediately through a pending map. Iteration-style reads flush the queue first; they
  * are not on the import hot path. An optional LRU read cache (INDEX only in practice) serves
  * repeated point reads; every write path, queued or direct, updates it, so it is never stale.
+ *
+ * <p>Keys and values are retained by reference (pending map, read cache, queue) and must not be
+ * mutated after they are handed in. A {@code put} with a {@code null} value is a delete, as on
+ * {@link RocksdbKVSource}. Direct-mode writes ({@link WriteBehindQueue#direct}) go to the delegate
+ * and clear the key's pending entry; see {@link io.xdag.db.PersistControl#direct} for the
+ * single-writer precondition that makes that sound.
  */
+@Slf4j
 public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
 
     private static final byte[] TOMBSTONE = new byte[0];
@@ -83,30 +91,52 @@ public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
         }
     }
 
+    /**
+     * Called by the queue under its lock, in the critical section that assigns {@code version} and
+     * the stream position: the pending map and the read cache see the write before any later one.
+     */
+    void recordPending(byte[] key, byte[] value, long version) {
+        if (value == null) {
+            pending.put(Bytes.wrap(key), new Pending(TOMBSTONE, version));
+            cacheRemove(key);
+        } else {
+            pending.put(Bytes.wrap(key), new Pending(value, version));
+            cachePut(key, value);
+        }
+    }
+
+    /** Called by the queue once the write with this version is in the database. */
+    void completed(byte[] key, long version) {
+        pending.computeIfPresent(Bytes.wrap(key), (k, p) -> p.version() == version ? null : p);
+    }
+
+    private void directWrite(byte[] key, byte[] value) {
+        pending.remove(Bytes.wrap(key));
+        if (value == null) {
+            cacheRemove(key);
+        } else {
+            cachePut(key, value);
+        }
+    }
+
     @Override
     public void put(byte[] key, byte[] val) {
         if (queue.isBypass()) {
             delegate.put(key, val);
-            cachePut(key, val);
+            directWrite(key, val);
             return;
         }
-        long version = queue.nextVersion();
-        pending.put(Bytes.wrap(key), new Pending(val, version));
-        cachePut(key, val);
-        queue.enqueue(new WriteBehindQueue.Entry(this, key, val, version));
+        queue.enqueue(this, key, val);
     }
 
     @Override
     public void delete(byte[] key) {
         if (queue.isBypass()) {
             delegate.delete(key);
-            cacheRemove(key);
+            directWrite(key, null);
             return;
         }
-        long version = queue.nextVersion();
-        pending.put(Bytes.wrap(key), new Pending(TOMBSTONE, version));
-        cacheRemove(key);
-        queue.enqueue(new WriteBehindQueue.Entry(this, key, null, version));
+        queue.enqueue(this, key, null);
     }
 
     @Override
@@ -129,29 +159,29 @@ public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
         return value;
     }
 
+    /** As on {@link KVSource}: a {@link Pair} with a {@code null} value is a delete. */
     @Override
     public void batchWrite(List<Pair<byte[], byte[]>> puts, List<byte[]> deletes) {
         if (queue.isBypass()) {
             delegate.batchWrite(puts, deletes);
             for (Pair<byte[], byte[]> p : puts) {
-                cachePut(p.getKey(), p.getValue());
+                directWrite(p.getKey(), p.getValue());
             }
             for (byte[] d : deletes) {
-                cacheRemove(d);
+                directWrite(d, null);
             }
             return;
         }
         for (Pair<byte[], byte[]> p : puts) {
-            put(p.getKey(), p.getValue());
+            if (p.getValue() == null) {
+                delete(p.getKey());
+            } else {
+                put(p.getKey(), p.getValue());
+            }
         }
         for (byte[] d : deletes) {
             delete(d);
         }
-    }
-
-    /** Called by the queue once the write with this version is on disk. */
-    void completed(byte[] key, long version) {
-        pending.computeIfPresent(Bytes.wrap(key), (k, p) -> p.version() == version ? null : p);
     }
 
     @Override
@@ -204,12 +234,16 @@ public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
         delegate.init();
     }
 
+    /** Flushes, then closes the delegate — also after a write-behind failure (logged, not hidden). */
     @Override
     public void close() {
-        if (queue.failure() == null) {
+        try {
             queue.flushSync();
+        } catch (IllegalStateException e) {
+            log.error("closing '{}' after a write-behind failure: queued writes were not flushed", getName(), e);
+        } finally {
+            delegate.close();
         }
-        delegate.close();
     }
 
     @Override

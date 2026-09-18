@@ -26,13 +26,20 @@ package io.xdag.db.rocksdb;
 
 import java.util.EnumMap;
 import java.util.EnumSet;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Wraps a node's {@link DatabaseFactory} so that the four databases the import path writes —
  * INDEX, BLOCK, TIME, ORPHANIND — go through one {@link WriteBehindQueue}. ADDRESS, CHAIN_L1 and
  * TXHISTORY are handed out untouched: they are written only on the apply path, which runs in
  * direct mode anyway. {@code BlockStoreImpl.forNode} and the orphan store need no change.
+ *
+ * <p>Lifecycle: the caller owns the queue. It starts the writer thread with
+ * {@link WriteBehindQueue#start()} (the kernel does, after the stores are built; until then, and
+ * in manual mode, writes are drained on the calling thread) and {@link #close()} stops it — flush
+ * first, then the databases are closed even if the queue has failed.
  */
+@Slf4j
 public final class WriteBehindFactory implements DatabaseFactory {
 
     private static final EnumSet<DatabaseName> WRAPPED =
@@ -64,7 +71,12 @@ public final class WriteBehindFactory implements DatabaseFactory {
 
     @Override
     public void close() {
-        queue.stop();
-        delegate.close();
+        try {
+            queue.stop();
+        } catch (RuntimeException e) {
+            log.error("write-behind queue did not stop cleanly; closing the databases anyway", e);
+        } finally {
+            delegate.close();
+        }
     }
 }
