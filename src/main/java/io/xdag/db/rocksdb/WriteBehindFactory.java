@@ -30,9 +30,10 @@ import lombok.extern.slf4j.Slf4j;
 
 /**
  * Wraps a node's {@link DatabaseFactory} so that the four databases the import path writes —
- * INDEX, BLOCK, TIME, ORPHANIND — go through one {@link WriteBehindQueue}. ADDRESS, CHAIN_L1 and
- * TXHISTORY are handed out untouched: they are written only on the apply path, which runs in
- * direct mode anyway. {@code BlockStoreImpl.forNode} and the orphan store need no change.
+ * INDEX, BLOCK, TIME, ORPHANIND — go through one {@link WriteBehindQueue}. Every other database
+ * (SNAPSHOT, ADDRESS, TXHISTORY, CHAIN_L1) is handed out untouched: they are written only on the
+ * apply path, which runs in direct mode anyway, or by offline tools. {@code BlockStoreImpl.forNode}
+ * and the orphan store need no change.
  *
  * <p>Lifecycle: the caller owns the queue. It starts the writer thread with
  * {@link WriteBehindQueue#start()} (the kernel does, after the stores are built; until then, and

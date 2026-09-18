@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
@@ -67,8 +68,8 @@ import org.apache.tuweni.bytes.Bytes;
  *
  * <p>Failure: any throwable out of a write, and an interrupt of the writer thread, marks the queue
  * failed: every waiter (producers parked on backpressure, flushers waiting on a barrier or on the
- * in-flight group) is woken, and every later put, flush, drain or start throws
- * {@link IllegalStateException} with that cause. Nothing is dropped silently.
+ * in-flight group) is woken, every later put, flush or start throws {@link IllegalStateException}
+ * with that cause, and {@link #drainOnce()} returns false. Nothing is dropped silently.
  *
  * <p>Manual mode ({@code threaded == false}, tests and offline tools): there is no writer thread.
  * {@link #flushSync()} drains on the calling thread, a producer that hits {@code maxPending} drains
@@ -113,6 +114,7 @@ public final class WriteBehindQueue implements PersistControl {
     private final Condition notEmpty = lock.newCondition();
     private final Condition idle = lock.newCondition();
     private final ThreadLocal<Boolean> bypass = new ThreadLocal<>();
+    private final AtomicBoolean warnedUnstarted = new AtomicBoolean();
     private volatile Throwable failure;
     private volatile boolean running;   // written under lock
     private volatile Thread writer;
@@ -165,8 +167,18 @@ public final class WriteBehindQueue implements PersistControl {
         }
         Thread t = new Thread(this::loop, "xdag-persist");
         t.setDaemon(false);
+        try {
+            t.start();
+        } catch (Throwable e) {
+            lock.lock();
+            try {
+                running = false;
+            } finally {
+                lock.unlock();
+            }
+            throw e;
+        }
         writer = t;
-        t.start();
         log.info("write-behind writer started (maxPending={}, flushEntries={}, flushMs={})",
                 maxPending, flushEntries, TimeUnit.NANOSECONDS.toMillis(flushNanos));
     }
@@ -176,30 +188,31 @@ public final class WriteBehindQueue implements PersistControl {
      * so a caller that closes the databases afterwards must do so in a {@code finally}.
      */
     public synchronized void stop() {
-        if (!running) {
-            flushSync(); // no writer: drains on the caller; throws after a failure
-            return;
-        }
         Thread t = writer;
+        boolean wasRunning = running;
         try {
-            flushSync();
+            flushSync(); // with a writer: barrier; without one: drains on the caller; throws after a failure
         } finally {
-            lock.lock();
-            try {
-                running = false;
-                notEmpty.signalAll();
-            } finally {
-                lock.unlock();
+            if (wasRunning) {
+                lock.lock();
+                try {
+                    running = false;
+                    notEmpty.signalAll();
+                } finally {
+                    lock.unlock();
+                }
             }
-            try {
-                t.join(30_000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-            if (t.isAlive()) {
-                log.warn("write-behind writer did not stop within 30 s; {} entries still queued", pending());
-            } else {
-                log.info("write-behind writer stopped: {} entries enqueued, {} written", enqueuedCount(), writtenCount());
+            if (t != null) { // also after a failure: the writer exits on its own, but stop() must see it out
+                try {
+                    t.join(30_000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                if (t.isAlive()) {
+                    log.warn("write-behind writer did not stop within 30 s; {} entries still queued", pending());
+                } else if (wasRunning) {
+                    log.info("write-behind writer stopped: {} entries enqueued, {} written", enqueuedCount(), writtenCount());
+                }
             }
         }
     }
@@ -258,10 +271,11 @@ public final class WriteBehindQueue implements PersistControl {
         return failure;
     }
 
+    /** Number of queued writes not yet taken by a drainer (barriers excluded). */
     public int pending() {
         lock.lock();
         try {
-            return queue.size();
+            return queue.size() - barriers;
         } finally {
             lock.unlock();
         }
@@ -303,6 +317,13 @@ public final class WriteBehindQueue implements PersistControl {
             return body.get();
         } finally {
             bypass.remove();
+        }
+    }
+
+    /** A threaded queue that was never started drains on the calling thread; say so once. */
+    private void warnIfUnstarted() {
+        if (threaded && writer == null && warnedUnstarted.compareAndSet(false, true)) {
+            log.warn("write-behind queue is threaded but start() was never called; writes are drained on the calling thread");
         }
     }
 
@@ -355,6 +376,7 @@ public final class WriteBehindQueue implements PersistControl {
                     notFull.await();
                 } else {
                     // No writer thread: drain one group on the caller instead of parking forever.
+                    warnIfUnstarted();
                     lock.unlock();
                     try {
                         drainOnce();
@@ -383,6 +405,9 @@ public final class WriteBehindQueue implements PersistControl {
     @Override
     public void flushSync() {
         checkFailed();
+        if (Thread.currentThread() == writer) {
+            throw new IllegalStateException("flushSync from the writer thread"); // would wait for itself
+        }
         if (isBypass()) {
             return;
         }
@@ -403,6 +428,7 @@ public final class WriteBehindQueue implements PersistControl {
                     notEmpty.signal();
                     break;
                 } else {
+                    warnIfUnstarted();
                     lock.unlock();
                     try {
                         drainOnce();
@@ -490,6 +516,7 @@ public final class WriteBehindQueue implements PersistControl {
                 return false;
             }
             inFlight++;
+            notFull.signalAll(); // the group has left the queue: parked producers may fill the gap now
             if (!queue.isEmpty()) {
                 // The timer restarts for the entries left behind: a partial remainder waits up to
                 // another flushMs (or until it fills up) before it is written.

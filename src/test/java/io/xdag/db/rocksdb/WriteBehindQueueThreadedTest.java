@@ -40,7 +40,9 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import org.apache.commons.lang3.tuple.Pair;
 import org.junit.After;
@@ -263,6 +265,107 @@ public class WriteBehindQueueThreadedTest {
         source.put(b("after"), b("w")); // no writer: flushSync drains on the caller
         queue.flushSync();
         assertArrayEquals(b("w"), raw.get(b("after")));
+    }
+
+    @Test(timeout = 30_000)
+    public void aThreadedQueueThatWasNeverStartedDrainsOnTheCaller() {
+        queue = new WriteBehindQueue(2, 1, 10, true);
+        source = new WriteBehindKVSource(raw, queue, 16);
+        assertFalse(queue.writerAlive());
+        source.put(b("a"), b("1"));
+        source.put(b("b"), b("2"));
+        source.put(b("c"), b("3")); // at maxPending: this thread drains a group itself
+        assertTrue(queue.writtenCount() >= 1);
+        assertArrayEquals(b("1"), raw.get(b("a")));
+        queue.direct(() -> assertArrayEquals(b("3"), raw.get(b("c")))); // flushSync drained on the caller
+        assertEquals(0, queue.pending());
+        assertEquals(3, queue.writtenCount());
+        assertFalse(queue.writerAlive());
+        queue.stop(); // nothing to join, no failure
+    }
+
+    /**
+     * Readers hammer four keys through a three-entry read cache (so most reads miss and repopulate
+     * from a slow delegate) while a writer churns the same keys; after every write, once the write
+     * has landed and a parked reader had time to repopulate, the value served must equal the disk.
+     */
+    @Test(timeout = 60_000)
+    public void concurrentReadersNeverPinAStaleValueInTheReadCache() throws Exception {
+        KVSource<byte[], byte[]> slowRead = new ForwardingKVSource(raw) {
+            @Override
+            public byte[] get(byte[] key) {
+                LockSupport.parkNanos(100_000); // widen the window between the epoch sample and the cache repopulation
+                return super.get(key);
+            }
+        };
+        queue = new WriteBehindQueue(64, 1, 1, true);
+        source = new WriteBehindKVSource(slowRead, queue, 3); // smaller than the key set: misses with real values
+        queue.start();
+        int keys = 4;
+        int writes = 20_000;
+        AtomicBoolean done = new AtomicBoolean();
+        AtomicReference<Throwable> error = new AtomicReference<>();
+        Thread writer = new Thread(() -> {
+            try {
+                for (int i = 0; i < writes; i++) {
+                    byte[] k = b("k" + (i % keys));
+                    if (i % 7 == 3) {
+                        source.delete(k);
+                        continue;
+                    }
+                    if (i % 101 == 50) {
+                        byte[] v = b("d" + i);
+                        queue.direct(() -> source.put(k, v));
+                    } else {
+                        source.put(k, b("v" + i));
+                    }
+                    // A stale repopulation is repaired by the next put to k or by an eviction, so
+                    // look now: after the write landed and after a parked reader (100 us) had time
+                    // to repopulate over it.
+                    queue.flushSync();
+                    LockSupport.parkNanos(150_000);
+                    byte[] disk = raw.get(k);
+                    byte[] served = source.get(k);
+                    if (!java.util.Arrays.equals(disk, served)) {
+                        throw new AssertionError("stale read cache after write " + i + ": disk="
+                                + new String(disk, StandardCharsets.UTF_8) + " served="
+                                + (served == null ? "null" : new String(served, StandardCharsets.UTF_8)));
+                    }
+                }
+            } catch (Throwable t) {
+                error.set(t);
+            } finally {
+                done.set(true);
+            }
+        }, "churn");
+        List<Thread> readers = new ArrayList<>();
+        for (int r = 0; r < 3; r++) {
+            Thread t = new Thread(() -> {
+                try {
+                    while (!done.get()) {
+                        source.get(b("k" + ThreadLocalRandom.current().nextInt(keys)));
+                    }
+                } catch (Throwable t2) {
+                    error.set(t2);
+                }
+            }, "reader-" + r);
+            readers.add(t);
+            t.start();
+        }
+        writer.start();
+        writer.join(50_000);
+        for (Thread t : readers) {
+            t.join(5_000);
+            assertFalse(t.isAlive());
+        }
+        assertFalse(writer.isAlive());
+        assertNull(String.valueOf(error.get()), error.get());
+        queue.flushSync();
+        assertEquals(0, queue.pending());
+        for (int k = 0; k < keys; k++) {
+            byte[] key = b("k" + k);
+            assertArrayEquals("key " + k + " served from the cache must match the database", raw.get(key), source.get(key));
+        }
     }
 
     @Test(timeout = 30_000)

@@ -154,6 +154,10 @@ public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
 
     @Override
     public byte[] get(byte[] key) {
+        // Invariant: seen must be read before every lookup below. A write that lands after the
+        // pending/cache misses but before the sample would otherwise leave writes == seen, and once
+        // completed() retires its pending entry the miss path would cache the pre-write disk value.
+        long seen = writes;
         Bytes k = Bytes.wrap(key);
         Pending p = pending.get(k);
         if (p != null) {
@@ -165,7 +169,6 @@ public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
                 return cached;
             }
         }
-        long seen = writes;
         byte[] value = delegate.get(key);
         if (value != null && readCache != null) {
             // Repopulate under the queue lock, and only if nothing was written to this source
@@ -270,6 +273,10 @@ public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
         }
     }
 
+    /**
+     * Flushes, wipes the delegate and forgets everything cached. Shares {@link WriteBehindQueue#direct}'s
+     * single-writer precondition: no other thread may write this source during the reset.
+     */
     @Override
     public void reset() {
         queue.flushSync();
@@ -281,5 +288,13 @@ public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
             writes++;
         });
         delegate.reset();
+        queue.runLocked(() -> {
+            // Again after the wipe: a read miss that sampled the epoch before the first bump could
+            // otherwise cache a pre-reset value it read from the old delegate.
+            if (readCache != null) {
+                readCache.clear();
+            }
+            writes++;
+        });
     }
 }
