@@ -186,7 +186,7 @@ interface Arbiter {
 
 SP0b 切成三个可独立交付的切片，顺序固定：**SP0b-1 基准 + 加固 → SP0b-2 流水线 → SP0b-3 孤块池与费率策略**。SP0b-1 的基线数据决定 SP0b-2 的切分；SP0b-2 的结果决定 SP0b-3 是否需要更激进的配额。
 
-### 5.1 SP0b-1：导入基准 + G1/G2/G9/G10（已确认方案）
+### 5.1 SP0b-1：导入基准 + G1/G2/G9/G10（已确认方案；**已实施，见 SP0b-1 规格与计划**——`2026-09-17-xdag-chain-sp0b1-benchmark-and-hardening-design.md` v2 是竣工版，本节保留原方案，与实现不一致处以该规格为准）
 
 **A. `L1ImportBenchmarkTest`（测试侧，黑盒）**
 
@@ -199,21 +199,22 @@ SP0b 切成三个可独立交付的切片，顺序固定：**SP0b-1 基准 + 加
 **B. 一致性检查（G2）与卡死主块（G1）**（设计已由用户于 2026-09-17 逐节确认，细节见 SP0b-1 规格 §3.2–§3.4）
 
 - **G1 根治**：`setMain` 在 `applyBlock` 之前就 `updateBlockRef(block, self)`（结尾那句保留，幂等）。DFS 中途抛异常留下的主块因此 `ref == self`，`unApplyBlock` 能正常处理它；"永远 unwind 不了"的状态不再产生。`ref` 只在本地 `BlockInfo`，不进任何哈希。
-- **G2 标记**：`BlockStore` 新增节点本地键 `LAST_COMPLETED_MAIN`（INDEX 列）：`setMain` **正常走到末尾**时写 `h`（异常路径不写，不在 `finally`）；`unSetMain` 末尾写 `h − 1`；快照导入后写 `snapshotHeight`。不放在 `CHAIN_L1`（免去状态哈希与快照门的排除逻辑）。
-- `ChainConsistencyCheck.run(blockStore, stats, spec, window)`：放在 `BlockchainImpl` 构造器、快照分支与统计加载之后、装配处理器之前。规则：标记缺失 → warn 并初始化为 `nmain`；`标记 < nmain` → 未完成的 `setMain`；扫描 `[max(activation, nmain − window), nmain + 8]` 中 `BI_MAIN` 已置而 `ref == null` 的主块 → 旧版遗留卡死；命中即抛 `IllegalStateException`（`repairMode` 下只记录报告）。`window` 默认 128（`chain.consistency.window`，节点本地）。
+- **G2 标记**：`BlockStore` 新增节点本地键 `LAST_COMPLETED_MAIN`（INDEX 列，as-built 键 `0xb0`）：`setMain` 的两个正常出口写 `h`（异常路径不写，不在 `finally`）；`unSetMain` 末尾写 `max(0, h − 1)`；快照重灌分支写 `xdagStats.nmain`。as-built 另有 `MAIN_IN_FLIGHT`（`0xc0`，op 字节 + 高度）在 `setMain`/`unSetMain` 入口写、正常结束时清，且每次写标记前先持久化 `XdagStats`。不放在 `CHAIN_L1`（免去状态哈希与快照门的排除逻辑）。
+- `ChainConsistencyCheck.run(blockStore, stats, spec, window)`：放在 `BlockchainImpl` 构造器、快照分支与统计加载之后、装配处理器之前。as-built 四条规则（SP0b-1 规格 §3.3）：in-flight 记录；`标记 < nmain` → 未完成的 `setMain`（受窗口约束）；`[max(1, nmain − window), nmain + 64]` 内统计之上的主块；同一扫描内 `BI_MAIN` 已置而 `ref == null` 的主块 → 旧版遗留卡死。扫描**不**按激活高度钳制（主链事实，与 chain 协议无关）；标记缺失 → warn 并初始化为 `nmain`；命中即抛 `IllegalStateException`（`Kernel.enterRepairMode()` 下只记录报告）。`window` 默认 128（`chain.consistency.window`，节点本地）。**检测即停机的启动门已实施**（`ConsistencyGateTest`）。
 
-**C. 修复命令 `XdagCli --repairchain [--dry-run]`**
+**C. 修复命令 `XdagCli --repairchain [dry-run|force|reinit-marker]`（已实施，as-built 见 SP0b-1 规格 §3.4）**
 
-- 离线打开 BLOCK/ADDRESS/CHAIN_L1，按 `ChainL1TestBase` 的方式组装无网络的 `Kernel + BlockchainImpl`（`startCheckMain` 不启动）。
-- 对每个卡死主块 M：`updateBlockRef(M, new Address(M))`（补上 `setMain` 本应写的那一步，`fee` 保持 0）。
-- 目标高度 `target = min(LAST_COMPLETED_MAIN, 最早卡死高度 − 1)`；`unWindMain(getBlockByHeight(target))`。回滚经由钩子成对撤销 `CHAIN_L1` 记录、撤销奖励；块仍在库里，节点启动后 `checkNewMain` 重新确认并重新应用。
-- 结束时重跑 `ChainConsistencyCheck`；`--dry-run` 只打印计划。
-- 测试：用基座人为制造 G1/G2 两种状态（在第 k 个块上抛异常的 handler 得到未完成的 `setMain`；人为把已确认主块的 `ref` 置 null 模拟旧版遗留），验证检查命中、`--dry-run` 不改库、修复后检查通过且 `CHAIN_L1` 与"干净重放"逐字节相等。
+- 模式是位置参数：无参 = 真修复；`dry-run` 只打印计划、不写（唯一例外：这次启动为无标记的旧库初始化了标记）；`force` 允许回滚到比 `chain.consistency.window` 更深的目标；`reinit-marker` 只为降级陷阱存在——不核验、不回滚，把标记改成持久化的 `nmain`，并**拒绝**抹掉 in-flight `unSetMain` 记录。
+- 退出码：**0** = CLEAN / REPAIRED / PLANNED（含 `reinit-marker` 后 re-check clean）；**1** = REFUSED（需要 `force`）；**2** = UNREPAIRABLE（半途 unwind 已开始反向、原始字节缺失、修复后仍不一致、`reinit-marker` 被拒或 re-check 不 clean → 从快照恢复）；**3** = 未启动（未知模式、钱包缺失/锁定/打不开）；**4** = 开库后运行失败（典型：节点仍在跑，RocksDB `LOCK`；打印根因与"先停节点"提示）。
+- 组装：`RocksdbFactory` 开库，`BlockStoreImpl.forNode`（绝不用构造器）+ `AddressStoreImpl` + `OrphanBlockStoreImpl` + `ChainL1Store`，`Kernel.enterRepairMode()`（单向）后 `new BlockchainImpl(kernel)`（构造器里的检查只记录）；钱包只用于构造 `Kernel`，不签任何东西。
+- 步骤：重新扫描 → 若统计之上有主块先 `reconcileTipTo`（把 `nmain`/top 抬到它，否则回滚看不见它）→ 对窗口内每个无 ref 的 `BI_MAIN` 块 `updateBlockRef(M, self)` → `repairUnwindTo(target)`（`unWindMain` + 核验 `nmain == target`）→ 写标记 → re-check。目标 `target = max(0, min(LAST_COMPLETED_MAIN, 最早卡死高度 − 1))`。半途 `unSetMain`：块仍 `BI_MAIN` → 恢复库里的 `info.fee` 后把那一次 `unSetMain` 跑完；已清 → UNREPAIRABLE。
+- 回滚后**不**重新打 `BI_MAIN_CHAIN`（打了会悬在启动 top 之上，下一次分叉会把整条主链回滚到创世）；块仍在库里，但节点只有收到同行**真正新的**块才会重新确认被回滚的高度——孤立修复的节点停在 `target`。
+- 测试：`ChainRepairToolTest`（12）+ `RepairChainCommandTest`（7）+ `XdagCliTest` 两例：未完成 `setMain`（在链接之后的**下一次** `mineMain` 里由 handler 抛异常制造——`checkNewMain` 确认的是上一次 `mineMain` 的主块）、人为置 null 的 ref、统计之上的主块、半途 unwind 两种、深目标/force、dry-run 不改库、修复后重新确认与"干净重放"逐字节相等。
 
 **D. G9 / G10**
 
-- G9：`XdagCliTest` 风格 spy，在临时存储上跑 `makeSnapshot`，断言三目录存在、`SNAPSHOT/CHAIN_L1` 的 `0xFF` 哈希等于源库 `stateHash()`。
-- G10：`ChainL1ReorgPropertyTest`：固定种子集合（默认 8 个，`-Dxdag.reorg.seeds` 可加），每个种子：随机 3–8 个高度、每高度随机 0–6 个块（DEPLOY 新建 / 加入、CALL 命中 / 未命中金库、普通转账、故意低费），随机分叉点与竞争分支长度（保证超越），断言 `sortedKeys` 与全部 value 逐字节等于同种子在新基座上直接 apply 的结果，并比对涉及地址的余额与 nonce；失败时打印种子。
+- G9（已实施）：`MakeSnapshotEndToEndTest` 在基座上跑真实 `makeSnapshot(true)`，三目录的内容按启动路径实际读取的方式核验（BLOCKS 灌进第二个节点后顶主块可按高度读到、ADDRESS 经 `AddressStoreImpl` 余额相等、CHAIN_L1 哈希等于 `stateHash()` 且第二个节点导入后相等）；`--makesnapshot` 不可启动时退出 1。
+- G10（已实施，形态有变）：`ChainL1ReorgPropertyTest` + `ReorgScenario`：种子 1–8（默认跑 2 个，`-Dxdag.reorg.full=true` 跑全部，`-Dxdag.reorg.seeds` 追加），竞争分支在**相同高度**重放同一批付费块，断言 reorg 后 `CHAIN_L1.stateHash()` == 分叉前 == 新基座直接 apply，外加余额/nonce/金库与标志；失败消息带场景。它的余额比对找出并修掉了既有的 `unApplyBlock` 费用除数错误（SP0a 规格 §12.2 G11；不修既有存储，见 §14 R9）。
 
 **任务量估计**：8–10 个 TDD 任务。
 
@@ -514,6 +515,7 @@ brainstorming（子项目 spec，以本文对应章节为起点）→ writing-pl
 | R6 | `canUseInput` 与 `AddressStore` 耦合限制锁外验签覆盖率 | SP0b-2 | SP0b-1 基线后 | 先覆盖块内公钥路径 |
 | R7 | 矿池即排序者（S3）、可组合性引力（S4） | 产品 | v2 | 反 MEV 排序模式与编织锚定留 v2 |
 | R8 | 过渡模式 `subscribeAll` 下单节点承担全部执行 | SP4/运营 | M5 | 多核并行执行不同链；testnet 负载测试 |
+| R9 | `unApplyBlock` 费用反向修复（SP0a 规格 G11，提交 79705de6）不修既有存储：在旧代码上 unwind 过 chain 块的节点留着静默偏低的发送方余额（或偏高的金库），以后可能拒绝同行接受的交易而分歧 | devnet/testnet 运维 | 主网激活前 | 见过这种 reorg 的存储重新同步或从快照重灌；主网无存量（chain 块只在激活后出现）；修复本身无条件生效、不设激活高度 |
 
 ---
 

@@ -10,6 +10,40 @@
 
 ---
 
+## 执行记录（as executed，2026-09-18）
+
+> 本块只记录执行结果与偏离；各任务正文保持计划原样，as-built 细节以 SP0b-1 规格 v2（`docs/superpowers/specs/2026-09-17-xdag-chain-sp0b1-benchmark-and-hardening-design.md`）为准。
+
+**提交（`git log --oneline 4805774e..HEAD`，旧→新）**
+
+| 任务 | 提交 |
+|------|------|
+| T1 | 5a82825a Point a main block at itself before applying it and record setMain completion；63bca8e2 Complete the setMain marker on every normal exit and set child refs before applying；f196557e Polish the setMain marker comments and test the unSetMain guard |
+| T2 | 7f541c84 Add the node-local chain.consistency.window setting；dcc5e0b4 Mark the consistency window as node-local in config and Javadoc |
+| T3 | d9fd5932 Add the read-only main chain consistency check；66cad1c1 Scan the whole main chain in the consistency check and record the in-flight operation |
+| T4 | 0b7ae3e1 Refuse to start on an inconsistent main chain unless in repair mode；3877c1b5 Persist stats before the completion marker and harden the boot consistency gate |
+| T5 | 9e1c52b9 Add the offline chain repair tool: patch stuck refs and unwind to the last complete height；d9c50cb9 Make the chain repair tool reconcile the tip, verify its unwind and report a status；e5f8eb3f Leave the unwound branch un-flagged after a repair and state the peer dependency honestly |
+| T6 | e796aaff Add the --repairchain command；a5ced6fe Open block stores through one production wiring so offline tools read what the node wrote；f996e091 Open the block store through forNode in BlockStoreImplTest；e19e4cb7 Harden --repairchain: refuse in-flight unwind, split exit codes |
+| T7 | 224f1c40 Fail loudly on a snapshot copy error and release read options on a failed RocksDB open |
+| T8 | ace94fb2 Test makeSnapshot end to end across the three snapshot directories；3709e43e Verify snapshot BLOCKS/ADDRESS content and close makeSnapshot's handles；84b2d4aa Polish the repair and snapshot commands after review；de60672b Make the snapshot rerun hint and the bootable verdict honest |
+| T9 | 79705de6 Reverse OUTPUT credits from the persisted fee per output address；ba91968a Add the seeded reorg property test for CHAIN_L1 symmetry；5a698579 Restore the stored fee before finishing an interrupted unwind |
+| T10 | d12181f0 Add the L1 import benchmark and record the baseline（首版 harness）；基线重跑所用的 harness 修订与基线文档重写由基准代理另行提交（本记录写成时尚未提交） |
+| T11 | 规格/文档同步提交（本块所在提交及其后的运维文档提交） |
+
+**偏离计划之处**
+
+- **标记键与 in-flight 记录（T1/T3）**：`LAST_COMPLETED_MAIN` 是 `0xb0`（不是规格 v1 的 `0x7E`），另加 `MAIN_IN_FLIGHT = 0xc0`（op 字节 1 = setMain / 2 = unSetMain + 大端高度）；每次写标记前先 `saveXdagStatus`，`Kernel.testStop` 关库前再存一次；快照重灌分支写 `xdagStats.nmain` 并清 in-flight。
+- **一致性检查（T3）**：四条规则（in-flight、标记落后、统计之上有主块、窗口内无 ref），扫描 `[max(1, nmain − window), nmain + 64]`，不按激活高度钳制，跳过陈旧高度索引；`Report` 五个分量，`describe()` / `describeForBoot()` 分开。
+- **修复命令（T5/T6）**：`--repairchain [dry-run|force|reinit-marker]`（位置参数；`reinit-marker` 为降级陷阱新增），退出码 0/1/2/3/4（Task 6 质量评审后从 0/1/2/3 拆开）；回滚前 `reconcileTipTo`；回滚后不重新打 `BI_MAIN_CHAIN`，节点需要同行的新块才能重新确认；半途 `unSetMain` 单独处理（块仍 `BI_MAIN` → 恢复库里的 `info.fee` 后续完，否则 UNREPAIRABLE）；`BlockStoreImpl.forNode` 成为所有开库的唯一入口（曾因按签名顺序开库而全量报 `INCOMPLETE_BLOCK_DATA_REASON`）。
+- **G9（T8）**：`makeSnapshot` 改为返回 boolean，不可启动 → `--makesnapshot` 退出 1；三目录内容按启动路径实际读取的方式核验；重跑提示指向整个 `SNAPSHOT` 目录；`finally` 关闭句柄。
+- **Task 9 形态变更**：计划里"分叉回滚后 `CHAIN_L1` 只剩 META、再在新分支重新链接"不可行（`confirm()` 在非最佳分支断言 BEST/APPLIED 会失败，高度整体偏移）→ 改为**同高度分支重放**（竞争分支在相同高度重新 link 同一批付费块、每高度主块数相同），性质 = reorg 后 `stateHash()` == 分叉前 == 新基座直接 apply，外加余额/nonce/金库与标志。基座事实：`checkNewMain` 确认的是**上一次** `mineMain` 的主块（`i > 1`），故 handler 故障注入发生在链接之后的下一次 `mineMain`。
+- **G10 发现（T9）**：属性测试的余额半边暴露既有的 `unApplyBlock` 费用除数错误（`fee / outPutNum` 把 OUT 块 link 也算进除数），带代码链的 DEPLOY 与带参数链的 CALL 在 unwind 时每个 OUTPUT 多扣 `L/2`；修为 `amount − info.fee / k`（提交 79705de6，m = 0 逐字节不变；`ChainL1UnwindFeeTest`）。不修既有存储；不设激活高度；不只影响 chain 合约——见 SP0a 规格 §12.2 G11。
+- **Task 10 API 与统计口径修正**：`syncPath` 用 `new BlockWrapper(b, 0)`（计划写的 `(b, ttl, null)` 不是现有构造器）；`confirmed` 每 `LINKS_PER_MAIN = 10` 个付费块出一个主块（不是 2000），其 mean/p50/p95 是**每个主块**的耗时；新增 `calib.emptyMain`（100 个空主块的基座成本）用于把 `confirmed` 拆成伪 PoW 与 setMain/apply；`direct`/`syncPath` 同轮交错并报配对差值（消单调漂移）；报表加 `mean` 列，**阶段占比 = 阶段均值 / direct 均值**（阶段行是 best-of-3 墙钟 / n，本身是均值；除以 direct 的 p50 会因右偏分布高估），不是计划的"中位数占比"；基座改为生产形状 `txHistoryStore == null`（默认 mock 会把每个金额 link 送进 MySQL 失败回退）。数字只在 `docs/benchmarks/2026-09-18-l1-import-baseline.md`。
+- **顺手关闭 G5**：`stopCheckMain()` 经 `stopCleaner()` 停掉 cleaner（`--repairchain` 依赖它退出）。
+- **Task 11**：Step 2 本提交完成；Step 1（全量 `mvn test` + `license:check`）与 Step 3（记忆）由控制方在基准重跑之后执行。
+
+---
+
 ## 0. 约定（每个任务都适用）
 
 ### 0.1 构建与测试命令
@@ -58,7 +92,7 @@ P1 `tryToConnect` 不读 EXT；P5 每个应用块一个 `CHAIN_L1` batch（本�
 - Modify: `src/main/java/io/xdag/core/BlockchainImpl.java`（`setMain`、`unSetMain`、构造器快照分支）
 - Test: `src/test/java/io/xdag/chain/repair/MainCompletionMarkerTest.java`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```java
 package io.xdag.chain.repair;
@@ -159,12 +193,12 @@ public class MainCompletionMarkerTest extends ChainL1TestBase {
 }
 ```
 
-- [ ] **Step 2: 运行，确认失败**
+- [x] **Step 2: 运行，确认失败**
 
 Run: `mvn -q -Dtest=io.xdag.chain.repair.MainCompletionMarkerTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 编译错误 `cannot find symbol: method getLastCompletedMain()`。
 
-- [ ] **Step 3: `BlockStore` 接口与实现**
+- [x] **Step 3: `BlockStore` 接口与实现**
 
 `src/main/java/io/xdag/db/BlockStore.java`，常量区（`TX_HISTORY = (byte) 0xa0` 之后）加：
 
@@ -206,7 +240,7 @@ Expected: 编译错误 `cannot find symbol: method getLastCompletedMain()`。
 
 （`BytesUtils.longToBytes(long, boolean)` / `bytesToLong(byte[], int, boolean)` 已存在于 `io.xdag.utils.BytesUtils`；若签名不同，改用同文件里现有的 8 字节大端编解码。）
 
-- [ ] **Step 4: `setMain` / `unSetMain` / 构造器快照分支**
+- [x] **Step 4: `setMain` / `unSetMain` / 构造器快照分支**
 
 `BlockchainImpl.setMain`：把 `try {` 后的开头改为
 
@@ -243,12 +277,12 @@ Expected: 编译错误 `cannot find symbol: method getLastCompletedMain()`。
             blockStore.saveLastCompletedMain(snapshotHeight);
 ```
 
-- [ ] **Step 5: 运行测试，确认通过**
+- [x] **Step 5: 运行测试，确认通过**
 
 Run: `mvn -q -Dtest=io.xdag.chain.repair.MainCompletionMarkerTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `Tests run: 2, Failures: 0`。再跑 `mvn -q -Dtest='io.xdag.chain.**.*Test,io.xdag.core.*Test' -Dsurefire.failIfNoSpecifiedTests=false test` 全绿（既有 reorg/激活/快照测试不受影响）。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/main/java/io/xdag/db/BlockStore.java src/main/java/io/xdag/db/rocksdb/BlockStoreImpl.java src/main/java/io/xdag/core/BlockchainImpl.java src/test/java/io/xdag/chain/repair/MainCompletionMarkerTest.java
@@ -266,7 +300,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `src/main/java/io/xdag/config/AbstractConfig.java`
 - Test: `src/test/java/io/xdag/config/ChainSpecTest.java`（追加两个测试）
 
-- [ ] **Step 1: 写失败测试**（追加到 `ChainSpecTest`，沿用文件里已有的 `withProperty` 助手）
+- [x] **Step 1: 写失败测试**（追加到 `ChainSpecTest`，沿用文件里已有的 `withProperty` 助手）
 
 ```java
     @Test
@@ -284,12 +318,12 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
     }
 ```
 
-- [ ] **Step 2: 运行，确认失败**
+- [x] **Step 2: 运行，确认失败**
 
 Run: `mvn -q -Dtest=io.xdag.config.ChainSpecTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 编译错误 `cannot find symbol: method getChainConsistencyWindow()`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `ChainSpec.java` 末尾加：
 
@@ -326,12 +360,12 @@ getter：
     }
 ```
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `mvn -q -Dtest='io.xdag.config.*Test' -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 全绿（`ChainSpecTest` 比之前多 2 个）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/main/java/io/xdag/config/spec/ChainSpec.java src/main/java/io/xdag/config/AbstractConfig.java src/test/java/io/xdag/config/ChainSpecTest.java
@@ -348,7 +382,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Create: `src/main/java/io/xdag/chain/repair/ChainConsistencyCheck.java`
 - Test: `src/test/java/io/xdag/chain/repair/ChainConsistencyCheckTest.java`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```java
 package io.xdag.chain.repair;
@@ -461,12 +495,12 @@ public class ChainConsistencyCheckTest extends ChainL1TestBase {
 }
 ```
 
-- [ ] **Step 2: 运行，确认失败**
+- [x] **Step 2: 运行，确认失败**
 
 Run: `mvn -q -Dtest=io.xdag.chain.repair.ChainConsistencyCheckTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 编译错误 `cannot find symbol: class ChainConsistencyCheck`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `src/main/java/io/xdag/chain/repair/ChainConsistencyCheck.java`：
 
@@ -599,12 +633,12 @@ public final class ChainConsistencyCheck {
 
 注意：`markerBehindTipIsAnIncompleteSetMain` 里 `tip-1` 与 `tip` 各出现一次——规则 (1) 与规则 (2) 可能对同一高度各加一条；实现里对同一高度只保留一条（先加的那条），用 `LinkedHashMap<Long, Stuck>` 或在加入前 `stuck.stream().noneMatch(s -> s.height() == h)` 去重。
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `mvn -q -Dtest=io.xdag.chain.repair.ChainConsistencyCheckTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `Tests run: 6, Failures: 0`。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/main/java/io/xdag/chain/repair/ChainConsistencyCheck.java src/test/java/io/xdag/chain/repair/ChainConsistencyCheckTest.java
@@ -622,7 +656,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `src/main/java/io/xdag/core/BlockchainImpl.java`（构造器）
 - Test: `src/test/java/io/xdag/chain/repair/ConsistencyGateTest.java`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```java
 package io.xdag.chain.repair;
@@ -687,12 +721,12 @@ public class ConsistencyGateTest extends ChainL1TestBase {
 }
 ```
 
-- [ ] **Step 2: 运行，确认失败**
+- [x] **Step 2: 运行，确认失败**
 
 Run: `mvn -q -Dtest=io.xdag.chain.repair.ConsistencyGateTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 编译错误 `cannot find symbol: method getConsistencyReport()`。
 
-- [ ] **Step 3: `Kernel` 字段**
+- [x] **Step 3: `Kernel` 字段**
 
 `Kernel.java` 字段区（`chainKindHandlers` 之后）加（类级 Lombok `@Getter @Setter` 生成访问器）：
 
@@ -708,7 +742,7 @@ Expected: 编译错误 `cannot find symbol: method getConsistencyReport()`。
     protected io.xdag.chain.repair.ChainConsistencyCheck.Report consistencyReport;
 ```
 
-- [ ] **Step 4: 构造器接线**
+- [x] **Step 4: 构造器接线**
 
 `BlockchainImpl` 构造器：在 `// Initialize RandomX` 块之后、`// Chain contracts (SP0a): install the hooks` 之前加：
 
@@ -740,12 +774,12 @@ Expected: 编译错误 `cannot find symbol: method getConsistencyReport()`。
 
 import `io.xdag.chain.repair.ChainConsistencyCheck`。
 
-- [ ] **Step 5: 运行测试，确认通过**
+- [x] **Step 5: 运行测试，确认通过**
 
 Run: `mvn -q -Dtest='io.xdag.chain.**.*Test,io.xdag.core.*Test' -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 全绿（`ConsistencyGateTest` 4 个；既有 `BlockchainTest` 等构造 `BlockchainImpl` 的测试在无标记时走"初始化"路径，不受影响）。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/main/java/io/xdag/Kernel.java src/main/java/io/xdag/core/BlockchainImpl.java src/test/java/io/xdag/chain/repair/ConsistencyGateTest.java
@@ -763,7 +797,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `src/main/java/io/xdag/core/BlockchainImpl.java`（新增 `repairUnwindTo`）
 - Test: `src/test/java/io/xdag/chain/repair/ChainRepairToolTest.java`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```java
 package io.xdag.chain.repair;
@@ -926,12 +960,12 @@ public class ChainRepairToolTest extends ChainL1TestBase {
 
 `kernel.getChainL1Store().getRaw(k)`：若 `ChainL1Store` 没有原始读接口，测试改用 `chainStore.stateHash()` 比较（before/after 的哈希相等即可），并删掉 `chainState()`。
 
-- [ ] **Step 2: 运行，确认失败**
+- [x] **Step 2: 运行，确认失败**
 
 Run: `mvn -q -Dtest=io.xdag.chain.repair.ChainRepairToolTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 编译错误 `cannot find symbol: class ChainRepairTool`。
 
-- [ ] **Step 3: `BlockchainImpl.repairUnwindTo`**
+- [x] **Step 3: `BlockchainImpl.repairUnwindTo`**
 
 `BlockchainImpl` 里 `unWindMain` 之后加：
 
@@ -959,7 +993,7 @@ Expected: 编译错误 `cannot find symbol: class ChainRepairTool`。
     }
 ```
 
-- [ ] **Step 4: `ChainRepairTool`**
+- [x] **Step 4: `ChainRepairTool`**
 
 `src/main/java/io/xdag/chain/repair/ChainRepairTool.java`：
 
@@ -1028,12 +1062,12 @@ public final class ChainRepairTool {
 
 注意 `repairUnwindTo` 会经由 `unSetMain` 把标记写到 `height − 1`……最后 `saveLastCompletedMain(target)` 再统一写一次即可。`getBlockByHash(hash, false)` 得到的 `BlockInfo` 足够 `updateBlockRef`。
 
-- [ ] **Step 5: 运行测试，确认通过**
+- [x] **Step 5: 运行测试，确认通过**
 
 Run: `mvn -q -Dtest=io.xdag.chain.repair.ChainRepairToolTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `Tests run: 3, Failures: 0`。若第一个测试在 `confirm(call.block())` 处失败，检查 `repairUnwindTo` 后 `updateNewChain` 是否把 `BI_MAIN_CHAIN` 重新标到了被回滚的分支上（`checkNewMain` 只提升 `BI_MAIN_CHAIN` 块）；若 `updateNewChain(top, true)` 在 `top` 已带 `BI_MAIN_CHAIN` 时提前返回，改为从 `getMaxDiffLink(top, true)` 起调用。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/main/java/io/xdag/chain/repair/ChainRepairTool.java src/main/java/io/xdag/core/BlockchainImpl.java src/test/java/io/xdag/chain/repair/ChainRepairToolTest.java
@@ -1051,7 +1085,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `src/main/java/io/xdag/cli/XdagCli.java`
 - Test: `src/test/java/io/xdag/cli/XdagCliTest.java`（追加）
 
-- [ ] **Step 1: 写失败测试**（追加到 `XdagCliTest`）
+- [x] **Step 1: 写失败测试**（追加到 `XdagCliTest`）
 
 ```java
     @Test
@@ -1077,12 +1111,12 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
                     --repairchain <mode>              unwind to the last complete main height; mode = dry-run|force
 ```
 
-- [ ] **Step 2: 运行，确认失败**
+- [x] **Step 2: 运行，确认失败**
 
 Run: `mvn -q -Dtest=io.xdag.cli.XdagCliTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 编译错误 `cannot find symbol: method repairChain(boolean,boolean)`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `XdagOption.java`：`MAKE_SNAPSHOT("makesnapshot")` 改为 `MAKE_SNAPSHOT("makesnapshot"),` 并追加 `REPAIR_CHAIN("repairchain");`。
 
@@ -1162,12 +1196,12 @@ Expected: 编译错误 `cannot find symbol: method repairChain(boolean,boolean)`
 
 （`BlockStoreImpl` 的参数顺序沿用 `Kernel.testStart` 的写法；`blockchain.stopCheckMain()` 若不存在则省略——repair 模式下未启动。）
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `mvn -q -Dtest='io.xdag.cli.*Test' -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 全绿。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/main/java/io/xdag/cli/XdagOption.java src/main/java/io/xdag/cli/XdagCli.java src/test/java/io/xdag/cli/XdagCliTest.java
@@ -1185,7 +1219,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `src/main/java/io/xdag/db/rocksdb/RocksdbKVSource.java`（`init`）
 - Test: `src/test/java/io/xdag/cli/CopyDirFailureTest.java`、`src/test/java/io/xdag/db/rocksdb/RocksdbInitFailureTest.java`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```java
 package io.xdag.cli;
@@ -1269,12 +1303,12 @@ public class RocksdbInitFailureTest {
 }
 ```
 
-- [ ] **Step 2: 运行，确认失败**
+- [x] **Step 2: 运行，确认失败**
 
 Run: `mvn -q -Dtest='io.xdag.cli.CopyDirFailureTest,io.xdag.db.rocksdb.RocksdbInitFailureTest' -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `CopyDirFailureTest.unreadableSourceFileFails` 失败（当前 `copyFile` 只打印堆栈，不抛）；`RocksdbInitFailureTest` 可能已通过或因 `close()` 触碰已释放对象失败——记录实际结果。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `XdagCli.copyFile` 的 `catch(IOException e)` 改为：
 
@@ -1299,12 +1333,12 @@ Expected: `CopyDirFailureTest.unreadableSourceFileFails` 失败（当前 `copyFi
 
 同样在 `catch (IOException ioe)` 分支加同一段释放。（`Options` 本身由 try-with-resources 释放；`tableCfg`/`LRUCache`/`BloomFilter` 随 `options` 释放。）
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `mvn -q -Dtest='io.xdag.cli.CopyDirFailureTest,io.xdag.db.rocksdb.RocksdbInitFailureTest,io.xdag.cli.*Test' -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 全绿。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/main/java/io/xdag/cli/XdagCli.java src/main/java/io/xdag/db/rocksdb/RocksdbKVSource.java src/test/java/io/xdag/cli/CopyDirFailureTest.java src/test/java/io/xdag/db/rocksdb/RocksdbInitFailureTest.java
@@ -1321,7 +1355,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `src/test/java/io/xdag/chain/l1/ChainL1TestBase.java`（`rootDir`/`storeDir` 对齐）
 - Test: `src/test/java/io/xdag/cli/MakeSnapshotEndToEndTest.java`
 
-- [ ] **Step 1: 基座对齐 `rootDir`**
+- [x] **Step 1: 基座对齐 `rootDir`**
 
 `ChainL1TestBase.setUpLane` 开头的两行改为：
 
@@ -1334,7 +1368,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 跑 `mvn -q -Dtest='io.xdag.chain.**.*Test' ... test` 确认既有基座测试仍全绿。
 
-- [ ] **Step 2: 写失败测试**
+- [x] **Step 2: 写失败测试**
 
 ```java
 package io.xdag.cli;
@@ -1440,12 +1474,12 @@ public class MakeSnapshotEndToEndTest extends ChainL1TestBase {
 }
 ```
 
-- [ ] **Step 3: 运行，确认失败或通过**
+- [x] **Step 3: 运行，确认失败或通过**
 
 Run: `mvn -q -Dtest=io.xdag.cli.MakeSnapshotEndToEndTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 首次运行可能因 `makeSnapshot` 用 `getRootDir() + "/rocksdb/xdagdb/..."` 路径而与基座目录不一致失败——Step 1 的对齐正是为此；若仍失败，把失败信息原样记入报告后修正测试的路径假设（不改 `makeSnapshot` 的路径推导）。`tearDownChain` 在 `dbFactory == null` 时应跳过关闭（基座已判空）。
 
-- [ ] **Step 4: 通过后提交**
+- [x] **Step 4: 通过后提交**
 
 ```bash
 git add src/test/java/io/xdag/chain/l1/ChainL1TestBase.java src/test/java/io/xdag/cli/MakeSnapshotEndToEndTest.java
@@ -1462,7 +1496,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Create: `src/test/java/io/xdag/chain/l1/ReorgScenario.java`
 - Test: `src/test/java/io/xdag/chain/l1/ChainL1ReorgPropertyTest.java`
 
-- [ ] **Step 1: 场景生成器**
+- [x] **Step 1: 场景生成器**
 
 ```java
 package io.xdag.chain.l1;
@@ -1532,7 +1566,7 @@ public final class ReorgScenario {
 }
 ```
 
-- [ ] **Step 2: 属性测试**
+- [x] **Step 2: 属性测试**
 
 ```java
 package io.xdag.chain.l1;
@@ -1764,12 +1798,12 @@ public class ChainL1ReorgPropertyTest extends ChainL1TestBase {
 
 如果 `kernel.getChainL1Store().getRaw(k)` 不存在，比较改用 `chainStore.stateHash()`（相等即通过），并只在失败时打印键集差异。
 
-- [ ] **Step 3: 运行**
+- [x] **Step 3: 运行**
 
 Run: `mvn -q -Dtest=io.xdag.chain.l1.ChainL1ReorgPropertyTest -Dsurefire.failIfNoSpecifiedTests=false test`（默认 2 个种子，约 1–2 分钟）；再 `-Dxdag.reorg.full=true` 跑全部 8 个一次并记录用时。
 Expected: 全部通过。失败时输出包含 `ReorgScenario{seed=…}` 全文；先用 `-Dxdag.reorg.seeds=<seed>` 复现，再判断是场景生成器的非法组合（例如同一发送方余额耗尽 → `importBuilt` 断言失败）还是真正的对称性缺陷；前者修生成器（例如把每个发送方每场景的操作数限制在 8 以内），后者停下并报告。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add src/test/java/io/xdag/chain/l1/ReorgScenario.java src/test/java/io/xdag/chain/l1/ChainL1ReorgPropertyTest.java
@@ -1787,7 +1821,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Create: `src/test/java/io/xdag/chain/bench/ChainL1ImportBenchmarkTest.java`
 - Create: `docs/benchmarks/2026-09-xx-l1-import-baseline.md`（日期用实际运行日）
 
-- [ ] **Step 1: 工作负载生成器**
+- [x] **Step 1: 工作负载生成器**
 
 ```java
 package io.xdag.chain.bench;
@@ -1877,7 +1911,7 @@ public final class BenchWorkload {
 }
 ```
 
-- [ ] **Step 2: 基准测试**
+- [x] **Step 2: 基准测试**
 
 ```java
 package io.xdag.chain.bench;
@@ -2128,7 +2162,7 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
 }
 ```
 
-- [ ] **Step 3: 首次运行与修正**
+- [x] **Step 3: 首次运行与修正**
 
 Run: `mvn -q -Dxdag.bench=true -Dxdag.bench.blocks=2000 -Dtest=io.xdag.chain.bench.ChainL1ImportBenchmarkTest -Dsurefire.failIfNoSpecifiedTests=false test`（先小规模跑通）。
 Expected: 通过并打印表格。常见修正：
@@ -2139,7 +2173,7 @@ Expected: 通过并打印表格。常见修正：
 
 然后全量：`mvn -q -Dxdag.bench=true -Dtest=io.xdag.chain.bench.ChainL1ImportBenchmarkTest -Dsurefire.failIfNoSpecifiedTests=false test`。默认不带 `-Dxdag.bench=true` 时确认该类被跳过（surefire 报告 `Skipped: 1`）。
 
-- [ ] **Step 4: 基线文档**
+- [x] **Step 4: 基线文档**
 
 `docs/benchmarks/<yyyy-mm-dd>-l1-import-baseline.md`：
 
@@ -2167,7 +2201,7 @@ Expected: 通过并打印表格。常见修正：
 <哪一段最大；锁外预验证能覆盖的比例；syncPath 相对 direct 的重解析开销>
 ```
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/test/java/io/xdag/chain/bench/BenchWorkload.java src/test/java/io/xdag/chain/bench/ChainL1ImportBenchmarkTest.java
@@ -2191,7 +2225,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 Run: `mvn -q license:check` → 退出 0；`mvn -q test` → 读 `target/surefire-reports/*.txt` 汇总 0 失败 0 错误（基准类 Skipped 1）。
 
-- [ ] **Step 2: 规格同步**
+- [x] **Step 2: 规格同步**
 
 SP0a 规格 §12.2：G1/G2/G7/G8/G9/G10 行的"影响与现状"末尾追加"**已关闭（SP0b-1）**：<一句话指向实现类/测试类>"。总体设计 §5.1 标题后加"（已实施，见 SP0b-1 规格与计划）"。`docs/XDAGJ_SNAPSHOT_zh.md` 新增一节"启动一致性检查与 `--repairchain`"：两种失败形态、报错示例、`--repairchain dry-run` / `--repairchain` / `--repairchain force` 的含义与退出码、修复后节点自行重新确认。`.claude/docs/chain-l1-foundation.md` 增补 §9"主链完整性：`LAST_COMPLETED_MAIN`、`ChainConsistencyCheck`、`ChainRepairTool`"。
 
