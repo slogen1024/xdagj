@@ -213,7 +213,7 @@ SP0b 切成三个可独立交付的切片，顺序固定：**SP0b-1 基准 + 加
 
 **D. G9 / G10**
 
-- G9（已实施）：`MakeSnapshotEndToEndTest` 在基座上跑真实 `makeSnapshot(true)`，三目录的内容按启动路径实际读取的方式核验（BLOCKS 灌进第二个节点后顶主块可按高度读到、ADDRESS 经 `AddressStoreImpl` 余额相等、CHAIN_L1 哈希等于 `stateHash()` 且第二个节点导入后相等）；`--makesnapshot` 不可启动时退出 1。
+- G9（已实施）：`MakeSnapshotEndToEndTest` 在基座上跑真实 `makeSnapshot(false)`，三目录的内容按启动路径实际读取的方式核验（BLOCKS 灌进第二个节点后顶主块可按高度读到、ADDRESS 经 `AddressStoreImpl` 余额相等、CHAIN_L1 哈希等于 `stateHash()` 且第二个节点导入后相等）；`--makesnapshot` 不可启动时退出 1。
 - G10（已实施，形态有变）：`ChainL1ReorgPropertyTest` + `ReorgScenario`：种子 1–8（默认跑 2 个，`-Dxdag.reorg.full=true` 跑全部，`-Dxdag.reorg.seeds` 追加），竞争分支在**相同高度**重放同一批付费块，断言 reorg 后 `CHAIN_L1.stateHash()` == 分叉前 == 新基座直接 apply，外加余额/nonce/金库与标志；失败消息带场景。它的余额比对找出并修掉了既有的 `unApplyBlock` 费用除数错误（SP0a 规格 §12.2 G11；不修既有存储，见 §14 R9）。
 
 **任务量估计**：8–10 个 TDD 任务。

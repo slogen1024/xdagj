@@ -68,7 +68,7 @@
 
 从 SP0b-1 起，节点每次启动都会先核对主链的完整性（`ChainConsistencyCheck`，只读），核对不过就**拒绝启动**、不自动改任何状态；修复只由运维用 `--repairchain` 显式触发。核对依赖两个节点本地的标记（不进任何哈希、不随快照导出）：`setMain`/`unSetMain` 正常结束时写的"最后一个完整高度"，以及两者一进入就写、正常结束才清掉的"进行中"记录。
 
-**报错长什么样**（终端上看到的就是这一段，日志里同样有一份；高度与哈希是示例）：
+**报错长什么样**（这段会以 `Uncaught exception during kernel startup:` 为前缀打到 stderr、后面还跟一份 Java 栈迹，日志里同样有一份；高度与哈希是示例）：
 
 ```
 main chain consistency: nmain=1207, lastCompletedMain=1206, 1 stuck main block(s):

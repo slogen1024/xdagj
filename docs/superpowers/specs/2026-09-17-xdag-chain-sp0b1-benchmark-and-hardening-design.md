@@ -46,7 +46,7 @@
 
 > **偏差**：`confirmed` 每 `LINKS_PER_MAIN = 10` 个付费块出一个主块（不是 2000），并新增 `calib.emptyMain` 校准行；`direct` 与 `syncPath` 同轮**交错**并报**配对差值**；报表多一列 `mean`，阶段占比按**均值 / 均值**算而不是"中位数占比"；`syncPath` 用 `new BlockWrapper(b, 0)`；`confirmed.*` 与 `calib.emptyMain` 行的 mean/p50/p95 是**每个主块**的耗时，不是每个付费块。本节描述基线重跑所用的版本（d12181f0 是首版 harness，基准代理随后修订）。数字一律见基线文档。
 
-- 继承 `ChainL1TestBase`；`@Before` 里 `assumeTrue("set -Dxdag.bench=true …", Boolean.getBoolean("xdag.bench"))`，默认 Skipped，不进 CI 默认路径；无新依赖。参数 `-Dxdag.bench.senders`（默认 64）、`.blocks`（20,000；上限 `MAX_BLOCKS = 60,000`——条目 n 的时间戳是 `txTime() + n`，必须留在下一个主块关闭的同一纪元内）、`.seed`（20260917）、`.mix`（`"60,25,10,5"` = `PLAIN` / `CALL_INLINE` / `CALL_CHAIN` / `DEPLOY` 的百分比）。
+- 继承 `ChainL1TestBase`；`@BeforeClass benchGate()` 里 `assumeTrue("set -Dxdag.bench=true to run the import benchmark", Boolean.getBoolean("xdag.bench"))`（**类级**门：普通 `mvn test` 在超类 `@Before` 建基座之前就跳过整个类），四个参数也在那里读进静态字段；默认 Skipped，不进 CI 默认路径；无新依赖。参数 `-Dxdag.bench.senders`（默认 64）、`.blocks`（20,000；必须在 `1..MAX_BLOCKS − 1` = 1..59,999——条目 n 的时间戳是 `txTime() + n`，必须留在下一个主块关闭的同一纪元内）、`.seed`（20260917）、`.mix`（`"60,25,10,5"` = `PLAIN` / `CALL_INLINE` / `CALL_CHAIN` / `DEPLOY` 的百分比）。
 - **生产形状**：`beforeBlockchain` 里 `kernel.setTxHistoryStore(null)`——没有开 `node.transaction.history.enable` 的节点就是这样，`onNewTxHistory` 直接返回；基座默认的 Mockito mock 会让 `saveTxHistory` 返回 false，把每个金额 link 送进 MySQL 失败回退（WARN + INFO + 一次 RocksDB put），那不是节点的路径。报表头与 JSON 都标 `txHistoryStore=null`。
 - `BenchWorkload`（同包）：一趟带种子的 `Random` 生成 `(chunks…, paying block)` 条目列表（`Item(kind, chunks, block)`）；每个发送方的 nonce 按条目顺序发放，按条目顺序导入（或从主块 link）即满足 `applyBlock` 的严格 per-sender nonce 递增。CALL/DEPLOY 的目标链由 `prepareChain()` 在计时前部署并确认的一条链提供，DEPLOY 复用同一份代码（`sharedCodeHash`）。先全部构建到内存再计时。
 - 三个测量路径，各 `ROUNDS = 3` 轮、每轮 `freshFixture()` 新基座 + `prepareChain()`：
@@ -91,7 +91,7 @@ record Stuck(long height, Bytes32 hash, String reason) {}
 static Report run(BlockStore blockStore, XdagStats stats, ChainSpec spec, int window);
 ```
 
-- **调用点**：`BlockchainImpl` 构造器——快照重灌分支或"加载既有状态"分支之后、RandomX 初始化之后、装配 `ChainL1Processor` 之前；两条启动路径都已装好 `xdagStats`，都还没有任何东西能确认一个块。`markerInitialized` → 构造器把 `report.marker()` 写回库（只此一次，写的就是检查采用的值）；每次都 `kernel.recordConsistencyReport(report)`；`!clean()` 时，`kernel.isRepairMode()`（`Kernel.enterRepairMode()` 单向进入，没有生成的 setter）只 `log.warn`，否则 `log.error` 并抛 `IllegalStateException(report.describeForBoot())`——`XdagCli.start()` 捕获后打印 `getMessage()` 退出 −1，运维在终端看到的正是带修复提示的那一段。clean 时 `log.info` 报告（每次启动都把 nmain 与标记留在日志里）。
+- **调用点**：`BlockchainImpl` 构造器——快照重灌分支或"加载既有状态"分支之后、RandomX 初始化之后、装配 `ChainL1Processor` 之前；两条启动路径都已装好 `xdagStats`，都还没有任何东西能确认一个块。`markerInitialized` → 构造器把 `report.marker()` 写回库（只此一次，写的就是检查采用的值）；每次都 `kernel.recordConsistencyReport(report)`；`!clean()` 时，`kernel.isRepairMode()`（`Kernel.enterRepairMode()` 单向进入，没有生成的 setter）只 `log.warn`，否则 `log.error` 并抛 `IllegalStateException(report.describeForBoot())`——`XdagCli.start()` 捕获后打印 `getMessage()` 退出 −1，运维在终端看到的正是带修复提示的那一段。clean 时 `log.info` 报告（每次启动都把 nmain 与标记留在日志里）。快照重灌分支**自己写标记**（`BlockchainImpl` 构造器：标记 = `xdagStats.nmain`，随后 `clearMainInFlight()`），所以从快照启动的节点永远不会报 `markerInitialized`。
 - **规则**（每高度只报一条，先到先得；结果按高度排序）：
   1. **in-flight**：`MAIN_IN_FLIGHT` 存在 → `stuck += (h, "setMain in flight when the node stopped")` 或 `"unSetMain in flight …"`，`inFlightUnwind = (op == 2)`。先查：它点名节点死在哪个高度，而且是半途 `unSetMain` 留下的唯一证据（那种形状单看标记只是 `marker > nmain` 的 warn）。
   2. **标记落后**：`marker < nmain` → `h ∈ [max(marker + 1, nmain − window), nmain]`，reason `setMain incomplete (completion marker M is behind persisted nmain N)`。受窗口约束，远远落后的标记不会枚举整条链。`marker > nmain + 64` 只 `log.warn`（统计滞后）。
@@ -114,7 +114,7 @@ static Report run(BlockStore blockStore, XdagStats stats, ChainSpec spec, int wi
 | 顺序 | 条件 | `Status` / 动作 | 退出码 |
 |------|------|-----------------|--------|
 | 1 | 报告 clean | `CLEAN`（"nothing to repair"） | 0 |
-| 2 | `inFlightUnwind`（in-flight op = unSetMain） | 见下"半途 unwind"：可续 → 续完后 re-check（`REPAIRED` / `UNREPAIRABLE`）；不可续 → `UNREPAIRABLE`（`INTERRUPTED_UNWIND_REASON`），`force` 也不能越过 | 0 / 2 |
+| 2 | `inFlightUnwind`（in-flight op = unSetMain） | 见下"半途 unwind"：可续 → **dry-run 只打印计划并返回 `PLANNED`（0）**，否则续完后 re-check（`REPAIRED` / `UNREPAIRABLE`）；不可续 → `UNREPAIRABLE`（在 dry-run 判定**之前**，所以 dry-run 也退 2），`force` 也不能越过 | 0 / 2 |
 | 3 | `target < tip − window` 且非 `force` | `REFUSED`（"target … is more than … height(s) below the tip …; pass --force to unwind that far"）；**在 dry-run 返回之前判**，所以 dry-run 也会告诉你需要 force | 1 |
 | 4 | `dry-run` | `PLANNED`：打印计划，什么都不写——唯一例外是这次启动为无标记的旧库初始化了标记，`dryRunNote` 从 kernel 上的**启动**报告读 `markerInitialized` 并如实说明 | 0 |
 | 5 | 否则 | `reconcileTipTo`（若统计之上有主块）→ `patchStuckRefs` → `repairUnwindTo(target)` → `saveLastCompletedMain(target)` → `recheck`：clean → `REPAIRED`；否则 `UNREPAIRABLE`（`STILL_INCONSISTENT_REASON`） | 0 / 2 |
@@ -134,7 +134,7 @@ static Report run(BlockStore blockStore, XdagStats stats, ChainSpec spec, int wi
 
 - **G7**：`XdagCli.copyFile` 捕获 `IOException` 后抛 `IllegalStateException("snapshot copy failed: <src> -> <dst>", e)`；`copyDir` 传播。`makeSnapshot` 把 `SNAPSHOT/ADDRESS` 的拷贝失败（任何 `RuntimeException`）报成 `address snapshot NOT written: …`，继续导出 `CHAIN_L1`、照常打印高度与 next start frame，末行给出处置，并返回 `false`。
 - **G8**：`RocksdbKVSource.init()` 的 `ReadOptions` 在 `try` 内创建，`finally` 里 `!alive` 即释放；`alive` 保持 false，对象可再次 `init()`。**残留**：`init()` 里的 `LRUCache(32 MiB)` 与 `BloomFilter(10, false)` 从未释放（成功/失败路径皆然），不在本 SP。
-- **G9**：`MakeSnapshotEndToEndTest`（`io.xdag.cli`）在基座上生成一条已确认的链，`spy(new XdagCli())` + `setConfig` 指向该存储，跑 `makeSnapshot(true)`：
+- **G9**：`MakeSnapshotEndToEndTest`（`io.xdag.cli`）在基座上生成一条已确认的链，用**未经 mock 的 `new XdagCli()`**（`makeSnapshot` 以下不打桩）+ `setConfig` 指向该存储，跑 `makeSnapshot(false)`：
   - 返回 `true`；输出含 `snapshot height: <h>`、`next start frame: …`、`chain state snapshot written to …`；三目录存在。
   - **内容按启动路径实际读取的方式核验**（不只看目录存在）：`SNAPSHOT/BLOCKS` 用启动同款 `SnapshotStoreImpl.saveSnapshotToIndex` 灌进第二个节点的块库后，`getBlockByHeight(h)` 读到的正是源库的顶主块（启动就是不加保护地解引用这一读）；`SNAPSHOT/ADDRESS` 经 `AddressStoreImpl` 打开，矿工余额与源库相等；`SNAPSHOT/CHAIN_L1` 记录的哈希等于源库 `stateHash()`，拷到第二个节点后 `ChainL1SnapshotGate.checkAndImport` 通过、`stateHash` 相等、链存在。
   - 第二个用例在 `SNAPSHOT/ADDRESS/CURRENT` 处放一个目录制造拷贝失败：返回 `false`、打印 `address snapshot NOT written` 与出错文件、`CHAIN_L1` 仍导出、高度仍打印、末行指明删除**整个** `SNAPSHOT` 目录后重跑。
@@ -148,7 +148,7 @@ static Report run(BlockStore blockStore, XdagStats stats, ChainSpec spec, int wi
 - 种子：默认跑 2 个（约 20 s）；`-Dxdag.reorg.full=true` 跑 1..8（约 1 min）；`-Dxdag.reorg.seeds=a,b,c` 追加（格式错误会点名这条性质）。每条断言消息都带场景（`ReorgScenario.toString()`），凭报告即可复现。
 - 生成器 `ReorgScenario.generate(seed)`：**纯数据**——按主块高度分组的随机操作序列（`DEPLOY_NEW` / `DEPLOY_JOIN` / `CALL_HIT` / `CALL_MISS` / `PLAIN` / 低费 / 坏 gas 等）+ 竞争分支额外主块数的上界；同高度内步骤顺序**就是 link 顺序**，按发送方稳定排序以满足 `applyBlock` 的严格 per-sender nonce；`chainRef` 只索引同一顺序里**之前**部署的链。可行性由构造保证（`SENDERS` 里 4 个注资 500 XDAG 的密钥、每操作 ≤ ~1.3 XDAG、≤ 8 × 6 = 48 操作、每高度 ≤ `MAX_OPS` 个付费块）。
 - 一个种子的执行：
-  1. 基座 A：4 个空主块、记分叉点，然后逐高度 `mineMain(refs)` + `confirm` 所需的确认，记录每高度的 refs 与主块数；取 `appliedHash = chainStore.stateHash()` 与余额快照（发送方余额/nonce、金库、挖矿密钥余额）。
+  1. 基座 A：5 个空主块，最后一个作为分叉点，然后逐高度 `mineMain(refs)` + `confirm` 所需的确认，记录每高度的 refs 与主块数；取 `appliedHash = chainStore.stateHash()` 与余额快照（发送方余额/nonce、金库、挖矿密钥余额）。
   2. 分叉：`rewindTo(forkPoint)`，在竞争分支上重建**同样的高度**——`mineMain(refs_h, false)` + `count_h − 1` 个空主块——再继续挖空分支主块直到 top 翻转（有界）。节点回滚旧分支的每个主块（unapply 全部付费块）并应用新分支（在相同高度重新 apply 它们）：这就是被测的对称性。
   3. 断言 (a) 旧主块不再 `BI_MAIN`、场景高度上的分支主块是；(b) 每个付费块 `BI_APPLIED`；(c) `stateHash() == appliedHash`；(d) 余额/nonce/金库等于分叉前快照。
   4. 基座 B：新基座、同种子发送方、5 个空主块、同样 apply；断言 (e) `stateHash() == appliedHash`——A 的分叉前状态就是直接 apply 的状态（RFC 6979 签名 + 挖矿时间线从基座常量重启 ⇒ 每个付费块跨运行逐字节相同；`forkSalt` 跨新基座保留已在测试里注明）。
@@ -182,6 +182,7 @@ static Report run(BlockStore blockStore, XdagStats stats, ChainSpec spec, int wi
 ## 5. 文件清单（as-built）
 
 **改动**：`core/BlockchainImpl.java`（`setMain` 提前 `updateBlockRef` + 两处正常出口写统计与标记 + in-flight、`unSetMain` 标记/门/非主块守卫、`applyBlock` 子块 ref、`unApplyBlock` 费用反向、构造器一致性门与快照分支标记、`reconcileTipTo`、`repairUnwindTo`、`stopCleaner`）、`db/BlockStore.java` + `db/rocksdb/BlockStoreImpl.java`（两个标记的读写、`forNode`）、`db/rocksdb/RocksdbKVSource.java`（G8）、`Kernel.java`（`enterRepairMode` / `recordConsistencyReport`、`testStop` 存统计、经 `forNode` 开库）、`cli/XdagCli.java` + `cli/XdagOption.java`（`--repairchain`、`makeSnapshot` 返回值/句柄/失败行/重跑提示、G7）、`config/AbstractConfig.java` + `config/spec/ChainSpec.java`（`chain.consistency.window`，节点本地）。
+**改动（测试）**：`chain/l1/ChainL1TestBase.java`（`beforeBlockchain` 钩子、`releaseStores()`、`tearDownChain` → `stopCheckMain`、rootDir/storeDir/wallet 对齐）、`chain/l1/ChainL1ProcessorTest.java`、`cli/XdagCliTest.java`、`config/ChainSpecTest.java`、`db/store/BlockStoreImplTest.java`、`db/SnapshotStoreTest.java`，以及 `forNode` 迁移：`consensus/SyncTest.java`、`core/BlockchainTest.java`、`core/ExtraBlockTest.java`、`core/RandomXSyncTest.java`、`core/RewardTest.java`。
 **新增**：`chain/repair/{ChainConsistencyCheck, ChainRepairTool}.java`；测试 `chain/bench/{ChainL1ImportBenchmarkTest, BenchWorkload}.java`、`chain/repair/{ChainConsistencyCheckTest, ConsistencyGateTest, ChainRepairToolTest, MainCompletionMarkerTest}.java`、`chain/l1/{ChainL1ReorgPropertyTest, ReorgScenario, ChainL1UnwindFeeTest}.java`、`cli/{MakeSnapshotEndToEndTest, CopyDirFailureTest, RepairChainCommandTest}.java`、`db/rocksdb/RocksdbInitFailureTest.java`、`db/store/BlockStoreWiringTest.java`；`docs/benchmarks/2026-09-18-l1-import-baseline.md`。
 **v1 列了但未改**：`chain/l1/ChainL1SnapshotGate.java`（标记由 `BlockchainImpl` 的快照分支写，快照门不碰它）。
 
