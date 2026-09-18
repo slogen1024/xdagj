@@ -1,7 +1,7 @@
 # L1 导入基准基线（SP0b-1）
 
 - 日期 / 机器：2026-09-18（第二次运行，08:27–08:47）/ Apple M1 Pro，8 核，16 GiB（`hw.memsize` = 17179869184），macOS 15.7.4（Darwin 24.6.0）/ JDK `openjdk version "21.0.12" 2026-07-21 LTS`（Temurin-21.0.12+8-LTS）
-- 代码：d12181f0 + 本次基准修正（`BenchWorkload`、`ChainL1ImportBenchmarkTest`、`ChainL1TestBase.tearDownChain`；见文末"修订记录"）。`src/main` 未动。
+- 代码：0500e106（在 d12181f0 之上的基准修正：`BenchWorkload`、`ChainL1ImportBenchmarkTest`、`ChainL1TestBase.tearDownChain`；见文末"修订记录"）。`src/main` 未动。
 - 命令：`mvn -q -Dxdag.bench=true -Dtest=io.xdag.chain.bench.ChainL1ImportBenchmarkTest -Dsurefire.failIfNoSpecifiedTests=false test`（全部默认参数，未缩减 `blocks`）
 - 负载：senders=64, blocks=20000（PLAIN 12075 / CALL_INLINE 4975 / CALL_CHAIN 1943 / DEPLOY 1007）, chunks=5829, mix=60/25/10/5, seed=20260917；sender 密钥由 seed 派生（sha256("bench-sender"‖seed‖i)），所以同 seed/senders/blocks/mix 下付费块与 chunk 跨轮、跨次逐字节相同（RFC 6979）。`confirmed` 每个主块链接 10 个付费块 → 每轮 2000 个链接主块 + 1 个空主块（最后一个付费块要再多一个主块才 `BI_APPLIED`），`confirmedMainsPerRound=2001`。
 - 耗时：mvn 墙钟 19 min 45 s（08:27:34 → 08:47:19；surefire `Time elapsed: 1182 s`）
@@ -56,25 +56,27 @@ json: target/bench/l1-import-20260918-084718.json
 - `direct.*`：网络形态的块（从原始 512 字节解析出来、带 `XdagBlock`）直接进 `BlockchainImpl.tryToConnect`；p50/p95 只统计付费块。表中行的顺序就是运行顺序：第 r 轮先后跑 direct 与 syncPath 两条腿，偶数轮 direct 先、奇数轮 syncPath 先，每条腿一个全新基座。
 - `syncPath.*`：走 `SyncManager.validateAndAddNewBlock(new BlockWrapper(b, 0))`。注意重解析发生在 `SyncManager.importBlock`（`tryToConnect(new Block(new XdagBlock(wrapper.getBlock().getXdagBlock().getData().toArray())))`），不是 `validateAndAddNewBlock` 开头的 `parse()`——对已解析的块它是空操作。
 - `confirmed.*`：导入 + 每 10 个付费块挖一个主块（基座伪 PoW）+ `checkMain`，最后再挖空主块直到最后一个付费块 `BI_APPLIED`，含 `setMain`/`applyBlock`。**此行与 `calib.emptyMain` 的 mean/p50/p95 是每个主块的耗时（`mineMain` 含 `checkMain`），不是每块；blocks/s 的分母是付费块 + chunk = 25829，不含 2001 个主块。**
-- `calib.emptyMain`：同一基座连挖 100 个**空**主块（找 nonce + 导入主块 + `checkMain` 但没有东西可 apply），用来从 `confirmed` 里扣掉伪 PoW 的开销。
+- `calib.emptyMain`：在一个只含 `prepareChain` 那几个块的全新基座上连挖 100 个**空**主块（找 nonce + 导入主块 + `checkMain` 但没有东西可 apply），用来从 `confirmed` 里扣掉伪 PoW 的开销。它跑在小链上而 `confirmed` 的主块跑在最多 25829 块的链上，扣减仍然成立：伪 PoW 的接受判据（`calculateCurrentBlockDiff` 落在难度带内）不读存储、与链长和链接数无关，500 块的冒烟运行复现出 97.3 ms（对比本次 98.3 ms）。
 - `phase.*`：在最后一份负载上单独重放某一阶段，只做归因，不是共识路径。`persist.first` 是往空的 scratch 库里写的第一遍（所有键都是新键，sums 数组首次创建）；`persist` 是三遍取最好（第 2、3 遍覆盖同样的键）。
 
 ## 阶段占比（均值 ÷ 均值：`direct` 每付费块均值 = 100%）
 
 `direct` 三轮 mean 的中位数 = 460.2 µs（`direct.r2`；三轮 486.6 / 451.0 / 460.2）。阶段行本身就是均值，所以占比一律用均值除均值——分布右偏（p50 363 vs p95 594），用 p50 做分母会把每个占比抬高约四分之一。
 
+**parse 不在这 100% 里。** `direct` 交给 `tryToConnect` 的是已解析的块（`new Block(new XdagBlock(bytes))` 在构造时就 `parse()` 了），而 `tryToConnect` 内部从不解析——锁内只有 `canUseInput`、`checkNewMain` 与 `saveBlock` 等；所以 parse 的 15.4 µs 落在锁外、在 460.2 µs 之外（"配对差值"一节里 syncPath 比 direct 多出的 ≈18 µs 正是这一次重解析）。下面把它单列为锁前一行，只拿 signature / refLookup / persist / 其余 分 100%。
+
 | 阶段 | 均值 µs/付费块 | 占比 |
 |------|--------------|------|
-| parse（`new Block(new XdagBlock(bytes))`，含算哈希） | 15.4 | 3.4% |
+| （锁前）parse（`new Block(new XdagBlock(bytes))`，含算哈希；不计入 100%） | 15.4 | — |
 | signature（`canUseInput` → `verifiedKeys()` 的 ECDSA 验签） | 109.2 | 23.7% |
 | refLookup（对块链接做 `getBlockInfoByHash`）：1943 次 × 13.8 µs/次 = 26.8 ms ÷ 20000 块 | 1.3 | 0.3% |
 | persist（`BlockStore.saveBlock`，三遍取最好） | 217.4 | 47.2% |
-| 其余（锁内校验/难度/孤块池/统计） | 差值 116.9 | 25.4% |
+| 其余（锁内校验/难度/孤块池/统计） | 差值 132.3 | 28.7% |
 
 说明：
 
 - refLookup 对本负载**可忽略**：只有 CALL_CHAIN（1943 块，9.7%）的付费块带块链接（chunk 链头，每块一个），PLAIN/CALL_INLINE/DEPLOY 的输入输出都是地址链接，不查块库；1943 次查询共 26.8 ms，**每次 13.8 µs**（热的、命中的键：重放前已把负载导入过一次，查的不是布隆过滤器直接挡掉的未命中）。链接密集的负载要按每次查询 13.8 µs 重新算。
-- persist 是**下界**：scratch 库是空的、三遍取最好；第一遍 246.8 µs（占 53.6%，此时"其余"降到 87.5 µs / 19.0%）。`saveBlock` 每块做 **8 次 put + 4 次 get**：`timeSource.put`（TIME 索引）+ `blockSource.put`（512 字节）+ `saveBlockSums`（4 个 sums 键，每个 get + put 一个 Java 序列化的 4096 字节数组，读改写）+ `saveBlockInfo`（`HASH_BLOCK_INFO` put + 高度键 put，后者无条件执行）——每导入一个 512 字节的块约写 16 KB。
+- persist 是**下界**：scratch 库是空的、三遍取最好；第一遍 246.8 µs（占 53.6%，此时"其余"降到 102.9 µs / 22.4%）。还有一层下界：重放时 `saveBlock` 拿到的 `BlockInfo` 直接来自 `parse()`，没有 `tryToConnect` 填进去的 ref / 难度 / 标志，序列化出来比真实路径小。`saveBlock` 每块做 **8 次 put + 4 次 get**：`timeSource.put`（TIME 索引）+ `blockSource.put`（512 字节）+ `saveBlockSums`（4 个 sums 键，每个 get + put 一个 Java 序列化的 4096 字节数组，读改写）+ `saveBlockInfo`（`HASH_BLOCK_INFO` put + 高度键 put，后者无条件执行）——每导入一个 512 字节的块约写 16 KB。
 - "其余"里的东西（都在 `synchronized tryToConnect` 内）：时间戳区间与孤块池上限检查、`isExist`/`isExistInMem`、链接校验（地址链接查 AddressStore 的余额/费用与 nonce）、`removeOrphan`、每次导入都调一次 `checkNewMain()`（从 top 往回走到上一个 `BI_MAIN`）、难度计算与 top/统计更新、孤块池写入，以及 `removeOrphan` → `OrphanBlockStoreImpl.deleteFromQueue` 每次的一条队列统计 INFO 日志（见"注意事项"）。本次 `txHistoryStore == null`，"其余"里不再含交易历史回退。
 
 ## direct 与 syncPath：配对差值
@@ -104,7 +106,7 @@ json: target/bench/l1-import-20260918-084718.json
 ## 结论（给 SP0b-2 的输入）
 
 1. **最大的一段是 persist（47.2%，且是下界；第一遍 53.6%）**，其次是"其余"锁内逻辑（25.4%）和验签（23.7%）；解析 3.4%，链接查询 0.3%（每次 13.8 µs，本负载链接太少）。想提高单节点导入吞吐，先动 `saveBlock`：它对每块做 8 次 put + 4 次 get（其中 `saveBlockSums` 是 4 个 4 KB 数组的读改写），合并成一个 WriteBatch / 去掉每块的 sums 读改写是最直接的目标；其次才是"其余"里每次导入都做的 `checkNewMain()` 回走与孤块池日志。
-2. **锁外预验证能覆盖 parse + signature = 124.6 µs = 27.1%。** 本负载所有输入都是地址输入，`canUseInput` 走 `verifyBlockSignature`（只比公钥哈希），真正的开销在 `verifiedKeys()` 的 ECDSA，完全无状态，可以在拿 `tryToConnect` 锁之前做完；非地址输入的 `verifySignature` 要读输入块，不能全部外移。persist 与"其余"都要在锁内改状态，外移不了。按 Amdahl，锁持有时间减 27.1% 对应单锁吞吐上限约 1.37×；要更多就得改 persist。
+2. **锁外预验证能从锁内拿走的只有 signature = 109.2 µs = 23.7%。** parse 在生产路径上本来就在锁外（`SyncManager.importBlock` 先 `new Block(new XdagBlock(...))` 再调 `tryToConnect`），不是预验证能新省下的东西。本负载所有输入都是地址输入，`canUseInput` 走 `verifyBlockSignature`（只比公钥哈希），真正的开销在 `verifiedKeys()` 的 ECDSA，完全无状态，可以在拿 `tryToConnect` 锁之前做完；非地址输入的 `verifySignature` 要读输入块，不能全部外移。persist 与"其余"都要在锁内改状态，外移不了。按 Amdahl，锁持有时间减 23.7% 对应单锁吞吐上限约 1.31×；要更多就得改 persist。
 3. **syncPath 比 direct 每块贵得很少：配对中位 Δmean = +17.9 µs（+3.9%），Δp50 = +21.8 µs（+6.0%），总耗时 +446 ms（+4.0%）**，三轮两种先后顺序下符号一致，不是噪声；幅度与一次重解析（15.4 µs）加 512 字节拷贝与簿记相符。把已解析的 `Block` 直接递给 `tryToConnect`（省掉 `importBlock` 里的 `new Block(new XdagBlock(bytes))`）最多省 4–6%，`SyncManager` 这条路径没有"解析之外的大头"——第一次运行里的 +78.8 µs 是顺序漂移（见修订记录）。
 4. **确认路径：80 blocks/s 由基座伪 PoW 主导（≈ 61%），扣掉后 apply ≈ 5.7 ms/付费块，是导入的约 12 倍。** SP0b-2 若要看确认吞吐，应剖析 `setMain → applyBlock`（ChainL1 每应用块一个 batch、AddressStore 更新、每应用一个付费块一条地址级 "Balance checker" WARN 日志（3 轮共 60000 条，另有块级 12510 条）、统计保存），而不是 `tryToConnect`。
 5. 复现：同 seed、senders、blocks、mix 下负载**逐字节可重现**（sender 密钥由 seed 派生，RFC 6979 签名，时间戳固定）；主块的 nonce 搜索也从同一时间线出发。`ROUNDS` 固定为 3，`blocks`/`senders`/`seed`/`mix` 可用 `-Dxdag.bench.*` 覆盖（`blocks` 必须 < 60000：每个块的时间戳是 `txTime()+n`，都得落在下一个主块封掉的那个 epoch 里）；不带 `-Dxdag.bench=true` 时整个类在 `@BeforeClass` 就跳过，不建基座（`Tests run: 1, Failures: 0, Errors: 0, Skipped: 1`）。

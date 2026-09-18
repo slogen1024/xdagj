@@ -29,6 +29,7 @@ import static io.xdag.config.Constants.BI_APPLIED;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.junit.Assume.assumeTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -241,7 +242,11 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
 
     private void expectImported(Block b) {
         ImportResult r = blockchain.tryToConnect(b);
-        assertTrue("import failed: " + r + " " + r.getErrorInfo(), r == ImportResult.IMPORTED_BEST || r == ImportResult.IMPORTED_NOT_BEST);
+        // Build the message only on failure: this runs inside the timed window, and the syncPath
+        // leg's assertion does not concatenate, so an eager message would skew the paired delta.
+        if (r != ImportResult.IMPORTED_BEST && r != ImportResult.IMPORTED_NOT_BEST) {
+            fail("import failed: " + r + " " + r.getErrorInfo());
+        }
     }
 
     /** Outside the timed loops: a silent fork (a paying block or chunk taking the top) must not be measured as success. */
