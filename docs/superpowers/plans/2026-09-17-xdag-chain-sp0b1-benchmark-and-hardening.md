@@ -2221,7 +2221,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `docs/XDAGJ_SNAPSHOT_zh.md`（一致性检查与 `--repairchain`）
 - Modify: `.claude/docs/chain-l1-foundation.md`（§9 新增一致性/修复；不进 git）
 
-- [ ] **Step 1: 全量回归与许可证**
+- [x] **Step 1: 全量回归与许可证**（2026-09-18 @ 6bad0803：75 类 445 测试，0 失败 0 错误 1 跳过（基准类，设计如此）；`license:check` 通过）
 
 Run: `mvn -q license:check` → 退出 0；`mvn -q test` → 读 `target/surefire-reports/*.txt` 汇总 0 失败 0 错误（基准类 Skipped 1）。
 
@@ -2236,6 +2236,6 @@ git commit -m "Close the SP0a follow-up tickets in the specs and document the re
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
 
-- [ ] **Step 3: 记忆与汇报**
+- [x] **Step 3: 记忆与汇报**（2026-09-18）
 
 在 `/Users/tron/.claude/projects/-Users-tron-IDEAProject-xdagj/memory/xdag-chain-contracts.md` 追加：SP0b-1 完成的提交范围、测试数、基线数字（direct/syncPath/confirmed 块/s 与最大阶段占比）、G1–G10 状态、下一步 SP0b-2。最终向用户汇报：分支、提交列表、`mvn test` 结果、基线表、偏离计划之处。
