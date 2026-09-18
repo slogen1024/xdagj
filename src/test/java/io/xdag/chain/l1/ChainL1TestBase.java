@@ -190,6 +190,13 @@ public abstract class ChainL1TestBase {
 
     @After
     public void tearDownChain() throws IOException {
+        // BlockchainImpl's constructor starts a per-instance cleaner on a non-daemon scheduler
+        // (rollBackLoop); only stopCheckMain() -> stopCleaner() ends it. Idempotent, so a test that
+        // already went through releaseStores() is unaffected; startCheckMain is a no-op on the mock,
+        // so nothing else is running.
+        if (blockchain != null) {
+            blockchain.stopCheckMain();
+        }
         if (wallet != null) {
             try {
                 wallet.delete();
