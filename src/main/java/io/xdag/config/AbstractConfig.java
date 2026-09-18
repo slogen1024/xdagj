@@ -162,6 +162,12 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected XAmount chainChunkFee = XAmount.of(10, XUnit.MILLI_XDAG);
     @Setter(AccessLevel.NONE)
     protected int chainConsistencyWindow = ChainSpec.DEFAULT_CONSISTENCY_WINDOW;
+    protected int chainIngestThreads = ChainSpec.DEFAULT_INGEST_THREADS;
+    protected int chainIngestQueue = ChainSpec.DEFAULT_INGEST_QUEUE;
+    protected int chainPersistMaxPending = ChainSpec.DEFAULT_PERSIST_MAX_PENDING;
+    protected int chainPersistFlushMs = ChainSpec.DEFAULT_PERSIST_FLUSH_MS;
+    protected int chainPersistFlushEntries = ChainSpec.DEFAULT_PERSIST_FLUSH_ENTRIES;
+    protected int chainPersistReadCache = ChainSpec.DEFAULT_PERSIST_READ_CACHE;
 
     // RandomX configuration
     protected boolean flag;
@@ -229,6 +235,36 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     @Override
     public int getChainConsistencyWindow() {
         return chainConsistencyWindow;
+    }
+
+    @Override
+    public int getChainIngestThreads() {
+        return chainIngestThreads;
+    }
+
+    @Override
+    public int getChainIngestQueue() {
+        return chainIngestQueue;
+    }
+
+    @Override
+    public int getChainPersistMaxPending() {
+        return chainPersistMaxPending;
+    }
+
+    @Override
+    public int getChainPersistFlushMs() {
+        return chainPersistFlushMs;
+    }
+
+    @Override
+    public int getChainPersistFlushEntries() {
+        return chainPersistFlushEntries;
+    }
+
+    @Override
+    public int getChainPersistReadCache() {
+        return chainPersistReadCache;
     }
 
     @Override
@@ -412,6 +448,31 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
             throw new IllegalArgumentException(
                     "Invalid chain.consistency.window: " + chainConsistencyWindow + " (must be > 0)");
         }
+
+        // Node-local (SP0b-2): ingest pipeline and write-behind persistence sizing. Never consensus.
+        chainIngestThreads = readNodeLocalInt(config, "chain.ingest.threads", chainIngestThreads, 0);
+        chainIngestQueue = readNodeLocalInt(config, "chain.ingest.queue", chainIngestQueue, 1);
+        chainPersistMaxPending = readNodeLocalInt(config, "chain.persist.maxPending", chainPersistMaxPending, 0);
+        chainPersistFlushMs = readNodeLocalInt(config, "chain.persist.flushMs", chainPersistFlushMs, 1);
+        chainPersistFlushEntries = readNodeLocalInt(config, "chain.persist.flushEntries", chainPersistFlushEntries, 1);
+        chainPersistReadCache = readNodeLocalInt(config, "chain.persist.readCache", chainPersistReadCache, 0);
+        // A flushEntries above maxPending can never be reached (the write-behind stream fills to at
+        // most maxPending before the writer catches up), so every group would pay the flushMs delay
+        // instead of flushing early on the entry-count threshold. Only meaningful while write-behind
+        // is enabled (maxPending > 0); maxPending == 0 disables write-behind entirely.
+        if (chainPersistMaxPending > 0 && chainPersistFlushEntries > chainPersistMaxPending) {
+            throw new IllegalArgumentException(
+                    "Invalid chain.persist.flushEntries: " + chainPersistFlushEntries
+                            + " (must be <= chain.persist.maxPending: " + chainPersistMaxPending + ")");
+        }
+    }
+
+    private static int readNodeLocalInt(com.typesafe.config.Config config, String key, int current, int min) {
+        int value = config.hasPath(key) ? config.getInt(key) : current;
+        if (value < min) {
+            throw new IllegalArgumentException("Invalid " + key + ": " + value + " (must be >= " + min + ")");
+        }
+        return value;
     }
 
     /**

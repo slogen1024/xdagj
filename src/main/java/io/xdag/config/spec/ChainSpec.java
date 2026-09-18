@@ -60,6 +60,14 @@ public interface ChainSpec {
     /** Node-local default for {@code chain.consistency.window} (main blocks scanned below the tip at boot). */
     int DEFAULT_CONSISTENCY_WINDOW = 128;
 
+    /** Node-local defaults for the SP0b-2 ingest pipeline and write-behind persistence. */
+    int DEFAULT_INGEST_THREADS = Runtime.getRuntime().availableProcessors();
+    int DEFAULT_INGEST_QUEUE = 4096;
+    int DEFAULT_PERSIST_MAX_PENDING = 4096;
+    int DEFAULT_PERSIST_FLUSH_MS = 20;
+    int DEFAULT_PERSIST_FLUSH_ENTRIES = 256;
+    int DEFAULT_PERSIST_READ_CACHE = 65536;
+
     /**
      * The maximum size, in bytes, of the inline argument payload a CALL/DEPLOY ext may
      * carry directly in its fixed block fields (larger argument sets must instead reference
@@ -185,4 +193,22 @@ public interface ChainSpec {
      * @return the scan window in main blocks, always positive
      */
     int getChainConsistencyWindow();
+
+    /** Pre-validation threads ({@code chain.ingest.threads}); 0 disables the pipeline. Node-local. */
+    int getChainIngestThreads();
+
+    /** Bound of the pipeline's receive queue ({@code chain.ingest.queue}); positive. Node-local. */
+    int getChainIngestQueue();
+
+    /** Bound of the write-behind stream ({@code chain.persist.maxPending}); 0 disables write-behind. Node-local. */
+    int getChainPersistMaxPending();
+
+    /** Maximum delay before a queued write reaches the database ({@code chain.persist.flushMs}); positive. Node-local. */
+    int getChainPersistFlushMs();
+
+    /** Writes per group ({@code chain.persist.flushEntries}); positive. Node-local. */
+    int getChainPersistFlushEntries();
+
+    /** INDEX read cache entries ({@code chain.persist.readCache}); 0 disables it. Node-local. */
+    int getChainPersistReadCache();
 }

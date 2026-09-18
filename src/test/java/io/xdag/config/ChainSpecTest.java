@@ -34,6 +34,7 @@ import com.typesafe.config.ConfigFactory;
 import io.xdag.chain.ChainActivation;
 import io.xdag.chain.ext.CallExt;
 import io.xdag.chain.ext.ChunkExt;
+import io.xdag.config.spec.ChainSpec;
 import io.xdag.core.XAmount;
 import io.xdag.core.XUnit;
 import java.util.function.Supplier;
@@ -228,5 +229,42 @@ public class ChainSpecTest {
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
                 () -> withProperty("chain.consistency.window", "0", DevnetConfig::new));
         assertTrue(e.getMessage().contains("chain.consistency.window"));
+    }
+
+    @Test
+    public void ingestAndPersistKeysHaveNodeLocalDefaults() {
+        ChainSpec spec = new DevnetConfig().getChainSpec();
+        assertEquals(Runtime.getRuntime().availableProcessors(), spec.getChainIngestThreads());
+        assertEquals(4096, spec.getChainIngestQueue());
+        assertEquals(4096, spec.getChainPersistMaxPending());
+        assertEquals(20, spec.getChainPersistFlushMs());
+        assertEquals(256, spec.getChainPersistFlushEntries());
+        assertEquals(65536, spec.getChainPersistReadCache());
+    }
+
+    @Test
+    public void ingestAndPersistKeysAreOverridableAndValidated() {
+        assertEquals(0, (int) withProperty("chain.ingest.threads", "0",
+                () -> new DevnetConfig().getChainSpec().getChainIngestThreads()));
+        assertEquals(0, (int) withProperty("chain.persist.maxPending", "0",
+                () -> new DevnetConfig().getChainSpec().getChainPersistMaxPending()));
+        assertEquals(7, (int) withProperty("chain.persist.flushMs", "7",
+                () -> new DevnetConfig().getChainSpec().getChainPersistFlushMs()));
+        for (String[] bad : new String[][] {
+                {"chain.ingest.threads", "-1"}, {"chain.ingest.queue", "0"}, {"chain.persist.maxPending", "-1"},
+                {"chain.persist.flushMs", "0"}, {"chain.persist.flushEntries", "0"}, {"chain.persist.readCache", "-1"}}) {
+            IllegalArgumentException e = assertThrows(bad[0], IllegalArgumentException.class,
+                    () -> withProperty(bad[0], bad[1], DevnetConfig::new));
+            assertTrue(e.getMessage(), e.getMessage().contains(bad[0]));
+        }
+    }
+
+    @Test
+    public void flushEntriesAboveMaxPendingIsRejected() {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> withProperty("chain.persist.maxPending", "8",
+                        () -> withProperty("chain.persist.flushEntries", "9", DevnetConfig::new)));
+        assertTrue(e.getMessage(), e.getMessage().contains("chain.persist.flushEntries"));
+        assertTrue(e.getMessage(), e.getMessage().contains("chain.persist.maxPending"));
     }
 }

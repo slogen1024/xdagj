@@ -84,6 +84,12 @@ public class ChainL1ProcessorTest {
         @Override public int getChainMaxInlineArgs() { return 256; }
         @Override public XAmount getChainChunkFee() { return XAmount.of(10, XUnit.MILLI_XDAG); }
         @Override public int getChainConsistencyWindow() { return ChainSpec.DEFAULT_CONSISTENCY_WINDOW; }
+        @Override public int getChainIngestThreads() { return ChainSpec.DEFAULT_INGEST_THREADS; }
+        @Override public int getChainIngestQueue() { return ChainSpec.DEFAULT_INGEST_QUEUE; }
+        @Override public int getChainPersistMaxPending() { return ChainSpec.DEFAULT_PERSIST_MAX_PENDING; }
+        @Override public int getChainPersistFlushMs() { return ChainSpec.DEFAULT_PERSIST_FLUSH_MS; }
+        @Override public int getChainPersistFlushEntries() { return ChainSpec.DEFAULT_PERSIST_FLUSH_ENTRIES; }
+        @Override public int getChainPersistReadCache() { return ChainSpec.DEFAULT_PERSIST_READ_CACHE; }
     }
 
     /** A handler that records nothing; used where only registration behaviour is under test. */
