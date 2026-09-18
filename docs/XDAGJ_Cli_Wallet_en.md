@@ -176,8 +176,14 @@ usage: ./xdag.sh [options]
     --loadsnapshot <filename>         load snapshot
     --makesnapshot <covertuint>       make snapshot
     --password <password>             wallet password
+    --repairchain <mode>              unwind to the last complete main height; mode = dry-run|force|reinit-marker; dry-run may still initialize an absent completion marker
     --version                         show version
 ```
+
+Two of these are node maintenance commands rather than wallet commands:
+
+- `--makesnapshot` exits 0 only when all three snapshot directories (`SNAPSHOT/BLOCKS`, `SNAPSHOT/ADDRESS`, `SNAPSHOT/CHAIN_L1`) were written and can boot a node; otherwise it prints which one was `NOT written` and exits 1 — delete the whole `SNAPSHOT` directory and rerun.
+- `--repairchain [dry-run|force|reinit-marker]` is the offline main-chain repair that the node's boot consistency check points at when it refuses to start. Stop the node first (RocksDB allows one process per store). Exit codes: 0 clean / repaired / dry-run planned, 1 refused (pass `force`), 2 unrepairable from local state (restore from a snapshot), 3 could not start (unknown mode or no usable wallet — the wallet is only used to build the kernel, nothing is signed), 4 failed after the stores were opened. Details are in `XDAGJ_SNAPSHOT_zh.md`.
 
 ### Version
 
