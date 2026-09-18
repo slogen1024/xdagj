@@ -34,6 +34,7 @@ import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
 import io.xdag.core.Block;
 import io.xdag.core.XdagBlock;
+import io.xdag.core.XdagStats;
 import io.xdag.crypto.SampleKeys;
 import io.xdag.crypto.keys.ECKeyPair;
 import io.xdag.db.BlockStore;
@@ -57,6 +58,12 @@ import org.junit.rules.TemporaryFolder;
 
 public class SumsCacheTest {
 
+    /** One deepest sums bucket: the level-3 key changes every 2^24 ms. */
+    private static final long BUCKET = 1L << 24;
+    /** A bucket-aligned start, so a run of blocks with a small stride stays in one deepest bucket. */
+    private static final long T0 = 1_700_000_000_000L & ~(BUCKET - 1);
+    private static final long EPOCH = 65536L;
+
     @Rule
     public TemporaryFolder root = new TemporaryFolder();
 
@@ -75,10 +82,10 @@ public class SumsCacheTest {
         store.start();
     }
 
-    private List<Block> blocks(int n, long t0) {
+    private List<Block> blocks(int n, long t0, long stride) {
         List<Block> out = new ArrayList<>();
         for (int i = 0; i < n; i++) {
-            Block b = BlockBuilder.generateAddressBlock(config, key, t0 + i * 65536L * 3);
+            Block b = BlockBuilder.generateAddressBlock(config, key, t0 + i * stride);
             out.add(new Block(new XdagBlock(b.toBytes())));
         }
         return out;
@@ -107,9 +114,17 @@ public class SumsCacheTest {
         return index.get(BytesUtils.merge(BlockStore.SUMS_BLOCK_INFO, name.getBytes(StandardCharsets.UTF_8)));
     }
 
+    private static String rootKey(Block b) {
+        return FileUtils.getFileName(b.getTimestamp()).get(0);
+    }
+
+    private static String deepestKey(Block b) {
+        return FileUtils.getFileName(b.getTimestamp()).get(3);
+    }
+
     @Test
     public void sumsAreUpdatedInMemoryAndWrittenOnlyOnFlush() {
-        List<Block> bs = blocks(5, 1_700_000_000_000L);
+        List<Block> bs = blocks(5, T0, EPOCH);
         for (Block b : bs) {
             store.saveBlock(b);
         }
@@ -119,25 +134,27 @@ public class SumsCacheTest {
             assertNull("nothing written before the flush", rawSums(e.getKey()));
         }
         store.flushSums();
+        BlockStoreImpl fresh = BlockStoreImpl.forNode(factory);
         for (Map.Entry<String, MutableBytes> e : want.entrySet()) {
             assertArrayEquals("flushed value equals the cache", e.getValue().toArray(), store.getSums(e.getKey()).toArray());
             assertNotNull("the index now holds the key", rawSums(e.getKey()));
-            BlockStoreImpl fresh = BlockStoreImpl.forNode(factory);
-            assertArrayEquals("a fresh store reads the flushed array back", e.getValue().toArray(), fresh.getSums(e.getKey()).toArray());
+            assertArrayEquals("a store with an empty cache reads the flushed array back",
+                    e.getValue().toArray(), fresh.getSums(e.getKey()).toArray());
         }
     }
 
     @Test
     public void loadSumIsIdenticalBeforeAndAfterAReopen() {
-        List<Block> bs = blocks(12, 1_700_000_000_000L);
+        List<Block> bs = blocks(12, T0, EPOCH);
         for (Block b : bs) {
             store.saveBlock(b);
         }
         long start = bs.get(0).getTimestamp() & 0xffffff000000L;
         MutableBytes fromCache = MutableBytes.create(4096);
         int rc1 = store.loadSum(start, start + (1L << 24), fromCache);
-        store.saveXdagStatus(new io.xdag.core.XdagStats()); // flushes the dirty sums first
+        store.flushSums();
         BlockStoreImpl reopened = BlockStoreImpl.forNode(factory);
+        // The factory hands back the already-open sources; start() relies on RocksdbKVSource.init() being idempotent.
         reopened.start();
         MutableBytes fromDisk = MutableBytes.create(4096);
         int rc2 = reopened.loadSum(start, start + (1L << 24), fromDisk);
@@ -145,15 +162,66 @@ public class SumsCacheTest {
         assertArrayEquals(fromCache.toArray(), fromDisk.toArray());
     }
 
+    /**
+     * The production shape: BlockchainImpl.tryToConnect saves the stats after every import. That
+     * must not flush the sums, or the batching never happens; only the 256th save writes them.
+     */
     @Test
-    public void everyTwoHundredFiftySixBlocksFlushOnTheirOwn() {
-        List<Block> bs = blocks(BlockStoreImpl.SUMS_FLUSH_EVERY, 1_700_000_000_000L);
-        for (int i = 0; i < bs.size() - 1; i++) {
+    public void aStatsSavePerImportDoesNotFlushBeforeTheTwoHundredFiftySixthBlock() {
+        List<Block> bs = blocks(300, T0, EPOCH / 2); // 300 * 32768 ms stays inside one deepest bucket
+        XdagStats stats = new XdagStats();
+        String rootKey = rootKey(bs.get(0));
+        for (int i = 0; i < bs.size(); i++) {
             store.saveBlock(bs.get(i));
+            store.saveXdagStatus(stats);
+            if (i + 1 < BlockStoreImpl.SUMS_FLUSH_EVERY) {
+                assertNull("no sums written after save " + (i + 1), rawSums(rootKey));
+            } else {
+                assertNotNull("sums written from save " + BlockStoreImpl.SUMS_FLUSH_EVERY + " on", rawSums(rootKey));
+            }
         }
-        String any = FileUtils.getFileName(bs.get(0).getTimestamp()).get(0);
-        assertNull(rawSums(any));
-        store.saveBlock(bs.get(bs.size() - 1));
-        assertNotNull("the 256th block flushed", rawSums(any));
+        BlockStoreImpl fresh = BlockStoreImpl.forNode(factory);
+        assertArrayEquals("the index holds exactly the first 256 blocks' contributions",
+                expected(bs.subList(0, BlockStoreImpl.SUMS_FLUSH_EVERY)).get(rootKey).toArray(),
+                fresh.getSums(rootKey).toArray());
+        assertArrayEquals("the cache holds all 300",
+                expected(bs).get(rootKey).toArray(), store.getSums(rootKey).toArray());
+    }
+
+    @Test
+    public void rollingIntoANewDeepestBucketFlushesTheOneLeftBehind() {
+        Block first = blocks(1, T0, EPOCH).get(0);
+        Block next = blocks(1, T0 + BUCKET, EPOCH).get(0);
+        store.saveBlock(first);
+        assertNull(rawSums(deepestKey(first)));
+        store.saveBlock(next);
+        assertNotNull("the bucket left behind was written at the roll", rawSums(deepestKey(first)));
+        assertNull("the bucket being grown stays in memory", rawSums(deepestKey(next)));
+        BlockStoreImpl fresh = BlockStoreImpl.forNode(factory);
+        assertArrayEquals(expected(List.of(first)).get(deepestKey(first)).toArray(), fresh.getSums(deepestKey(first)).toArray());
+        assertArrayEquals("the shared root key was written with only the first block in it",
+                expected(List.of(first)).get(rootKey(first)).toArray(), fresh.getSums(rootKey(first)).toArray());
+        assertArrayEquals("while the cache already has both",
+                expected(List.of(first, next)).get(rootKey(first)).toArray(), store.getSums(rootKey(first)).toArray());
+    }
+
+    @Test
+    public void resetClearsTheCacheTheDirtySetAndTheCounter() {
+        List<Block> bs = blocks(200, T0, EPOCH / 2);
+        for (Block b : bs) {
+            store.saveBlock(b);
+        }
+        String rootKey = rootKey(bs.get(0));
+        assertNotNull(store.getSums(rootKey));
+        store.reset();
+        assertNull("the cache is empty after a reset", store.getSums(rootKey));
+        for (Block b : bs) {
+            store.saveBlock(b);
+        }
+        assertNull("the counter restarted at zero: 200 + 200 saves did not reach the flush", rawSums(rootKey));
+        store.flushSums();
+        BlockStoreImpl fresh = BlockStoreImpl.forNode(factory);
+        assertArrayEquals("only the saves after the reset were written",
+                expected(bs).get(rootKey).toArray(), fresh.getSums(rootKey).toArray());
     }
 }

@@ -63,6 +63,16 @@ import java.util.function.Function;
 
 import static io.xdag.utils.BytesUtils.equalBytes;
 
+/**
+ * The node's block store over RocksDB.
+ *
+ * <p>Block sums (the {@code SUMS_BLOCK_INFO} keys, one 4 KB array per key) are kept in memory and
+ * written back in batches; {@link #flushSums()} documents the triggers and the loss bound. The
+ * cache is bounded: reads never populate it, and after every flush it keeps only the arrays that are
+ * still dirty plus the four keys of the last saved block. There is one key per deepest bucket of
+ * 2^24 ms (about 4.66 h) plus three shallower levels — about 1,900 keys a year at 4 KB each, so an
+ * unbounded cache would retain on the order of 60 MB after a full historical sync.
+ */
 @Slf4j
 public class BlockStoreImpl implements BlockStore {
 
@@ -178,14 +188,21 @@ public class BlockStoreImpl implements BlockStore {
     }
 
     public void reset() {
+        sumsCache.clear();
+        dirtySums.clear();
+        sumsSinceFlush.set(0);
+        lastBlockKeys = List.of();
         indexSource.reset();
         timeSource.reset();
         blockSource.reset();
         txHistorySource.reset();
     }
 
+    /**
+     * Persists the stats only. It deliberately does NOT flush the sums: {@code BlockchainImpl.tryToConnect}
+     * calls this once per import, so a flush here would write the sums per block again.
+     */
     public void saveXdagStatus(XdagStats status) {
-        flushSums();
         byte[] value = null;
         try {
             value = serialize(status);
@@ -366,37 +383,65 @@ public class BlockStoreImpl implements BlockStore {
         });
     }
 
-    /** Sums are rewritten in memory per block and written back every this many saved blocks (and at every stats save). */
+    /**
+     * Sums are updated in memory per saved block and written back in batches. The triggers are every
+     * this many saved blocks, the first saved block of a new deepest bucket, {@code Kernel.testStop()}
+     * and {@link #stop()} — see {@link #flushSums()}. {@link #saveXdagStatus(XdagStats)} is NOT one.
+     */
     public static final int SUMS_FLUSH_EVERY = 256;
+    /** The arrays touched since the last flush plus the last saved block's four keys; the class Javadoc gives the bound. */
     private final ConcurrentHashMap<String, MutableBytes> sumsCache = new ConcurrentHashMap<>();
     private final Set<String> dirtySums = ConcurrentHashMap.newKeySet();
     private final AtomicInteger sumsSinceFlush = new AtomicInteger();
+    /** The four sums keys of the block last passed to {@link #saveBlockSums}; index 3 is its deepest bucket. */
+    private volatile List<String> lastBlockKeys = List.of();
 
     /**
-     * Writes every dirty sums array to the index. Called every {@link #SUMS_FLUSH_EVERY} saved
-     * blocks, before every stats save and at stop, so a crash loses at most that many blocks'
-     * contributions — the same window as the write-behind stream, and sums are advisory (they only
-     * steer the legacy sync protocol's range requests).
+     * Writes every dirty sums array to the index and drops the clean entries the next block will not
+     * reuse. Triggers: every {@value #SUMS_FLUSH_EVERY} saved blocks, the first saved block whose
+     * deepest bucket differs from the previous saved block's, {@code Kernel.testStop()} before its
+     * final stats save, and {@link #stop()}. {@link #saveXdagStatus(XdagStats)} runs once per import
+     * and therefore is not a trigger. Safe to call with nothing dirty.
+     *
+     * <p>Loss bound: a crash — any stop that reaches none of those triggers — loses the contributions
+     * of the blocks saved since the last flush: fewer than {@value #SUMS_FLUSH_EVERY} of them, all in
+     * the deepest bucket that was growing at the time, because the bucket roll flushes before the
+     * first block of the next bucket is added. That loss is permanent: nothing re-sums blocks already
+     * on disk, so the bucket under-reports from then on and the legacy sync protocol, which compares
+     * sums to choose the ranges it requests, keeps drilling into and re-requesting that range on every
+     * sync round. The bucket-roll trigger confines the exposure to the newest bucket's tail; without
+     * it a quiet node (fewer than {@value #SUMS_FLUSH_EVERY} blocks in hours) could hold a completed
+     * bucket dirty indefinitely. Sums are advisory — they steer those range requests, never consensus.
      */
+    @Override
     public void flushSums() {
         for (String key : dirtySums) {
-            MutableBytes sums = sumsCache.get(key);
-            if (sums != null) {
-                writeSums(key, sums);
-            }
+            // Un-mark before writing: a putSums racing with this write re-marks the key and the next
+            // flush rewrites it, so a concurrent update is written twice rather than lost.
             dirtySums.remove(key);
+            MutableBytes sums = sumsCache.get(key);
+            if (sums != null && !writeSums(key, sums)) {
+                dirtySums.add(key);
+            }
         }
+        // May swallow increments made concurrently with this flush; acceptable, saves run under the blockchain lock.
         sumsSinceFlush.set(0);
+        // Bound the cache: keep what is still dirty and the last block's four keys, which the next block almost always reuses.
+        List<String> hot = lastBlockKeys;
+        sumsCache.keySet().removeIf(key -> !dirtySums.contains(key) && !hot.contains(key));
     }
 
-    private void writeSums(String key, Bytes sums) {
-        byte[] value = null;
+    /** Returns false when the array could not be serialized; a null put would DELETE the key, so nothing is written then. */
+    private boolean writeSums(String key, Bytes sums) {
+        byte[] value;
         try {
             value = serialize(sums.toArray());
         } catch (SerializationException e) {
-            log.error(e.getMessage(), e);
+            log.error("sums {} not written, the index keeps its previous value: {}", key, e.getMessage(), e);
+            return false;
         }
         indexSource.put(BytesUtils.merge(SUMS_BLOCK_INFO, key.getBytes(StandardCharsets.UTF_8)), value);
+        return true;
     }
 
     @Override
@@ -405,6 +450,13 @@ public class BlockStoreImpl implements BlockStore {
         long sum = block.getXdagBlock().getSum();
         long time = block.getTimestamp();
         List<String> filename = FileUtils.getFileName(time);
+        List<String> previous = lastBlockKeys;
+        lastBlockKeys = filename;
+        // Bucket roll: the stream of saved blocks moved to another deepest bucket, so write the one
+        // it left now rather than letting a quiet node hold it dirty for hours.
+        if (!previous.isEmpty() && !previous.get(3).equals(filename.get(3))) {
+            flushSums();
+        }
         for (int i = 0; i < filename.size(); i++) {
             updateSum(filename.get(i), sum, size, (time >> (40 - 8 * i)) & 0xff);
         }
@@ -424,9 +476,9 @@ public class BlockStoreImpl implements BlockStore {
             return null;
         }
         try {
-            MutableBytes sums = MutableBytes.wrap((byte[]) deserialize(value, byte[].class));
-            sumsCache.putIfAbsent(key, sums.mutableCopy());
-            return sums;
+            // Reads do not populate the cache — only putSums does — so the legacy sync protocol's
+            // loadSum traffic over historical buckets cannot grow it.
+            return MutableBytes.wrap((byte[]) deserialize(value, byte[].class));
         } catch (DeserializationException e) {
             log.error(e.getMessage(), e);
             return null;

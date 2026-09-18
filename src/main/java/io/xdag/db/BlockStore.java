@@ -183,6 +183,15 @@ public interface BlockStore extends XdagLifecycle {
 
     int loadSum(long starttime, long endtime, MutableBytes sums);
 
+    /**
+     * Writes back every block-sums array changed in memory since the last write-back. The store
+     * calls it on its own every batch of saved blocks and whenever the saved block's deepest sums
+     * bucket changes; {@code Kernel.testStop()} calls it before the final stats save because
+     * {@link #saveXdagStatus(XdagStats)} — which runs once per import — deliberately does not.
+     * Safe to call with nothing to write.
+     */
+    void flushSums();
+
     void saveXdagStatus(XdagStats status);
 
 }

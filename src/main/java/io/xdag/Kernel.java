@@ -346,6 +346,12 @@ public class Kernel {
         // Stop data layer
         blockchain.stopCheckMain();
 
+        // Block sums are written back in batches and saveXdagStatus deliberately does not flush
+        // them (it runs once per import); this is the last chance before the databases close.
+        if (blockStore != null) {
+            blockStore.flushSums();
+        }
+
         // I3 (SP0b-1): the check-main loop was the only thing persisting XdagStats and it has just
         // been stopped, so flush them once more before the databases close. Without this a clean
         // shutdown could still leave the completion marker written by the last setMain ahead of the
