@@ -366,6 +366,7 @@ public class BlockchainImpl implements Blockchain {
         xdagTopStatus.setTop(lastBlock.getHashLow().toArray());
         xdagTopStatus.setTopDiff(lastBlock.getInfo().getDifficulty());
         xdagTopStatus.setPreTopDiff(lastBlock.getInfo().getDifficulty());
+        chainVersion++; // snapshot import rewrites flags and links without going through updateBlockFlag
 
         // Calculate total balance
         XAmount allBalance = snapshotStore.getAllBalance().add(snapshotAddressStore.getAllBalance());
@@ -1052,28 +1053,109 @@ public class BlockchainImpl implements Blockchain {
         }
     }
 
+    /**
+     * What {@link #checkNewMain()} decides on: the deepest {@code BI_MAIN_CHAIN} block the walk from
+     * the top reached before the last main block, and how many such candidates it passed. A
+     * {@code null} hash means the walk found none.
+     */
+    public record MainCandidate(Bytes32 hashLow, int count) {
+
+        static final MainCandidate NONE = new MainCandidate(null, 0);
+    }
+
+    /**
+     * Bumped on every {@code BI_MAIN} / {@code BI_MAIN_CHAIN} flag change and on every repair-mode
+     * tip move; those are the only inputs to {@link #walkCandidate()} besides the top itself and the
+     * {@code maxDiffLink} chain, and a block's {@code maxDiffLink} is written once, while it is
+     * being connected ({@code calculateBlockDiff} returns early for any block that already has a
+     * difficulty). A bump invalidates the candidate cache.
+     */
+    private long chainVersion;
+    /** The top {@link #cachedCandidate()} last answered for, or {@code null} before the first call. */
+    private byte[] candidateTop;
+    private MainCandidate candidate = MainCandidate.NONE;
+    private long candidateVersion = -1;
+
+    /**
+     * The full walk from the top down to the last main block, exactly as {@code checkNewMain} always
+     * did it. Read-only: it touches neither the cache nor any block flag.
+     */
+    MainCandidate walkCandidate() {
+        // If it's a snapshot point main block, return directly since data before snapshot is already determined
+        if (xdagTopStatus.getTop() == null) {
+            return MainCandidate.NONE;
+        }
+        Bytes32 p = null;
+        int i = 0;
+        for (Block block = getBlockByHash(Bytes32.wrap(xdagTopStatus.getTop()), false); block != null
+                && ((block.getInfo().flags & BI_MAIN) == 0);
+             block = getMaxDiffLink(getBlockByHash(block.getHashLow(), true), true)) {
+
+            if ((block.getInfo().flags & BI_MAIN_CHAIN) != 0) {
+                p = Bytes32.wrap(block.getHashLow().toArray());
+                ++i;
+            }
+        }
+        return new MainCandidate(p, i);
+    }
+
+    /**
+     * The same answer as {@link #walkCandidate()}, in O(1) whenever the top has not moved or has
+     * moved by exactly one block: the walk from a new top whose {@code maxDiffLink} is the old top
+     * is that new top followed by the walk from the old top, so the count grows by one if the new
+     * top carries {@code BI_MAIN_CHAIN}, and the deepest candidate is unchanged unless there was
+     * none. Everything else — a fork, any {@code BI_MAIN} / {@code BI_MAIN_CHAIN} flag change
+     * anywhere ({@code chainVersion}), a top that is itself a main block, a cold cache — falls back
+     * to the full walk. Updates the cache; callers must hold this monitor.
+     */
+    MainCandidate cachedCandidate() {
+        byte[] top = xdagTopStatus.getTop();
+        if (top == null) {
+            candidateTop = null;
+            candidate = MainCandidate.NONE;
+            candidateVersion = chainVersion;
+            return candidate;
+        }
+        MainCandidate result;
+        boolean warm = candidateVersion == chainVersion && candidateTop != null;
+        // java.util.Arrays spelled out: the file's unqualified Arrays is org.bouncycastle.util.Arrays.
+        if (warm && java.util.Arrays.equals(top, candidateTop)) {
+            result = candidate;
+        } else {
+            Block topBlock = getBlockByHash(Bytes32.wrap(top), false);
+            byte[] link = topBlock == null ? null : topBlock.getInfo().getMaxDiffLink();
+            if (warm && topBlock != null && (topBlock.getInfo().flags & BI_MAIN) == 0
+                    && link != null && java.util.Arrays.equals(link, candidateTop)) {
+                boolean onChain = (topBlock.getInfo().flags & BI_MAIN_CHAIN) != 0;
+                result = new MainCandidate(
+                        candidate.hashLow() != null ? candidate.hashLow()
+                                : (onChain ? Bytes32.wrap(topBlock.getHashLow().toArray()) : null),
+                        candidate.count() + (onChain ? 1 : 0));
+            } else {
+                result = walkCandidate();
+            }
+        }
+        candidateTop = top.clone();
+        candidate = result;
+        candidateVersion = chainVersion;
+        return result;
+    }
+
     // Check and update main chain
     @Override
     public synchronized void checkNewMain() {
-        Block p = null;
-        int i = 0;
-
-        // If it's a snapshot point main block, return directly since data before snapshot is already determined
-        if (xdagTopStatus.getTop() != null) {
-            for (Block block = getBlockByHash(Bytes32.wrap(xdagTopStatus.getTop()), false); block != null
-                    && ((block.getInfo().flags & BI_MAIN) == 0);
-                 block = getMaxDiffLink(getBlockByHash(block.getHashLow(), true), true)) {
-
-                if ((block.getInfo().flags & BI_MAIN_CHAIN) != 0) {
-                    p = block;
-                    ++i;
-                }
-            }
+        MainCandidate c = cachedCandidate();
+        if (c.hashLow() == null || c.count() <= 1) {
+            return;
         }
+        // Re-read the candidate rather than keeping the object the walk loaded: BI_REF is not part of
+        // the cache key, and a later block may have set it since. The walk only ever reaches this
+        // block through the raw lookup (with count > 1 the deepest candidate is never the top block),
+        // so this is the same object the old code decided on.
+        Block p = getBlockByHash(c.hashLow(), true);
         long ct = XdagTime.getCurrentTimestamp();
         if (p != null
                 && ((p.getInfo().flags & BI_REF) != 0)
-                && i > 1
                 && ct >= p.getTimestamp() + 2 * 1024) {
 //            log.info("setMain success block:{}", Hex.toHexString(p.getHashLow()));
             setMain(p);
@@ -1173,6 +1255,7 @@ public class BlockchainImpl implements Blockchain {
             xdagStats.setDifficulty(block.getInfo().getDifficulty());
             xdagTopStatus.setTop(block.getHashLow().toArray());
             xdagTopStatus.setTopDiff(block.getInfo().getDifficulty());
+            chainVersion++; // the repair paths move the top without going through updateBlockFlag
             blockStore.saveXdagStatus(xdagStats);
             blockStore.saveXdagTopStatus(xdagTopStatus);
         }
@@ -1241,6 +1324,7 @@ public class BlockchainImpl implements Blockchain {
                 throw new IllegalStateException("unwind stopped at nmain=" + xdagStats.nmain + ", expected "
                         + height + "; block data is incomplete (raw bytes missing?)");
             }
+            chainVersion++; // the repair paths move the top without going through updateBlockFlag
             blockStore.saveXdagStatus(xdagStats);
         }
     }
@@ -2107,6 +2191,10 @@ public class BlockchainImpl implements Blockchain {
     public void updateBlockFlag(Block block, byte flag, boolean direction) {
         if (block == null) {
             return;
+        }
+        // The only two flags the main-block candidate walk reads; see cachedCandidate().
+        if (flag == BI_MAIN || flag == BI_MAIN_CHAIN) {
+            chainVersion++;
         }
         if (direction) {
             block.getInfo().setFlags(block.getInfo().flags |= flag);
