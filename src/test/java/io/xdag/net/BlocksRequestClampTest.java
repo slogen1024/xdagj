@@ -27,7 +27,9 @@ package io.xdag.net;
 import static io.xdag.config.Constants.REQUEST_BLOCKS_MAX_TIME;
 import static org.junit.Assert.assertEquals;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -41,6 +43,9 @@ import io.xdag.consensus.SyncManager;
 import io.xdag.crypto.keys.ECKeyPair;
 import io.xdag.crypto.keys.PrivateKey;
 import io.xdag.net.message.MessageQueue;
+import io.xdag.net.message.Message;
+import io.xdag.net.message.consensus.BlocksReplyMessage;
+import org.mockito.ArgumentCaptor;
 import io.xdag.net.message.consensus.BlocksRequestMessage;
 import java.math.BigInteger;
 import java.util.Collections;
@@ -73,6 +78,7 @@ public class BlocksRequestClampTest {
 
     private XdagP2pHandler handler;
     private Blockchain chain;
+    private MessageQueue msgQueue;
 
     @Before
     public void setUp() {
@@ -95,7 +101,7 @@ public class BlocksRequestClampTest {
         when(syncMgr.getIsUpdateXdagStats()).thenReturn(new AtomicBoolean(false));
         kernel.setSyncMgr(syncMgr);
 
-        MessageQueue msgQueue = mock(MessageQueue.class);
+        msgQueue = mock(MessageQueue.class);
         Channel channel = mock(Channel.class);
         when(channel.getMessageQueue()).thenReturn(msgQueue);
         handler = new XdagP2pHandler(channel, kernel);
@@ -197,5 +203,32 @@ public class BlocksRequestClampTest {
         ArgumentCaptor<Long> end = ArgumentCaptor.forClass(Long.class);
         verify(chain, times(1)).getBlocksByTime(start.capture(), end.capture());
         return new long[]{start.getValue(), end.getValue()};
+    }
+
+    /**
+     * The reply must echo the span this node actually served, not the one the peer asked for.
+     * Claiming coverage of a span that was clamped away would leave a peer that tracks its own
+     * coverage believing it holds blocks it was never sent, and it would never ask for them again.
+     * A silent gap is worse than a clamp the peer can see. This node's own requester correlates
+     * replies by {@code random} alone and reads neither time, so nothing here depends on the echo.
+     */
+    @Test
+    public void theReplyEchoesTheServedSpanNotTheRequestedOne() {
+        long startTime = 1600616700000L;
+        long endTime = startTime + REQUEST_BLOCKS_MAX_TIME * 50;
+
+        handler.processBlocksRequest(request(startTime, endTime));
+
+        ArgumentCaptor<Message> sent = ArgumentCaptor.forClass(Message.class);
+        verify(msgQueue, atLeastOnce()).sendMessage(sent.capture());
+        BlocksReplyMessage reply = sent.getAllValues().stream()
+                .filter(m -> m instanceof BlocksReplyMessage)
+                .map(m -> (BlocksReplyMessage) m)
+                .reduce((a, b) -> b)
+                .orElseThrow(() -> new AssertionError("no BlocksReplyMessage was sent"));
+
+        assertEquals(startTime, reply.getStarttime());
+        assertEquals("the reply must not claim a span the node clamped away",
+                startTime + REQUEST_BLOCKS_MAX_TIME, reply.getEndtime());
     }
 }
