@@ -23,6 +23,8 @@
  */
 package io.xdag.chain.ingest;
 
+import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_INPUT;
+import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUTPUT;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -30,15 +32,19 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import io.xdag.BlockBuilder;
 import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
+import io.xdag.core.Address;
 import io.xdag.core.Block;
 import io.xdag.core.BlockWrapper;
 import io.xdag.core.ImportResult;
 import io.xdag.core.XAmount;
+import io.xdag.core.XUnit;
 import io.xdag.core.XdagBlock;
 import io.xdag.crypto.SampleKeys;
 import io.xdag.crypto.keys.ECKeyPair;
+import io.xdag.utils.BytesUtils;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -46,17 +52,24 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.tuweni.units.bigints.UInt64;
 import org.junit.Test;
 
 public class IngestOrderingTest {
 
     private final Config config = new DevnetConfig();
     private final ECKeyPair key = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
+    private final ECKeyPair other = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY2);
 
     /**
-     * A signed block that carries its own public key, so {@code verifiedKeys()} has real ECDSA work
-     * to do — that work is what the pipeline moves off the blockchain lock. Returned re-parsed from
-     * its 512 bytes, the way an arriving block reaches the node.
+     * A signed block with no inputs — an address block. Returned re-parsed from its 512 bytes, the
+     * way an arriving block reaches the node.
+     *
+     * <p>Since SP0b-2's I3 a block like this costs pre-validation no ECDSA at all: {@code
+     * canUseInput} returns true without reading the keys when there are no inputs, so {@code
+     * PreValidator} does not compute them. The ordering tests below do not depend on that work —
+     * they force out-of-order completion with the {@code beforeReady} hook — but a test that wants
+     * keys to actually be carried has to use {@link #txBlock} instead.
      */
     private Block block(int i) {
         Block b = new Block(config, 1_700_000_000_000L + i * 65536L, null, null, false,
@@ -66,11 +79,24 @@ public class IngestOrderingTest {
     }
 
     /**
+     * A signed block that spends an input, so its signature is one {@code canUseInput} actually
+     * reads and pre-validation therefore computes the keys for. Re-parsed from its 512 bytes like
+     * {@link #block}.
+     */
+    private Block txBlock(int i) {
+        Address from = new Address(BytesUtils.arrayToByte32(key.toAddress().toArray()), XDAG_FIELD_INPUT, true);
+        Address to = new Address(BytesUtils.arrayToByte32(other.toAddress().toArray()), XDAG_FIELD_OUTPUT, true);
+        Block b = BlockBuilder.generateNewTransactionBlock(config, key, 1_700_000_000_000L + i * 65536L,
+                from, to, XAmount.of(1, XUnit.XDAG), UInt64.valueOf(i + 1L));
+        return new Block(new XdagBlock(b.toBytes()));
+    }
+
+    /**
      * One block, parsed and hashed up front, so that handing it to several pre-validations at once
      * is safe: {@code Block.parse()} and {@code getHashLow()} are unsynchronized lazy mutators, and
-     * from here on both are no-ops. {@code verifiedKeys()} is read-only and still does its real
-     * ECDSA work on every pre-validation, which is what the many-round tests below want to exercise
-     * without paying to build a fresh block each time.
+     * from here on both are no-ops. Since SP0b-2's C1 the pre-validation works on a private copy of
+     * the 512 bytes anyway, so it only ever reads this instance — but the up-front parse is what
+     * makes that read a plain read.
      */
     private final Block shared = preParsed(block(0));
 
@@ -115,11 +141,21 @@ public class IngestOrderingTest {
 
     @Test(timeout = 30_000)
     public void preValidationCarriesKeysAndNeverRejects() {
-        PreValidated pv = PreValidator.inline(block(1));
-        assertNull(pv.error());
-        assertNotNull(pv.hashLow());
-        assertEquals("an address block is signed by its own key", 1, pv.keys().size());
-        assertTrue(pv.hasKeys());
+        // A block that spends an input: canUseInput reads its signature, so the keys travel with it
+        // and the lock never has to run the ECDSA itself.
+        PreValidated spending = PreValidator.inline(txBlock(1));
+        assertNull(spending.error());
+        assertNotNull(spending.hashLow());
+        assertTrue(spending.hasKeys());
+        assertFalse("a spending block is signed by its own key", spending.keys().isEmpty());
+
+        // No inputs, nothing to verify: canUseInput returns true without looking at the keys, so
+        // pre-validation does not compute them (I3). Still no verdict and still a usable hash.
+        PreValidated withoutInputs = PreValidator.inline(block(1));
+        assertNull(withoutInputs.error());
+        assertNotNull(withoutInputs.hashLow());
+        assertFalse(withoutInputs.hasKeys());
+        assertNull(withoutInputs.keys());
     }
 
     @Test(timeout = 30_000)

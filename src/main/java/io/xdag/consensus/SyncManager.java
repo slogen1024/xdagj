@@ -39,6 +39,7 @@ import io.xdag.net.ChannelManager;
 import io.xdag.net.Peer;
 import io.xdag.net.node.Node;
 import io.xdag.utils.XdagTime;
+import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -105,8 +106,15 @@ public class SyncManager extends AbstractXdagLifecycle {
      * Parallel pre-validation in front of the import (SP0b-2), or null when {@code chain.ingest.threads}
      * is 0 and the node imports synchronously as it did before. Built and started by {@link #doStart},
      * stopped by {@link #doStop}.
+     *
+     * <p>{@code volatile}, and assigned only after {@code start()} has returned: the readers are
+     * netty I/O threads, and one that saw the field before the commit thread was up would have its
+     * submit refused and the block dropped — while without {@code volatile} it might not see the
+     * field at all and keep importing synchronously. Not settable from outside, whatever the
+     * class-level Lombok says: the lifecycle owns it.
      */
-    private IngestPipeline pipeline;
+    @Setter(AccessLevel.NONE)
+    private volatile IngestPipeline pipeline;
 
     public SyncManager(Kernel kernel) {
         this.kernel = kernel;
@@ -126,8 +134,9 @@ public class SyncManager extends AbstractXdagLifecycle {
         int threads = chainSpec.getChainIngestThreads();
         int queue = chainSpec.getChainIngestQueue();
         if (threads > 0) {
-            pipeline = new IngestPipeline(threads, queue, this::importPreValidated);
-            pipeline.start();
+            IngestPipeline started = new IngestPipeline(threads, queue, this::importPreValidated);
+            started.start();
+            pipeline = started; // published only once it accepts blocks; see the field's comment
             log.info("Ingest pipeline on: threads={}, queue={}", threads, queue);
         }
     }
@@ -137,8 +146,9 @@ public class SyncManager extends AbstractXdagLifecycle {
         log.debug("sync manager stop");
         // First: the pipeline drains into tryToConnect, so it has to be done importing before the
         // kernel goes on to close the stores underneath it.
-        if (pipeline != null) {
-            pipeline.stop();
+        IngestPipeline running = pipeline;
+        if (running != null) {
+            running.stop();
         }
         if (this.stateListener.isRunning) {
             this.stateListener.isRunning = false;
@@ -200,12 +210,12 @@ public class SyncManager extends AbstractXdagLifecycle {
         // Re-parsed from the raw 512 bytes on purpose, and that has to stay: a block sitting in
         // syncMap carries the flags a previous attempt wrote (tryToConnect sets BI_EXTRA before it
         // can decide NO_PARENT), so every attempt has to start from a clean BlockInfo.
-        return finishImport(blockWrapper, blockchain
+        return relayImported(blockWrapper, blockchain
                 .tryToConnect(new Block(new XdagBlock(blockWrapper.getBlock().getXdagBlock().getData().toArray()))));
     }
 
-    /** What both entry points do with an import's verdict before the caller sees it: log, then relay. */
-    private ImportResult finishImport(BlockWrapper blockWrapper, ImportResult importResult) {
+    /** Gossips a block this node has just accepted onward, unless it is old, ours, or out of ttl. */
+    private ImportResult relayImported(BlockWrapper blockWrapper, ImportResult importResult) {
         if (importResult == EXIST) {
             log.debug("Block have exist:{}", blockWrapper.getBlock().getHashLow());
         }
@@ -245,15 +255,25 @@ public class SyncManager extends AbstractXdagLifecycle {
     }
 
     /**
-     * The pipeline's commit step: import with the facts computed off the monitor, then exactly the
-     * bookkeeping {@link #validateAndAddNewBlock} does. Runs on the single commit thread, in arrival
-     * order.
+     * The pipeline's commit step: import the private copy the pre-validation parsed, with the facts
+     * it computed off the monitor, then exactly the bookkeeping {@link #validateAndAddNewBlock}
+     * does. Runs on the single commit thread, in arrival order.
+     *
+     * <p>The chain never sees {@code pv.wrapper().getBlock()} here: that instance stays untouched
+     * for the relay, which re-serializes it after this returns. A pre-validation that failed has no
+     * copy to offer, so it falls back to {@link #importBlock}, which makes one the old way.
      */
     public synchronized ImportResult importPreValidated(PreValidated pv) {
         BlockWrapper blockWrapper = pv.wrapper();
-        ImportResult result = finishImport(blockWrapper, blockchain.tryToConnect(pv));
-        log.debug("importPreValidated:{}, {}", blockWrapper.getBlock().getHashLow(), result);
-        afterImport(blockWrapper, result);
+        if (pv.error() != null) {
+            log.debug("ingest pre-validation failed, importing the block the old way", pv.error());
+            ImportResult fallback = importBlock(blockWrapper);
+            releaseWaiters(blockWrapper, fallback);
+            return fallback;
+        }
+        ImportResult result = relayImported(blockWrapper, blockchain.tryToConnect(pv));
+        log.debug("importPreValidated:{}, {}", pv.hashLow(), result);
+        releaseWaiters(blockWrapper, result);
         return result;
     }
 
@@ -261,12 +281,12 @@ public class SyncManager extends AbstractXdagLifecycle {
         blockWrapper.getBlock().parse();
         ImportResult result = importBlock(blockWrapper);
         log.debug("validateAndAddNewBlock:{}, {}", blockWrapper.getBlock().getHashLow(), result);
-        afterImport(blockWrapper, result);
+        releaseWaiters(blockWrapper, result);
         return result;
     }
 
     /** Releases the children waiting on this block, or queues it behind the parent it is missing. */
-    private void afterImport(BlockWrapper blockWrapper, ImportResult result) {
+    private void releaseWaiters(BlockWrapper blockWrapper, ImportResult result) {
         switch (result) {
             case EXIST, IMPORTED_BEST, IMPORTED_NOT_BEST, IN_MEM -> syncPopBlock(blockWrapper);
             case NO_PARENT -> {

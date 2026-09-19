@@ -24,6 +24,7 @@
 
 package io.xdag.core;
 
+import io.xdag.chain.ingest.PreValidated;
 import io.xdag.crypto.keys.ECKeyPair;
 import io.xdag.listener.Listener;
 import org.apache.tuweni.bytes.Bytes;
@@ -43,8 +44,13 @@ public interface Blockchain {
     /**
      * Import with facts already computed outside the lock (SP0b-2); the default recomputes them
      * inside, so an implementation that does not know about the pipeline keeps working unchanged.
+     *
+     * <p>Note which way round {@code BlockchainImpl} implements the pair: it does the real work
+     * <em>here</em> and lets {@link #tryToConnect(Block)} delegate to it. An implementation that
+     * copied that delegating one-liner without also overriding this default would recurse until the
+     * stack ran out — so override this one, or do the work in {@code tryToConnect(Block)}.
      */
-    default ImportResult tryToConnect(io.xdag.chain.ingest.PreValidated pv) {
+    default ImportResult tryToConnect(PreValidated pv) {
         return tryToConnect(pv.block());
     }
 

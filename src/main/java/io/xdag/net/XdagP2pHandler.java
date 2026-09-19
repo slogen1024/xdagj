@@ -34,6 +34,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.commons.lang3.time.FastDateFormat;
 import org.apache.tuweni.bytes.Bytes;
@@ -46,6 +47,7 @@ import com.google.common.util.concurrent.SettableFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.xdag.Kernel;
+import io.xdag.chain.ingest.IngestPipeline;
 import io.xdag.config.Config;
 import io.xdag.config.spec.NodeSpec;
 import io.xdag.consensus.SyncManager;
@@ -91,6 +93,12 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
                     return new Thread(r, "p2p-" + cnt.getAndIncrement());
                 }
             });
+
+    /** How often {@link #warnDeadCommitter} may speak; every peer's every block takes that path. */
+    private static final long DEAD_COMMITTER_WARN_INTERVAL_MS = 60_000L;
+
+    /** Shared across channels: the dead commit thread is the node's, not the connection's. */
+    private static final AtomicLong LAST_DEAD_COMMITTER_WARN = new AtomicLong();
 
     private final Channel channel;
 
@@ -371,16 +379,37 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
     /**
      * Hands the block to the ingest path (SP0b-2). Nothing may read the block after this returns:
      * with the pipeline on, the block is being parsed on a pool thread, and {@code Block.parse()} is
-     * an unsynchronized lazy mutator. The {@code IllegalStateException} is the shutdown case -- the
-     * pipeline stops accepting before the rest of the node stops -- and it is raised before the
-     * block is handed over, so the block is simply not imported and a peer will offer it again.
+     * an unsynchronized lazy mutator.
+     *
+     * <p>Only {@link IngestPipeline.SubmitRejectedException} is caught, and only the pipeline can
+     * raise it — so with {@code chain.ingest.threads = 0} an {@code IllegalStateException} out of
+     * the synchronous import still reaches netty's {@code exceptionCaught}, exactly as before
+     * SP0b-2. The refusal is raised before the block is handed over, so it is simply not imported
+     * and a peer will offer it again.
      */
     private void submitBlock(BlockWrapper bw) {
         try {
             syncMgr.submitBlock(bw);
-        } catch (IllegalStateException e) {
-            log.debug("ingest is not accepting blocks, dropping one from node {}: {}",
-                    channel.getRemoteAddress(), e.getMessage());
+        } catch (IngestPipeline.SubmitRejectedException e) {
+            if (e.isCommitterDead()) {
+                warnDeadCommitter(e);
+            } else {
+                log.debug("ingest is shutting down, dropping a block from node {}", channel.getRemoteAddress());
+            }
+        }
+    }
+
+    /**
+     * A dead commit thread means this node imports nothing at all from here on, which no amount of
+     * DEBUG would make visible. Rate-limited because the next thing that happens is every block from
+     * every peer taking this path.
+     */
+    private void warnDeadCommitter(RuntimeException cause) {
+        long now = System.currentTimeMillis();
+        long last = LAST_DEAD_COMMITTER_WARN.get();
+        if (now - last >= DEAD_COMMITTER_WARN_INTERVAL_MS && LAST_DEAD_COMMITTER_WARN.compareAndSet(last, now)) {
+            log.warn("ingest commit thread is dead: this node is dropping every block it receives and will not "
+                    + "import again until it is restarted", cause);
         }
     }
 

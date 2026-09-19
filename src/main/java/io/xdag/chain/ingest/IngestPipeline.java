@@ -83,6 +83,29 @@ public final class IngestPipeline {
         ImportResult commit(PreValidated pv);
     }
 
+    /**
+     * {@link #submit} refusing a block. The two causes need different handling by the caller, so
+     * they are distinguishable rather than one opaque {@code IllegalStateException}: a refusal
+     * during shutdown is routine, while a dead commit thread means the node has silently stopped
+     * importing anything and an operator has to be told.
+     */
+    public static final class SubmitRejectedException extends IllegalStateException {
+
+        private static final long serialVersionUID = 1L;
+
+        private final boolean committerDead;
+
+        SubmitRejectedException(boolean committerDead) {
+            super(committerDead ? "ingest pipeline commit thread is dead" : "ingest pipeline is not running");
+            this.committerDead = committerDead;
+        }
+
+        /** True when the commit thread has died: every further block is dropped until a restart. */
+        public boolean isCommitterDead() {
+            return committerDead;
+        }
+    }
+
     private final ExecutorService pool;
     private final Thread commitThread;
     private final Semaphore slots;
@@ -168,11 +191,16 @@ public final class IngestPipeline {
      * than a crash.
      * </ul>
      *
-     * @throws IllegalStateException before {@link #start}, after {@link #stop}, or if the commit
-     *                               thread has died — the caller's shutdown path must expect it
+     * @throws SubmitRejectedException before {@link #start}, after {@link #stop}, or if the commit
+     *                                 thread has died — the caller's shutdown path must expect it,
+     *                                 and must tell the two apart via {@code isCommitterDead()}
      */
     public void submit(BlockWrapper wrapper) {
         Objects.requireNonNull(wrapper, "wrapper");
+        // Uninterruptibly on purpose: this is the netty I/O thread's own backpressure, exactly as
+        // the synchronized import blocked it before SP0b-2, and an interrupt here would have to
+        // drop the block. Nothing unsticks it but a commit -- netty's own shutdown will not -- so
+        // stop() is what has to be reachable, and it is: the commit thread never calls submit.
         slots.acquireUninterruptibly();
         long seq = -1;
         boolean commitThreadDead = false;
@@ -190,9 +218,7 @@ public final class IngestPipeline {
         }
         if (seq < 0) {
             slots.release();
-            throw new IllegalStateException(commitThreadDead
-                    ? "ingest pipeline commit thread is dead"
-                    : "ingest pipeline is not running");
+            throw new SubmitRejectedException(commitThreadDead);
         }
         long assigned = seq;
         try {
@@ -387,8 +413,14 @@ public final class IngestPipeline {
             Thread.currentThread().interrupt();
         }
         if (commitThread.isAlive()) {
-            log.error("ingest commit thread still running after {}ms, interrupting it to keep it out of a closing store",
-                    JOIN_MILLIS);
+            // The interrupt can land inside a setMain. commit() catches the Throwable that comes
+            // back, so the import is abandoned rather than propagated: on disk that leaves the
+            // store a prefix of the write stream with an incomplete transition at the tip, which is
+            // what SP0b-1's start-up gate and --repairchain exist to find and unwind. It is still
+            // better than never closing the store at all.
+            log.error("ingest commit thread still running after {}ms, interrupting it to keep it out of a closing "
+                    + "store; an import in flight is abandoned and may leave an incomplete main-block transition "
+                    + "for the start-up check to unwind", JOIN_MILLIS);
             commitThread.interrupt();
         }
     }

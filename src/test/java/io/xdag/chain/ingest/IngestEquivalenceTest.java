@@ -55,6 +55,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.commons.io.FileUtils;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
@@ -211,7 +212,17 @@ public class IngestEquivalenceTest extends ChainL1TestBase {
         List<Block> blocks = order(w);
         SyncManager sync = syncManager();
         List<ImportResult> resultsA = Collections.synchronizedList(new ArrayList<>());
+        // Counted, not asserted, inside the committer: IngestPipeline.commit catches Throwable, so
+        // an AssertionError raised there would be logged and swallowed instead of failing the test.
+        AtomicInteger signedBlocks = new AtomicInteger();
+        AtomicInteger missingKeys = new AtomicInteger();
         IngestPipeline pipeline = new IngestPipeline(4, 256, pv -> {
+            if (!pv.block().getInputs().isEmpty()) {
+                signedBlocks.incrementAndGet();
+                if (!pv.hasKeys()) {
+                    missingKeys.incrementAndGet();
+                }
+            }
             ImportResult r = sync.importPreValidated(pv);
             resultsA.add(r);
             return r;
@@ -223,6 +234,10 @@ public class IngestEquivalenceTest extends ChainL1TestBase {
         }
         assertTrue("the pipeline did not drain", pipeline.awaitIdle(120, TimeUnit.SECONDS));
         pipeline.stop();
+        // The point of the pipeline: a block whose inputs need verifying must reach the lock with
+        // its keys already computed, or the ECDSA quietly moved back under the monitor.
+        assertTrue("no block with inputs went through the pipeline", signedBlocks.get() > 0);
+        assertEquals("a block with inputs reached the lock without pre-validated keys", 0, missingKeys.get());
         Outcome a = snapshot(resultsA);
 
         // Run B: the synchronous path on a fresh fixture with the same bytes
