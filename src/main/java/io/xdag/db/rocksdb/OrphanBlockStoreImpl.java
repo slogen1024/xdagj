@@ -64,11 +64,6 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
 
     private final Map<String, Queue<OrphanMeta>> accountTxMap = new ConcurrentHashMap<>();
 
-    private final Queue<CandidateEntry> candidateQueue = new PriorityBlockingQueue<>(20, Comparator
-            .comparingLong((CandidateEntry e) -> -e.meta.fee)
-            .thenComparingLong(e -> e.meta.time)
-            .thenComparing(e -> e.meta.hashlow.toArray(), UnsignedBytes.lexicographicalComparator()));
-
     private final Map<Bytes, Long> orphanInsertTimeMap = new ConcurrentHashMap<>();
 
     private final Map<String, Queue<OrphanMeta>> vipTxMap = new ConcurrentHashMap<>();
@@ -102,7 +97,6 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
         linkQueue.clear();
         mtxQueue.clear();
         accountTxMap.clear();
-        candidateQueue.clear();
         orphanInsertTimeMap.clear();
         vipTxMap.clear();
         mainRef.clear();
@@ -356,7 +350,41 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
         }
     }
 
+    /**
+     * D1: the whole body runs under the blockchain monitor — the same monitor {@link
+     * #cleanExpiredOrphans} takes, and the one every mutator of these queues already holds
+     * ({@code addOrphan} through {@code dealOrphan}, {@code deleteFromQueue}/{@code deleteByKey}
+     * through {@code removeOrphan}, both inside the synchronized {@code tryToConnect}).
+     *
+     * <p>This was the one path left outside it. It runs on the PoW main thread
+     * ({@code createMainBlock}) and on the check-main thread ({@code createLinkBlock}), so a
+     * concurrent import could remove an entry between an {@code isEmpty()} and the {@code peek()}
+     * that follows it — the dereference then threw straight into the mining loop — or between a
+     * candidate's {@code peek()} and the {@code poll()} meant to consume it, which dropped a block
+     * that was never selected out of the in-memory pool while only the selected one's
+     * {@code orphanInsertTimeMap} entry was cleared.
+     *
+     * <p>Lock order is blockchain → orphan queues, exactly the order {@code cleanExpiredOrphans}
+     * established; nothing holds an orphan queue and then asks for the blockchain, so no inversion
+     * is introduced. The monitor is reentrant, so a caller that already holds it is unaffected, and
+     * nothing under the monitor blocks on the mining thread (the only listener hands work to
+     * unbounded queues), so the wait is bounded by the import itself.
+     *
+     * <p>The blockchain is null only before the kernel has built it; nothing can import then, so
+     * there is no mutator to serialize against.
+     */
+    @Override
     public List<Address> getOrphan(long num, long[] sendtime, boolean isMain) {
+        Blockchain blockchain = kernel.getBlockchain();
+        if (blockchain == null) {
+            return getOrphanLocked(num, sendtime, isMain);
+        }
+        synchronized (blockchain) {
+            return getOrphanLocked(num, sendtime, isMain);
+        }
+    }
+
+    private List<Address> getOrphanLocked(long num, long[] sendtime, boolean isMain) {
         List<Address> result = Lists.newArrayList();
 
         long addNum;
@@ -394,9 +422,10 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
         }
         if (isMain && !vipTxMap.isEmpty()) {
             long remain = 0;
-            candidateQueue.clear();
+            Queue<CandidateEntry> candidateQueue = newCandidateQueue();
             for (Map.Entry<String, Queue<OrphanMeta>> entry : vipTxMap.entrySet()) {
-                if (entry.getValue().peek() != null) candidateQueue.offer(new CandidateEntry(entry.getValue().peek(), entry.getKey(), CandidateEntry.EntryType.ACCOUNT_TX));
+                OrphanMeta head = entry.getValue().peek();
+                if (head != null) candidateQueue.offer(new CandidateEntry(head, entry.getKey(), CandidateEntry.EntryType.ACCOUNT_TX));
             }
             while (!candidateQueue.isEmpty() && result.size() < totalRequired && remain < 6) {
                 CandidateEntry chosen = candidateQueue.poll();
@@ -406,9 +435,12 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
                 orphanInsertTimeMap.remove(Bytes.wrap(getKeyFromMeta(chosen.meta)));
                 Queue<OrphanMeta> vipQueue = vipTxMap.get(chosen.accountKey);
                 if (vipQueue != null) {
-                    vipQueue.poll();
-                    if (!vipQueue.isEmpty()) {
-                        OrphanMeta next = vipQueue.peek();
+                    // Remove the entry that was actually selected rather than "whatever is at the
+                    // head now": under the monitor they are the same entry, and saying so keeps a
+                    // dropped-but-unselected block impossible instead of merely unreachable.
+                    vipQueue.remove(chosen.meta);
+                    OrphanMeta next = vipQueue.peek();
+                    if (next != null) {
                         if (next.getTime() <= cutoffTime) candidateQueue.offer(new CandidateEntry(next, chosen.accountKey, CandidateEntry.EntryType.ACCOUNT_TX));
                     } else {
                         vipTxMap.remove(chosen.accountKey);
@@ -422,7 +454,7 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
         if ((isMain || (accountTxCount + mtxQueue.size()) == 0 || linkQueue.size() >= totalRequired) && !linkQueue.isEmpty()) {
             while (!linkQueue.isEmpty() && result.size() < totalRequired) {
                 OrphanMeta m = linkQueue.peek();
-                if (m.time > cutoffTime) break;
+                if (m == null || m.time > cutoffTime) break;
                 result.add(m);
                 linkQueue.remove(m);
                 orphanInsertTimeMap.remove(Bytes.wrap(getKeyFromMeta(m)));
@@ -431,13 +463,17 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
         }
 
         if ((!mtxQueue.isEmpty() || accountTxCount != 0) && result.size() < totalRequired) {
-            candidateQueue.clear();
-            if (!mtxQueue.isEmpty()) {
-                candidateQueue.offer(new CandidateEntry(mtxQueue.peek(), null, CandidateEntry.EntryType.MTX));
+            Queue<CandidateEntry> candidateQueue = newCandidateQueue();
+            OrphanMeta mtxHead = mtxQueue.peek();
+            if (mtxHead != null) {
+                candidateQueue.offer(new CandidateEntry(mtxHead, null, CandidateEntry.EntryType.MTX));
             }
             if (!accountTxMap.isEmpty()) {
                 for (Map.Entry<String, Queue<OrphanMeta>> entry : accountTxMap.entrySet()) {
-                    candidateQueue.offer(new CandidateEntry(entry.getValue().peek(), entry.getKey(), CandidateEntry.EntryType.ACCOUNT_TX));
+                    OrphanMeta head = entry.getValue().peek();
+                    if (head != null) {
+                        candidateQueue.offer(new CandidateEntry(head, entry.getKey(), CandidateEntry.EntryType.ACCOUNT_TX));
+                    }
                 }
             }
 
@@ -447,7 +483,7 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
                 result.add(chosen.meta);
                 orphanInsertTimeMap.remove(Bytes.wrap(getKeyFromMeta(chosen.meta)));
                 if (chosen.type == CandidateEntry.EntryType.MTX) {
-                    mtxQueue.poll();
+                    mtxQueue.remove(chosen.meta);
                     OrphanMeta next = mtxQueue.peek();
                     if (next != null && next.time <= cutoffTime) {
                         candidateQueue.offer(new CandidateEntry(next, null, CandidateEntry.EntryType.MTX));
@@ -455,9 +491,9 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
                 } else {
                     Queue<OrphanMeta> q = accountTxMap.get(chosen.accountKey);
                     if (q != null) {
-                        q.poll();
-                        if (!q.isEmpty()) {
-                            OrphanMeta next = q.peek();
+                        q.remove(chosen.meta);
+                        OrphanMeta next = q.peek();
+                        if (next != null) {
                             if (next.time <= cutoffTime) {
                                 candidateQueue.offer(new CandidateEntry(next, chosen.accountKey, CandidateEntry.EntryType.ACCOUNT_TX));
                             }
@@ -470,6 +506,19 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
         }
 
         return result;
+    }
+
+    /**
+     * D1: the working set of {@code selectBlocks} is a local, not an instance field. It used to be
+     * shared state that every call {@code clear()}ed and refilled, so two callers — the PoW main
+     * thread and the check-main thread — could corrupt each other's selection even while each one
+     * looked correct on its own.
+     */
+    private static Queue<CandidateEntry> newCandidateQueue() {
+        return new PriorityQueue<>(20, Comparator
+                .comparingLong((CandidateEntry e) -> -e.meta.fee)
+                .thenComparingLong(e -> e.meta.time)
+                .thenComparing(e -> e.meta.hashlow.toArray(), UnsignedBytes.lexicographicalComparator()));
     }
 
     private byte[] getKeyFromMeta(OrphanMeta meta) {
