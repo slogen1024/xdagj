@@ -618,7 +618,16 @@ public class BlockStoreImpl implements BlockStore {
         long time = startTime;
         while (time < endTime) {
             List<Block> blocks = getBlocksByTime(time);
-            time += 0x10000;
+            // The stride can carry `time` past Long.MAX_VALUE, and the wrapped, hugely negative
+            // result still satisfies `time < endTime` -- the loop would then run for about 2^48
+            // more iterations before wrapping back, which is minutes of a pinned core. Stop at the
+            // boundary instead. Reachable from any caller that passes an extreme startTime,
+            // including the peer-supplied one behind BLOCKS_REQUEST.
+            long next = time + 0x10000;
+            if (next <= time) {
+                break;
+            }
+            time = next;
             if (CollectionUtils.isEmpty(blocks)) {
                 continue;
             }

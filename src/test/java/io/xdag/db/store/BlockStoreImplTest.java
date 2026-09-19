@@ -64,6 +64,24 @@ public class BlockStoreImplTest {
         factory = new RocksdbFactory(config);
     }
 
+    /**
+     * The time-bucket walk strides by 0x10000. Carried past Long.MAX_VALUE that stride wraps to a
+     * hugely negative value which still satisfies {@code time < endTime}, so the loop kept going for
+     * on the order of 2^48 more iterations -- minutes of a pinned core, reachable from any caller
+     * that passes an extreme startTime, including the peer-supplied range behind BLOCKS_REQUEST.
+     * The walk must stop at the boundary instead.
+     */
+    @Test(timeout = 30_000)
+    public void getBlocksUsedTimeStopsAtTheEndOfTheTimeRangeInsteadOfWrapping() {
+        BlockStore bs = BlockStoreImpl.forNode(factory);
+        bs.start();
+
+        List<Block> blocks = bs.getBlocksUsedTime(Long.MAX_VALUE - 10, Long.MAX_VALUE);
+
+        assertTrue("an empty store has no blocks to return at the top of the time range",
+                blocks.isEmpty());
+    }
+
     @Test
     public void testNewBlockStore() {
         BlockStore bs = BlockStoreImpl.forNode(factory);
