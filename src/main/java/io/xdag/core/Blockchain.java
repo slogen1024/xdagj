@@ -40,6 +40,14 @@ public interface Blockchain {
     // Try to connect a new block to the blockchain
     ImportResult tryToConnect(Block block);
 
+    /**
+     * Import with facts already computed outside the lock (SP0b-2); the default recomputes them
+     * inside, so an implementation that does not know about the pipeline keeps working unchanged.
+     */
+    default ImportResult tryToConnect(io.xdag.chain.ingest.PreValidated pv) {
+        return tryToConnect(pv.block());
+    }
+
     // Create a new block with given parameters
     Block createNewBlock(
             Map<Address, ECKeyPair> pairs,

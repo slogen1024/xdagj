@@ -357,7 +357,7 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
 
         log.debug("processNewBlock:{} from node {}", block.getHashLow(), channel.getRemoteAddress());
         BlockWrapper bw = new BlockWrapper(block, msg.getTtl() - 1, channel.getRemotePeer(), false);
-        syncMgr.validateAndAddNewBlock(bw);
+        submitBlock(bw);
     }
 
     protected void processSyncBlock(SyncBlockMessage msg) {
@@ -365,7 +365,23 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
         chain.putSyncTxStatus(block.getHashLow(), msg.getExecutionState());
         log.debug("processSyncBlock:{}  from node {}", block.getHashLow(), channel.getRemoteAddress());
         BlockWrapper bw = new BlockWrapper(block, msg.getTtl() - 1, channel.getRemotePeer(), true);
-        syncMgr.validateAndAddNewBlock(bw);
+        submitBlock(bw);
+    }
+
+    /**
+     * Hands the block to the ingest path (SP0b-2). Nothing may read the block after this returns:
+     * with the pipeline on, the block is being parsed on a pool thread, and {@code Block.parse()} is
+     * an unsynchronized lazy mutator. The {@code IllegalStateException} is the shutdown case -- the
+     * pipeline stops accepting before the rest of the node stops -- and it is raised before the
+     * block is handed over, so the block is simply not imported and a peer will offer it again.
+     */
+    private void submitBlock(BlockWrapper bw) {
+        try {
+            syncMgr.submitBlock(bw);
+        } catch (IllegalStateException e) {
+            log.debug("ingest is not accepting blocks, dropping one from node {}: {}",
+                    channel.getRemoteAddress(), e.getMessage());
+        }
     }
 
     /**

@@ -26,7 +26,10 @@ package io.xdag.consensus;
 
 import com.google.common.collect.Queues;
 import io.xdag.Kernel;
+import io.xdag.chain.ingest.IngestPipeline;
+import io.xdag.chain.ingest.PreValidated;
 import io.xdag.config.*;
+import io.xdag.config.spec.ChainSpec;
 import io.xdag.core.*;
 import io.xdag.crypto.core.CryptoProvider;
 import io.xdag.crypto.encoding.Base58;
@@ -98,6 +101,12 @@ public class SyncManager extends AbstractXdagLifecycle {
 
     private ScheduledFuture<?> checkStateFuture;
     private final TransactionHistoryStore txHistoryStore;
+    /**
+     * Parallel pre-validation in front of the import (SP0b-2), or null when {@code chain.ingest.threads}
+     * is 0 and the node imports synchronously as it did before. Built and started by {@link #doStart},
+     * stopped by {@link #doStop}.
+     */
+    private IngestPipeline pipeline;
 
     public SyncManager(Kernel kernel) {
         this.kernel = kernel;
@@ -113,11 +122,24 @@ public class SyncManager extends AbstractXdagLifecycle {
         log.debug("Download receiveBlock run...");
         new Thread(this.stateListener, "xdag-stateListener").start();
         checkStateFuture = checkStateTask.scheduleAtFixedRate(this::checkState, 64, 5, TimeUnit.SECONDS);
+        ChainSpec chainSpec = kernel.getConfig().getChainSpec();
+        int threads = chainSpec.getChainIngestThreads();
+        int queue = chainSpec.getChainIngestQueue();
+        if (threads > 0) {
+            pipeline = new IngestPipeline(threads, queue, this::importPreValidated);
+            pipeline.start();
+            log.info("Ingest pipeline on: threads={}, queue={}", threads, queue);
+        }
     }
 
     @Override
     protected void doStop() {
         log.debug("sync manager stop");
+        // First: the pipeline drains into tryToConnect, so it has to be done importing before the
+        // kernel goes on to close the stores underneath it.
+        if (pipeline != null) {
+            pipeline.stop();
+        }
         if (this.stateListener.isRunning) {
             this.stateListener.isRunning = false;
         }
@@ -175,9 +197,15 @@ public class SyncManager extends AbstractXdagLifecycle {
     // TODO: Modify consensus
     public ImportResult importBlock(BlockWrapper blockWrapper) {
         log.debug("importBlock:{}", blockWrapper.getBlock().getHashLow());
-        ImportResult importResult = blockchain
-                .tryToConnect(new Block(new XdagBlock(blockWrapper.getBlock().getXdagBlock().getData().toArray())));
+        // Re-parsed from the raw 512 bytes on purpose, and that has to stay: a block sitting in
+        // syncMap carries the flags a previous attempt wrote (tryToConnect sets BI_EXTRA before it
+        // can decide NO_PARENT), so every attempt has to start from a clean BlockInfo.
+        return finishImport(blockWrapper, blockchain
+                .tryToConnect(new Block(new XdagBlock(blockWrapper.getBlock().getXdagBlock().getData().toArray()))));
+    }
 
+    /** What both entry points do with an import's verdict before the caller sees it: log, then relay. */
+    private ImportResult finishImport(BlockWrapper blockWrapper, ImportResult importResult) {
         if (importResult == EXIST) {
             log.debug("Block have exist:{}", blockWrapper.getBlock().getHashLow());
         }
@@ -194,10 +222,51 @@ public class SyncManager extends AbstractXdagLifecycle {
         return importResult;
     }
 
+    /**
+     * The network entry point (SP0b-2): the pipeline when it is on, else the synchronous import.
+     *
+     * <p>Deliberately NOT {@code synchronized}, and it must never be called from a method that is.
+     * {@code IngestPipeline.submit} holds its backpressure permit from here until the commit of that
+     * block returns, and the committer is {@link #importPreValidated}, which IS synchronized on this
+     * object: a caller parked here at queue capacity while holding this monitor would deadlock the
+     * pipeline. For the same reason nothing here touches the block — {@code Block.parse()} and
+     * {@code Block.getHashLow()} are unsynchronized lazy mutators, and a caller-side {@code parse()}
+     * racing the pool's would duplicate the block's inputs and outputs.
+     *
+     * @throws IllegalStateException if the pipeline is no longer accepting blocks (shutdown)
+     */
+    public void submitBlock(BlockWrapper blockWrapper) {
+        IngestPipeline p = pipeline;
+        if (p != null) {
+            p.submit(blockWrapper);
+        } else {
+            validateAndAddNewBlock(blockWrapper);
+        }
+    }
+
+    /**
+     * The pipeline's commit step: import with the facts computed off the monitor, then exactly the
+     * bookkeeping {@link #validateAndAddNewBlock} does. Runs on the single commit thread, in arrival
+     * order.
+     */
+    public synchronized ImportResult importPreValidated(PreValidated pv) {
+        BlockWrapper blockWrapper = pv.wrapper();
+        ImportResult result = finishImport(blockWrapper, blockchain.tryToConnect(pv));
+        log.debug("importPreValidated:{}, {}", blockWrapper.getBlock().getHashLow(), result);
+        afterImport(blockWrapper, result);
+        return result;
+    }
+
     public synchronized ImportResult validateAndAddNewBlock(BlockWrapper blockWrapper) {
         blockWrapper.getBlock().parse();
         ImportResult result = importBlock(blockWrapper);
         log.debug("validateAndAddNewBlock:{}, {}", blockWrapper.getBlock().getHashLow(), result);
+        afterImport(blockWrapper, result);
+        return result;
+    }
+
+    /** Releases the children waiting on this block, or queues it behind the parent it is missing. */
+    private void afterImport(BlockWrapper blockWrapper, ImportResult result) {
         switch (result) {
             case EXIST, IMPORTED_BEST, IMPORTED_NOT_BEST, IN_MEM -> syncPopBlock(blockWrapper);
             case NO_PARENT -> {
@@ -218,7 +287,6 @@ public class SyncManager extends AbstractXdagLifecycle {
             default -> {
             }
         }
-        return result;
     }
 
     /**

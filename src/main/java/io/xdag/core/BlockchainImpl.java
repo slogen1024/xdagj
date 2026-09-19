@@ -30,6 +30,8 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import io.xdag.Kernel;
 import io.xdag.Wallet;
+import io.xdag.chain.ingest.PreValidated;
+import io.xdag.chain.ingest.PreValidator;
 import io.xdag.chain.l1.ChainL1Hooks;
 import io.xdag.chain.l1.ChainL1Processor;
 import io.xdag.chain.l1.ChainL1SnapshotGate;
@@ -388,7 +390,22 @@ public class BlockchainImpl implements Blockchain {
 
     // Try to connect a new block to the chain
     @Override
-    public synchronized ImportResult tryToConnect(Block block) {
+    public ImportResult tryToConnect(Block block) {
+        // The ECDSA of verifiedKeys() runs on this thread, outside the monitor -- the same work the
+        // lock used to do, only moved out of it. Every caller that hands a bare Block to the chain
+        // (local mining, the repair tools, syncPopBlock's re-import, the tests) is unchanged by it.
+        return tryToConnect(PreValidator.inline(block));
+    }
+
+    /**
+     * The import proper (SP0b-2). Everything the lock needs that is a pure function of the block's
+     * bytes may already have been computed off the monitor; what {@code pv} does not carry is
+     * recomputed here, so a {@link PreValidated} whose pre-validation blew up imports exactly as a
+     * bare block does.
+     */
+    @Override
+    public synchronized ImportResult tryToConnect(PreValidated pv) {
+        Block block = pv.block();
 
         // TODO: if current height is snapshot height, we need change logic to process new block
 
@@ -559,7 +576,7 @@ public class BlockchainImpl implements Blockchain {
             }
 
             // Validate block inputs
-            if (!canUseInput(block)) {
+            if (!canUseInput(block, pv.hasKeys() ? pv.keys() : null)) {
                 result = ImportResult.INVALID_BLOCK;
                 result.setHashlow(block.getHashLow());
                 result.setErrorInfo("Block's input can't be used");
@@ -2309,7 +2326,16 @@ public class BlockchainImpl implements Blockchain {
     }
 
     public boolean canUseInput(Block block) {
-        List<PublicKey> keys = block.verifiedKeys();
+        return canUseInput(block, null);
+    }
+
+    /**
+     * {@code keys == null}: compute {@code block.verifiedKeys()} here, which is the pre-SP0b-2
+     * behaviour. Otherwise the keys were verified off the monitor by the ingest pipeline; they are a
+     * pure function of the block's bytes, so the verdict is the same either way.
+     */
+    public boolean canUseInput(Block block, List<PublicKey> preVerifiedKeys) {
+        List<PublicKey> keys = preVerifiedKeys != null ? preVerifiedKeys : block.verifiedKeys();
         List<Address> inputs = block.getInputs();
         if (inputs == null || inputs.isEmpty()) {
             return true;
