@@ -71,6 +71,13 @@ public class SyncManager extends AbstractXdagLifecycle {
     // Number of keys to remove when syncMap exceeds MAX_SIZE
     public static final int DELETE_NUM = 5000;
 
+    /** How long the state listener waits after boot before it first looks at the node's state. */
+    private static final long INITIAL_STATE_CHECK_DELAY_MS = 100_000;
+    /** How long the state listener waits between two state checks. */
+    private static final long STATE_CHECK_INTERVAL_MS = 10_000;
+    /** How long {@link #doStop} waits for the state listener to finish after interrupting it. */
+    private static final long STATE_LISTENER_STOP_WAIT_MS = 5_000;
+
     private static final ThreadFactory factory = new BasicThreadFactory.Builder()
             .namingPattern("SyncManager-thread-%d")
             .daemon(true)
@@ -116,6 +123,14 @@ public class SyncManager extends AbstractXdagLifecycle {
     @Setter(AccessLevel.NONE)
     private volatile IngestPipeline pipeline;
 
+    /**
+     * The thread {@link #stateListener} runs on, kept so {@link #doStop} can interrupt it out of a
+     * sleep. Null until {@link #doStart} has started it. Not settable from outside: the lifecycle
+     * owns it, whatever the class-level Lombok says.
+     */
+    @Setter(AccessLevel.NONE)
+    private volatile Thread stateListenerThread;
+
     public SyncManager(Kernel kernel) {
         this.kernel = kernel;
         this.blockchain = kernel.getBlockchain();
@@ -128,7 +143,19 @@ public class SyncManager extends AbstractXdagLifecycle {
     @Override
     protected void doStart() {
         log.debug("Download receiveBlock run...");
-        new Thread(this.stateListener, "xdag-stateListener").start();
+        // The flag is raised here, before the thread exists, rather than by run() itself: a stop
+        // that lands in the window between start() and the thread's first statement used to be
+        // undone by run()'s own `isRunning = true`, and the interrupt was lost as well (a thread
+        // that has not started yet cannot be interrupted). Raised first, the listener sees a stop
+        // at its first check whenever the two race.
+        this.stateListener.isRunning = true;
+        Thread listener = new Thread(this.stateListener, "xdag-stateListener");
+        // Daemon only as a backstop for a path that never reaches doStop(): the interrupt there is
+        // the actual shutdown mechanism, and doStop waits for this thread, so a makeSyncDone() in
+        // flight is never cut short by a stop.
+        listener.setDaemon(true);
+        listener.start();
+        this.stateListenerThread = listener;
         checkStateFuture = checkStateTask.scheduleAtFixedRate(this::checkState, 64, 5, TimeUnit.SECONDS);
         ChainSpec chainSpec = kernel.getConfig().getChainSpec();
         int threads = chainSpec.getChainIngestThreads();
@@ -150,10 +177,40 @@ public class SyncManager extends AbstractXdagLifecycle {
         if (running != null) {
             running.stop();
         }
-        if (this.stateListener.isRunning) {
-            this.stateListener.isRunning = false;
-        }
+        stopStateListener();
         stopStateTask();
+    }
+
+    /**
+     * Ends the state listener and waits a bounded time for it.
+     *
+     * <p>Clearing the flag is not enough on its own, and used to be all that happened here: the
+     * listener spends its first 100 seconds asleep and every later loop 10 seconds asleep, so a
+     * node that had been asked to stop kept a non-daemon thread — and with it the JVM — alive for
+     * up to 100 seconds after a clean shutdown. The interrupt is what ends the sleep.
+     *
+     * <p>Then it joins, briefly: the listener calls {@link #makeSyncDone()}, which writes through
+     * the transaction-history store and starts the miner, and none of that may still be running
+     * when the kernel goes on to close the stores underneath it.
+     */
+    private void stopStateListener() {
+        this.stateListener.isRunning = false;
+        Thread listener = this.stateListenerThread;
+        if (listener == null) {
+            return;
+        }
+        listener.interrupt();
+        try {
+            listener.join(STATE_LISTENER_STOP_WAIT_MS);
+        } catch (InterruptedException e) {
+            // Somebody wants this thread to stop too. Pass it on rather than swallow it, and do
+            // not wait any longer.
+            Thread.currentThread().interrupt();
+            return;
+        }
+        if (listener.isAlive()) {
+            log.warn("xdag-stateListener did not stop within {} ms", STATE_LISTENER_STOP_WAIT_MS);
+        }
     }
 
     private void checkState() {
@@ -474,27 +531,49 @@ public class SyncManager extends AbstractXdagLifecycle {
 
     private class StateListener implements Runnable {
 
-        boolean isRunning = false;
+        /**
+         * Volatile: written by whichever thread stops the kernel (and by {@link #makeSyncDone()}),
+         * read by the listener thread. A plain field gave the two no happens-before edge at all,
+         * so a clear could go unseen indefinitely and the listener loop on forever.
+         */
+        volatile boolean isRunning = false;
 
         @Override
         public void run() {
-            this.isRunning = true;
-            try {
-                Thread.sleep(100000);
-
-            } catch (InterruptedException e) {
-                throw new RuntimeException(e);
+            // Nothing is worth checking for the first stretch after boot: the node has not had
+            // time to hear from a peer yet.
+            if (!sleepUnlessStopping(INITIAL_STATE_CHECK_DELAY_MS)) {
+                return;
             }
             while (this.isRunning) {
                 if (isTimeToStart()) {
                     makeSyncDone();
                 }
-                try {
-                    Thread.sleep(10000);
-                } catch (InterruptedException e) {
-                    log.error(e.getMessage(), e);
+                if (!sleepUnlessStopping(STATE_CHECK_INTERVAL_MS)) {
+                    return;
                 }
             }
+        }
+
+        /**
+         * Sleeps for {@code millis}, returning false if the listener has been asked to stop —
+         * before the sleep, by the interrupt that ended it, or by the flag afterwards.
+         *
+         * <p>An interrupt means "stop now" and is never rethrown. The first sleep used to wrap it
+         * in a {@code RuntimeException}, which ended the thread with an uncaught exception the
+         * moment anybody interrupted it, and the second only logged it and slept again.
+         */
+        private boolean sleepUnlessStopping(long millis) {
+            if (!this.isRunning) {
+                return false;
+            }
+            try {
+                Thread.sleep(millis);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+            return this.isRunning;
         }
     }
 

@@ -500,6 +500,14 @@ public class Kernel {
             api.stop();
         }
 
+        // With the API, and for the same reason: the telnet console answers admin commands that
+        // read the stores, so it has to be shut before anything closes them. It was started in
+        // testStart() and never stopped at all, which left its listening socket and the threads
+        // jline's telnetd runs it on behind after the node had otherwise shut down.
+        if (telnetServer != null) {
+            telnetServer.stop();
+        }
+
         // Stop consensus
         if (sync != null) {
             sync.stop();
