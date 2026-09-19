@@ -122,8 +122,23 @@ public class BlockchainImpl implements Blockchain {
      */
     private final PersistControl persist;
 
+    /**
+     * D2: written only under the blockchain monitor, but read with no synchronization at all by
+     * {@link #getBlockByHash}, which is public and reached from netty I/O threads (the two P2P
+     * serve paths), RPC, the CLI and the award thread. As a plain {@code LinkedHashMap} that was
+     * both a data race — a {@code get} concurrent with a structural modification can return a
+     * spurious null, so a peer's request for a freshly arrived extra block goes unanswered — and a
+     * missing happens-before edge, which let a reader see a half-published block.
+     *
+     * <p>{@code Collections.synchronizedMap} rather than a {@code ConcurrentHashMap}: {@link
+     * #processExtraBlock()} evicts the oldest extra block by taking the map's first entry, which is
+     * {@code LinkedHashMap}'s insertion order. Keeping the {@code LinkedHashMap} keeps that
+     * behaviour exactly, where a {@code ConcurrentHashMap} would need a second, separately
+     * maintained key deque to say the same thing. Every reader now goes through the map's own lock;
+     * only iteration has to say so explicitly, and the one place that iterates does.
+     */
     // In-memory pools and maps
-    private final LinkedHashMap<Bytes, Block> memOrphanPool = new LinkedHashMap<>();
+    private final Map<Bytes, Block> memOrphanPool = Collections.synchronizedMap(new LinkedHashMap<>());
     private final Map<Bytes, Integer> memOurBlocks = new ConcurrentHashMap<>();
 
     // Stats and status tracking
@@ -1086,7 +1101,18 @@ public class BlockchainImpl implements Blockchain {
     // Process extra blocks
     public void processExtraBlock() {
         if (memOrphanPool.size() > MAX_ALLOWED_EXTRA) {
-            Block reuse = memOrphanPool.entrySet().iterator().next().getValue();
+            // The oldest extra block, by LinkedHashMap insertion order. Iteration over a
+            // synchronized map is the one operation the wrapper cannot lock for us, so it says so
+            // here — and it holds the pool lock for the first entry only, never across
+            // removeOrphan, which would nest the pool lock inside work that takes it again.
+            Block reuse;
+            synchronized (memOrphanPool) {
+                Iterator<Map.Entry<Bytes, Block>> it = memOrphanPool.entrySet().iterator();
+                if (!it.hasNext()) {
+                    return;
+                }
+                reuse = it.next().getValue();
+            }
             log.debug("Remove when extra too big");
             removeOrphan(reuse.getHashLow(), OrphanRemoveActions.ORPHAN_REMOVE_REUSE);
             xdagStats.nblocks--;

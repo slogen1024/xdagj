@@ -489,17 +489,20 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
         int ttl = config.getNodeSpec().getTTL();
         if (block != null) {
             log.debug("processBlockRequest: findBlock{}", Bytes32.wrap(hash).toHexString());
-            NewBlockMessage message = new NewBlockMessage(block, ttl);
+            NewBlockMessage message = new NewBlockMessage(copyForWire(block), ttl);
             msgQueue.sendMessage(message);
         }
     }
 
-    private void processSyncBlockRequest(SyncBlockRequestMessage msg) {
+    protected void processSyncBlockRequest(SyncBlockRequestMessage msg) {
         Bytes hash = msg.getHash();
         Block block = chain.getBlockByHash(Bytes32.wrap(hash), true);
         if (block != null) {
             log.debug("processSyncBlockRequest, findBlock: {}, to node: {}", Bytes32.wrap(hash).toHexString(), channel.getRemoteAddress());
             byte executionState = 0;
+            // The execution-state hint is a property of the chain's own view, so it is still read
+            // off the instance the chain handed back, not off the copy (whose BlockInfo carries
+            // only what the raw bytes say, and so has no flags at all).
             if (chain.isTxBlock(block)) {
                 int flag = block.getInfo().getFlags() & ~(BI_OURS | BI_REMARK);
                 // 1C,applied
@@ -509,9 +512,40 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
                     executionState = 2;
                 }
             }
-            SyncBlockMessage message = new SyncBlockMessage(block, 1, executionState);
+            SyncBlockMessage message = new SyncBlockMessage(copyForWire(block), 1, executionState);
             msgQueue.sendMessage(message);
         }
+    }
+
+    /**
+     * D2: what goes on the wire is a private copy parsed from the block's raw 512 bytes, never the
+     * instance {@code getBlockByHash} handed back — which, for a block still in the chain's
+     * {@code memOrphanPool}, is the live object the chain goes on mutating.
+     *
+     * <p>{@code NewBlockMessage}/{@code SyncBlockMessage} encode in their constructor, and they do
+     * it with {@code Block.toBytes()}, which re-encodes from the block's mutable fields;
+     * {@code getEncodedHeader} puts {@code info.fee} into the hashed, signed header, and
+     * {@code tryToConnect} sets that fee to zero immediately before it puts the block in the pool.
+     * The bytes a peer received therefore need not be the bytes that hash to the hash it asked for.
+     * Parsing the raw bytes afresh restores the header the block actually arrived with and hands
+     * the message an object nothing else can touch.
+     *
+     * <p>Both call sites ask for the raw form, so the block always carries its 512 bytes: from the
+     * pool it was built out of them, and from the store {@code getRawBlockByHash} attaches them (or
+     * returns null). The null branch is belt and braces — with no raw bytes to copy from there is
+     * nothing to send but the instance itself, exactly as before. This is the same aliasing SP0b-2
+     * closed for arriving blocks in {@code PreValidator.compute}; this is the serving direction.
+     *
+     * <p>Copying here and not in {@code getBlockByHash} is deliberate: callers inside the monitor
+     * rely on getting the live instance, so that their {@code updateBlockFlag}/{@code saveBlock}
+     * mutations stick.
+     */
+    private static Block copyForWire(Block block) {
+        XdagBlock raw = block.getXdagBlock();
+        if (raw == null || raw.getData() == null) {
+            return block;
+        }
+        return new Block(new XdagBlock(raw.getData().toArray()));
     }
 
     /**
