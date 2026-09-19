@@ -10,6 +10,43 @@
 
 ---
 
+## 执行记录（as executed，2026-09-19）
+
+> 本块只记录执行结果与偏离；各任务正文保持计划原样，as-built 细节以 SP0b-2 规格 v2（`docs/superpowers/specs/2026-09-18-xdag-chain-sp0b2-ingest-pipeline-design.md`）为准，实测数字只在 `docs/benchmarks/2026-09-19-l1-import-pipeline.md`。
+
+**提交（`git log --oneline 737c510e..HEAD`，旧→新，共 21 个）**
+
+| 任务 | 提交 |
+|------|------|
+| T1 | `404c1c7c` Add an ordered write-behind layer over the import databases；`96ecc28d` Close the in-flight window and make write-behind failures wake every waiter；`3fa9be55` Guard read-miss cache repopulation against racing writes；`6b188efe` Sample the read epoch before the lookups and wake producers at poll time |
+| T2 | `fedc6065` Keep block sums in memory and write them back in batches；`b8922aff` Batch the sums write-back for real and bound its cache；`7a2cae56` Polish the sums cache after review |
+| T3 | `b4632039` Add the node-local ingest and persistence settings；`bffd543f` Name every node-local chain setting in the ChainSpec class doc |
+| T4 | `73fb50ec` Run consensus transitions in direct-write mode over the write-behind layer；`f3dc00f7` Hold the blockchain monitor for every write behind the direct-write path；`298d5e28` Keep the shutdown writes on the monitor and the timer out of stopServices |
+| T5 | `a1f66c73` Make the main-block candidate walk incremental；`046fe4d9` Let the candidate cache survive the flag on the new top |
+| T6 | `7b74f39f` Add the parallel pre-validation pipeline with in-order commit；`289a822c` Keep the ingest pipeline from stalling when a submit or a commit fails |
+| T7 | `6daa0d62` Import network blocks through the pipeline with pre-validated keys；`65cd100b` Give the ingest pipeline its own copy of every block it imports；`324c81af` Refuse ingest submits once the commit loop is gone（T8 之后的修复，见下） |
+| T8 | `5784047e` Benchmark the ingest pipeline and record the SP0b-2 baseline；`997ce680` Correct the SP0b-2 baseline document after review |
+| T9 | 规格/文档同步提交（本块所在提交） |
+
+**偏离计划之处（按任务）**
+
+- **T1 写后层**：类切分多了 `io.xdag.db.PersistControl`（接口）与 `WriteBehindFactory`（包装工厂）。`WriteBehindQueue` 的构造器是**四参** `(maxPending, flushEntries, flushMs, threaded)`（计划的三参写法不存在），多出的 `threaded=false` 是**手动模式**（无写入线程：`flushSync` 在调用方排空、撞上背压的生产者自己排一组、测试用 `drainOnce()` 单步）。跨库顺序不是"按固定库序"，而是**严格按队列顺序切 run**，并且 run 还要在"同一 run 内 put 撞上先前 delete"处切开（`batchWrite` 先 put 后 delete）。"bypass 直写"改名为 `PersistControl.direct(body)` 且**排空是惰性的**（bypass 与 drained 各一个 ThreadLocal，排空发生在 body 的第一次写；一个什么都不写的 body 完全不排空——`unWindMain` 对多数导入的块都会进入而几乎从不写，急切排空会让这一层白做，代码标 **I1**）。读未命中回填读缓存要在队列锁内核对**本库的写世代**（`writes`，且必须在所有查找**之前**采样）。失败处理多了闭环：`setFailureHandler` → `Kernel.onPersistFailure`（**I2**）另起线程 `testStop()` + `System.exit(1)`。
+- **T2 sums**：计划写的是"写入线程每次落盘把脏键各写一次"；as-built 的触发点全在 `BlockStoreImpl` 自己身上，**四个**：每 `SUMS_FLUSH_EVERY = 256` 个保存的块、**换最深时间桶**（2^24 tick ≈ 4.55 h）时先写掉离开的那个、`BlockStore.stop()`、`Kernel.testStop()` 显式调 `BlockStore.flushSums()`（G3 失败路径也调）。**`saveXdagStatus` 不是触发点**——它每次导入都调，拿它当触发点等于把批量彻底废掉。崩溃损失界 = 上次 flush 以来不足 256 个块对当前桶的贡献，**永久**（没有代码会重算盘上块的 sums），后果是同步协议反复钻这个区间：带宽问题，不是正确性问题。缓存有界：每次 flush 后只留脏键 + 最后一块的四个键。
+- **T3 配置**：`chain.persist.maxPending = 0` 是**关闭写后层**的开关（规格 v1 写的是 ≥ 1，漏了这个回退口），与 `chain.ingest.threads = 0` 对称；另加跨键校验 `flushEntries ≤ maxPending`（仅当 `maxPending > 0`），否则条目阈值永远够不着、每组白等一个 `flushMs`。
+- **T4 直写接入**：六个 `persist.direct(…)` 包装（`initSnapshotJ` / `unWindMain` / `reconcileTipTo` / `repairUnwindTo` / `setMain` / `unSetMain`），里层 `…Direct` 方法体逐字节不变。**新增的 C1 约束**：写后层包住的库，所有写必须在区块链监视器下——为此 `BlockchainImpl.checkMain()` 整个改成 `synchronized`（原来只有里面的 `checkNewMain()` 是），孤块清理器 `cleanExpiredOrphans` 整体放进 `synchronized (blockchain)`。**I4**：`OrphanBlockStore.stop()` 现在停清理器（`shutdownNow` + 等 5 s + 关自己的 source），并在 `Kernel.stopServices()` 里紧挨 `stopCheckMain()` 调用。`Kernel.testStop` 改为 **`dbFactory.close()`**（不再逐个 `DatabaseName` 关）——只有 `WriteBehindFactory.close()` 会停那条非 daemon 的写入线程；最后两笔写（`flushSums` + `saveXdagStatus`）持着区块链监视器做；`MessageQueue.timer.shutdown()` 从 `stopServices()` 里挪出来（一次失败的 `testStart` 不能让同 JVM 的下一次拿到死掉的消息队列）。**顺手关闭 SP0a G3**：`testStart` 的 try/catch，失败时 `isRunning.set(false)` → `stopServices()` → `flushSums` → `chainL1Store.stop()` → `dbFactory.close()` → 原样重抛。**写后层默认开**（`maxPending = 4096`）。
+- **T5 增量回走**：规格 v1 的规则（"新 top 的 `maxDiffLink` 是缓存的 top **且 `chainVersion` 未变**"）**永远不可能触发**——`tryToConnect` 在挪 top 之前就给进来的块打了 `BI_MAIN_CHAIN`，版本已经 +1。as-built 的规则是"**且自缓存建立以来恰好一次标志变更，且就发生在如今这个 top 上**"（`candidateVersion + 1 == chainVersion && lastFlagged == top`），这正是每一次 best 导入的形状。另外 `chainVersion` 还必须在**块离开存储而没有标志变更**的地方 +1：`processExtraBlock → removeOrphan(ORPHAN_REMOVE_REUSE)` 把块从 `memOrphanPool` 踢掉而不落盘，回走依赖"走过的块还读得出来"，不只依赖标志。
+- **T6/T7 流水线**：计划里"`chain.ingest.threads = 0` 时同步路径去掉重解析"被**推翻**——`syncMap` 里的块带着上一次尝试写下的 `BI_EXTRA`，每次尝试必须从干净的 `BlockInfo` 开始，所以重解析**保留**。而且那次重解析原本担着**两件**事：干净 `BlockInfo`，以及把链上那份块与中继线程 `toBytes()` 的那份隔离开（链会改它导入的块的 fee/height，块还活在 `memOrphanPool` 里）。因此流水线在**池线程上重新解析出一份私有副本**（`PreValidator.compute`），`inline()` 则故意不复制。`canUseInput` 顺手把**空输入短路提到验签之前**（原来链接块与主块白付一次从没人读的 ECDSA），`PreValidator` 同样只对有输入的块算公钥。`SyncManager.pipeline` 是 `volatile` 且只在 `start()` 返回后赋值。新增 `SubmitRejectedException(isCommitterDead())` 与"提交线程死了就拒绝投递而不是停在信号量上"（`324c81af`，在 T8 基准之后）：判定在**取信号量之前**做，否则饱和的流水线会把每条 netty I/O 线程永久停住、那条 WARN 永远到不了；`XdagP2pHandler` 以 10 分钟节流打 WARN。**`Error` 不会结束提交循环**（`commit()` catch `Throwable` 只记日志），可达的死亡路径只有中断——所以基准的提交器不能用 `assertTrue`（会被吞成一行日志、测试假绿）。池线程与提交线程是 daemon，写入线程 `xdag-persist` 是非 daemon。
+- **T8 基准**：`-Dchain.ingest.threads=0` 对本基准**是空操作**（那个键只在 `SyncManager.doStart()` 里读，基准从不 `start()` `SyncManager`），所以运行 B 量的是"**流水线 + 同步库**"，不是"关掉流水线"；关写后层用的是基准自己的 `-Dxdag.bench.writeBehind=false`。`OrphanBlockStoreImpl` 两条每次导入都打的队列统计 INFO 降为 DEBUG（SP0b-1 基线里 118,603 行/次 → 本次窗口 0 行）；`getOrphan()` 里第三条同样的 INFO **按计划未动**（生产节点每出一个主块打一次，本基座一次都没触发）。基准测的是 `65cd100b` 之上带这两处改动的工作树（文档"代码："行写明）；`324c81af` 之后每个 `submit` 多了一次**无竞争**的 `ReentrantLock` 往返（取信号量前的死提交线程判定），远在噪声之下，但那次运行不包含它。
+- **T9**：全量回归 508 个测试 / 83 个类，0 失败 0 错误，Skipped 1（基准类，设计如此）；`mvn -q license:check` 退出 0。
+
+**验收：未达成。** `pipeline` 三轮中位 **7157 块/s**，目标 10,000，达成 **71.6%**。已交付：同一次运行内 `pipeline` / `direct` = **1.55×**；写后层 **+17.4%**；`phase.persist` 217.4 → **22.1 µs**；验签整项移出锁。**加线程到不了目标**——付费块的锁内提交占整轮 **78.1%** 且严格串行，故单提交线程的硬上限约 **9164 块/s**（池利用率只有约 9%）。剩下的时间在锁内"其余"（AddressStore 读 / 孤块池 / 难度与统计），占锁内 **≥ 84%**，与 SP0b-1 时几乎没变；要到 10,000 需要每单位 ≤ 100 µs（目前 139.7），即"其余"再砍约 34%。**下一个任务必须先给这几个子步骤补 `phase.*` 行再动手**（头号嫌疑：链接校验里的 `AddressStore` 读——ADDRESS 既没包写后层也没有读缓存）。已在路线图新开 **§5.2.1 SP0b-2b**，M3 的导入门禁挂在它上面。
+
+**已知缺口（不掩盖，见规格 §4.2）**：没有任何测试驱动 `Kernel.testStart`/`testStop`；`SyncManager.doStart`/`doStop` 的流水线接线也没有自己的测试；`IngestPipeline.submitted()/committed()/inFlight()` 只有测试在读（死提交线程**有**面向运维的 WARN，积压深度没有）；投机预验证的占比未测量。
+
+---
+
+---
+
 ## 0. 约定（每个任务都适用）
 
 ### 0.1 构建与测试命令
@@ -72,7 +109,7 @@ T1 写后存储层 → T2 sums 写回 → T3 配置键 → T4 直写模式接入
 - Create: `src/main/java/io/xdag/db/rocksdb/WriteBehindFactory.java`
 - Test: `src/test/java/io/xdag/db/rocksdb/WriteBehindKVSourceTest.java`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```java
 package io.xdag.db.rocksdb;
@@ -319,12 +356,12 @@ public class WriteBehindKVSourceTest {
 }
 ```
 
-- [ ] **Step 2: 运行，确认失败**
+- [x] **Step 2: 运行，确认失败**
 
 Run: `mvn -q -Dtest=io.xdag.db.rocksdb.WriteBehindKVSourceTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 编译失败（三个类不存在）。
 
-- [ ] **Step 3: 实现 `PersistControl`**
+- [x] **Step 3: 实现 `PersistControl`**
 
 ```java
 package io.xdag.db;
@@ -377,7 +414,7 @@ public interface PersistControl {
 }
 ```
 
-- [ ] **Step 4: 实现 `WriteBehindQueue`**
+- [x] **Step 4: 实现 `WriteBehindQueue`**
 
 ```java
 package io.xdag.db.rocksdb;
@@ -779,7 +816,7 @@ public final class WriteBehindQueue implements PersistControl {
 }
 ```
 
-- [ ] **Step 5: 实现 `WriteBehindKVSource`**
+- [x] **Step 5: 实现 `WriteBehindKVSource`**
 
 ```java
 package io.xdag.db.rocksdb;
@@ -984,7 +1021,7 @@ public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
 }
 ```
 
-- [ ] **Step 6: 实现 `WriteBehindFactory`**
+- [x] **Step 6: 实现 `WriteBehindFactory`**
 
 ```java
 package io.xdag.db.rocksdb;
@@ -1035,12 +1072,12 @@ public final class WriteBehindFactory implements DatabaseFactory {
 }
 ```
 
-- [ ] **Step 7: 运行测试，确认通过**
+- [x] **Step 7: 运行测试，确认通过**
 
 Run: `mvn -q -Dtest='io.xdag.db.rocksdb.WriteBehindKVSourceTest,io.xdag.db.rocksdb.BatchWriteTest' -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `WriteBehindKVSourceTest` 15 个全绿（`aFailedWriteIsFatalAndNeverSilent` 依赖 `RocksdbKVSource.batchWrite` 在已关闭的库上抛出——若它只记日志不抛，改用一个在 `batchWrite` 里 `throw new RuntimeException("boom")` 的匿名 `KVSource` 委托来制造失败，并在报告里注明）。
 
-- [ ] **Step 8: 提交**
+- [x] **Step 8: 提交**
 
 ```bash
 git add src/main/java/io/xdag/db/PersistControl.java src/main/java/io/xdag/db/rocksdb/WriteBehindQueue.java src/main/java/io/xdag/db/rocksdb/WriteBehindKVSource.java src/main/java/io/xdag/db/rocksdb/WriteBehindFactory.java src/test/java/io/xdag/db/rocksdb/WriteBehindKVSourceTest.java
@@ -1057,7 +1094,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `src/main/java/io/xdag/db/rocksdb/BlockStoreImpl.java`（`getSums`/`putSums`/`saveBlockSums`/`saveXdagStatus`/`stop`，新增 `flushSums`）
 - Test: `src/test/java/io/xdag/db/store/SumsCacheTest.java`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```java
 package io.xdag.db.store;
@@ -1199,12 +1236,12 @@ public class SumsCacheTest {
 
 （`BlockStoreImpl` 的 Kryo 序列化是私有方法，所以测试不反序列化原始字节，只断言键存在并用一个新的 `BlockStoreImpl` 实例读回。）
 
-- [ ] **Step 2: 运行，确认失败**
+- [x] **Step 2: 运行，确认失败**
 
 Run: `mvn -q -Dtest=io.xdag.db.store.SumsCacheTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 编译失败（`flushSums`、`SUMS_FLUSH_EVERY` 不存在）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `BlockStoreImpl` 新增字段与方法（放在 `saveBlockSums` 附近）：
 
@@ -1289,12 +1326,12 @@ Expected: 编译失败（`flushSums`、`SUMS_FLUSH_EVERY` 不存在）。
 
 `saveXdagStatus` 开头加一行 `flushSums();`；`stop()` 开头加 `flushSums();`（`stop` 关库前落盘）。`updateSum` 与 `loadSum` 不改（它们只经 `getSums`/`putSums`）。需要的 import：`java.util.Set`、`java.util.concurrent.ConcurrentHashMap`、`java.util.concurrent.atomic.AtomicInteger`。
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `mvn -q -Dtest='io.xdag.db.store.SumsCacheTest,io.xdag.db.store.BlockStoreImplTest,io.xdag.db.SnapshotStoreTest,io.xdag.consensus.SyncTest' -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 全绿（`SyncTest` 走 `loadSum`）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/main/java/io/xdag/db/rocksdb/BlockStoreImpl.java src/test/java/io/xdag/db/store/SumsCacheTest.java
@@ -1313,7 +1350,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `src/test/java/io/xdag/chain/l1/ChainL1ProcessorTest.java`（`TestSpec` 补六个方法）
 - Test: `src/test/java/io/xdag/config/ChainSpecTest.java`
 
-- [ ] **Step 1: 写失败测试（追加到 `ChainSpecTest`）**
+- [x] **Step 1: 写失败测试（追加到 `ChainSpecTest`）**
 
 ```java
     @Test
@@ -1345,12 +1382,12 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
     }
 ```
 
-- [ ] **Step 2: 运行，确认失败**
+- [x] **Step 2: 运行，确认失败**
 
 Run: `mvn -q -Dtest=io.xdag.config.ChainSpecTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 编译失败（六个 getter 不存在）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `ChainSpec` 在 `DEFAULT_CONSISTENCY_WINDOW` 之后加常量，在 `getChainConsistencyWindow()` 之后加 getter：
 
@@ -1453,12 +1490,12 @@ getter（`getChainConsistencyWindow()` 旁，六个同形）：
 
 （`config` 变量的类型以 `getSetting()` 里已有的为准。）`ChainL1ProcessorTest.TestSpec` 补六个 `@Override`，各返回对应 `ChainSpec.DEFAULT_*`。
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `mvn -q -Dtest='io.xdag.config.ChainSpecTest,io.xdag.chain.l1.ChainL1ProcessorTest' -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: `ChainSpecTest` 19、`ChainL1ProcessorTest` 17 全绿。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/main/java/io/xdag/config/spec/ChainSpec.java src/main/java/io/xdag/config/AbstractConfig.java src/test/java/io/xdag/config/ChainSpecTest.java src/test/java/io/xdag/chain/l1/ChainL1ProcessorTest.java
@@ -1477,7 +1514,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `src/test/java/io/xdag/chain/l1/ChainL1TestBase.java`（`wrapFactory` 钩子）
 - Test: `src/test/java/io/xdag/db/store/WriteBehindPrefixTest.java`
 
-- [ ] **Step 1: 基座钩子**
+- [x] **Step 1: 基座钩子**
 
 `ChainL1TestBase.setUpChain()` 里把 `dbFactory = new RocksdbFactory(config);` 改为：
 
@@ -1504,7 +1541,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 （`Kernel.setPersist` 由 Task 4 Step 3 的 Lombok 字段提供；先写基座会编译失败，按 Step 2 的顺序一起编译。）
 
-- [ ] **Step 2: 写失败测试**
+- [x] **Step 2: 写失败测试**
 
 ```java
 package io.xdag.db.store;
@@ -1647,7 +1684,7 @@ public class WriteBehindPrefixTest extends ChainL1TestBase {
 
 （`ChainConsistencyCheck.run` 的签名与 `Report.describe()/clean()`、`BlockStore.getLastCompletedMain()` 按 SP0b-1 as-built 用；不一致处以代码为准并记入报告。）
 
-- [ ] **Step 3: 实现 `Kernel`**
+- [x] **Step 3: 实现 `Kernel`**
 
 字段（Lombok 生成 `getPersist/setPersist`）：
 
@@ -1691,7 +1728,7 @@ public class WriteBehindPrefixTest extends ChainL1TestBase {
 
 `testStop()` 不改：`dbFactory.close()` → `WriteBehindFactory.close()` 先 `queue.stop()`（排空）再关库。
 
-- [ ] **Step 4: 实现 `BlockchainImpl`**
+- [x] **Step 4: 实现 `BlockchainImpl`**
 
 字段与构造器（`this.orphanBlockStore = kernel.getOrphanBlockStore();` 之后）：
 
@@ -1737,12 +1774,12 @@ public class WriteBehindPrefixTest extends ChainL1TestBase {
 
 要点：包装方法必须 `synchronized`——排空要在持锁时做，否则排空与进入本体之间另一次导入可能又排了写，直写就会插到它们前面。`direct` 可重入（`checkNewMain → setMain`、`unWindMain → unSetMain`、`tryToConnect → unWindMain` 都在锁内嵌套）。原方法上的 `@Override`/Javadoc 跟着包装方法走。
 
-- [ ] **Step 5: 运行测试，确认通过**
+- [x] **Step 5: 运行测试，确认通过**
 
 Run: `mvn -q -Dtest='io.xdag.db.store.WriteBehindPrefixTest,io.xdag.chain.**.*Test,io.xdag.cli.RepairChainCommandTest,io.xdag.cli.MakeSnapshotEndToEndTest,io.xdag.core.BlockchainTest' -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 全绿；SP0b-1 的全部基座测试在默认（不包）基座上不变；`WriteBehindPrefixTest` 2 个绿。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/main/java/io/xdag/core/BlockchainImpl.java src/main/java/io/xdag/Kernel.java src/test/java/io/xdag/chain/l1/ChainL1TestBase.java src/test/java/io/xdag/db/store/WriteBehindPrefixTest.java
@@ -1759,7 +1796,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `src/main/java/io/xdag/core/BlockchainImpl.java`（`chainVersion`、候选缓存、`updateBlockFlag`、`checkNewMain`）
 - Test: `src/test/java/io/xdag/core/CheckNewMainIncrementalTest.java`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```java
 package io.xdag.core;
@@ -1841,12 +1878,12 @@ public class CheckNewMainIncrementalTest extends ChainL1TestBase {
 }
 ```
 
-- [ ] **Step 2: 运行，确认失败**
+- [x] **Step 2: 运行，确认失败**
 
 Run: `mvn -q -Dtest=io.xdag.core.CheckNewMainIncrementalTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 编译失败（`MainCandidate`、`walkCandidate`、`cachedCandidate` 不存在）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `BlockchainImpl` 新增（放在 `checkNewMain` 之前）：
 
@@ -1944,12 +1981,12 @@ Expected: 编译失败（`MainCandidate`、`walkCandidate`、`cachedCandidate` �
 
 需要 `import java.util.Arrays;`。`reconcileTipToDirect` 与 `repairUnwindToDirect` 里 `xdagTopStatus.setTop(...)` 之后各加 `chainVersion++;`（修复路径不经 `updateBlockFlag` 也可能改 top）。`checkNewMain` 原来对 `p` 用的是回走时加载的对象；现在改为决策前重新按哈希加载（raw），只会更新，不会更旧。
 
-- [ ] **Step 4: 运行测试，确认通过**
+- [x] **Step 4: 运行测试，确认通过**
 
 Run: `mvn -q -Dtest='io.xdag.core.CheckNewMainIncrementalTest,io.xdag.chain.l1.ChainL1ReorgPropertyTest,io.xdag.chain.l1.ChainL1UnwindTest,io.xdag.chain.repair.*Test,io.xdag.core.BlockchainTest,io.xdag.core.RewardTest' -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 全绿（属性测试默认 2 个种子；再手动跑一次 `-Dxdag.reorg.full=true`）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/main/java/io/xdag/core/BlockchainImpl.java src/test/java/io/xdag/core/CheckNewMainIncrementalTest.java
@@ -1968,7 +2005,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Create: `src/main/java/io/xdag/chain/ingest/IngestPipeline.java`
 - Test: `src/test/java/io/xdag/chain/ingest/IngestOrderingTest.java`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```java
 package io.xdag.chain.ingest;
@@ -2086,12 +2123,12 @@ public class IngestOrderingTest {
 }
 ```
 
-- [ ] **Step 2: 运行，确认失败**
+- [x] **Step 2: 运行，确认失败**
 
 Run: `mvn -q -Dtest=io.xdag.chain.ingest.IngestOrderingTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 编译失败。
 
-- [ ] **Step 3: 实现 `PreValidated`**
+- [x] **Step 3: 实现 `PreValidated`**
 
 ```java
 package io.xdag.chain.ingest;
@@ -2119,7 +2156,7 @@ public record PreValidated(long seq, BlockWrapper wrapper, Block block, Bytes32 
 }
 ```
 
-- [ ] **Step 4: 实现 `PreValidator`**
+- [x] **Step 4: 实现 `PreValidator`**
 
 ```java
 package io.xdag.chain.ingest;
@@ -2158,7 +2195,7 @@ public final class PreValidator {
 }
 ```
 
-- [ ] **Step 5: 实现 `IngestPipeline`**
+- [x] **Step 5: 实现 `IngestPipeline`**
 
 ```java
 package io.xdag.chain.ingest;
@@ -2344,12 +2381,12 @@ public final class IngestPipeline {
 }
 ```
 
-- [ ] **Step 6: 运行测试，确认通过**
+- [x] **Step 6: 运行测试，确认通过**
 
 Run: `mvn -q -Dtest=io.xdag.chain.ingest.IngestOrderingTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 4 个绿。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add src/main/java/io/xdag/chain/ingest/PreValidated.java src/main/java/io/xdag/chain/ingest/PreValidator.java src/main/java/io/xdag/chain/ingest/IngestPipeline.java src/test/java/io/xdag/chain/ingest/IngestOrderingTest.java
@@ -2369,7 +2406,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `src/main/java/io/xdag/net/XdagP2pHandler.java`（两处 `validateAndAddNewBlock` → `submitBlock`）
 - Test: `src/test/java/io/xdag/chain/ingest/IngestEquivalenceTest.java`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```java
 package io.xdag.chain.ingest;
@@ -2567,12 +2604,12 @@ public class IngestEquivalenceTest extends ChainL1TestBase {
 
 （`BenchWorkload` 的构造签名与 `payload` 按 SP0b-1 as-built：`(Config, long seed, int senderCount, int blocks, int[] mix, long txTime, Bytes chainId, Bytes contract, Bytes32 sharedCodeHash)`；不一致处以代码为准。若 INDEX 里含无法逐字节比较的键（例如带墙钟的统计），把它从比较里剔除并在报告与规格里写明是哪一个。）
 
-- [ ] **Step 2: 运行，确认失败**
+- [x] **Step 2: 运行，确认失败**
 
 Run: `mvn -q -Dtest=io.xdag.chain.ingest.IngestEquivalenceTest -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 编译失败（`importPreValidated` 不存在）。
 
-- [ ] **Step 3: 实现 `Blockchain` 与 `BlockchainImpl`**
+- [x] **Step 3: 实现 `Blockchain` 与 `BlockchainImpl`**
 
 `Blockchain` 接口在 `tryToConnect(Block)` 之后加：
 
@@ -2629,7 +2666,7 @@ Expected: 编译失败（`importPreValidated` 不存在）。
 
 `inline` 在锁外的调用线程上算 ECDSA——对本地出块、测试、修复工具与 `syncPopBlock` 的重导都等价于今天（同一线程、同一份工作），只是搬到了 `synchronized` 之外。
 
-- [ ] **Step 4: 实现 `SyncManager`**
+- [x] **Step 4: 实现 `SyncManager`**
 
 字段：`private IngestPipeline pipeline;`。`doStart()` 末尾：
 
@@ -2665,16 +2702,16 @@ Expected: 编译失败（`importPreValidated` 不存在）。
 
 重构（行为不变）：`importBlock(bw)` 的 `tryToConnect(new Block(new XdagBlock(...)))` 之后的部分抽成 `private ImportResult finishImport(BlockWrapper bw, ImportResult importResult)`（EXIST 日志 + 分发逻辑 + `return importResult`），`importBlock` = `finishImport(bw, blockchain.tryToConnect(new Block(new XdagBlock(bw.getBlock().getXdagBlock().getData().toArray()))))`——**重导路径保留重解析**（`syncMap` 里的块可能带着上次尝试写下的标志）；`validateAndAddNewBlock` 里 `switch (result)` 抽成 `private void afterImport(BlockWrapper bw, ImportResult result)`，`validateAndAddNewBlock` = `parse(); result = importBlock(bw); log; afterImport(bw, result); return result;`。
 
-- [ ] **Step 5: `XdagP2pHandler`**
+- [x] **Step 5: `XdagP2pHandler`**
 
 `processNewBlock` 与 `processSyncBlock` 里 `syncMgr.validateAndAddNewBlock(bw)` → `syncMgr.submitBlock(bw)`。
 
-- [ ] **Step 6: 运行测试，确认通过**
+- [x] **Step 6: 运行测试，确认通过**
 
 Run: `mvn -q -Dtest='io.xdag.chain.ingest.*Test,io.xdag.chain.**.*Test,io.xdag.core.BlockchainTest,io.xdag.consensus.SyncTest,io.xdag.cli.RepairChainCommandTest' -Dsurefire.failIfNoSpecifiedTests=false test`
 Expected: 全绿；`IngestEquivalenceTest` 1 个绿（约 30–60 s）。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add src/main/java/io/xdag/core/Blockchain.java src/main/java/io/xdag/core/BlockchainImpl.java src/main/java/io/xdag/consensus/SyncManager.java src/main/java/io/xdag/net/XdagP2pHandler.java src/test/java/io/xdag/chain/ingest/IngestEquivalenceTest.java
@@ -2692,11 +2729,11 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `src/test/java/io/xdag/chain/bench/ChainL1ImportBenchmarkTest.java`（`wrapFactory` 覆盖；`pipeline.rN` 三轮；`report` 新行）
 - Create: `docs/benchmarks/<yyyy-mm-dd>-l1-import-pipeline.md`
 
-- [ ] **Step 1: 日志降级**
+- [x] **Step 1: 日志降级**
 
 `OrphanBlockStoreImpl` 里两条 `log.info("vipTxCount: {}, …")` 改为 `log.debug`。
 
-- [ ] **Step 2: 基准**
+- [x] **Step 2: 基准**
 
 `ChainL1ImportBenchmarkTest`：
 
@@ -2758,16 +2795,16 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 （`pipeline.*` 行的 mean/p50/p95 是**锁内提交耗时**（`importPreValidated`），blocks/s 是端到端（首个 submit 到全部提交并排空）。`persist().flushSync()` 计入总时间，所以吞吐含落盘。）`report(...)` 的 JSON 与 Markdown 自动包含新行；控制台首行加 `writeBehind=<bool> ingestThreads=<n>`；配对差值表不变。
 
-- [ ] **Step 3: 跑**
+- [x] **Step 3: 跑**
 
 冒烟：`mvn -q -Dxdag.bench=true -Dxdag.bench.blocks=1000 -Dtest=io.xdag.chain.bench.ChainL1ImportBenchmarkTest -Dsurefire.failIfNoSpecifiedTests=false test`。
 全量（安静机器，`pgrep -fl "surefire|maven"` 无其他）：默认参数一次；`-Dxdag.bench.writeBehind=false` 再跑一次 direct/syncPath 做前后对比（可用 `-Dxdag.bench.blocks=20000` 全量）。记录 `uptime`。
 
-- [ ] **Step 4: 基线文档**
+- [x] **Step 4: 基线文档**
 
 `docs/benchmarks/<yyyy-mm-dd>-l1-import-pipeline.md`（中文）：机器/JDK/提交；两条命令；两张表（写后关 vs 开；`pipeline.rN` 三轮）；对比表：`direct` 均值前后、`pipeline` 三轮 blocks/s 与中位、锁内提交 mean/p50/p95；验收判定：**`pipeline` 三轮中位 ≥ 10,000 块/s** 达成与否；若未达成，给出锁内分段（`phase.*` 与 `pipeline` 的锁内 mean）与结论。注意事项：负载、`txHistoryStore=null`、残留日志。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/main/java/io/xdag/db/rocksdb/OrphanBlockStoreImpl.java src/test/java/io/xdag/chain/bench/ChainL1ImportBenchmarkTest.java
@@ -2789,11 +2826,11 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Modify: `.claude/docs/chain-l1-foundation.md`（§9.2 导入流水线与写后层；§10 索引）—— 不进 git
 - Modify: 本计划头部"执行记录"
 
-- [ ] **Step 1: 全量回归与许可证**
+- [x] **Step 1: 全量回归与许可证**
 
 Run: `mvn -q license:check` → 退出 0；`mvn -q test`（安静机器）→ 汇总 0 失败 0 错误（基准类 Skipped 1）；`-Dxdag.reorg.full=true -Dtest=io.xdag.chain.l1.ChainL1ReorgPropertyTest` 8 个种子全绿。
 
-- [ ] **Step 2: 规格与文档同步**
+- [x] **Step 2: 规格与文档同步**
 
 按上面的文件清单逐项改；每条陈述以代码为准；数字只引用基线文档。提交（`git add -f` 每个 docs 文件；`.claude/docs` 不提交）。
 

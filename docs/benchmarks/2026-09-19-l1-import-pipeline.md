@@ -1,7 +1,8 @@
 # L1 导入流水线基线（SP0b-2）
 
 - 日期 / 机器：2026-09-19（10:58–11:36，两次全量运行背靠背）/ Apple M1 Pro，8 核，16 GiB（`hw.memsize` = 17179869184），macOS 15.7.4（24G517，Darwin 24.6.0）/ JDK `openjdk version "21.0.12" 2026-07-21 LTS`（Temurin-21.0.12+8-LTS）
-- 代码：`dev-dag-contract`，SP0b-2 的 T1–T7 已全部落地（HEAD `65cd100b`），本次运行的工作树在其上多两处本任务的改动：`OrphanBlockStoreImpl` 两条每次导入都打的 INFO 降为 DEBUG，`ChainL1ImportBenchmarkTest` 加 `wrapFactory` 覆盖与 `pipeline.rN` 行。两者与本文档在同一个提交里。
+- 代码：`dev-dag-contract`。**被测的树就是提交 `5784047e`（"Benchmark the ingest pipeline and record the SP0b-2 baseline"）**——它等于 T1–T7 的末端 `65cd100b` 加上本任务的两处改动（`OrphanBlockStoreImpl` 两条每次导入都打的 INFO 降为 DEBUG；`ChainL1ImportBenchmarkTest` 加 `wrapFactory` 覆盖与 `pipeline.rN` 行），两者与本文档首版在同一个提交里。
+  **跑完之后又有一处修复不在被测树里**：`324c81af`（"Refuse ingest submits once the commit loop is gone"）给每个 `submit` 加了一次取信号量之前的死提交线程判定，也就是每块**多一次无竞争的 `ReentrantLock` 往返**。远在本基准的噪声底（轮间散布 2.6%）之下，不重跑；但本文的数字严格地说是 `5784047e` 的，不是 `HEAD` 的。
 - 负载：与 SP0b-1 基线**逐字节相同**——senders=64, blocks=20000（PLAIN 12075 / CALL_INLINE 4975 / CALL_CHAIN 1943 / DEPLOY 1007）, chunks=5829, mix=60/25/10/5, seed=20260917。`confirmedMainsPerRound=2001`。
 - `TransactionHistoryStore`：`null`（`node.transaction.history.enable` 关闭时 CLI 节点的生产路径）。
 - 原始输出：`target/bench/l1-import-20260919-111701.json`（A）、`target/bench/l1-import-20260919-113608.json`（B）
