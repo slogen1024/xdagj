@@ -99,7 +99,14 @@ public final class PreValidator {
             // No inputs, nothing to verify: canUseInput returns true without ever reading the keys,
             // so computing them would be pure waste. Link and main blocks -- most of the traffic --
             // take this branch. keys stays null, which leaves the lock's own path unchanged.
-            List<PublicKey> keys = inputs == null || inputs.isEmpty() ? null : List.copyOf(block.verifiedKeys());
+            //
+            // A missing out-signature is the same skip for a different reason: verifiedKeys() is
+            // not total on that shape (it reaches Signer.verify with a null signature), and the
+            // lock rejects the block as INVALID_BLOCK before canUseInput anyway, so computing the
+            // keys here would only trade a clean verdict for a caught NPE on a pool thread.
+            List<PublicKey> keys = block.getOutsig() == null || inputs == null || inputs.isEmpty()
+                    ? null
+                    : List.copyOf(block.verifiedKeys());
             // classify() reads the block's own Address objects (getBlockLinks()) but keeps none of
             // them: every ext decoder copies links.get(i).getAddress().toArray() into a fresh
             // Bytes32, and a payload is a list of immutable Bytes32. It is still classified from

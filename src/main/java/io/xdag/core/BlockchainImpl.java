@@ -588,6 +588,33 @@ public class BlockchainImpl implements Blockchain {
                 }
             }
 
+            // Reject before anything mutates. A block with no out-signature is malformed, and every
+            // later step that reaches for it dereferences null: Block.verifiedKeys() does whenever
+            // there are public-key fields to match against, and checkMineAndAdd does
+            // unconditionally. Both of those sit past the link-removal loop below, where
+            // removeOrphan deletes ORPHANIND rows, decrements nnoref and writes BI_REF into another
+            // block's persisted BlockInfo — so a throw down there is a reject-AFTER-mutate that a
+            // peer can aim at orphans of its choosing.
+            //
+            // Before SP0b-2, canUseInput computed verifiedKeys() unconditionally, so the
+            // public-keys-but-no-signature shape threw exactly here and the catch(Throwable) below
+            // turned it into ERROR with no state touched. SP0b-2's empty-inputs fast path is right
+            // in itself — link and main blocks are most of the traffic and must not pay for an
+            // ECDSA verification they cannot use — but it removed that accident. This restores the
+            // verdict as an explicit rejection, and covers the no-public-keys variant too, which
+            // reached checkMineAndAdd's null dereference even before SP0b-2.
+            //
+            // O(1), and that is the point: an ordinary link or main block carries no public-key
+            // field at all (its signature is checked against the node's own wallet keys), so this
+            // guard verifies nothing and costs nothing.
+            if (block.getOutsig() == null) {
+                result = ImportResult.INVALID_BLOCK;
+                result.setHashlow(block.getHashLow());
+                result.setErrorInfo("Block has no out-signature");
+                log.debug("Block has no out-signature");
+                return result;
+            }
+
             // Validate block inputs
             if (!canUseInput(block, pv.hasKeys() ? pv.keys() : null)) {
                 result = ImportResult.INVALID_BLOCK;
@@ -2354,6 +2381,9 @@ public class BlockchainImpl implements Blockchain {
         }
         // After the empty check, never before it: link and main blocks have no inputs and are most
         // of the traffic, and verifying their signatures here only to return true is pure waste.
+        // Safe to skip a verdict as well as a cost, but only because tryToConnect now rejects a
+        // block with no out-signature before it gets here: that is the one shape verifiedKeys() is
+        // not total on, and the fast path used to let it past on its way to a later NPE.
         List<PublicKey> keys = preVerifiedKeys != null ? preVerifiedKeys : block.verifiedKeys();
         /*
          * While "in" isn't address, need to verify signature
