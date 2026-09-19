@@ -42,7 +42,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.Set;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 import org.apache.commons.io.FileUtils;
 import org.junit.Test;
 
@@ -96,6 +98,23 @@ public class RepairChainCommandTest extends ChainL1TestBase {
 
     private int inFlightOp() {
         return readStore(BlockStore::getMainInFlightOp);
+    }
+
+    /**
+     * Every live non-daemon thread, i.e. exactly the threads that keep a JVM from exiting once the
+     * command has returned.
+     */
+    private static Set<Thread> liveNonDaemonThreads() {
+        return Thread.getAllStackTraces().keySet().stream()
+                .filter(Thread::isAlive)
+                .filter(t -> !t.isDaemon())
+                .collect(Collectors.toSet());
+    }
+
+    private static Set<String> newLiveNonDaemonThreads(Set<Thread> before) {
+        Set<Thread> now = liveNonDaemonThreads();
+        now.removeAll(before);
+        return now.stream().map(Thread::getName).collect(Collectors.toSet());
     }
 
     private long mineAndCorruptMarker(long behind) {
@@ -189,6 +208,32 @@ public class RepairChainCommandTest extends ChainL1TestBase {
         assertEquals(3, cli.repairChain(null));
         assertEquals(nmain - 1, marker());
         assertEquals(nmain, persistedNmain());
+    }
+
+    /**
+     * The command has to return the shell a status and then end. It opens an orphan block store,
+     * whose start() schedules a cleaner on a non-daemon thread, and the finally used to close the
+     * databases without ever stopping it -- so a run that succeeded printed its result and then
+     * hung with the process alive, while every run that failed did exit. This asserts both halves:
+     * the success code, and that nothing the command started outlives it.
+     */
+    @Test
+    public void aSuccessfulRepairReturnsZeroAndLeavesNoThreadBehind() throws Exception {
+        mineAndCorruptMarker(1);
+        Set<Thread> before = liveNonDaemonThreads();
+
+        assertEquals("the repair exits 0", 0, cli().repairChain(null));
+
+        // A stopped scheduler's thread does not die on the instant it is interrupted, so give it a
+        // moment; a leaked one is still there after five seconds.
+        long deadline = System.currentTimeMillis() + 5000;
+        Set<String> leaked = newLiveNonDaemonThreads(before);
+        while (!leaked.isEmpty() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50);
+            leaked = newLiveNonDaemonThreads(before);
+        }
+        assertTrue("--repairchain left non-daemon threads alive, so the command hangs: " + leaked,
+                leaked.isEmpty());
     }
 
     /** A typo must not become the most destructive of the four modes. */

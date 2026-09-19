@@ -538,12 +538,17 @@ public class XdagCliTest {
      * SP0b-1: every {@code --repairchain} mode reaches {@link XdagCli#repairChain(String)} verbatim,
      * and the command never falls through to {@code start()}. {@code nullable(String.class)} rather
      * than {@code anyString()}: the no-argument form passes null, which anyString() does not match.
+     *
+     * <p>A successful run exits too, with 0: the command used to exit only on failure, so a clean,
+     * repaired or planned run returned no status to the shell and, with a non-daemon thread of the
+     * orphan store still up, hung with the process alive.
      */
     @Test
     public void testRepairChain() throws Exception {
         XdagCli xdagCLI = spy(new XdagCli());
         xdagCLI.setConfig(config);
         doReturn(0).when(xdagCLI).repairChain(nullable(String.class));
+        doNothing().when(xdagCLI).exit(anyInt());
 
         xdagCLI.start(new String[]{"--repairchain", "dry-run"});
         verify(xdagCLI).repairChain("dry-run");
@@ -558,6 +563,7 @@ public class XdagCliTest {
         xdagCLI.start(new String[]{"--repairchain"});
         verify(xdagCLI).repairChain((String) null);
 
+        verify(xdagCLI, times(4)).exit(0);
         verify(xdagCLI, never()).startKernel(any(), any());
     }
 

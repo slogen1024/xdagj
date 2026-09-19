@@ -224,10 +224,9 @@ public class XdagCli extends Launcher {
         } else if (cmd.hasOption(XdagOption.REPAIR_CHAIN.toString())) {
             // Never falls through to start(): the whole point of the command is that the node must
             // not run on this store until the repair has been accepted.
-            int code = repairChain(cmd.getOptionValue(XdagOption.REPAIR_CHAIN.toString()));
-            if (code != 0) {
-                exit(code);
-            }
+            // Unconditionally, including 0: a shell reads the status of every run, not only of the
+            // ones that failed, and the JVM has no reason to stay up either way.
+            exit(repairChain(cmd.getOptionValue(XdagOption.REPAIR_CHAIN.toString())));
         } else {
             if (cmd.hasOption(XdagOption.ENABLE_SNAPSHOT.toString())) {
                 String[] values = cmd.getOptionValues(XdagOption.ENABLE_SNAPSHOT.toString().trim());
@@ -704,6 +703,9 @@ public class XdagCli extends Launcher {
         DatabaseFactory dbFactory = new RocksdbFactory(getConfig());
         BlockchainImpl blockchain = null;
         ChainL1Store chainStore = null;
+        // Declared out here so the finally can stop it: start() schedules its cleaner on a
+        // non-daemon thread, and stop() is the only thing that shuts that scheduler down.
+        OrphanBlockStore orphanBlockStore = null;
         try {
             // forNode, never the constructor: it is the single definition of the layout a node
             // writes (raw blocks in the database named TIME). Opening by the signature order here
@@ -713,7 +715,7 @@ public class XdagCli extends Launcher {
             blockStore.start();
             AddressStore addressStore = new AddressStoreImpl(dbFactory.getDB(DatabaseName.ADDRESS));
             addressStore.start();
-            OrphanBlockStore orphanBlockStore = new OrphanBlockStoreImpl(dbFactory.getDB(DatabaseName.ORPHANIND),
+            orphanBlockStore = new OrphanBlockStoreImpl(dbFactory.getDB(DatabaseName.ORPHANIND),
                     kernel);
             orphanBlockStore.start();
             chainStore = new ChainL1Store(dbFactory.getDB(DatabaseName.CHAIN_L1));
@@ -754,6 +756,13 @@ public class XdagCli extends Launcher {
                 // leaves that thread alive when the constructor throws AFTER startCleaner(), but that
                 // path returns non-zero, which start() turns into System.exit, so the JVM still ends.
                 blockchain.stopCheckMain();
+            }
+            // Mirrors Kernel.stopServices: with the check-main loop, because it is a scheduler of
+            // the same kind, and before the databases close. Without it the command kept a
+            // non-daemon thread alive and a successful run hung with the process up -- the worst
+            // polarity there is, since every failing run did exit.
+            if (orphanBlockStore != null) {
+                orphanBlockStore.stop();
             }
             if (chainStore != null) {
                 chainStore.stop();
