@@ -243,6 +243,21 @@ public class Commands {
      * @param remark Optional transaction remark
      */
     public String xfer(double sendAmount, Bytes32 address, String remark, double fee) {
+        // The nonce each input is issued is read off the issued-nonce counter below, and only
+        // written back once the block has been built, imported and gossiped. Reserve every wallet
+        // account this call could draw an input from for that whole sequence, or two concurrent
+        // transfers from one account are issued the same nonce and one of them dies unspent at
+        // main time, long after this method has reported success.
+        List<byte[]> senders = Lists.newArrayList();
+        for (ECKeyPair account : kernel.getWallet().getAccounts()) {
+            senders.add(toBytesAddress(account).toArray());
+        }
+        return kernel.getAddressStore().withNonceReservation(senders,
+                () -> xferReserved(sendAmount, address, remark, fee));
+    }
+
+    /** The body of {@link #xfer}, run with every candidate sender's nonce reserved. */
+    private String xferReserved(double sendAmount, Bytes32 address, String remark, double fee) {
         StringBuilder str = new StringBuilder();
         str.append("Transaction :{ ").append("\n");
 

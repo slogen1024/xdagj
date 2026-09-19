@@ -1530,7 +1530,13 @@ public class BlockchainImpl implements Blockchain {
 
                 if (blockNonce.compareTo(executedNonce.add(UInt64.ONE)) > 0) {
                     log.info("tx nonce error, tx nonce: {}, executed nonce: {},hash:{}", blockNonce, executedNonce,block.getHashLow().toHexString());
-                    addressStore.updateTxQuantity(BasicUtils.hash2byte(linkAddress).toArray(), executedNonce);
+                    // Deliberately LOWERS the issued counter, so resetTxQuantity and not the
+                    // monotonic updateTxQuantity: a sender whose counter ran ahead of what actually
+                    // executed heals itself here, at the cost of this one transaction. Safe to do
+                    // unconditionally only because we hold the blockchain monitor - a submit that
+                    // is mid-flight for this address holds its reservation lock and cannot be
+                    // inside its own read-modify-write at the same time.
+                    addressStore.resetTxQuantity(BasicUtils.hash2byte(linkAddress).toArray(), executedNonce);
                     return XAmount.ZERO.subtract(XAmount.ONE);
                 }
                 if (blockNonce.compareTo(executedNonce) <= 0) {
@@ -1677,7 +1683,9 @@ public class BlockchainImpl implements Blockchain {
                         byte[] address = BytesUtils.byte32ToArray(link.getAddress()).toArray();
                         UInt64 exeNonce = addressStore.getExecutedNonceNum(address);
                         addressStore.updateExcutedNonceNum(address, false);
-                        addressStore.updateTxQuantity(address, exeNonce.subtract(UInt64.ONE));
+                        // Lowering again: unwinding an applied transaction puts the issued counter
+                        // back where the executed one now is.
+                        addressStore.resetTxQuantity(address, exeNonce.subtract(UInt64.ONE));
                         log.info("current nonce subtract one");
                     } else if (link.getType() == XDAG_FIELD_OUTPUT) {
                         // Reverse exactly the credit applyBlock made: amount - fee / k.
@@ -1701,7 +1709,7 @@ public class BlockchainImpl implements Blockchain {
                     UInt64 exeNonce = addressStore.getExecutedNonceNum(address.toArray());
                     if (blockNonce.compareTo(exeNonce) == 0) {
                         addressStore.updateExcutedNonceNum(address.toArray(), false);
-                        addressStore.updateTxQuantity(address.toArray(), exeNonce.subtract(UInt64.ONE));
+                        addressStore.resetTxQuantity(address.toArray(), exeNonce.subtract(UInt64.ONE));
                         log.debug("The transaction processed quantity of account {} is reduced by one, and the number of transactions processed now is nonce = {}",
                                 Base58.encodeCheck(BytesUtils.byte32ToArray(link.getAddress())), addressStore.getExecutedNonceNum(address.toArray()).intValue()
                         );
@@ -1892,6 +1900,13 @@ public class BlockchainImpl implements Blockchain {
         }
     }
 
+    /**
+     * Keeps the issued-nonce counter at or above the executed one after a transaction executes.
+     * The two reads below are outside any lock on purpose - they are only candidates. The compare
+     * and the write happen inside {@code updateTxQuantity}, under that address' value lock, and
+     * they are monotonic, so a submit raising the counter between these reads and that call is no
+     * longer clobbered back down onto a nonce that is already in flight.
+     */
     public void processNonceAfterTransactionExecution(Address link) {
         if (link.getType() != XDAG_FIELD_INPUT) {
             return;

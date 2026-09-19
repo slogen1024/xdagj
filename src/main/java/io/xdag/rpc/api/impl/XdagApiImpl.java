@@ -479,13 +479,29 @@ public class XdagApiImpl extends AbstractXdagLifecycle implements XdagApi {
         // 2. try to add blockchain
         // 3. check from address if valid.
         Block block = new Block(new XdagBlock(Hex.decode(rawData)));
-        ImportResult result;
         List<Address> inputs = block.getInputs();
-        int inputSize = inputs.size();
-        if (inputSize == 0) {
-            result = ImportResult.INVALID_BLOCK;
-            return "THE TX NEEDS INPUT " + result.getErrorInfo();
+        if (inputs.isEmpty()) {
+            return "THE TX NEEDS INPUT " + ImportResult.INVALID_BLOCK.getErrorInfo();
         }
+        // The read of the sender's issued-nonce counter, the import and the write-back below are
+        // one read-modify-write and have to run as one step per sender: two concurrent submits
+        // that both read the counter before either writes are both issued the same nonce, both
+        // import and both gossip, and only one of them can ever execute - the other is a dead
+        // transaction the caller has already been handed a hash for.
+        List<byte[]> senders = Lists.newArrayList();
+        for (Address input : inputs) {
+            if (input.getType() == XDAG_FIELD_INPUT) {
+                senders.add(BytesUtils.byte32ToArray(input.getAddress()).toArray());
+            }
+        }
+        return kernel.getAddressStore().withNonceReservation(senders,
+                () -> sendRawTransactionReserved(block, inputs));
+    }
+
+    /** The body of {@link #xdag_sendRawTransaction}, run with each sender's nonce reserved. */
+    private String sendRawTransactionReserved(Block block, List<Address> inputs) {
+        ImportResult result;
+        int inputSize = inputs.size();
         for (Address input : inputs) {
             if (input.getType() == XDAG_FIELD_IN && block.getTxNonceField() != null) {
                 result = ImportResult.INVALID_BLOCK;
@@ -847,6 +863,34 @@ public class XdagApiImpl extends AbstractXdagLifecycle implements XdagApi {
     }
 
     public void doXfer(
+            double sendValue,
+            Bytes32 fromAddress,
+            Bytes32 toAddress,
+            String remark,
+            UInt64 txNonce,
+            double fee,
+            ProcessResponse processResponse
+    ) {
+        // Same read-modify-write as xdag_sendRawTransaction, just spread further apart: the nonce
+        // is read off the issued counter here, the block is built, imported and gossiped, and only
+        // then is the counter written back. Reserve every address this call could draw an input
+        // from before any of that starts.
+        List<byte[]> senders = Lists.newArrayList();
+        if (fromAddress != null) {
+            senders.add(fromAddress.slice(8, 20).toArray());
+        } else {
+            for (ECKeyPair account : kernel.getWallet().getAccounts()) {
+                senders.add(toBytesAddress(account).toArray());
+            }
+        }
+        kernel.getAddressStore().withNonceReservation(senders, () -> {
+            doXferReserved(sendValue, fromAddress, toAddress, remark, txNonce, fee, processResponse);
+            return null;
+        });
+    }
+
+    /** The body of {@link #doXfer}, run with every candidate sender's nonce reserved. */
+    private void doXferReserved(
             double sendValue,
             Bytes32 fromAddress,
             Bytes32 toAddress,

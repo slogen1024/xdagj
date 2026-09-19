@@ -132,6 +132,10 @@ public class CommandsTest {
         Mockito.when(addressStore.getTxQuantity(AddressUtils.toBytesAddress(keyPair_2).toArrayUnsafe())).thenReturn(UInt64.ZERO);
         Mockito.when(addressStore.getExecutedNonceNum(AddressUtils.toBytesAddress(keyPair_1).toArrayUnsafe())).thenReturn(UInt64.ZERO);
         Mockito.when(addressStore.getExecutedNonceNum(AddressUtils.toBytesAddress(keyPair_2).toArrayUnsafe())).thenReturn(UInt64.ZERO);
+        // The submit paths run inside a per-sender nonce reservation; the mock has no locks to
+        // take, so it just runs the action the way an uncontended real store would.
+        Mockito.when(addressStore.withNonceReservation(Mockito.<java.util.Collection<byte[]>>any(), Mockito.any()))
+                .thenAnswer(invocation -> invocation.<java.util.function.Supplier<?>>getArgument(1).get());
 
         commands = new Commands(kernel);
     }
