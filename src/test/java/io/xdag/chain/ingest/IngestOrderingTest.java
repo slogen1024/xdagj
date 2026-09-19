@@ -52,6 +52,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.tuweni.units.bigints.UInt64;
 import org.junit.Test;
 
@@ -428,6 +429,115 @@ public class IngestOrderingTest {
         assertEquals(submitters * each, committed.size());
         for (int i = 0; i < committed.size(); i++) {
             assertEquals(i, (long) committed.get(i));
+        }
+    }
+
+    /**
+     * A commit loop that has exited must refuse every later submit, and refuse it <em>before</em>
+     * taking a backpressure permit. Nothing releases a permit once the loop is gone, so a submit
+     * that parked on the acquire would stay parked for the life of the node — in production that is
+     * a netty I/O thread, and the dead-committer warning {@code XdagP2pHandler} writes on this very
+     * exception would never be reached.
+     *
+     * <p>The setup is the one that makes it fatal: the pipeline is <b>saturated</b> when the loop
+     * dies. Both permits are held by blocks stuck in pre-validation, so no commit is in flight to
+     * hand one back — only the loop's own exit path can. Two submitters are already parked on the
+     * acquire when it dies and more arrive afterwards; before the fix the parked two would never
+     * wake and the later ones would join them, which is what the timeout turns into a failure rather
+     * than a hung build. The post-{@code isAlive} refusal that was there before the fix cannot help
+     * either group: nobody reaches it without a permit.
+     *
+     * <p>The loop is ended by interrupting the commit thread — the same route {@code stop} takes as
+     * a last resort, and the reachable one: {@code commit} deliberately swallows a committer that
+     * throws, so one bad block cannot end the loop.
+     */
+    @Test(timeout = 30_000)
+    public void aDeadCommitThreadRefusesSubmitsInsteadOfParkingThem() throws Exception {
+        int capacity = 2;
+        AtomicReference<Thread> commitThread = new AtomicReference<>();
+        CountDownLatch hold = new CountDownLatch(1);
+        IngestPipeline pipeline = new IngestPipeline(2, capacity, pv -> {
+            commitThread.set(Thread.currentThread());
+            return ImportResult.IMPORTED_BEST;
+        }, pv -> {
+            // Everything after the warm-up block stays in pre-validation: it is accepted, it holds
+            // its permit, and it never reaches the commit queue.
+            if (pv.seq() > 0) {
+                awaitLatch(hold);
+            }
+        });
+        pipeline.start();
+        List<Thread> parked = new ArrayList<>();
+        List<IngestPipeline.SubmitRejectedException> refusals = new CopyOnWriteArrayList<>();
+        try {
+            // One block all the way through, purely to get hold of the commit thread.
+            pipeline.submit(wrapShared());
+            assertTrue(pipeline.awaitIdle(10, TimeUnit.SECONDS));
+            assertNotNull(commitThread.get());
+
+            // Now saturate: capacity blocks accepted, every permit in flight, the commit loop idle
+            // in takeHead with nothing to commit.
+            for (int i = 0; i < capacity; i++) {
+                pipeline.submit(wrapShared());
+            }
+            CountDownLatch returned = new CountDownLatch(2);
+            for (int i = 0; i < 2; i++) {
+                Thread t = new Thread(() -> {
+                    try {
+                        pipeline.submit(wrapShared());
+                    } catch (IngestPipeline.SubmitRejectedException refused) {
+                        refusals.add(refused);
+                    } finally {
+                        returned.countDown();
+                    }
+                }, "parked-submit-" + i);
+                parked.add(t);
+                t.start();
+            }
+            assertFalse("the submits must park: every permit is in flight",
+                    returned.await(300, TimeUnit.MILLISECONDS));
+
+            commitThread.get().interrupt();
+
+            assertTrue("a dead commit loop must hand its permits back instead of parking the submitters",
+                    returned.await(10, TimeUnit.SECONDS));
+            assertEquals("both parked submits are refused", 2, refusals.size());
+            for (IngestPipeline.SubmitRejectedException refused : refusals) {
+                assertTrue("the caller has to tell a dead committer from a routine shutdown",
+                        refused.isCommitterDead());
+            }
+
+            // And a submit that arrives after the death is refused without parking, however many
+            // permits the exit path handed back.
+            for (int i = 0; i < capacity + 2; i++) {
+                try {
+                    pipeline.submit(wrapShared());
+                    fail("a dead commit thread must refuse a submit, not accept a block it cannot commit");
+                } catch (IngestPipeline.SubmitRejectedException refused) {
+                    assertTrue(refused.isCommitterDead());
+                }
+            }
+            assertEquals("no block may be accepted once the committer is dead",
+                    1 + capacity, pipeline.submitted());
+        } finally {
+            hold.countDown();
+            for (Thread t : parked) {
+                // Bounded, and deliberately without an assertion of its own: a submit still parked
+                // here is already the failure reported from the try block above, and a second one
+                // raised from this finally would hide it.
+                t.join(10_000);
+            }
+            // Deliberately no stop(): with a dead committer it would sit out its whole 15s drain
+            // waiting for blocks nothing can commit. Every thread the pipeline owns is a daemon and
+            // the commit thread has already exited.
+        }
+    }
+
+    private static void awaitLatch(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 

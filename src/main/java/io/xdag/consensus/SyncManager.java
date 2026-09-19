@@ -243,7 +243,12 @@ public class SyncManager extends AbstractXdagLifecycle {
      * {@code Block.getHashLow()} are unsynchronized lazy mutators, and a caller-side {@code parse()}
      * racing the pool's would duplicate the block's inputs and outputs.
      *
-     * @throws IllegalStateException if the pipeline is no longer accepting blocks (shutdown)
+     * @throws IngestPipeline.SubmitRejectedException if the pipeline is not accepting blocks: a
+     *                                                shutdown, or a commit thread that has died and
+     *                                                left the node importing nothing. The caller
+     *                                                tells the two apart with {@code
+     *                                                isCommitterDead()} — the second one an operator
+     *                                                has to be told about.
      */
     public void submitBlock(BlockWrapper blockWrapper) {
         IngestPipeline p = pipeline;

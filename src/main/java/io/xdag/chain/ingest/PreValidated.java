@@ -55,7 +55,15 @@ public record PreValidated(long seq, BlockWrapper wrapper, Block block, Bytes32 
         return keys != null;
     }
 
-    /** A block whose pre-validation blew up: it still travels to the committer, carrying the cause. */
+    /**
+     * A block whose pre-validation blew up before there was a private copy to carry: it still
+     * travels to the committer, carrying the cause.
+     *
+     * <p>This is the last factory that aliases — the {@code block} it returns <b>is</b> {@code
+     * wrapper.getBlock()}, the instance the relay re-serializes. A committer must therefore re-parse
+     * what this one produces instead of handing it to the chain, which is what {@code
+     * SyncManager.importPreValidated} does with every {@code pv} carrying an error.
+     */
     static PreValidated failed(long seq, BlockWrapper wrapper, Throwable error) {
         return failed(seq, wrapper, wrapper.getBlock(), error);
     }

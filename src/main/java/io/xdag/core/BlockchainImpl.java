@@ -403,8 +403,13 @@ public class BlockchainImpl implements Blockchain {
     /**
      * The import proper (SP0b-2). Everything the lock needs that is a pure function of the block's
      * bytes may already have been computed off the monitor; what {@code pv} does not carry is
-     * recomputed here, so a {@link PreValidated} whose pre-validation blew up imports exactly as a
-     * bare block does.
+     * recomputed here.
+     *
+     * <p>That is true of the facts, but not of the instance: a {@code pv} that carries an {@code
+     * error} may alias the arriving wrapper's own {@code Block} — {@code PreValidated.failed} hands
+     * back {@code wrapper.getBlock()} when the failure came before the private copy existed — so a
+     * committer must route that one through a re-parse rather than through here. {@code
+     * SyncManager.importPreValidated} does exactly that.
      *
      * <p>The block imported is {@code pv.block()}, which on the pipeline's path is a private copy
      * and never the instance the arriving {@code BlockWrapper} holds — this method mutates what it

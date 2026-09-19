@@ -49,6 +49,10 @@ import lombok.extern.slf4j.Slf4j;
  * accepted block always reaches the committer: {@link #stop} stops accepting and then drains, a
  * pre-validation that blows up travels on as a {@link PreValidated} carrying the cause, and a pool
  * task that cannot even be scheduled is published straight to the commit queue rather than dropped.
+ * The one exception is the commit loop itself ending — an {@code Error}, an interrupt: what was in
+ * flight is then lost, but the loop hands those blocks' backpressure permits back on its way out and
+ * every later {@link #submit} is refused with {@code isCommitterDead()}, so the node reports the
+ * death instead of parking its I/O threads on a semaphore nothing can release any more.
  *
  * <p>The pipeline is single-use: {@link #start} once, {@link #stop} once. {@link #submit} throws
  * {@link IllegalStateException} before the start and after the stop, so the caller has to handle
@@ -128,6 +132,12 @@ public final class IngestPipeline {
     /** Whether {@link #start} has run; guarded by {@link #lock}. A pipeline is not restartable. */
     private boolean started;
 
+    /**
+     * Set by the commit loop on its way out, guarded by {@link #lock}. From that moment nothing will
+     * ever release a backpressure permit again, so {@link #submit} has to refuse rather than park.
+     */
+    private boolean committerDead;
+
     public IngestPipeline(int threads, int queueCapacity, Committer committer) {
         this(threads, queueCapacity, committer, pv -> { });
     }
@@ -191,34 +201,44 @@ public final class IngestPipeline {
      * than a crash.
      * </ul>
      *
+     * <p>A dead commit thread is refused, never waited on: the refusal is decided before the permit
+     * is taken, so this returns (by throwing) instead of parking on a semaphore nothing can release
+     * any more.
+     *
      * @throws SubmitRejectedException before {@link #start}, after {@link #stop}, or if the commit
      *                                 thread has died — the caller's shutdown path must expect it,
      *                                 and must tell the two apart via {@code isCommitterDead()}
      */
     public void submit(BlockWrapper wrapper) {
         Objects.requireNonNull(wrapper, "wrapper");
+        // Tested BEFORE the acquire, which is the whole point of committerDead: once the commit
+        // loop has exited nothing releases a permit ever again, so on a saturated pipeline the
+        // acquire below would park this thread -- a netty I/O thread -- for good, and the
+        // dead-committer warning the caller writes on this very exception would never be reached.
+        SubmitRejectedException rejected = rejection();
+        if (rejected != null) {
+            throw rejected;
+        }
         // Uninterruptibly on purpose: this is the netty I/O thread's own backpressure, exactly as
         // the synchronized import blocked it before SP0b-2, and an interrupt here would have to
-        // drop the block. Nothing unsticks it but a commit -- netty's own shutdown will not -- so
-        // stop() is what has to be reachable, and it is: the commit thread never calls submit.
+        // drop the block. Nothing unsticks it but a commit or the commit loop handing the permits
+        // back on its way out -- netty's own shutdown will not -- so stop() is what has to be
+        // reachable, and it is: the commit thread never calls submit.
         slots.acquireUninterruptibly();
         long seq = -1;
-        boolean commitThreadDead = false;
         lock.lock();
         try {
-            if (running) {
-                if (commitThread.isAlive()) {
-                    seq = accepted++;
-                } else {
-                    commitThreadDead = true;
-                }
+            rejected = rejectionLocked();
+            if (rejected == null) {
+                seq = accepted++;
             }
         } finally {
             lock.unlock();
         }
         if (seq < 0) {
+            // A stop(), or the commit loop's own exit, raced the acquire above.
             slots.release();
-            throw new SubmitRejectedException(commitThreadDead);
+            throw rejected;
         }
         long assigned = seq;
         try {
@@ -233,6 +253,31 @@ public final class IngestPipeline {
                 throw error;
             }
         }
+    }
+
+    /** {@link #rejectionLocked} for a caller that does not already hold {@link #lock}. */
+    private SubmitRejectedException rejection() {
+        lock.lock();
+        try {
+            return rejectionLocked();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * The refusal this {@link #submit} deserves, or null while the pipeline still accepts blocks.
+     * Must be called holding {@link #lock}.
+     *
+     * <p>The two causes are told apart by {@code running}: a dead committer is only news while the
+     * pipeline is supposed to be importing, whereas after {@link #stop} the refusal is the routine
+     * shutdown one the caller must not warn an operator about.
+     */
+    private SubmitRejectedException rejectionLocked() {
+        if (running && !committerDead && commitThread.isAlive()) {
+            return null;
+        }
+        return new SubmitRejectedException(running);
     }
 
     private void preValidate(long seq, BlockWrapper wrapper) {
@@ -272,8 +317,18 @@ public final class IngestPipeline {
             try {
                 outstanding = accepted - nextToCommit;
                 wasRunning = running;
+                // Nothing will commit anything after this, so nothing will release a permit after
+                // this either: refuse every later submit rather than let it park forever on the
+                // acquire, which on a saturated pipeline is every netty I/O thread at once.
+                committerDead = true;
             } finally {
                 lock.unlock();
+            }
+            // The permits of the blocks that were in flight, handed back for the submitters already
+            // parked on the acquire: they wake, see committerDead and are refused. Safe to release
+            // beyond the capacity only because no permit is ever taken again.
+            if (outstanding > 0) {
+                slots.release((int) outstanding);
             }
             if (wasRunning || outstanding > 0) {
                 log.error("ingest commit loop exited while the pipeline was {}, {} block(s) not committed",

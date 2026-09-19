@@ -42,6 +42,7 @@ import io.xdag.core.Block;
 import io.xdag.core.BlockWrapper;
 import io.xdag.core.ImportResult;
 import io.xdag.core.XAmount;
+import io.xdag.core.XUnit;
 import io.xdag.core.XdagBlock;
 import io.xdag.net.ChannelManager;
 import io.xdag.net.PeerClient;
@@ -88,6 +89,15 @@ public class IngestBlockIsolationTest extends ChainL1TestBase {
     }
 
     /**
+     * The header fee the arriving block is signed with. Non-zero on purpose: the chain sets the fee
+     * of a BI_EXTRA block it imports to zero, and the fee lives in the hashed header, so this is
+     * what makes the byte comparison below able to fail at all. With the {@code XAmount.ZERO} this
+     * block used to carry, the import had nothing left to change in its 512 bytes — flags and height
+     * live outside them — and the assertion was vacuous.
+     */
+    private static final XAmount ARRIVING_FEE = XAmount.of(1024, XUnit.NANO_XDAG);
+
+    /**
      * A block of the shape {@code BlockchainImpl.isExtraBlock} accepts — end-of-epoch timestamp and
      * a nonce — round-tripped through its 512 bytes, as one arriving from a peer is. No difficulty
      * search: this block only has to import, not to win the chain top.
@@ -97,7 +107,7 @@ public class IngestBlockIsolationTest extends ChainL1TestBase {
         pending.add(new Address(topRef, XDAG_FIELD_OUT, false));
         pending.add(new Address(BasicUtils.keyPair2Hash(poolKey), XDAG_FIELD_COINBASE, true));
         long xdagTime = XdagTime.getEndOfEpoch(XdagTime.msToXdagtimestamp(generateTime + 64000L));
-        Block template = new Block(config, xdagTime, null, pending, true, null, null, -1, XAmount.ZERO, null);
+        Block template = new Block(config, xdagTime, null, pending, true, null, null, -1, ARRIVING_FEE, null);
         template.signOut(poolKey);
         byte[] nonceBytes = new byte[32];
         ExtCodec.putU64(nonceBytes, 0, nonceSeed);
@@ -111,6 +121,7 @@ public class IngestBlockIsolationTest extends ChainL1TestBase {
             mineMain(List.of());
         }
         Block received = arrivingExtraBlock(4242L);
+        assertEquals("the arriving block must carry a fee the import can zero", ARRIVING_FEE, received.getFee());
         // Everything that reads the block is done here, before the hand-off: getHashLow() and
         // toBytes() are lazy mutators themselves, and after submit() the block belongs to the pool.
         Bytes32 hashLow = hashLow(received);
@@ -139,6 +150,10 @@ public class IngestBlockIsolationTest extends ChainL1TestBase {
         assertNotSame("the chain imported the instance the relay re-serializes", received, inChain);
         assertNotSame("pre-validation handed the chain the wrapper's own block", received, importedInstance.get());
         assertEquals("the received block picked up the chain's flags", 0, received.getInfo().getFlags());
+        // The mutation the byte comparison is looking for: the chain zeroes the fee of the block it
+        // imports, and the fee is part of the hashed header the relay re-serializes.
+        assertEquals("the import must have zeroed the fee of the block it kept",
+                XAmount.ZERO, importedInstance.get().getFee());
         assertArrayEquals("the bytes left to relay are no longer the bytes received",
                 bytesAsReceived, received.toBytes());
     }
