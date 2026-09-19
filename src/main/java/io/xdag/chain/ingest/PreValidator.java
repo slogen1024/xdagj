@@ -37,7 +37,15 @@ public final class PreValidator {
     private PreValidator() {
     }
 
-    /** For callers that hand a block straight to the lock: same facts, computed on the calling thread; no classification. */
+    /**
+     * For callers that hand a block straight to the lock: the same facts, computed on the calling
+     * thread, without the ext classification the lock-side import does not need there.
+     *
+     * <p>The returned {@link PreValidated#wrapper()} is fabricated — ttl 0 and no peer — because
+     * there is no arriving wrapper to carry. A caller that relays what it imports (as {@code
+     * SyncManager.importBlock} does, reading the wrapper's ttl and peer) must use its own wrapper
+     * and not this one.
+     */
     public static PreValidated inline(Block block) {
         return compute(-1, new BlockWrapper(block, 0), false);
     }
@@ -46,7 +54,9 @@ public final class PreValidator {
         Block block = wrapper.getBlock();
         try {
             block.parse();
-            Bytes32 hashLow = Bytes32.wrap(block.getHashLow());
+            // copy(): getHashLow() returns a MutableBytes32 view over the block's own cached
+            // array, and a PreValidated must be immutable facts.
+            Bytes32 hashLow = block.getHashLow().copy();
             List<PublicKey> keys = List.copyOf(block.verifiedKeys());
             Classified classified = classify ? ChainBlockClassifier.classify(block) : null;
             return new PreValidated(seq, wrapper, block, hashLow, keys, classified, null);

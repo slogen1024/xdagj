@@ -41,7 +41,7 @@ public record PreValidated(long seq, BlockWrapper wrapper, Block block, Bytes32 
                            List<PublicKey> keys, Classified classified, Throwable error) {
 
     public boolean hasKeys() {
-        return error == null && keys != null;
+        return keys != null;
     }
 
     /** A block whose pre-validation blew up: it still travels to the committer, carrying the cause. */
