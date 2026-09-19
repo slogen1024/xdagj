@@ -44,6 +44,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import org.apache.commons.lang3.tuple.Pair;
 import org.junit.After;
 import org.junit.Before;
@@ -125,14 +126,150 @@ public class WriteBehindKVSourceTest {
         assertArrayEquals(b("v2"), raw.get(b("k")));
     }
 
+    /**
+     * A prefix scan is reachable from a peer — a blocks request is one scan per 16-second bucket of
+     * a range the peer chooses, on a netty event loop — so it must serve the queued writes from the
+     * pending map instead of draining the queue for each one.
+     */
     @Test
-    public void iterationFlushesFirst() {
+    public void aPrefixScanSeesQueuedWritesWithoutDrainingTheQueue() {
         source.put(b("p1"), b("a"));
         source.put(b("p2"), b("b"));
+        List<Pair<byte[], byte[]>> found = source.prefixKeyAndValueLookup(b("p"));
+        assertEquals(2, found.size());
+        assertArrayEquals(b("p1"), found.get(0).getKey());
+        assertArrayEquals(b("a"), found.get(0).getValue());
+        assertArrayEquals(b("p2"), found.get(1).getKey());
+        assertArrayEquals(b("b"), found.get(1).getValue());
+        assertEquals("the scan must not have drained the queue", 2, queue.pending());
+        assertNull("nothing was forced to disk", raw.get(b("p1")));
+        assertEquals(2, source.prefixKeyLookup(b("p")).size());
+        assertEquals(2, source.prefixValueLookup(b("p")).size());
+        assertEquals(2, queue.pending());
+    }
+
+    @Test
+    public void aPendingTombstoneHidesADelegateKeyFromAScan() {
+        raw.put(b("p1"), b("disk"));
+        raw.put(b("p2"), b("disk"));
+        source.delete(b("p1"));
         List<byte[]> keys = source.prefixKeyLookup(b("p"));
-        assertEquals(2, keys.size());
+        assertEquals(1, keys.size());
+        assertArrayEquals(b("p2"), keys.getFirst());
+        assertEquals("the scan must not have drained the queue", 1, queue.pending());
+        assertArrayEquals("the delete has not landed yet", b("disk"), raw.get(b("p1")));
+    }
+
+    @Test
+    public void aPendingPutSupersedesTheDelegatesValueAndTheMergeKeepsKeyOrder() {
+        raw.put(b("p1"), b("disk"));
+        raw.put(b("p3"), b("disk"));
+        source.put(b("p0"), b("q"));
+        source.put(b("p1"), b("newer"));
+        source.put(b("p2"), b("q"));
+        source.put(b("p4"), b("q"));
+        List<Pair<byte[], byte[]>> found = source.prefixKeyAndValueLookup(b("p"));
+        List<String> keys = new ArrayList<>();
+        found.forEach(p -> keys.add(new String(p.getKey(), StandardCharsets.UTF_8)));
+        assertEquals(List.of("p0", "p1", "p2", "p3", "p4"), keys);
+        assertArrayEquals("the queued value wins over the delegate's", b("newer"), found.get(1).getValue());
+        assertArrayEquals(b("disk"), found.get(3).getValue());
+        assertEquals(4, queue.pending());
+    }
+
+    @Test
+    public void fetchPrefixStopsWhereTheConsumerSaysSo() {
+        raw.put(b("p1"), b("disk"));
+        raw.put(b("p3"), b("disk"));
+        source.put(b("p2"), b("q"));
+        source.put(b("p4"), b("q"));
+        List<String> seen = new ArrayList<>();
+        source.fetchPrefix(b("p"), pair -> {
+            seen.add(new String(pair.getKey(), StandardCharsets.UTF_8));
+            return seen.size() == 2; // stop on the overlay entry: nothing after it may be emitted
+        });
+        assertEquals(List.of("p1", "p2"), seen);
+        seen.clear();
+        source.fetchPrefix(b("p"), pair -> {
+            seen.add(new String(pair.getKey(), StandardCharsets.UTF_8));
+            return Boolean.TRUE; // stop on the first delegate entry: the overlay tail is not emitted
+        });
+        assertEquals(List.of("p1"), seen);
+    }
+
+    /** A delegate that runs a hook once its prefix scan is done, before the merge resolves the overlay. */
+    private static final class HookedScanDelegate extends ForwardingKVSource {
+        private Runnable afterScan = () -> {
+        };
+
+        HookedScanDelegate(KVSource<byte[], byte[]> delegate) {
+            super(delegate);
+        }
+
+        void onceAfterScan(Runnable hook) {
+            afterScan = () -> {
+                afterScan = () -> {
+                };
+                hook.run();
+            };
+        }
+
+        @Override
+        public void fetchPrefix(byte[] key, Function<Pair<byte[], byte[]>, Boolean> func) {
+            super.fetchPrefix(key, func);
+            afterScan.run();
+        }
+    }
+
+    /**
+     * The ordering hazard of the merge: the scan reads the delegate (the key is not written yet),
+     * the writer then writes it and {@code completed()} retires its pending entry, and a scan that
+     * read the pending map afterwards would find neither — losing a key that was queued before it
+     * even started. The overlay is therefore snapshotted before the delegate is read.
+     */
+    @Test
+    public void aScanDoesNotMissAKeyRetiredWhileItReadsTheDelegate() {
+        HookedScanDelegate hook = new HookedScanDelegate(raw);
+        WriteBehindKVSource scanned = new WriteBehindKVSource(hook, queue, 0);
+        raw.put(b("p1"), b("disk"));
+        scanned.put(b("p2"), b("queued"));
+        hook.onceAfterScan(() -> assertTrue("the writer lands the queued entry mid-scan", queue.drainOnce()));
+        List<Pair<byte[], byte[]>> found = scanned.prefixKeyAndValueLookup(b("p"));
+        assertEquals(0, queue.pending()); // the hook, not the scan, drained it
+        assertEquals(2, found.size());
+        assertArrayEquals(b("p1"), found.get(0).getKey());
+        assertArrayEquals(b("p2"), found.get(1).getKey());
+        assertArrayEquals(b("queued"), found.get(1).getValue());
+    }
+
+    /**
+     * The same window the other way round: the entry is retired because it was written and then
+     * removed from the delegate outright. An overlay that served its snapshotted value would
+     * resurrect a deleted key, so every overlay key is resolved against the delegate instead.
+     */
+    @Test
+    public void aScanDoesNotResurrectAKeyDirectlyDeletedWhileItReadsTheDelegate() {
+        HookedScanDelegate hook = new HookedScanDelegate(raw);
+        WriteBehindKVSource scanned = new WriteBehindKVSource(hook, queue, 0);
+        raw.put(b("p1"), b("disk"));
+        scanned.put(b("p2"), b("queued"));
+        hook.onceAfterScan(() -> queue.direct(() -> scanned.delete(b("p2"))));
+        List<byte[]> keys = scanned.prefixKeyLookup(b("p"));
+        assertEquals(1, keys.size());
+        assertArrayEquals(b("p1"), keys.getFirst());
+        assertNull(raw.get(b("p2")));
+    }
+
+    /**
+     * {@code keys()} keeps draining: no wrapped database is scanned with it in the node, and its
+     * identity-hashed {@code Set<byte[]>} would need a dedupe pass no caller asks for.
+     */
+    @Test
+    public void keysStillFlushesBeforeItScans() {
+        source.put(b("k"), b("v"));
+        assertEquals(1, source.keys().size());
         assertEquals(0, queue.pending());
-        assertArrayEquals(b("a"), raw.get(b("p1")));
+        assertArrayEquals(b("v"), raw.get(b("k")));
     }
 
     @Test
