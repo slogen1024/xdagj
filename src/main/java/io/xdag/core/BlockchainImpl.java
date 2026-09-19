@@ -2378,8 +2378,9 @@ public class BlockchainImpl implements Blockchain {
     /**
      * C1 (SP0b-2): {@code synchronized}, not just {@code checkNewMain()} inside. The stats save has
      * to be under the same monitor as the transition that changed them. Two reasons, both real:
-     * {@code xdagStats} is serialized here while {@code tryToConnect} on another thread is free to
-     * mutate it, and — since the write-behind layer — a save left outside the monitor is QUEUED
+     * {@code xdagStats} is serialized here while {@code tryToConnect} on another thread would otherwise
+     * be free to mutate it (SyncManager still bumps nwaitsync off the monitor, so a torn read of
+     * THAT field is still possible), and — since the write-behind layer — a save left outside the monitor is QUEUED
      * while a concurrent {@code setMain} writes DIRECTLY, so the stale queued stats land after the
      * transition's own and persist {@code nmain} ahead of {@code LAST_COMPLETED_MAIN}: the exact
      * shape the boot consistency check refuses to start on. The try/catch stays — this runs on the

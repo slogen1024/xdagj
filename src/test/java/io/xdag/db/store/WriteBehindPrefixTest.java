@@ -171,7 +171,7 @@ public class WriteBehindPrefixTest extends ChainL1TestBase {
                 queue.writtenCount() >= queuedBeforeTransition);
         // The direct half: setMain makes dozens of writes and not one of them entered the stream,
         // so what is still queued is only checkMain's own stats save, which runs after it returns.
-        assertTrue("setMain's writes bypassed the queue; still queued: " + queue.pending(), queue.pending() <= 2);
+        assertEquals("setMain's writes bypassed the queue; only checkMain's own stats save is left", 1, queue.pending());
         assertTrue(store().getLastCompletedMain() >= 1);
     }
 

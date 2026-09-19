@@ -133,6 +133,15 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
     @Override
     public void stop() {
         cleaner.shutdownNow();
+        try {
+            // Wait for a tick that is already running: shutdownNow only interrupts, and a tick that
+            // is mid-write would otherwise reach the source after the close below.
+            if (!cleaner.awaitTermination(5, TimeUnit.SECONDS)) {
+                log.warn("the orphan cleaner did not stop within 5s; closing its source anyway");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
         orphanSource.close();
     }
 

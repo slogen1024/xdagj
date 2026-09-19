@@ -433,31 +433,58 @@ public class Kernel {
 
         stopServices();
 
-        // Block sums are written back in batches and saveXdagStatus deliberately does not flush
-        // them (it runs once per import); this is the last chance before the databases close.
+        // The timer is JVM-global, not a kernel component, so it is stopped here rather than in
+        // stopServices(): a failed testStart() must not leave the next attempt in this JVM with a
+        // dead message queue.
+        MessageQueue.timer.shutdown();
+
+        try {
+            // Both saves go through the blockchain monitor, the lock that excludes every other
+            // writer of these databases (SP0b-2 §3.2): stopCheckMain() above waits only five
+            // seconds for the check-main thread, so a transition that outlives that wait must not
+            // race a queued write from here. Sums are written back in batches and saveXdagStatus
+            // deliberately does not flush them (it runs once per import), so this is their last
+            // chance; the stats save is I3 from SP0b-1 — without it a clean shutdown could leave
+            // the completion marker written by the last setMain ahead of the stats the next boot
+            // loads, the shape the boot consistency check reports as a crash.
+            if (blockchain != null) {
+                synchronized (blockchain) {
+                    saveOnStop();
+                }
+            } else {
+                saveOnStop();
+            }
+        } catch (RuntimeException e) {
+            // A poisoned write-behind queue throws here. Log and carry on: the databases still have
+            // to be closed, and everything this would have written is advisory or re-derivable.
+            log.error("could not write the final stats and sums; closing the databases anyway", e);
+        } finally {
+            // Stop the chain store before its database is closed below
+            if (chainL1Store != null) {
+                try {
+                    chainL1Store.stop();
+                } catch (RuntimeException e) {
+                    log.error("could not stop the chain store; closing the databases anyway", e);
+                }
+            }
+
+            // Close all databases. Through the factory, not by closing each DatabaseName in turn:
+            // with SP0b-2 the factory may be a WriteBehindFactory, whose close() stops the writer
+            // thread (flushing what it still holds) before the databases go. That thread is not a
+            // daemon, so leaving it running would outlive the kernel. Closing the factory also
+            // stops opening databases this node never used just to close them again.
+            dbFactory.close();
+        }
+    }
+
+    /** The two writes a clean shutdown owes the store; the caller holds the blockchain monitor. */
+    private void saveOnStop() {
         if (blockStore != null) {
             blockStore.flushSums();
         }
-
-        // I3 (SP0b-1): the check-main loop was the only thing persisting XdagStats and it has just
-        // been stopped, so flush them once more before the databases close. Without this a clean
-        // shutdown could still leave the completion marker written by the last setMain ahead of the
-        // stats the next boot loads — the shape the boot consistency check reports as a crash.
         if (blockStore != null && blockchain != null && blockchain.getXdagStats() != null) {
             blockStore.saveXdagStatus(blockchain.getXdagStats());
         }
-
-        // Stop the chain store before its database is closed below
-        if (chainL1Store != null) {
-            chainL1Store.stop();
-        }
-
-        // Close all databases. Through the factory, not by closing each DatabaseName in turn: with
-        // SP0b-2 the factory may be a WriteBehindFactory, whose close() stops the writer thread
-        // (flushing what it still holds) before the databases go. That thread is not a daemon, so
-        // leaving it running would outlive the kernel. Closing the factory also stops opening
-        // databases this node never used just to close them again.
-        dbFactory.close();
     }
 
     /**
@@ -491,9 +518,6 @@ public class Kernel {
         if (nodeMgr != null) {
             nodeMgr.stop();
         }
-
-        // Close message queue timer
-        MessageQueue.timer.shutdown();
 
         // Close P2P networking
         if (p2p != null) {
