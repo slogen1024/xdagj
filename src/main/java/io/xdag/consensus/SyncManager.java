@@ -48,7 +48,6 @@ import org.apache.commons.lang3.concurrent.BasicThreadFactory;
 import org.apache.commons.lang3.time.FastDateFormat;
 import org.apache.tuweni.bytes.Bytes32;
 
-import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Queue;
@@ -379,13 +378,7 @@ public class SyncManager extends AbstractXdagLifecycle {
      */
     public boolean syncPushBlock(BlockWrapper blockWrapper, Bytes32 hashLow) {
         if (syncMap.size() >= MAX_SIZE) {
-            for (int j = 0; j < DELETE_NUM; j++) {
-                List<Bytes32> keyList = new ArrayList<>(syncMap.keySet());
-
-                Bytes32 key = keyList.get(CryptoProvider.nextInt(0, keyList.size()));
-                assert key != null;
-                if (syncMap.remove(key) != null) blockchain.getXdagStats().nwaitsync--;
-            }
+            evictFromSyncMap();
         }
         AtomicBoolean r = new AtomicBoolean(true);
         long now = System.currentTimeMillis();
@@ -416,6 +409,56 @@ public class SyncManager extends AbstractXdagLifecycle {
                     return oldQ;
                 });
         return r.get();
+    }
+
+    /**
+     * Drops up to {@link #DELETE_NUM} entries once {@code syncMap} has reached {@link #MAX_SIZE}.
+     * Everything in there is a block whose parent never turned up, so any of them is as good a
+     * victim as any other; the only thing that matters is that the map stops growing.
+     *
+     * <p>The key snapshot is taken <b>once</b>. It used to be rebuilt inside the loop — 5,000 copies
+     * of a 500,000-entry key set, some 2.5 billion reference copies and 5,000 allocations of a
+     * multi-megabyte array, to delete 5,000 entries. Since SP0b-2 that runs on the single ingest
+     * commit thread and holds this object's monitor throughout, so a peer that feeds the node enough
+     * blocks with unknown parents could drive {@code syncMap} to {@code MAX_SIZE} and stall the whole
+     * import path — every netty thread backed up behind the pipeline's backpressure semaphore — for
+     * minutes at a time. One snapshot is the same eviction for 1/DELETE_NUM of the work.
+     *
+     * <p>Victims are still drawn at random, but now <b>without replacement</b>: a partial
+     * Fisher-Yates over the snapshot hands out distinct keys. Drawing with replacement, as the old
+     * code did, re-drew keys it had already removed, and each repeat was a {@code remove} that
+     * returned null and freed nothing — it quietly under-deleted (about 4,975 of the 5,000 asked
+     * for, at {@code MAX_SIZE}). {@code nwaitsync} stays right either way: it is only decremented
+     * when {@code remove} actually took an entry out.
+     *
+     * <p>{@code syncMap} is concurrent and is emptied from elsewhere — see {@link #syncPopBlock} and
+     * the {@code merge} in {@link #syncPushBlock} — so by the time the snapshot is taken it may hold
+     * fewer than {@code MAX_SIZE} keys, or none. The loop is bounded by the snapshot's own length.
+     * The old code instead re-read {@code keyList.size()} every iteration and, on a map that had
+     * emptied under it, handed a zero to {@code CryptoProvider.nextInt(0, 0)} — which throws
+     * {@code IllegalArgumentException("bound must be greater than origin")} straight out of the
+     * import path.
+     */
+    private void evictFromSyncMap() {
+        Bytes32[] keys = syncMap.keySet().toArray(new Bytes32[0]);
+        int quota = Math.min(DELETE_NUM, keys.length);
+        for (int i = 0; i < quota; i++) {
+            // Partial Fisher-Yates: draw from the tail that has not been handed out yet and swap the
+            // pick away, so no key is offered twice. The bound is exclusive and keys.length > i here,
+            // so the empty-range throw above is unreachable.
+            int pick = CryptoProvider.nextInt(i, keys.length);
+            Bytes32 key = keys[pick];
+            keys[pick] = keys[i];
+            // A real check. What stood here was `assert key != null`, which is off unless the JVM was
+            // started with -ea — surefire may enable assertions where a production node does not, so
+            // that line protected the tests and nothing else.
+            if (key == null) {
+                continue;
+            }
+            if (syncMap.remove(key) != null) {
+                blockchain.getXdagStats().nwaitsync--;
+            }
+        }
     }
 
     /**
