@@ -125,16 +125,21 @@ public abstract class ChainL1TestBase {
 
         /**
          * Deliberately without the {@code try/catch} of the real {@link BlockchainImpl#checkMain()}:
-         * an exception out of {@code setMain} must reach the test (plan §0.5). Nothing else — and
-         * in particular no stats save: since SP0b-1 {@code setMain} and {@code unSetMain} persist
-         * the stats themselves, immediately before the completion marker, so a "restart" in a test
-         * loads stats that already agree with the marker. That the marker and gate tests still pass
-         * with this override reduced to {@code checkNewMain()} is what proves the window between
-         * {@code setMain} and {@code checkMain}'s own save is closed at the source.
+         * an exception out of {@code setMain} must reach the test (plan §0.5). Everything else is
+         * the production shape, monitor included. The stats save in particular: C1 (SP0b-2) is a
+         * bug that only exists because that save runs after {@code checkNewMain} — under the
+         * write-behind layer it is a QUEUED write that must not be allowed to land after a
+         * transition's DIRECT one — and an override that dropped it would hide exactly that from
+         * every fixture test. It is still redundant as far as the completion marker is concerned:
+         * since SP0b-1 {@code setMain} and {@code unSetMain} persist the stats themselves,
+         * immediately before the marker, so a "restart" in a test loads stats that already agree
+         * with it either way.
          */
         @Override
-        public void checkMain() {
+        public synchronized void checkMain() {
             checkNewMain();
+            // xdagStats state will change after checkNewMain
+            getBlockStore().saveXdagStatus(getXdagStats());
         }
     }
 

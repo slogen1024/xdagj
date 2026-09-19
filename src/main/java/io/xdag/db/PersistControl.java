@@ -42,14 +42,22 @@ public interface PersistControl {
     void flushSync();
 
     /**
-     * {@link #flushSync()} then runs {@code body} on the calling thread in direct-write mode:
-     * its writes bypass the queue (and are therefore in the database when it returns, in program
-     * order). Re-entrant: a body already in direct mode runs the nested body as is.
+     * Runs {@code body} on the calling thread in direct-write mode: its writes bypass the queue
+     * (and are therefore in the database when it returns, in program order), behind one
+     * {@link #flushSync()} of everything queued before the call. Re-entrant: a body already in
+     * direct mode runs the nested body as is.
+     *
+     * <p>That flush is lazy — it happens at the body's first write (or first iteration read), not
+     * on entry — so a body that writes nothing does not drain the stream at all. The ordering a
+     * caller sees is the same either way: no direct write can reach the database before the writes
+     * queued ahead of it. It matters because the transitions below are entered far more often than
+     * they write: {@code unWindMain} runs for most imported blocks and usually unwinds nothing.
      *
      * <p>Precondition: the caller holds the lock that excludes every other writer of the wrapped
-     * sources (on the node, the blockchain lock). {@code direct} does not block concurrent
-     * producers: a write queued by another thread during the body is ordered after the drain and
-     * would land after — and could overwrite — the body's direct writes.
+     * sources (on the node, the blockchain monitor — which is why {@code checkMain} and the orphan
+     * cleaner hold it too). {@code direct} does not block concurrent producers: a write queued by
+     * another thread during the body is ordered after the drain and would land after — and could
+     * overwrite — the body's direct writes.
      */
     <T> T direct(Supplier<T> body);
 

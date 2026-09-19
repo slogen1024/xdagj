@@ -184,6 +184,42 @@ public class WriteBehindQueueThreadedTest {
         assertFalse(queue.isBypass());
     }
 
+    /**
+     * I1 (SP0b-2): with a real writer thread behind it, a {@code direct} body that writes nothing
+     * must not drain the stream — that is the whole point of making the drain lazy, because
+     * {@code unWindMain} is entered for most imported blocks and almost never writes.
+     */
+    @Test(timeout = 30_000)
+    public void directWithoutAWriteLeavesTheStreamAlone() throws Exception {
+        start(raw, 64, 1000, 60_000); // the writer will not drain on its own within this test
+        source.put(b("k1"), b("v1"));
+        source.put(b("k2"), b("v2"));
+        awaitUntil("both writes to be queued", () -> queue.pending() == 2);
+        queue.direct(() -> {
+            assertEquals("no drain on entry", 2, queue.pending());
+            assertNull("the delegate is untouched", raw.get(b("k1")));
+        });
+        assertEquals("nothing was written", 0, queue.writtenCount());
+        assertEquals("nothing left the queue", 2, queue.pending());
+        assertFalse(queue.isBypass());
+    }
+
+    /** I1: the first write inside the body drains the stream, so ordering is what it always was. */
+    @Test(timeout = 30_000)
+    public void directDrainsOnItsFirstWrite() throws Exception {
+        start(raw, 64, 1000, 60_000);
+        source.put(b("k"), b("queued"));
+        awaitUntil("the write to be queued", () -> queue.pending() == 1);
+        queue.direct(() -> {
+            source.put(b("k2"), b("direct"));
+            assertArrayEquals("the queued write is on disk before the direct one", b("queued"), raw.get(b("k")));
+            assertArrayEquals(b("direct"), raw.get(b("k2")));
+        });
+        assertEquals(1, queue.writtenCount());
+        assertEquals(0, queue.pending());
+        assertFalse(queue.isBypass());
+    }
+
     @Test(timeout = 30_000)
     public void aFailedWriteWakesEveryWaiter() throws Exception {
         CountDownLatch release = new CountDownLatch(1);
@@ -277,9 +313,12 @@ public class WriteBehindQueueThreadedTest {
         source.put(b("c"), b("3")); // at maxPending: this thread drains a group itself
         assertTrue(queue.writtenCount() >= 1);
         assertArrayEquals(b("1"), raw.get(b("a")));
-        queue.direct(() -> assertArrayEquals(b("3"), raw.get(b("c")))); // flushSync drained on the caller
+        // The direct body's first write drains the rest on the caller, there being no writer thread.
+        queue.direct(() -> source.put(b("d"), b("4")));
+        assertArrayEquals(b("3"), raw.get(b("c")));
+        assertArrayEquals(b("4"), raw.get(b("d")));
         assertEquals(0, queue.pending());
-        assertEquals(3, queue.writtenCount());
+        assertEquals("the direct write is not part of the stream", 3, queue.writtenCount());
         assertFalse(queue.writerAlive());
         queue.stop(); // nothing to join, no failure
     }

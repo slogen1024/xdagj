@@ -36,6 +36,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.tuple.Pair;
@@ -69,7 +70,10 @@ import org.apache.tuweni.bytes.Bytes;
  * <p>Failure: any throwable out of a write, and an interrupt of the writer thread, marks the queue
  * failed: every waiter (producers parked on backpressure, flushers waiting on a barrier or on the
  * in-flight group) is woken, every later put, flush or start throws {@link IllegalStateException}
- * with that cause, and {@link #drainOnce()} returns false. Nothing is dropped silently.
+ * with that cause, and {@link #drainOnce()} returns false. Nothing is dropped silently. A failed
+ * queue never recovers — it accepts no further write — so the owner installs a
+ * {@link #setFailureHandler(java.util.function.Consumer) failure handler} that stops the node;
+ * without one, a node would keep running over state that can no longer be persisted.
  *
  * <p>Manual mode ({@code threaded == false}, tests and offline tools): there is no writer thread.
  * {@link #flushSync()} drains on the calling thread, a producer that hits {@code maxPending} drains
@@ -114,7 +118,15 @@ public final class WriteBehindQueue implements PersistControl {
     private final Condition notEmpty = lock.newCondition();
     private final Condition idle = lock.newCondition();
     private final ThreadLocal<Boolean> bypass = new ThreadLocal<>();
+    /**
+     * Set once the calling thread's {@link #direct} scope has drained the stream. It is what makes
+     * a second {@link #flushSync()} inside that scope a no-op -- not {@link #bypass}, which says
+     * only that writes go straight to the delegate and is set before anything is drained.
+     */
+    private final ThreadLocal<Boolean> drained = new ThreadLocal<>();
     private final AtomicBoolean warnedUnstarted = new AtomicBoolean();
+    private final AtomicBoolean failureReported = new AtomicBoolean();
+    private volatile Consumer<Throwable> failureHandler;
     private volatile Throwable failure;
     private volatile boolean running;   // written under lock
     private volatile Thread writer;
@@ -267,6 +279,30 @@ public final class WriteBehindQueue implements PersistControl {
         }
     }
 
+    /**
+     * Installs the node's reaction to a write failure: called at most once, from the thread that
+     * failed, after every waiter has been woken and outside the queue lock. A failed queue accepts
+     * no further write, so the owner must stop the node -- nothing retries.
+     */
+    public void setFailureHandler(Consumer<Throwable> handler) {
+        this.failureHandler = handler;
+        Throwable f = failure;
+        if (f != null) {
+            notifyFailure(f); // installed after the fact: still exactly once
+        }
+    }
+
+    private void notifyFailure(Throwable t) {
+        Consumer<Throwable> handler = failureHandler;
+        if (handler != null && failureReported.compareAndSet(false, true)) {
+            try {
+                handler.accept(t);
+            } catch (Throwable h) {
+                log.error("write-behind failure handler threw", h);
+            }
+        }
+    }
+
     public Throwable failure() {
         return failure;
     }
@@ -311,12 +347,20 @@ public final class WriteBehindQueue implements PersistControl {
         if (isBypass()) {
             return body.get();
         }
-        flushSync();
+        checkFailed();
+        // Lazy: the bypass flag goes up now, the drain happens at the body's FIRST write (or at its
+        // first iteration read), through flushSync() -- which marks the scope drained so it runs
+        // exactly once. Ordering is unchanged, because a direct write cannot overtake the queued
+        // stream without going through that flush first; what changes is that a transition whose
+        // body writes nothing no longer drains at all. On the import path unWindMain is entered for
+        // most blocks and almost always writes nothing, so an eager drain there would empty the
+        // stream roughly once per imported block and the layer would buy nothing (SP0b-2 I1).
         bypass.set(Boolean.TRUE);
         try {
             return body.get();
         } finally {
             bypass.remove();
+            drained.remove();
         }
     }
 
@@ -360,6 +404,10 @@ public final class WriteBehindQueue implements PersistControl {
         } finally {
             lock.unlock();
         }
+        // Outside the lock, and after every waiter has been woken: the handler stops the node and
+        // must never be able to block the thread that is releasing them. Reports the recorded
+        // cause, not this call's -- a second failure is a consequence of the first.
+        notifyFailure(failure);
     }
 
     /**
@@ -408,9 +456,19 @@ public final class WriteBehindQueue implements PersistControl {
         if (Thread.currentThread() == writer) {
             throw new IllegalStateException("flushSync from the writer thread"); // would wait for itself
         }
-        if (isBypass()) {
-            return;
+        if (Boolean.TRUE.equals(drained.get())) {
+            return; // this direct scope already drained, and it is the only writer
         }
+        drainToQuiescence();
+        if (isBypass()) {
+            // Inside a direct scope the caller excludes every other writer, so quiescent stays
+            // quiescent: record it and let the rest of the body write straight through.
+            drained.set(Boolean.TRUE);
+        }
+    }
+
+    /** {@link #flushSync()} without the direct-scope bookkeeping: returns once the queue is quiescent. */
+    private void drainToQuiescence() {
         CountDownLatch barrier;
         lock.lock();
         try {

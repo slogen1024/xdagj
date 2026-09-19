@@ -36,9 +36,10 @@ import lombok.extern.slf4j.Slf4j;
  * and the orphan store need no change.
  *
  * <p>Lifecycle: the caller owns the queue. It starts the writer thread with
- * {@link WriteBehindQueue#start()} (the kernel does, after the stores are built; until then, and
- * in manual mode, writes are drained on the calling thread) and {@link #close()} stops it — flush
- * first, then the databases are closed even if the queue has failed.
+ * {@link WriteBehindQueue#start()} (the kernel does so as soon as it has wrapped the factory,
+ * before it builds any store; while no writer is running, and in manual mode, writes are drained
+ * on the calling thread) and {@link #close()} stops it — flush first, then the databases are
+ * closed even if the queue has failed.
  */
 @Slf4j
 public final class WriteBehindFactory implements DatabaseFactory {
@@ -71,12 +72,15 @@ public final class WriteBehindFactory implements DatabaseFactory {
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
         try {
             queue.stop();
         } catch (RuntimeException e) {
             log.error("write-behind queue did not stop cleanly; closing the databases anyway", e);
         } finally {
+            // Forget the wrappers with the databases they wrap: a getDB() after close() must build
+            // a fresh one over the delegate's fresh source, not hand back a closed one.
+            wrapped.clear();
             delegate.close();
         }
     }

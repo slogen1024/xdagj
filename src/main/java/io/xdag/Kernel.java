@@ -190,20 +190,27 @@ public class Kernel {
         // SP0b-2: the write-behind layer, when the node is configured for it. Installed here, before
         // any store is built from the factory, so BLOCK/TIME/INDEX/ORPHANIND are wrapped for every
         // store at once; the queue's writer thread is owned by this kernel and is stopped by
-        // dbFactory.close() (WriteBehindFactory.close() flushes first).
+        // dbFactory.close() (WriteBehindFactory.close() flushes first). Only the wrapping happens
+        // out here -- the thread is started inside the try below, so no failure path can leave a
+        // running non-daemon writer that nothing owns.
         ChainSpec chainSpec = config.getChainSpec();
+        WriteBehindQueue persistQueue = null;
         if (chainSpec.getChainPersistMaxPending() > 0) {
-            WriteBehindQueue persistQueue = new WriteBehindQueue(chainSpec.getChainPersistMaxPending(),
+            persistQueue = new WriteBehindQueue(chainSpec.getChainPersistMaxPending(),
                     chainSpec.getChainPersistFlushEntries(), chainSpec.getChainPersistFlushMs(), true);
-            persistQueue.start();
             dbFactory = new WriteBehindFactory(dbFactory, persistQueue, chainSpec.getChainPersistReadCache());
             persist = persistQueue;
-            log.info("Write-behind persistence on: maxPending={}, flushEntries={}, flushMs={}, readCache={}",
-                    chainSpec.getChainPersistMaxPending(), chainSpec.getChainPersistFlushEntries(),
-                    chainSpec.getChainPersistFlushMs(), chainSpec.getChainPersistReadCache());
         }
 
         try {
+            if (persistQueue != null) {
+                persistQueue.setFailureHandler(this::onPersistFailure);
+                persistQueue.start();
+                log.info("Write-behind persistence on: maxPending={}, flushEntries={}, flushMs={}, readCache={}",
+                        chainSpec.getChainPersistMaxPending(), chainSpec.getChainPersistFlushEntries(),
+                        chainSpec.getChainPersistFlushMs(), chainSpec.getChainPersistReadCache());
+            }
+
             // BlockStoreImpl.forNode, not the constructor: the databases named BLOCK and TIME go into
             // swapped roles here, and that is the on-disk layout of every node (see forNode's javadoc).
             blockStore = BlockStoreImpl.forNode(dbFactory);
@@ -320,26 +327,78 @@ public class Kernel {
             Launcher.registerShutdownHook("kernel", this::testStop);
         } catch (RuntimeException | Error e) {
             // G3 (SP0a §12.2): a failure anywhere after the databases opened used to leak every
-            // store — and with SP0b-2 the write-behind writer thread, which is not a daemon. Closing
-            // the factory stops the queue (flushing what it holds) and closes the databases, so the
-            // next attempt in this JVM can open the same directory again.
-            log.error("kernel start failed; closing the stores", e);
+            // store — and with SP0b-2 the write-behind writer thread, which is not a daemon. What
+            // started before the failure is stopped in the usual order FIRST: closing RocksDB under
+            // a running P2P/RPC/check-main thread is worse than the leak it would fix. Then the
+            // stores go, so the next attempt in this JVM can open the same directory again.
+            // The kernel is not running: without this a later testStop() would pass its isRunning
+            // guard and NPE on a half-built component, and a retried testStart() would no-op.
+            isRunning.set(false);
+            log.error("kernel start failed; stopping what started and closing the stores", e);
+            try {
+                stopServices();
+            } catch (RuntimeException | Error ex) {
+                e.addSuppressed(ex);
+            }
+            if (blockStore != null) {
+                try {
+                    // Sums are written back in batches: without this, those of a genesis import
+                    // that did land would be dropped for good.
+                    blockStore.flushSums();
+                } catch (RuntimeException ex) {
+                    e.addSuppressed(ex);
+                }
+            }
             if (chainL1Store != null) {
                 try {
                     chainL1Store.stop();
-                } catch (RuntimeException ignored) {
-                    // already reported by the throw below
+                } catch (RuntimeException ex) {
+                    e.addSuppressed(ex);
                 }
             }
             if (dbFactory != null) {
                 try {
                     dbFactory.close();
-                } catch (RuntimeException ignored) {
-                    // already reported by the throw below
+                } catch (RuntimeException ex) {
+                    e.addSuppressed(ex);
                 }
             }
             throw e;
         }
+    }
+
+    /**
+     * I2 (SP0b-2): the write-behind queue has failed and accepts no further write. Before the
+     * layer existed a RocksDB error was thrown synchronously, turned into {@code ImportResult.ERROR}
+     * and retried by the next write; now the first failure poisons the stream for good, so a node
+     * left running would keep mining and answering RPC over state that will never be persisted.
+     * It has to stop.
+     *
+     * <p>On its own thread, and never inline: the handler runs on whichever thread failed, which is
+     * normally the writer — and the writer may not flush (it would wait for itself) nor join itself
+     * in {@code stop()}. Nothing here can block indefinitely either: {@code fail()} has already
+     * woken and poisoned every waiter before calling this, so no producer stays parked and every
+     * flush on the way out throws instead of waiting. {@code System.exit} rather than
+     * {@code halt} so the registered shutdown hooks still run; {@code testStop()} is called first
+     * because the hook's own call would be a no-op once it has flipped {@code isRunning}.
+     */
+    private void onPersistFailure(Throwable failure) {
+        log.error("write-behind persistence failed: this node can no longer store anything durably "
+                + "and is stopping", failure);
+        if (!isRunning.get()) {
+            return; // already stopping: the stores are being closed anyway
+        }
+        Thread stopper = new Thread(() -> {
+            try {
+                testStop();
+            } catch (RuntimeException | Error e) {
+                log.error("stopping after a persistence failure did not complete cleanly", e);
+            } finally {
+                System.exit(1);
+            }
+        }, "xdag-persist-failure");
+        stopper.setDaemon(false);
+        stopper.start();
     }
 
     /**
@@ -372,29 +431,7 @@ public class Kernel {
 
         isRunning.set(false);
 
-        // Stop Api
-        if (api != null) {
-            api.stop();
-        }
-
-        // Stop consensus
-        sync.stop();
-        syncMgr.stop();
-        pow.stop();
-
-        // Stop networking layer
-        channelMgr.stop();
-        nodeMgr.stop();
-
-        // Close message queue timer
-        MessageQueue.timer.shutdown();
-
-        // Close P2P networking
-        p2p.close();
-        client.close();
-
-        // Stop data layer
-        blockchain.stopCheckMain();
+        stopServices();
 
         // Block sums are written back in batches and saveXdagStatus deliberately does not flush
         // them (it runs once per import); this is the last chance before the databases close.
@@ -421,13 +458,73 @@ public class Kernel {
         // leaving it running would outlive the kernel. Closing the factory also stops opening
         // databases this node never used just to close them again.
         dbFactory.close();
+    }
 
-        // Stop remaining services
-        if(webSocketServer != null) {
-            webSocketServer.stop();
-
+    /**
+     * Everything that runs on a thread of its own, stopped in the order {@link #testStop()} has
+     * always used, before anything touches the databases. Every component is null-guarded: the G3
+     * path in {@link #testStart()} calls this on a half-built kernel, where most of them are still
+     * null. Writes nothing itself — the stats and sums saves stay in {@code testStop}, which owns
+     * the "clean shutdown" semantics the boot consistency check relies on.
+     */
+    private void stopServices() {
+        // Stop Api
+        if (api != null) {
+            api.stop();
         }
-        poolAwardManager.stop();
+
+        // Stop consensus
+        if (sync != null) {
+            sync.stop();
+        }
+        if (syncMgr != null) {
+            syncMgr.stop();
+        }
+        if (pow != null) {
+            pow.stop();
+        }
+
+        // Stop networking layer
+        if (channelMgr != null) {
+            channelMgr.stop();
+        }
+        if (nodeMgr != null) {
+            nodeMgr.stop();
+        }
+
+        // Close message queue timer
+        MessageQueue.timer.shutdown();
+
+        // Close P2P networking
+        if (p2p != null) {
+            p2p.close();
+        }
+        if (client != null) {
+            client.close();
+        }
+
+        // Stop data layer
+        if (blockchain != null) {
+            blockchain.stopCheckMain();
+        }
+
+        // I4 (SP0b-2): with the check-main loop, because it is a scheduler of the same kind — a
+        // non-daemon thread that writes ORPHANIND and the stats. A tick after the databases close
+        // would write into a closed RocksDB and poison the write-behind queue on the way out. It
+        // closes its own source as well; RocksdbKVSource.close() is idempotent, so the factory
+        // close below still does the right thing.
+        if (orphanBlockStore != null) {
+            orphanBlockStore.stop();
+        }
+
+        // Stop remaining services. Before the databases close, not after as they used to be: both
+        // of these can still be serving requests that read the stores.
+        if (webSocketServer != null) {
+            webSocketServer.stop();
+        }
+        if (poolAwardManager != null) {
+            poolAwardManager.stop();
+        }
     }
 
     public enum Status {

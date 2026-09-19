@@ -43,9 +43,10 @@ import org.apache.tuweni.bytes.Bytes;
  *
  * <p>Keys and values are retained by reference (pending map, read cache, queue) and must not be
  * mutated after they are handed in. A {@code put} with a {@code null} value is a delete, as on
- * {@link RocksdbKVSource}. Direct-mode writes ({@link WriteBehindQueue#direct}) go to the delegate
- * and clear the key's pending entry; see {@link io.xdag.db.PersistControl#direct} for the
- * single-writer precondition that makes that sound.
+ * {@link RocksdbKVSource}. Direct-mode writes ({@link WriteBehindQueue#direct}) drain the stream
+ * once -- the scope's drain happens here, at its first write -- then go to the delegate and clear
+ * the key's pending entry; see {@link io.xdag.db.PersistControl#direct} for the single-writer
+ * precondition that makes that sound.
  */
 @Slf4j
 public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
@@ -135,6 +136,7 @@ public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
     @Override
     public void put(byte[] key, byte[] val) {
         if (queue.isBypass()) {
+            queue.flushSync(); // the direct scope's one drain, on its first write (no-op afterwards)
             delegate.put(key, val);
             directWrite(key, val);
             return;
@@ -145,6 +147,7 @@ public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
     @Override
     public void delete(byte[] key) {
         if (queue.isBypass()) {
+            queue.flushSync(); // as in put(): drain the stream before the first direct write
             delegate.delete(key);
             directWrite(key, null);
             return;
@@ -188,6 +191,7 @@ public final class WriteBehindKVSource implements KVSource<byte[], byte[]> {
     @Override
     public void batchWrite(List<Pair<byte[], byte[]>> puts, List<byte[]> deletes) {
         if (queue.isBypass()) {
+            queue.flushSync(); // as in put(): drain the stream before the first direct write
             delegate.batchWrite(puts, deletes);
             queue.runLocked(() -> {
                 for (Pair<byte[], byte[]> p : puts) {

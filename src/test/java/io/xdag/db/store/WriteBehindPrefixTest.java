@@ -51,7 +51,6 @@ import io.xdag.db.rocksdb.WriteBehindQueue;
 import io.xdag.utils.BytesUtils;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Random;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 import org.apache.tuweni.units.bigints.UInt64;
@@ -93,7 +92,6 @@ public class WriteBehindPrefixTest extends ChainL1TestBase {
     @Test
     public void theDatabasesAlwaysHoldAPrefixOfTheWriteStream() throws Exception {
         queue.flushSync(); // the fixture's own setup (address block, stats) is on disk
-        long baselineBlocks = blockchain.getXdagStats().nblocks;
         List<Block> blocks = plainTransfers(BLOCKS);
         long[] stampAfter = new long[BLOCKS];
         long[] nblocksAfter = new long[BLOCKS];
@@ -104,11 +102,12 @@ public class WriteBehindPrefixTest extends ChainL1TestBase {
         }
         assertTrue("the stream grew", stampAfter[BLOCKS - 1] > 0);
 
-        // Drain a random number of groups, then crash.
-        Random r = new Random(20260918L);
-        int groups = r.nextInt((int) (stampAfter[BLOCKS - 1] / 16) + 1);
-        for (int g = 0; g < groups; g++) {
-            queue.drainOnce();
+        // Cut the stream in the middle of an import, deterministically: drain group by group until
+        // the first import that is only half written, and crash there. A random cut could land past
+        // the end of the stream and quietly test nothing.
+        long target = (stampAfter[0] + stampAfter[BLOCKS - 1]) / 2;
+        while (queue.writtenCount() < target) {
+            assertTrue("the queue still had a group to drain", queue.drainOnce());
         }
         long written = queue.writtenCount();
         queue.abandon();
@@ -128,7 +127,7 @@ public class WriteBehindPrefixTest extends ChainL1TestBase {
             XdagStats stats = store.getXdagStatus();
             assertEquals("stats on disk equal the last fully written import (" + written + " writes, " + full
                             + " imports)",
-                    full == 0 ? baselineBlocks : nblocksAfter[full - 1], stats.nblocks);
+                    nblocksAfter[full - 1], stats.nblocks);
             for (int i = 0; i < full; i++) {
                 assertNotNull("import " + i + " is fully on disk",
                         store.getBlockByHash(blocks.get(i).getHashLow(), false));
@@ -163,9 +162,16 @@ public class WriteBehindPrefixTest extends ChainL1TestBase {
             assertImported(b);
         }
         assertTrue("imports are queued", queue.pending() > 0);
+        long queuedBeforeTransition = queue.enqueuedCount();
         mineMain(List.of(hashLow(blocks.get(0)), hashLow(blocks.get(1)), hashLow(blocks.get(2))));
         confirm(blocks.get(2)); // setMain runs inside: drains first, then writes directly
-        assertEquals("nothing left queued after a setMain (its own writes bypassed the queue)", 0, queue.pending());
+        // The drain half: everything queued before the transition is in the databases.
+        assertTrue("the transition drained the stream ahead of it (" + queue.writtenCount() + " written, "
+                        + queuedBeforeTransition + " queued before it)",
+                queue.writtenCount() >= queuedBeforeTransition);
+        // The direct half: setMain makes dozens of writes and not one of them entered the stream,
+        // so what is still queued is only checkMain's own stats save, which runs after it returns.
+        assertTrue("setMain's writes bypassed the queue; still queued: " + queue.pending(), queue.pending() <= 2);
         assertTrue(store().getLastCompletedMain() >= 1);
     }
 

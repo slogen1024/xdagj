@@ -124,8 +124,15 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
         cleaner.scheduleAtFixedRate(() -> cleanExpiredOrphans(15 * 60 * 1000L), 5, 300, TimeUnit.SECONDS);
     }
 
+    /**
+     * I4 (SP0b-2): the cleaner goes first. Its scheduler owns a non-daemon thread, and a tick that
+     * fires after the databases are closed would write through a stopped write-behind queue into a
+     * closed RocksDB — poisoning the queue on the way out and logging a persistence failure that
+     * never happened. {@code shutdownNow} is idempotent, so calling this twice is harmless.
+     */
     @Override
     public void stop() {
+        cleaner.shutdownNow();
         orphanSource.close();
     }
 
@@ -139,7 +146,29 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
         this.orphanSource.put(ORPHAN_SIZE, BytesUtils.longToBytes(0, false));
     }
 
+    /**
+     * C1 (SP0b-2): the whole body runs under the blockchain monitor. It writes ORPHANIND (the
+     * orphan key and ORPHAN_SIZE) and INDEX (the stats), and it decrements {@code nnoref} — all on
+     * this scheduler's own thread, which used to hold no lock at all. Three things that fixes: the
+     * unsynchronized {@code nnoref--}, the read-modify-write on ORPHAN_SIZE racing
+     * {@code addOrphan}/{@code deleteByKey}, and — since the write-behind layer — a stats save
+     * QUEUED here landing after a concurrent transition's DIRECT save, which would persist
+     * {@code nmain} ahead of the completion marker and make the next boot refuse to start.
+     *
+     * <p>The blockchain is null until the kernel has built it (this cleaner starts with the store,
+     * five seconds earlier), and there is nothing to clean before then anyway.
+     */
     private void cleanExpiredOrphans(long maxAgeMillis) {
+        Blockchain blockchain = kernel.getBlockchain();
+        if (blockchain == null) {
+            return;
+        }
+        synchronized (blockchain) {
+            cleanExpiredOrphansLocked(maxAgeMillis, blockchain);
+        }
+    }
+
+    private void cleanExpiredOrphansLocked(long maxAgeMillis, Blockchain blockchain) {
         long now = System.currentTimeMillis();
         for (Iterator<Map.Entry<Bytes, Long>> it = orphanInsertTimeMap.entrySet().iterator(); it.hasNext(); ) {
             Map.Entry<Bytes, Long> entry = it.next();
@@ -179,8 +208,8 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
                     }
                 }
                 it.remove();
-                kernel.getBlockchain().getXdagStats().nnoref--;
-                kernel.getBlockStore().saveXdagStatus(kernel.getBlockchain().getXdagStats());
+                blockchain.getXdagStats().nnoref--;
+                kernel.getBlockStore().saveXdagStatus(blockchain.getXdagStats());
                 log.debug("Cleaned expired orphan: {}", Hex.toHexString(entry.getKey().toArray()));
             }
         }

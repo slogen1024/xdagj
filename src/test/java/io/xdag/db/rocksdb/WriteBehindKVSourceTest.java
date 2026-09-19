@@ -151,11 +151,48 @@ public class WriteBehindKVSourceTest {
     }
 
     @Test
-    public void directDrainsPendingWritesFirst() {
+    public void directDrainsBeforeItsFirstWrite() {
         source.put(b("k"), b("queued"));
         assertEquals(1, queue.pending());
-        queue.direct(() -> assertArrayEquals("drained before the body runs", b("queued"), raw.get(b("k"))));
+        queue.direct(() -> {
+            assertEquals("lazy: nothing is drained until the body writes", 1, queue.pending());
+            source.put(b("k2"), b("direct"));
+            assertArrayEquals("the queued write landed before the direct one", b("queued"), raw.get(b("k")));
+            assertArrayEquals(b("direct"), raw.get(b("k2")));
+        });
         assertEquals(0, queue.pending());
+    }
+
+    /**
+     * I1 (SP0b-2): the drain is the expensive half of {@code direct}, and most transitions on the
+     * import path ({@code unWindMain} above all) write nothing at all. A body that writes nothing
+     * must therefore leave the stream exactly as it found it.
+     */
+    @Test
+    public void directWithoutAWriteDoesNotDrain() {
+        source.put(b("k"), b("queued"));
+        queue.direct(() -> {
+            assertNull("the body sees the delegate as it was", raw.get(b("k")));
+            assertArrayEquals("reads still go through the pending map", b("queued"), source.get(b("k")));
+        });
+        assertEquals("still queued", 1, queue.pending());
+        assertEquals(0, queue.writtenCount());
+    }
+
+    /**
+     * The lazy drain is keyed on "this direct scope has drained", not on "we are bypassing" — so an
+     * iteration read inside a direct body still flushes before it hits the delegate, and only once.
+     */
+    @Test
+    public void anIterationReadInsideDirectDrainsFirst() {
+        source.put(b("p1"), b("a"));
+        queue.direct(() -> {
+            assertEquals(1, source.prefixKeyLookup(b("p")).size());
+            assertEquals("the iteration read drained the stream", 0, queue.pending());
+            source.put(b("p2"), b("b"));
+        });
+        assertArrayEquals(b("a"), raw.get(b("p1")));
+        assertArrayEquals(b("b"), raw.get(b("p2")));
     }
 
     @Test

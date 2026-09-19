@@ -188,7 +188,10 @@ public class BlockchainImpl implements Blockchain {
         // SP0b-2: read exactly here, before anything that can run a consensus transition — the
         // snapshot branch below calls initSnapshotJ(), and the check-main loop started at the end of
         // this constructor can reach setMain before the caller gets control back. NONE (a no-op both
-        // ways) whenever no write-behind layer is installed.
+        // ways) whenever no write-behind layer is installed. Note that `this` escapes to that
+        // scheduler before the constructor returns, so final-field freeze does not cover the
+        // check-main thread; what does cover it is the monitor — startCheckMain publishes through
+        // the executor's queue, and every transition on that thread enters a synchronized wrapper.
         PersistControl control = kernel.getPersist();
         this.persist = control == null ? PersistControl.NONE : control;
         snapshotHeight = kernel.getConfig().getSnapshotSpec().getSnapshotHeight();
@@ -1155,6 +1158,7 @@ public class BlockchainImpl implements Blockchain {
     }
 
     private void reconcileTipToDirect(long height, Bytes32 hashLow) {
+        // Redundant: the wrapper holds this monitor. Kept so the body is unchanged from before SP0b-2.
         synchronized (this) {
             Block block = hashLow == null ? null : getBlockByHash(hashLow, false);
             if (block == null || block.getInfo().getHeight() != height
@@ -1220,6 +1224,7 @@ public class BlockchainImpl implements Blockchain {
     }
 
     private void repairUnwindToDirect(long height) {
+        // Redundant: the wrapper holds this monitor. Kept so the body is unchanged from before SP0b-2.
         synchronized (this) {
             Block target = height <= 0 ? null : blockStore.getBlockByHeight(height);
             // I1: the height index is not authoritative -- saveBlockInfo never deletes a stale key,
@@ -1541,6 +1546,7 @@ public class BlockchainImpl implements Blockchain {
 
     private void setMainDirect(Block block) {
 
+        // The wrapper already holds this monitor; kept so the body stays byte-for-byte the pre-SP0b-2 one.
         synchronized (this) {
             // Set reward
             long mainNumber = xdagStats.nmain + 1;
@@ -1622,6 +1628,7 @@ public class BlockchainImpl implements Blockchain {
 
     private void unSetMainDirect(Block block) {
 
+        // The wrapper already holds this monitor; kept so the body stays byte-for-byte the pre-SP0b-2 one.
         synchronized (this) {
 
             if ((block.getInfo().flags & BI_MAIN) == 0) {
@@ -2368,7 +2375,17 @@ public class BlockchainImpl implements Blockchain {
         }
     }
 
-    public void checkMain() {
+    /**
+     * C1 (SP0b-2): {@code synchronized}, not just {@code checkNewMain()} inside. The stats save has
+     * to be under the same monitor as the transition that changed them. Two reasons, both real:
+     * {@code xdagStats} is serialized here while {@code tryToConnect} on another thread is free to
+     * mutate it, and — since the write-behind layer — a save left outside the monitor is QUEUED
+     * while a concurrent {@code setMain} writes DIRECTLY, so the stale queued stats land after the
+     * transition's own and persist {@code nmain} ahead of {@code LAST_COMPLETED_MAIN}: the exact
+     * shape the boot consistency check refuses to start on. The try/catch stays — this runs on the
+     * check-main scheduler, where a throw would silently cancel the periodic task.
+     */
+    public synchronized void checkMain() {
         try {
             checkNewMain();
             // xdagStats state will change after checkNewMain
