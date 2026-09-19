@@ -112,3 +112,26 @@ main chain consistency: nmain=1207, lastCompletedMain=1206, 1 stuck main block(s
 **降级陷阱。** 有了标记之后**不要降级到 SP0b-1 之前的版本**：老版本继续确认主块而标记冻结，再升级时检查会把标记之上的几百个其实完好的高度都报成"未完成"。如果已经这样做了，先 `--repairchain reinit-marker`（它等于由你断言这些高度全部完整），再启动。快照重灌请用**空的** store 目录。
 
 **一条与回滚有关的升级提醒。** SP0b-1 修正了回滚 chain 区块（带代码链的 DEPLOY、带参数链的 CALL）时的一处费用扣减错误（`unApplyBlock` 现按持久化费用 `amount − fee / k` 精确扣回）。修复不设激活高度、不影响普通转账，但**不会修正既有存储**：如果某个 devnet/testnet 节点曾在旧代码上回滚过 chain 区块，它的某些余额已经静默偏低（或金库偏高），以后可能拒绝一笔别的节点接受的交易而分歧。这样的存储请重新同步，或用快照重灌。
+
+### 写后落盘与导入流水线（SP0b-2）
+
+从 SP0b-2 起，节点**默认**开启两样东西：导入流水线（网络来的块在线程池里并行做哈希与验签，再由一条提交线程**按到达顺序**进链，判定一字不改），以及**写后落盘**——区块、`BlockInfo`、统计与孤块索引的写先进一条有序队列，由一条名为 `xdag-persist` 的线程合批写进 RocksDB。主块确认与回滚（`setMain` / `unSetMain` / `unWindMain`、`--repairchain` 的回滚、快照导入）**不**走队列：它们先把队列排空，再直写，落盘形态与 SP0b-2 之前逐字节相同。
+
+**运维需要知道的四件事**
+
+1. **崩溃会丢掉最后一小段写。** 磁盘上的四个库永远是写流的一个**前缀**（组粒度），最多丢队列里还没写出去的那些——上限是 `chain.persist.maxPending`（默认 4096 条）加一组，或 `chain.persist.flushMs`（默认 20 ms）的时间窗。丢掉的块只是"不在"，同步会重新拿；库里的链顶一定指向库里存在的块。**注意这里说的是"交给 RocksDB"**（写进 WAL），不是 `fsync`——掉电的耐久性与 SP0b-2 之前完全一样，没有变好也没有变差。
+   另有一项与块无关的小损失：块的 **sums**（传统同步协议用来挑请求区间的统计）现在也是批量写回的，触发点是每 256 个保存的块、每次换到新的最深时间桶、以及**正常关机**。一次崩溃会丢掉最后不足 256 个块对当前桶的贡献，而且**丢了就补不回来**（没有任何代码会重新给盘上的块计 sums）。后果只是那个区间以后会被同步协议反复钻进去重新请求，**是带宽，不是正确性**——sums 从不进共识。
+2. **落盘失败现在会让节点停机。** 以前一次 RocksDB 写失败只是日志里一行错误，节点继续跑；现在队列一旦写失败就**永久中毒**（不重试、不静默丢写），日志里会出现
+   ```
+   write-behind persistence failed after <N> written entries; the node must stop
+   write-behind persistence failed: this node can no longer store anything durably and is stopping
+   ```
+   紧接着节点自己走一遍正常关机（另起一条 `xdag-persist-failure` 线程跑关机流程）并以**退出码 1** 结束。这是有意的：一个存不下东西的节点继续挖矿、继续答 RPC，比停下来糟糕得多。看到这个先查磁盘（满了？只读？坏道？），处理完直接重启——库里剩下的仍然是一个合法前缀，启动一致性检查会照常核对。
+3. **两个关掉的开关**（都是节点本地设置，**不要**写进任何 `.conf`，用 `-D` 传给 JVM 即可；给了非法值节点会拒绝启动）：
+   - `-Dchain.persist.maxPending=0` —— 关掉写后落盘，回到**完全同步**的写（每次 put 直接进 RocksDB），行为与 SP0b-2 之前逐字节相同。
+   - `-Dchain.ingest.threads=0` —— 关掉导入流水线，回到**同步导入**路径。
+   其余四个只是尺寸：`chain.ingest.queue`（默认 4096，在飞块数上限）、`chain.persist.flushMs`（20）、`chain.persist.flushEntries`（256，**必须 ≤ `chain.persist.maxPending`**，否则拒绝启动）、`chain.persist.readCache`（65536 条，INDEX 读缓存，0 = 关）。正常运行时日志里会各有一行
+   `Write-behind persistence on: maxPending=…, flushEntries=…, flushMs=…, readCache=…` 与 `Ingest pipeline on: threads=…, queue=…`；关掉的那个就没有对应的行。
+4. **关机顺序变了，别在中途 `kill -9`。** 现在是：停 API → 停同步 → **停导入流水线（先停止接收、把已经收下的块全部提交完、再 join）** → 停挖矿 → 停网络 → 停主链检查线程 → **停孤块清理器** → 停 WebSocket / 奖励分发 → 最后一次写 sums 与统计 → 关 `CHAIN_L1` → **通过工厂关掉全部数据库**（这一步会先把写后队列排空、再停 `xdag-persist` 这条**非 daemon** 线程）。正常 `stop` 能走完全程，这一小段写就不会丢；中途强杀就退化成第 1 条说的那个前缀。如果日志里出现 `write-behind writer did not stop within 30 s` 或 `ingest pipeline drain timed out`，说明底下的 RocksDB 卡住了，先看磁盘再重启。
+
+**不受影响的东西**：SP0b-1 的启动一致性检查、`LAST_COMPLETED_MAIN` / `MAIN_IN_FLIGHT` 两个标记、`--repairchain` 的全部模式与退出码、`--makesnapshot` 与快照导入——它们要么跑在直写模式下，要么用离线工具自己开库（离线工具根本不装写后层）。上面那几节一个字都不用改。
