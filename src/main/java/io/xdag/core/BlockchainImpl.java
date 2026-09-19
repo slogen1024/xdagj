@@ -2713,10 +2713,35 @@ public class BlockchainImpl implements Blockchain {
     }
 
     /**
-     * Check if block already exists
+     * Check if block already exists.
+     *
+     * <p>Both halves of a saved block, not just the first one. {@code saveBlock} writes the raw 512
+     * bytes ({@code blockSource}) before the {@code BlockInfo} ({@code indexSource}), and since
+     * SP0b-2 both are queued through the write-behind layer, so a kill — or the failure handler's
+     * {@code System.exit(1)}, which drops the queued tail by construction — can land between them.
+     * Asking {@code hasBlock} alone then answers EXIST for a block {@code getBlockByHash} cannot
+     * return (it reads the info), which is a state nothing repairs: {@code tryToConnect} returns
+     * EXIST before it can re-save, every child stays NO_PARENT, and the re-request/EXIST loop
+     * throttles sync to one retry per parent-request period, forever. Requiring the info when the
+     * raw bytes are there makes the block re-importable instead.
+     *
+     * <p>The snapshot rule is untouched, and that is why the info is demanded only in the
+     * {@code hasBlock} branch: snapshot-imported blocks are info-only on purpose — they have no raw
+     * bytes at all — so {@code isExitInSnapshot} still answers for them.
+     *
+     * <p>Residual, and it is acceptable: the repairing re-import runs {@code saveBlockSums} a second
+     * time for this block, so its 512 bytes are counted twice in the sums buckets. The sums are
+     * advisory (they serve the {@code SUMS} P2P reply and nothing that validates a block), a torn
+     * write is rare, and double-counting a little is strictly better than a permanently stalled
+     * chain. Note also that the write order is deliberate: saving the raw bytes last would move the
+     * torn state to "info without raw", where {@code getBlockByHash(h, false)} returns a block whose
+     * raw lookup is null — and on a snapshot node {@code isExitInSnapshot} would answer EXIST for it
+     * and reinstate exactly this stall.
      */
     public boolean isExist(Bytes32 hashlow) {
-        return blockStore.hasBlock(hashlow) || isExitInSnapshot(hashlow);
+        return blockStore.hasBlock(hashlow)
+                ? blockStore.hasBlockInfo(hashlow)
+                : isExitInSnapshot(hashlow);
     }
 
     public boolean isExistInMem(Bytes32 hashlow) {

@@ -134,7 +134,9 @@ public class WriteBehindPrefixTest extends ChainL1TestBase {
                 assertNotNull("import " + i + " has its raw bytes too (saveBlock writes them first)",
                         store.getBlockByHash(blocks.get(i).getHashLow(), true));
             }
-            // Later imports may be partial: a raw block without its info is invisible and harmless.
+            // Later imports may be partial. A raw block without its info reads back as absent --
+            // getBlockByHash goes through the info -- and since the isExist fix it no longer answers
+            // EXIST either, so the block is re-importable rather than a permanent hole (TornBlockSaveTest).
             for (int i = full + 1; i < BLOCKS; i++) {
                 assertNull("import " + i + " is not on disk", store.getBlockByHash(blocks.get(i).getHashLow(), false));
             }
