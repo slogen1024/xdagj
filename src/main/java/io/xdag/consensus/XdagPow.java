@@ -86,17 +86,21 @@ public class XdagPow implements PoW, Listener, Runnable, XdagLifecycle {
 
     private final ExecutorService timerExecutor = Executors.newSingleThreadExecutor(BasicThreadFactory.builder()
             .namingPattern("XdagPow-timer-thread")
+            .daemon(true)
             .build());
 
     private final ExecutorService mainExecutor = Executors.newSingleThreadExecutor(BasicThreadFactory.builder()
             .namingPattern("XdagPow-main-thread")
+            .daemon(true)
             .build());
 
     private final ExecutorService broadcasterExecutor = Executors.newSingleThreadExecutor(BasicThreadFactory.builder()
             .namingPattern("XdagPow-broadcaster-thread")
+            .daemon(true)
             .build());
     private final ExecutorService getSharesExecutor = Executors.newSingleThreadExecutor(BasicThreadFactory.builder()
             .namingPattern("XdagPow-getShares-thread")
+            .daemon(true)
             .build());
 
     protected RandomX randomXUtils;
@@ -119,6 +123,13 @@ public class XdagPow implements PoW, Listener, Runnable, XdagLifecycle {
     @Override
     public void start() {
         if (running.compareAndSet(false, true)) {
+            // Raised here, not at the top of each run(): the workers used to set their own flag
+            // first thing, so a stop() arriving between the execute() below and that first
+            // statement was overwritten by the worker itself and the loop ran for the life of the
+            // JVM. Set before execute() so every worker observes true.
+            timer.isRunning = true;
+            broadcaster.isRunning = true;
+            sharesFromPools.isRunning = true;
             getSharesExecutor.execute(this.sharesFromPools);
             mainExecutor.execute(this);
             kernel.getPoolAwardManager().start();
@@ -133,6 +144,14 @@ public class XdagPow implements PoW, Listener, Runnable, XdagLifecycle {
             timer.isRunning = false;
             broadcaster.isRunning = false;
             sharesFromPools.isRunning = false;
+            // The flags alone only ask the loops to finish their current poll. The executors own
+            // the threads, and their factories are the only reason those threads did not outlive
+            // the kernel before; shutdownNow() interrupts a worker parked in poll()/sleep() so a
+            // stop() returns promptly, and every loop below treats the interrupt as "exit now".
+            timerExecutor.shutdownNow();
+            mainExecutor.shutdownNow();
+            broadcasterExecutor.shutdownNow();
+            getSharesExecutor.shutdownNow();
         }
     }
 
@@ -369,8 +388,9 @@ public class XdagPow implements PoW, Listener, Runnable, XdagLifecycle {
         // init pretop
         globalPretop = null;
         while (running.get()) {
+            Event ev = null;
             try {
-                Event ev = events.poll(10, TimeUnit.MILLISECONDS);
+                ev = events.poll(10, TimeUnit.MILLISECONDS);
                 if (ev == null) {
                     continue;
                 }
@@ -391,11 +411,25 @@ public class XdagPow implements PoW, Listener, Runnable, XdagLifecycle {
                     }
                 }
             } catch (InterruptedException e) {
-                log.error(e.getMessage(), e);
+                // Only stop() (through shutdownNow) interrupts this thread: restore the flag for
+                // whoever looks at it next and leave the loop.
+                Thread.currentThread().interrupt();
+                log.info("Main PoW thread interrupted, stopping");
+                break;
             } catch (Exception e) {
-                throw new RuntimeException(e);
+                // Never rethrow: this used to kill the only thread that produces main blocks while
+                // running stayed true, so start() would not bring it back and the node went quiet
+                // until it was restarted. One bad event must cost one event, not the miner.
+                log.error("PoW event {} failed, skipping it", ev == null ? "null" : ev.getType(), e);
+            } catch (Error e) {
+                // Not recoverable — an OutOfMemoryError must reach the default handler — but the
+                // point of this defect is that the miner died in silence, so say so on the way out.
+                log.error("Main PoW thread is dying on a fatal error; the node will stop producing "
+                        + "main blocks until it is restarted", e);
+                throw e;
             }
         }
+        log.info("Main PoW stopped.");
     }
 
     @Override
@@ -465,23 +499,30 @@ public class XdagPow implements PoW, Listener, Runnable, XdagLifecycle {
 
     public class Timer implements Runnable {
 
-        private long timeout;
-        private boolean isRunning = false;
+        private volatile long timeout;
+        // volatile: written by stop() on the caller's thread and read by the timer thread. Without
+        // it the loop is free never to observe the write and to run for the life of the JVM.
+        private volatile boolean isRunning = false;
 
         @Override
         public void run() {
-            this.isRunning = true;
             while (this.isRunning) {
-                if (timeout != -1 && XdagTime.getCurrentTimestamp() > timeout) {
-                    log.debug("CurrentTimestamp:{},sendTime:{} Timeout!", XdagTime.getCurrentTimestamp(), timeout);
-                    timeout = -1;
-                    events.add(new Event(Event.Type.TIMEOUT));
-                    continue;
-                }
                 try {
+                    if (timeout != -1 && XdagTime.getCurrentTimestamp() > timeout) {
+                        log.debug("CurrentTimestamp:{},sendTime:{} Timeout!", XdagTime.getCurrentTimestamp(), timeout);
+                        timeout = -1;
+                        events.add(new Event(Event.Type.TIMEOUT));
+                        continue;
+                    }
                     Thread.sleep(10);
                 } catch (InterruptedException e) {
-                    log.error(e.getMessage(), e);
+                    Thread.currentThread().interrupt();
+                    log.info("PoW timer thread interrupted, stopping");
+                    return;
+                } catch (Exception e) {
+                    // Same reason as the main loop: the timer is what wakes the miner, so it has to
+                    // outlive a single failed tick.
+                    log.error("PoW timer tick failed", e);
                 }
             }
         }
@@ -500,16 +541,20 @@ public class XdagPow implements PoW, Listener, Runnable, XdagLifecycle {
 
         @Override
         public void run() {
-            isRunning = true;
             while (isRunning) {
-                BlockWrapper bw = null;
                 try {
-                    bw = queue.poll(50, TimeUnit.MILLISECONDS);
+                    BlockWrapper bw = queue.poll(50, TimeUnit.MILLISECONDS);
+                    if (bw != null) {
+                        channelMgr.sendNewBlock(bw);
+                    }
                 } catch (InterruptedException e) {
-                    log.error(e.getMessage(), e);
-                }
-                if (bw != null) {
-                    channelMgr.sendNewBlock(bw);
+                    Thread.currentThread().interrupt();
+                    log.info("PoW broadcaster thread interrupted, stopping");
+                    return;
+                } catch (Exception e) {
+                    // sendNewBlock reaches every channel: one peer that fails must not end the
+                    // broadcaster and silence this node for good.
+                    log.error("Failed to broadcast a block, skipping it", e);
                 }
             }
         }
@@ -529,17 +574,11 @@ public class XdagPow implements PoW, Listener, Runnable, XdagLifecycle {
 
         @Override
         public void run() {
-            isRunning = true;
             while (isRunning) {
                 String shareInfo = null;
                 try {
                     shareInfo = shareQueue.poll(50, TimeUnit.MILLISECONDS);
-                } catch (InterruptedException e) {
-                    log.error(e.getMessage(), e);
-                }
-
-                if (shareInfo != null) {
-                    try {
+                    if (shareInfo != null) {
                         JsonObject shareJson = JsonParser.parseString(shareInfo).getAsJsonObject();
                         if (shareJson.get("msgType").getAsInt() == SHARE_FLAG) {
                             JsonObject msgContent = shareJson.getAsJsonObject("msgContent");
@@ -549,9 +588,14 @@ public class XdagPow implements PoW, Listener, Runnable, XdagLifecycle {
                         } else {
                             log.error("Share format error! Current share: {}", shareInfo);
                         }
-                    } catch (Exception e) {
-                        log.error("Share format error, current share: {}", shareInfo);
                     }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    log.info("PoW getShares thread interrupted, stopping");
+                    return;
+                } catch (Exception e) {
+                    // A pool that sends nonsense costs its own share, not every pool's shares.
+                    log.error("Share format error, current share: {}", shareInfo, e);
                 }
             }
         }
