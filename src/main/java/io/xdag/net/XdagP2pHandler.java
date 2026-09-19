@@ -100,6 +100,14 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
     /** Shared across channels: the dead commit thread is the node's, not the connection's. */
     private static final AtomicLong LAST_DEAD_COMMITTER_WARN = new AtomicLong();
 
+    /**
+     * At most one clamp WARN per connection per this interval. {@link #processBlocksRequest} runs
+     * on the netty event loop for every {@code BLOCKS_REQUEST} a peer sends; an unthrottled WARN per
+     * message would itself be a remote-triggered log flood, mirroring {@link MessageQueue}'s
+     * {@code DROP_WARN_INTERVAL_MS}.
+     */
+    private static final long BLOCKS_REQUEST_CLAMP_WARN_INTERVAL_MS = 10_000L;
+
     private final Channel channel;
 
     private final Kernel kernel;
@@ -115,6 +123,9 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
     private final MessageQueue msgQueue;
 
     private final AtomicBoolean isHandshakeDone = new AtomicBoolean(false);
+
+    /** Per-connection, like {@link MessageQueue}'s drop-warn: the resource is this peer's, not the node's. */
+    private final AtomicLong lastBlocksRequestClampWarn = new AtomicLong();
 
     private ScheduledFuture<?> getNodes = null;
     private ScheduledFuture<?> pingPong = null;
@@ -414,6 +425,66 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
     }
 
     /**
+     * Bounds how much of a {@code BLOCKS_REQUEST} this node will actually scan and send, without
+     * rejecting the request outright.
+     *
+     * <p>Clamping rather than rejecting is deliberate: a conforming peer (this codebase's own
+     * {@code XdagSync#requestBlocks}/{@code #sendGetBlocks} never asks for more than
+     * {@code REQUEST_BLOCKS_MAX_TIME} in one message — anything wider is split with
+     * {@code SUMS_REQUEST} first) never notices, and a peer that does ask for more still gets the
+     * earliest window of its request, which is what a peer walking forward in time needs. Rejecting
+     * outright would risk breaking interop with some other implementation of this wire protocol that
+     * this repository has no record of; clamping degrades gracefully instead.
+     *
+     * <p>{@code endTime <= startTime} (a zero or negative span, however it arose) is left alone:
+     * {@link io.xdag.db.rocksdb.BlockStoreImpl#getBlocksUsedTime}'s {@code while (time < endTime)}
+     * already does zero iterations for it, so there is nothing to clamp and no reason to change that
+     * pre-existing, already-safe behaviour.
+     *
+     * <p>A {@code startTime} within {@code REQUEST_BLOCKS_MAX_TIME} of {@link Long#MAX_VALUE} is
+     * refused outright (served as zero iterations), not saturated to {@code Long.MAX_VALUE}: no real
+     * xdag timestamp is anywhere near that boundary, and {@code getBlocksUsedTime}'s own
+     * {@code time += 0x10000} stride can silently overflow past {@code Long.MAX_VALUE} and wrap to a
+     * huge negative "time" that still satisfies {@code time < endTime} — on the order of 2^48 more
+     * strides before the wrap comes back around, i.e. a practical infinite scan on the netty event
+     * loop. This was found empirically: an early version of this guard only saturated the *clamp's
+     * own* arithmetic to {@code Long.MAX_VALUE} and still handed that startTime to the store, which
+     * hung a test run stepping toward it. Refusing avoids the boundary entirely instead of tiptoeing
+     * up to it.
+     */
+    private long clampBlocksRequestEndTime(long startTime, long endTime) {
+        if (endTime <= startTime) {
+            return endTime;
+        }
+        if (startTime > Long.MAX_VALUE - REQUEST_BLOCKS_MAX_TIME) {
+            warnBlocksRequestClamped(startTime, endTime);
+            return startTime;
+        }
+        long maxEndTime = startTime + REQUEST_BLOCKS_MAX_TIME;
+        if (endTime <= maxEndTime) {
+            return endTime;
+        }
+        warnBlocksRequestClamped(startTime, endTime);
+        return maxEndTime;
+    }
+
+    /**
+     * Rate-limited the same way {@link MessageQueue#recordDrop} is: this runs on the netty event
+     * loop for every {@code BLOCKS_REQUEST}, so an unthrottled WARN per oversized request is itself
+     * a remote-triggered log flood.
+     */
+    private void warnBlocksRequestClamped(long startTime, long endTime) {
+        long now = System.currentTimeMillis();
+        long last = lastBlocksRequestClampWarn.get();
+        if (now - last >= BLOCKS_REQUEST_CLAMP_WARN_INTERVAL_MS
+                && lastBlocksRequestClampWarn.compareAndSet(last, now)) {
+            log.warn("Clamping oversized BLOCKS_REQUEST from {}: requested [{}, {}), serving at most "
+                            + "REQUEST_BLOCKS_MAX_TIME ({}) past startTime",
+                    channel.getRemoteAddress(), startTime, endTime, REQUEST_BLOCKS_MAX_TIME);
+        }
+    }
+
+    /**
      * A block request responds to a block and starts a thread to continuously send blocks over a period of time. *
      */
     protected void processBlocksRequest(BlocksRequestMessage msg) {
@@ -423,15 +494,17 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
         long endTime = msg.getEndtime();
         long random = msg.getRandom();
 
-        // TODO: paulochen Processing multi-block requests
-        //        // If it's greater than the snapshot point, I can send it.
-        //        if (startTime > 1658318225407L) {
-        //            // TODO: If the request interval is too long, a new thread will be started to send the request; this is to prevent attacks.
+        // A peer chooses startTime/endTime; getBlocksByTime -> getBlocksUsedTime steps 0x10000 per
+        // iteration from startTime to endTime, materialising every block it finds. Clamp the span
+        // this node is willing to scan and send in one go to what the node's own sync ever asks for
+        // in one request (see XdagSync#requestBlocks/#sendGetBlocks): REQUEST_BLOCKS_MAX_TIME.
+        long servedEndTime = clampBlocksRequestEndTime(startTime, endTime);
+
         log.debug("Send blocks between {} and {} to node {}",
                 FastDateFormat.getInstance("yyyy-MM-dd HH:mm:ss.SSS").format(XdagTime.xdagTimestampToMs(startTime)),
-                FastDateFormat.getInstance("yyyy-MM-dd HH:mm:ss.SSS").format(XdagTime.xdagTimestampToMs(endTime)),
+                FastDateFormat.getInstance("yyyy-MM-dd HH:mm:ss.SSS").format(XdagTime.xdagTimestampToMs(servedEndTime)),
                 channel.getRemoteAddress());
-        List<Block> blocks = chain.getBlocksByTime(startTime, endTime);
+        List<Block> blocks = chain.getBlocksByTime(startTime, servedEndTime);
         for (Block block : blocks) {
             byte executionState = 0;
             if (chain.isTxBlock(block)) {
@@ -446,7 +519,13 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
             SyncBlockMessage blockMsg = new SyncBlockMessage(block, 1, executionState);
             msgQueue.sendMessage(blockMsg);
         }
-        msgQueue.sendMessage(new BlocksReplyMessage(startTime, endTime, random, chain.getXdagStats()));
+        // The reply echoes what was actually served, not what was asked for. Claiming coverage of a
+        // span this node clamped away would leave a peer that tracks its own coverage believing it
+        // holds blocks it was never sent, and it would never ask for them again. This node's own
+        // requester correlates replies by `random` alone (see processBlocksReply) and ignores both
+        // times, so nothing here depends on the echo; an implementation that does read it is told
+        // the truth and can request the remainder.
+        msgQueue.sendMessage(new BlocksReplyMessage(startTime, servedEndTime, random, chain.getXdagStats()));
     }
 
     protected void processBlocksReply(BlocksReplyMessage msg) {
