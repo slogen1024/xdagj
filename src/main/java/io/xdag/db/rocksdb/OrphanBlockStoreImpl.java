@@ -281,7 +281,7 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
         }
         long vipTxCount = vipTxMap.values().stream().mapToLong(Queue::size).sum();
         long accountTxCount = accountTxMap.values().stream().mapToLong(Queue::size).sum();
-        log.info("vipTxCount: {}, accountTxQueue.size(): {}, mtxQueue.size(): {}, linkQueue.size(): {}, mainRef.size() :{}",
+        log.debug("vipTxCount: {}, accountTxQueue.size(): {}, mtxQueue.size(): {}, linkQueue.size(): {}, mainRef.size() :{}",
                 vipTxCount, accountTxCount, mtxQueue.size(), linkQueue.size(), mainRef.size());
     }
 
@@ -313,7 +313,7 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
         }
         long vipTxCount = vipTxMap.values().stream().mapToLong(Queue::size).sum();
         long accountTxCount = accountTxMap.values().stream().mapToLong(Queue::size).sum();
-        log.info("vipTxCount: {}, accountTxQueue.size(): {}, mtxQueue.size(): {}, linkQueue.size(): {}, mainRef.size() :{}",
+        log.debug("vipTxCount: {}, accountTxQueue.size(): {}, mtxQueue.size(): {}, linkQueue.size(): {}, mainRef.size() :{}",
                 vipTxCount, accountTxCount, mtxQueue.size(), linkQueue.size(), mainRef.size());
     }
 

@@ -27,6 +27,7 @@ package io.xdag.chain.bench;
 import static io.xdag.chain.bench.BenchWorkload.payload;
 import static io.xdag.config.Constants.BI_APPLIED;
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -36,6 +37,7 @@ import static org.mockito.Mockito.when;
 
 import io.xdag.Kernel;
 import io.xdag.chain.ext.ChainBlockBuilder;
+import io.xdag.chain.ingest.IngestPipeline;
 import io.xdag.chain.l1.ChainIds;
 import io.xdag.chain.l1.ChainL1TestBase;
 import io.xdag.config.DevnetConfig;
@@ -50,8 +52,12 @@ import io.xdag.core.XdagBlock;
 import io.xdag.crypto.hash.HashUtils;
 import io.xdag.crypto.keys.ECKeyPair;
 import io.xdag.db.BlockStore;
+import io.xdag.db.PersistControl;
 import io.xdag.db.rocksdb.BlockStoreImpl;
+import io.xdag.db.rocksdb.DatabaseFactory;
 import io.xdag.db.rocksdb.RocksdbFactory;
+import io.xdag.db.rocksdb.WriteBehindFactory;
+import io.xdag.db.rocksdb.WriteBehindQueue;
 import io.xdag.net.ChannelManager;
 import io.xdag.net.PeerClient;
 import io.xdag.net.node.Node;
@@ -67,6 +73,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import org.apache.commons.io.FileUtils;
 import org.apache.tuweni.bytes.Bytes;
@@ -87,6 +94,11 @@ import org.junit.Test;
  * {@code Block} before {@code tryToConnect}). The two are interleaved — round r runs both legs back
  * to back, alternating which goes first — and reported as PAIRED per-round deltas, so monotone
  * drift over the run (JIT, log growth, page cache) does not get charged to one of them.
+ * {@code pipeline} submits the same workload to an {@link IngestPipeline} whose committer is
+ * {@code SyncManager.importPreValidated} — SP0b-2's network path — so pre-validation (parse, hash,
+ * ECDSA) runs on the pool and only the commit is serialized; its mean/p50/p95 are the IN-LOCK
+ * commit time of a paying block and its blocks/s is end to end, from the first submit to the last
+ * commit plus a {@code flushSync()} of the write-behind queue, so persistence is inside the number.
  * {@code confirmed} imports and then mines main blocks linking every paying block until the last
  * one is applied, so it includes fake PoW, {@code setMain} and {@code applyBlock}; its blocks/s
  * counts paying blocks and chunks only, not the main blocks. The {@code phase.*} rows replay single
@@ -154,6 +166,38 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
     @Override
     protected void beforeBlockchain(Kernel kernel) {
         kernel.setTxHistoryStore(null);
+    }
+
+    /**
+     * The node's real storage path: INDEX/BLOCK/TIME/ORPHANIND behind one {@link WriteBehindQueue}
+     * with the kernel's own defaults. {@code -Dxdag.bench.writeBehind=false} gives every row the
+     * old synchronous stores instead, which is the "before" leg of the SP0b-2 comparison.
+     * {@link ChainL1TestBase#setUpChain()} installs the queue as the kernel's {@code PersistControl}
+     * when the factory is a {@link WriteBehindFactory}, and {@code dbFactory.close()} in
+     * {@code tearDownChain()} flushes and stops the writer thread, so every fresh fixture gets a
+     * fresh queue and none is leaked.
+     */
+    @Override
+    protected DatabaseFactory wrapFactory(DatabaseFactory raw) {
+        if (!writeBehind()) {
+            return raw;
+        }
+        WriteBehindQueue q = new WriteBehindQueue(4096, 256, 20, true);
+        q.start();
+        return new WriteBehindFactory(raw, q, 65536);
+    }
+
+    private static boolean writeBehind() {
+        return Boolean.parseBoolean(System.getProperty("xdag.bench.writeBehind", "true"));
+    }
+
+    private static int ingestThreads() {
+        return Integer.getInteger("xdag.bench.ingestThreads", Runtime.getRuntime().availableProcessors());
+    }
+
+    /** The fixture's persistence control: the live write-behind queue, or a no-op when it is off. */
+    private PersistControl persist() {
+        return dbFactory instanceof WriteBehindFactory wb ? wb.queue() : PersistControl.NONE;
     }
 
     /**
@@ -308,6 +352,58 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
                 }
             }
         }
+        // The SP0b-2 acceptance row: the same workload through IngestPipeline (parallel
+        // pre-validation off the lock, in-order commit through SyncManager.importPreValidated).
+        // mean/p50/p95 are the IN-LOCK commit time of a paying block; blocks/s is end to end, from
+        // the first submit to the last commit PLUS the final drain, so the throughput includes
+        // persistence.
+        Measure[] pipelineRows = new Measure[ROUNDS];
+        for (int round = 0; round < ROUNDS; round++) {
+            freshFixture();
+            prepareChain();
+            BenchWorkload w = workload();
+            SyncManager sync = syncManager();
+            long[] inLock = new long[w.items().size()];
+            int[] k = {0};
+            // The committer runs on the pipeline's commit thread, where an AssertionError would be
+            // caught and only logged: record the first bad result and assert on this thread instead.
+            String[] failure = {null};
+            IngestPipeline pipeline = new IngestPipeline(ingestThreads(), 4096, pv -> {
+                long a = System.nanoTime();
+                ImportResult r = sync.importPreValidated(pv);
+                long spent = System.nanoTime() - a;
+                Block b = pv.block();
+                if (b != null && b.getInputs() != null && !b.getInputs().isEmpty() && k[0] < inLock.length) {
+                    inLock[k[0]++] = spent;
+                }
+                if (r != ImportResult.IMPORTED_BEST && r != ImportResult.IMPORTED_NOT_BEST && failure[0] == null) {
+                    failure[0] = "import failed: " + r + " " + r.getErrorInfo();
+                }
+                return r;
+            });
+            pipeline.start();
+            long t0 = System.nanoTime();
+            for (BenchWorkload.Item item : w.items()) {
+                for (int c = item.chunks().size() - 1; c >= 0; c--) {
+                    pipeline.submit(new BlockWrapper(item.chunks().get(c), 0));
+                }
+                pipeline.submit(new BlockWrapper(item.block(), 0));
+            }
+            assertTrue("pipeline did not drain in 600s", pipeline.awaitIdle(600, TimeUnit.SECONDS));
+            persist().flushSync();
+            long total = (System.nanoTime() - t0) / 1_000_000;
+            pipeline.stop();
+            if (failure[0] != null) {
+                fail(failure[0]);
+            }
+            // Chunk blocks carry no inputs (ChunkChainBuilder passes links == null), so the in-lock
+            // samples must be exactly the paying blocks; if that ever changed the row would be
+            // timing the wrong blocks rather than being visibly wrong.
+            assertEquals("in-lock samples must be one per paying block", w.items().size(), k[0]);
+            assertTop();
+            pipelineRows[round] = measure("pipeline.r" + round, inLock, k[0], w.items().size() + w.chunkCount(), total);
+            results.add(pipelineRows[round]);
+        }
         int mainsPerRound = 0;
         for (int round = 0; round < ROUNDS; round++) {
             freshFixture();
@@ -425,7 +521,7 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
         } finally {
             scratch.close();
         }
-        report(results, w, mainsPerRound, direct, syncPath, order);
+        report(results, w, mainsPerRound, direct, syncPath, order, pipelineRows);
     }
 
     /** Mines one main block linking {@code refs} (fixture fake PoW + import + checkMain); returns its wall time in ns. */
@@ -469,7 +565,8 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
         return Double.isNaN(v) ? "null" : String.format(Locale.ROOT, "%.3f", v);
     }
 
-    private void report(List<Measure> results, BenchWorkload w, int mainsPerRound, Measure[] direct, Measure[] syncPath, String[] order) throws IOException {
+    private void report(List<Measure> results, BenchWorkload w, int mainsPerRound, Measure[] direct, Measure[] syncPath,
+            String[] order, Measure[] pipelineRows) throws IOException {
         StringBuilder md = new StringBuilder();
         md.append("| measure | n | blocks/s | mean µs | p50 µs | p95 µs | total ms |\n|---|---|---|---|---|---|---|\n");
         for (Measure m : results) {
@@ -493,18 +590,30 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
                 + " mix=" + Arrays.toString(mix) + " kinds=[PLAIN " + w.kindCount(BenchWorkload.Kind.PLAIN)
                 + ", CALL_INLINE " + w.kindCount(BenchWorkload.Kind.CALL_INLINE) + ", CALL_CHAIN " + w.kindCount(BenchWorkload.Kind.CALL_CHAIN)
                 + ", DEPLOY " + w.kindCount(BenchWorkload.Kind.DEPLOY) + "] seed=" + seed
-                + " confirmedMainsPerRound=" + mainsPerRound + " txHistoryStore=null";
+                + " confirmedMainsPerRound=" + mainsPerRound + " txHistoryStore=null"
+                + " writeBehind=" + writeBehind() + " ingestThreads=" + ingestThreads();
+        double[] pipeRate = new double[ROUNDS];
+        for (int r = 0; r < ROUNDS; r++) {
+            pipeRate[r] = pipelineRows[r].perSec();
+        }
+        double pipeMedian = median(pipeRate);
+        String verdict = String.format(Locale.ROOT,
+                "acceptance: pipeline median = %.0f blocks/s over %d rounds, target 10000 -> %s",
+                pipeMedian, ROUNDS, pipeMedian >= 10_000 ? "MET" : "NOT MET");
         System.out.println(header);
         System.out.println(md);
         System.out.println("paired direct/syncPath (same round, fresh fixtures, back to back):");
         System.out.println(paired);
+        System.out.println(verdict);
         Path dir = Paths.get("target", "bench");
         Files.createDirectories(dir);
         String stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
         StringBuilder json = new StringBuilder("{\"jvm\":\"" + System.getProperty("java.version") + "\",\"cores\":"
                 + Runtime.getRuntime().availableProcessors() + ",\"senders\":" + senders + ",\"blocks\":" + blocks
                 + ",\"chunks\":" + w.chunkCount() + ",\"mix\":" + Arrays.toString(mix) + ",\"seed\":" + seed
-                + ",\"confirmedMainsPerRound\":" + mainsPerRound + ",\"txHistoryStore\":null,\"results\":[");
+                + ",\"confirmedMainsPerRound\":" + mainsPerRound + ",\"txHistoryStore\":null"
+                + ",\"writeBehind\":" + writeBehind() + ",\"ingestThreads\":" + ingestThreads()
+                + ",\"pipelineMedianPerSec\":" + jsonNum(pipeMedian) + ",\"results\":[");
         for (int i = 0; i < results.size(); i++) {
             Measure m = results.get(i);
             json.append(i > 0 ? "," : "").append("{\"name\":\"").append(m.name()).append("\",\"n\":").append(m.n())
