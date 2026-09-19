@@ -121,7 +121,15 @@ public class PoolAwardManagerImpl extends AbstractXdagLifecycle implements PoolA
                     payAndAddNewAwardBlock(awardBlock);
                 }
             } catch (InterruptedException e) {
-                log.error(" Can not take the awardBlock from awardBlockQueue{}", e.getMessage(), e);
+                // Nothing interrupts this thread today (doStop() shuts the executor down without
+                // interrupting), but if anything ever does: restore the flag and leave the loop.
+                Thread.currentThread().interrupt();
+                log.info("Pool award thread interrupted, stopping");
+                return;
+            } catch (Exception e) {
+                // Never let it out: nothing re-submits this runnable, so one failed award used to
+                // stop every later one in silence. One block must cost one payout, not the payouts.
+                log.error("Failed to award a block, skipping it", e);
             }
         }
     }
@@ -167,16 +175,20 @@ public class PoolAwardManagerImpl extends AbstractXdagLifecycle implements PoolA
         // Obtain the hashlow of this block for query
         MutableBytes32 hashlow = MutableBytes32.create();
         hashlow.set(8, Bytes.wrap(hash).slice(8, 24));
-        Block block = blockchain.getBlockByHash(hashlow, true);
-        BlockInfo blockInfo = kernel.getBlockStore().getBlockInfo(hashlow);
-        if (blockInfo != null) {
-            block.getInfo().setFee(blockInfo.getFee());
-        }
         log.debug("Hash low [{}]", hashlow.toHexString());
+        Block block = blockchain.getBlockByHash(hashlow, true);
+        // The guard comes before the first dereference now. A fee copy used to sit three lines
+        // above it and dereference block, so a block that is not in the store -- a rejected import
+        // is queued for an award all the same -- threw an NPE out of the work loop, which caught
+        // only InterruptedException and was never re-submitted: rewards stopped in silence until
+        // the node was restarted.
         if (block == null) {
             log.debug("Can't find the block");
             return -2;
         }
+        // That copy is gone rather than moved: nothing below reads the fee -- the payout is
+        // computed from getAmount() and MIN_GAS -- and getBlockByHash can hand back the live object
+        // the chain keeps in its orphan pool, so the write reached state this class does not own.
         // nonce = share(12 bytes) + pool wallet address(20 bytes)
         if (compareTo(block.getNonce().slice(12, 20).toArray(), 0,
                 20, block.getCoinBase().getAddress().slice(8, 20).toArray(), 0, 20) == 0) {

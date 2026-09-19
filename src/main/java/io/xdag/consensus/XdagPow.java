@@ -315,9 +315,18 @@ public class XdagPow implements PoW, Listener, Runnable, XdagLifecycle {
             Block newBlock = new Block(new XdagBlock(b.toBytes()));
             log.debug("Broadcast locally generated blockchain, waiting to be verified. block hash = [{}]", newBlock.getHash().toHexString());
             // add new block and broadcast the new block
-            kernel.getBlockchain().tryToConnect(newBlock);
-            Bytes32 currentPreHash = Bytes32.wrap(currentTask.get().getTask()[0].getData());
-            poolAwardManager.addAwardBlock(minShare.get(), currentPreHash, newBlock.getHash(), newBlock.getTimestamp());
+            ImportResult result = kernel.getBlockchain().tryToConnect(newBlock);
+            // Only a block the chain actually took earns an award. The award is paid sixteen rounds
+            // later by looking the block up in the store, so queueing one that was rejected as
+            // INVALID_BLOCK, NO_PARENT or ERROR handed the award thread a block that is not there.
+            if (result == ImportResult.IMPORTED_BEST || result == ImportResult.IMPORTED_NOT_BEST) {
+                Bytes32 currentPreHash = Bytes32.wrap(currentTask.get().getTask()[0].getData());
+                poolAwardManager.addAwardBlock(minShare.get(), currentPreHash, newBlock.getHash(),
+                        newBlock.getTimestamp());
+            } else {
+                log.warn("Locally generated block {} was not imported ({}); no award is queued for it",
+                        newBlock.getHash().toHexString(), result);
+            }
             BlockWrapper bw = new BlockWrapper(newBlock, kernel.getConfig().getNodeSpec().getTTL());
             broadcaster.broadcast(bw);
         }
