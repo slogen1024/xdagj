@@ -31,6 +31,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
+import java.util.Objects;
 import java.util.TreeSet;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
@@ -64,8 +65,13 @@ import org.apache.tuweni.bytes.Bytes32;
  * <p>{@link #remove(Bytes32)} looks the entry up in the index and hands <em>that very instance</em>
  * to the set. See its javadoc for why rebuilding one would fail silently.
  *
- * <p>This class holds containers and ordering only. Quotas, TTL and the VIP admission rule arrive
- * in later tasks; today nothing is ever refused except a duplicate hashlow.
+ * <h2>What the caps are for</h2>
+ *
+ * <p>Each category is capped on its own, and the pool as a whole is capped behind them. Without the
+ * per-category caps a flood of one kind fills the pool and every other kind starts being refused —
+ * which is what the live code does today, where {@code MAX_ORPHAN_SIZE} counts all four queues
+ * together but is only consulted when an account transaction arrives. The per-peer and per-chain
+ * chunk quotas, the TTL and the VIP admission rule arrive in later tasks.
  */
 public final class ChainOrphanPool {
 
@@ -136,6 +142,16 @@ public final class ChainOrphanPool {
 
     private int total;
 
+    private final OrphanLimits limits;
+
+    /**
+     * @param limits the caps this pool enforces, injected rather than read from a global so that a
+     *     test can exercise a boundary with two entries instead of sixty thousand
+     */
+    public ChainOrphanPool(OrphanLimits limits) {
+        this.limits = Objects.requireNonNull(limits, "limits");
+    }
+
     /** Adds an account transaction into the regular lane; other categories have only one lane. */
     public OrphanAdmission add(OrphanEntry entry) {
         return add(entry, AccountLane.REGULAR);
@@ -148,11 +164,32 @@ public final class ChainOrphanPool {
      * <p>A hashlow already in the pool is {@link OrphanAdmission#DUPLICATE} and changes nothing —
      * not the stored entry, not any count. That check is by hashlow, never by comparator: two
      * entries for the same block whose fee has drifted apart would not compare equal, so a set
-     * would happily hold both.
+     * would happily hold both. It is asked first, before either cap: a duplicate has nothing to
+     * admit, so no cap could be the reason it did not go in.
+     *
+     * <p><b>The global cap is asked before the category cap.</b> Both can be reached at once, and
+     * the verdict has to name the constraint that admitting could not have got around. At the
+     * global ceiling no amount of room in this category would have helped, so that is
+     * {@link OrphanAdmission#POOL_FULL}; {@link OrphanAdmission#CATEGORY_FULL} then carries the
+     * stronger statement that the pool <em>did</em> have room and this kind had used its share. The
+     * configuration keeps the pool cap at or above the sum of the four category caps, so on a
+     * configured node the global cap is a backstop that can only be reached once every category is
+     * already at its own.
+     *
+     * <p><b>Every refusal happens before anything is touched.</b> The checks come before {@link
+     * #holderFor}, which is what would create an address bucket — a refused account transaction for
+     * an address the pool has never seen must not leave an empty bucket behind for the reclaim on
+     * removal to never come and collect.
      */
     public OrphanAdmission add(OrphanEntry entry, AccountLane lane) {
         if (index.containsKey(entry.hashlow())) {
             return OrphanAdmission.DUPLICATE;
+        }
+        if (total >= limits.poolLimit()) {
+            return OrphanAdmission.POOL_FULL;
+        }
+        if (counts[entry.category().ordinal()] >= limits.limit(entry.category())) {
+            return OrphanAdmission.CATEGORY_FULL;
         }
         NavigableSet<OrphanEntry> holder = holderFor(entry, lane);
         holder.add(entry);

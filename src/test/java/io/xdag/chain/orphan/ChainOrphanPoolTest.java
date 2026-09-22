@@ -205,8 +205,9 @@ public class ChainOrphanPoolTest {
 
     // ---- helpers -------------------------------------------------------------------------
 
+    /** Structure and ordering only: no cap is named, so none is enforced. */
     private static ChainOrphanPool newPool() {
-        return new ChainOrphanPool();
+        return new ChainOrphanPool(OrphanLimits.builder().build());
     }
 
     private static OrphanEntry link(Bytes32 hashlow, long time) {
