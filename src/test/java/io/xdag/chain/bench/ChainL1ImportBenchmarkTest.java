@@ -26,6 +26,7 @@ package io.xdag.chain.bench;
 
 import static io.xdag.chain.bench.BenchWorkload.payload;
 import static io.xdag.config.Constants.BI_APPLIED;
+import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_INPUT;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -52,15 +53,18 @@ import io.xdag.core.XdagBlock;
 import io.xdag.crypto.hash.HashUtils;
 import io.xdag.crypto.keys.ECKeyPair;
 import io.xdag.db.BlockStore;
+import io.xdag.db.OrphanBlockStore;
 import io.xdag.db.PersistControl;
 import io.xdag.db.rocksdb.BlockStoreImpl;
 import io.xdag.db.rocksdb.DatabaseFactory;
+import io.xdag.db.rocksdb.OrphanBlockStoreImpl;
 import io.xdag.db.rocksdb.RocksdbFactory;
 import io.xdag.db.rocksdb.WriteBehindFactory;
 import io.xdag.db.rocksdb.WriteBehindQueue;
 import io.xdag.net.ChannelManager;
 import io.xdag.net.PeerClient;
 import io.xdag.net.node.Node;
+import io.xdag.utils.BytesUtils;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -71,8 +75,12 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Random;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import org.apache.commons.io.FileUtils;
@@ -103,7 +111,10 @@ import org.junit.Test;
  * one is applied, so it includes fake PoW, {@code setMain} and {@code applyBlock}; its blocks/s
  * counts paying blocks and chunks only, not the main blocks. The {@code phase.*} rows replay single
  * phases of the direct path on the last workload for cost attribution only; they are not a
- * consensus path. {@code calib.emptyMain} is the fixture's cost of an empty main block, so the
+ * consensus path. The two {@code phase.orphan.*} rows are the exception: the fixture sets no pow, so
+ * {@code dealOrphan} is a no-op and no other row in this file touches the orphan pool — they are an
+ * estimate of what the pool would cost a node that does mine, not a replay of something the direct
+ * path did. {@code calib.emptyMain} is the fixture's cost of an empty main block, so the
  * confirmed rows can be split into fake PoW and setMain/apply. For the {@code confirmed.*} and
  * {@code calib.emptyMain} rows the mean/p50/p95 columns are per main block.
  *
@@ -123,6 +134,25 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
     private static final int CALIB_MAINS = 100;
     /** Empty main blocks mined after the last paying block before the confirmed round gives up (the fixture's own confirm() budget). */
     private static final int CONFIRM_MAINS = 6;
+    /**
+     * Addresses the {@code orphan.removeWorst} flood concentrates the paying blocks on, so each
+     * accountTxMap bucket is {@code blocks / WORST_SENDERS} deep rather than {@code blocks / 64}.
+     */
+    private static final int WORST_SENDERS = 4;
+    /**
+     * Entries handed to {@code mainRef} before the worst-case removal — a backlog of main-block
+     * references not yet confirmed. {@code deleteFromQueue} walks this deque on EVERY removal.
+     */
+    private static final int MAIN_REF_DEPTH = 256;
+    /**
+     * Per-address bucket depths the {@code orphan.removeWorst.d*} rows are measured at. Two points,
+     * because the question the row exists to answer — does a removal cost more when the queue is
+     * deeper? — is answered by the RATIO between depths, not by either number on its own. They are
+     * deliberately far below the other rows' 20000 samples: the flood concentrates onto
+     * {@link #WORST_SENDERS} addresses, so the work per pass grows with the SQUARE of the depth and
+     * a 5000-deep bucket costs ~10^8 comparisons per pass before the restores.
+     */
+    private static final int[] WORST_DEPTHS = {125, 500};
     /**
      * Item n is stamped {@code txTime() + n} and every item must stay inside the one epoch the next
      * main block closes; {@code txTime()} is 60000 ticks before that epoch's end.
@@ -251,6 +281,161 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
      * NaN marks a column that has no meaning for the row and prints as "-".
      */
     private record Measure(String name, int n, double perSec, double meanMicros, double p50Micros, double p95Micros, long totalMillis) {
+    }
+
+    /**
+     * The ORPHANIND row count as the store itself persists it. {@code getOrphanSize()} counts the
+     * in-memory queues only, and the two are what separate "this pass really wrote" from "this pass
+     * found every key already present and skipped its writes" — {@code addOrphan}'s idempotence
+     * guard is on the database, not on the queues.
+     *
+     * <p>Benchmark-only cast: the counter is not on the {@link OrphanBlockStore} interface.
+     */
+    private static long persistedOrphanSize(OrphanBlockStore pool) {
+        byte[] v = ((OrphanBlockStoreImpl) pool).getOrphanSource().get(OrphanBlockStore.ORPHAN_SIZE);
+        return v == null ? 0 : BytesUtils.bytesToLong(v, 0, false);
+    }
+
+    // The three in-memory collections orphan.removeWorst asserts the shape of. Benchmark-only casts:
+    // none of them is on the OrphanBlockStore interface, and without them the row could silently
+    // stop being the worst case (an empty linkQueue, an unseeded mainRef) and still look healthy.
+    private static Collection<?> mainRef(OrphanBlockStore pool) {
+        return ((OrphanBlockStoreImpl) pool).getMainRef();
+    }
+
+    private static Collection<?> linkQueue(OrphanBlockStore pool) {
+        return ((OrphanBlockStoreImpl) pool).getLinkQueue();
+    }
+
+    private static Map<?, ?> accountBuckets(OrphanBlockStore pool) {
+        return ((OrphanBlockStoreImpl) pool).getAccountTxMap();
+    }
+
+    /**
+     * A flood-shaped entry list over the workload's first {@code items} items: every chunk of those
+     * items as a link entry, then every paying block reassigned to one of {@link #WORST_SENDERS}
+     * addresses so each accountTxMap bucket ends up {@code items / WORST_SENDERS} deep instead of
+     * {@code items / senders}.
+     *
+     * <p>Only the address argument is synthesized. The pool is handed exactly what a flood from a
+     * handful of addresses would present it with, and they are the workload's own sender addresses —
+     * real entries in the AddressStore — so {@code getExecutedNonceNum} answers as it does in
+     * production rather than against a key that was never funded.
+     */
+    private List<OrphanEntry> floodEntries(BenchWorkload w, List<OrphanEntry> paying, int items) {
+        List<OrphanEntry> flood = new ArrayList<>();
+        for (int i = 0; i < items; i++) {
+            for (Block c : w.items().get(i).chunks()) {
+                flood.add(orphanEntry(c));
+            }
+        }
+        List<ECKeyPair> floodSenders = w.senders().subList(0, WORST_SENDERS);
+        for (int i = 0; i < items; i++) {
+            OrphanEntry e = paying.get(i);
+            flood.add(new OrphanEntry(e.block(), e.isTx(), e.nonce(), e.fee(),
+                    floodSenders.get(i % WORST_SENDERS).toAddress().toArray()));
+        }
+        return flood;
+    }
+
+    /**
+     * One {@code orphan.removeWorst.d<depth>} row: {@code deleteFromQueue} over a flood-shaped pool,
+     * in an order uncorrelated with any queue's comparator. Three things separate it from
+     * {@code orphan.remove}, and all three are what makes it the case SP0b-3 has to move:
+     *
+     * <ol>
+     *   <li>FEW SENDERS, DEEP QUEUES — see {@link #floodEntries}.
+     *   <li>{@code linkQueue} AND {@code mainRef}, not just the account buckets. Chunks are not
+     *       transaction blocks, so they land in {@code linkQueue} (spec §1: 分片块就住在里面), and one
+     *       {@code getOrphan(isMain = true)} seeds {@code mainRef} — a {@code ConcurrentLinkedDeque}
+     *       that {@code deleteFromQueue} walks on EVERY removal whatever the entry's category. Both
+     *       are O(n) with no heap structure to help (spec §3 table).
+     *   <li>OUT-OF-ORDER REMOVAL — a fixed-seed shuffle, so {@code contains()}/{@code remove()} land
+     *       mid-queue instead of at index 0 the way the workload-ordered {@code orphan.remove} does.
+     * </ol>
+     *
+     * <p>{@code n} is this row's own removal count, far below the 20000 of the other phase rows:
+     * the flood is quadratic in depth, so matching their sample count would cost ~10^8 comparisons
+     * per pass. Compare the two depths against EACH OTHER, not against the 20000-sample rows.
+     *
+     * <p>Still an understatement of the ceiling: {@code chain.orphan.chunkLimit} is 60000 (spec §2).
+     */
+    private Measure worstRow(OrphanBlockStore pool, BenchWorkload w, List<OrphanEntry> paying, int items) {
+        List<OrphanEntry> flood = floodEntries(w, paying, items);
+        int links = (int) flood.stream().filter(e -> !e.isTx()).count();
+        int expectedMainRef = Math.min(MAIN_REF_DEPTH, links);
+        // Fixed seed: the removal order is part of what this row measures, so it must be reproducible.
+        List<OrphanEntry> order = new ArrayList<>(flood);
+        Collections.shuffle(order, new Random(seed));
+        int[] pass = {0};
+        long nanos = bestOf3(() -> {
+            if (pass[0]++ > 0) {
+                assertEquals("a timed worst-case pass did not drain the pool", 0, (int) pool.getOrphanSize());
+                assertTrue("a timed worst-case pass left entries in mainRef", mainRef(pool).isEmpty());
+            }
+            emptyPool(pool, flood);
+            fillPool(pool, flood);
+            // The shape is the row's whole point, so assert it rather than assume it.
+            assertEquals("the restore left a partial pool before a timed worst-case pass", flood.size(), (int) pool.getOrphanSize());
+            assertEquals("chunks must flood linkQueue", links, linkQueue(pool).size());
+            assertEquals("the paying blocks must be concentrated on WORST_SENDERS buckets", WORST_SENDERS, accountBuckets(pool).size());
+            // Seeds mainRef exactly as a main block's selection does. The exact count is selectBlocks'
+            // business (a linkQueue draw plus whatever the VIP branch contributes) and SP0b-3 is
+            // going to change that order, so pin mainRef against what getOrphan actually handed out
+            // rather than against a number that encodes today's selection policy.
+            int seeded = pool.getOrphan(MAIN_REF_DEPTH, new long[]{Long.MAX_VALUE, 0}, true).size();
+            assertEquals("mainRef was not seeded with what getOrphan handed out", seeded, mainRef(pool).size());
+            assertTrue("mainRef is too shallow for a worst case: " + seeded, seeded >= expectedMainRef);
+            persist().flushSync();
+        }, () -> {
+            for (OrphanEntry e : order) {
+                pool.deleteFromQueue(e.block(), e.isTx(), e.nonce(), e.fee(), e.address());
+            }
+        });
+        assertEquals("orphan.removeWorst must leave the pool empty", 0, (int) pool.getOrphanSize());
+        assertTrue("orphan.removeWorst must drain mainRef too", mainRef(pool).isEmpty());
+        emptyPool(pool, flood);
+        return phaseRow("orphan.removeWorst.d" + (items / WORST_SENDERS), flood.size(), nanos);
+    }
+
+    /** Drops every entry from the pool in memory AND on disk, then drains the write-behind queue. */
+    private void emptyPool(OrphanBlockStore pool, List<OrphanEntry> entries) {
+        for (OrphanEntry e : entries) {
+            pool.deleteFromQueue(e.block(), e.isTx(), e.nonce(), e.fee(), e.address());
+            pool.deleteByKey(e.block().getHashLow().toArray(), e.isTx(), e.nonce(), e.fee(), e.address());
+        }
+        persist().flushSync();
+    }
+
+    private static void fillPool(OrphanBlockStore pool, List<OrphanEntry> entries) {
+        for (OrphanEntry e : entries) {
+            pool.addOrphan(e.block(), e.isTx(), e.nonce(), e.fee(), e.address());
+        }
+    }
+
+    /** One orphan-pool call's arguments, derived once so the orphan phase rows time the pool only. */
+    private record OrphanEntry(Block block, boolean isTx, UInt64 nonce, XAmount fee, byte[] address) {
+    }
+
+    /**
+     * {@code BlockchainImpl.dealOrphan}'s own argument derivation, hoisted out of the timed window.
+     * {@code removeOrphan} derives the same five values for the same block, so one entry serves both
+     * the add and the remove row.
+     */
+    private OrphanEntry orphanEntry(Block b) {
+        UInt64 nonce = UInt64.ZERO;
+        XAmount fee = blockchain.getTxFee(b);
+        byte[] address = null;
+        if (blockchain.isAccountTx(b)) {
+            for (Address ref : b.getLinks()) {
+                if (ref.getType() == XDAG_FIELD_INPUT) {
+                    address = BytesUtils.byte32ToArray(ref.getAddress()).toArray();
+                    nonce = b.getTxNonceField().getTransactionNonce();
+                    break;
+                }
+            }
+        }
+        return new OrphanEntry(b, blockchain.isTxBlock(b), nonce, fee, address);
     }
 
     /** Mean (summed before sorting), p50 and p95 over the first {@code n} samples of {@code samples}. */
@@ -500,6 +685,94 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
                 }
             }
         })));
+        // Orphan-pool add and remove, the two halves SP0b-2b named as a prime suspect for the
+        // in-lock rest. The fixture never sets a pow, so BlockchainImpl.dealOrphan returns at once
+        // and every other row in this file imports without ever touching the pool: it is empty here,
+        // and these two rows are the only place its cost shows up at all.
+        //
+        // Inside `orphan.add`: the in-memory offer (a linear contains() over the sender's queue,
+        // then an O(log n) offer), ONE AddressStore read per account transaction
+        // (getExecutedNonceNum, a synchronous RocksDB get — ADDRESS is not behind the write-behind
+        // queue), and two ORPHANIND reads plus two ORPHANIND writes through the node's write-behind
+        // queue (the key itself and the ORPHAN_SIZE counter). Inside `orphan.remove`: deleteFromQueue
+        // only, which touches no database at all — removeOrphan's database half is deleteByKey, and
+        // that is deliberately not in this row, so the number is the pure removal walk.
+        //
+        // Every paying block here carries an XDAG_FIELD_INPUT, so all of them are account
+        // transactions and land in accountTxMap keyed by sender: the per-sender queues whose linear
+        // scans SP0b-3 is about. Chunks are not in these rows, so linkQueue stays empty, and
+        // getOrphan() is never called, so mainRef stays empty too.
+        //
+        // `orphan.remove` is the BEST case of the current removal, not its worst. The removals run
+        // in workload order, which per sender is ascending nonce — exactly the order accountTxMap's
+        // comparator heaps them in — so contains() and remove() both hit index 0 and the row is an
+        // O(log n) sift, not the O(n) scan. That is the shape of the happy path (selectBlocks pops
+        // heads too), so it is the right BEFORE number for "SP0b-3 must not make the normal path
+        // slower", but it says nothing about the flood this plan exists to survive. Proving the
+        // O(n) claim needs a different workload: few senders, deep queues, out-of-order removal.
+        //
+        // Both bodies mutate the pool, so each of the three repetitions is preceded by an untimed
+        // restore of the same starting state (see the two-argument bestOf3): plain bestOf3 would
+        // have addOrphan hit its idempotence guards on runs two and three and deleteFromQueue walk
+        // an already-empty pool, and the reported minimum would be whichever of those read cheapest.
+        OrphanBlockStore pool = kernel.getOrphanBlockStore();
+        List<OrphanEntry> orphans = new ArrayList<>();
+        for (Block b : parsed) {
+            orphans.add(orphanEntry(b));
+        }
+        // Empties the pool in memory AND on disk, and drains the write-behind queue, so a timed run
+        // never starts against a backlog the previous run's restore queued up.
+        Runnable emptyPool = () -> emptyPool(pool, orphans);
+        Runnable fillPool = () -> fillPool(pool, orphans);
+        // bestOf3 reports the CHEAPEST of three passes, so "each pass did the same work" cannot be
+        // left to the reader's trust: every timed pass is bracketed by state checks, in memory AND
+        // on disk. A pass that started against a pool someone else had already filled or drained —
+        // the way a plain bestOf3 would have run it — fails the build instead of quietly becoming
+        // the reported minimum. addPass/removePass skip the entry check on the first pass only,
+        // where there is no previous pass to have left the state behind.
+        int[] addPass = {0};
+        results.add(phaseRow("orphan.add", orphans.size(), bestOf3(() -> {
+            if (addPass[0]++ > 0) {
+                assertEquals("a timed add pass did not fill the pool", orphans.size(), (int) pool.getOrphanSize());
+                assertEquals("a timed add pass skipped its ORPHANIND writes", orphans.size(), (int) persistedOrphanSize(pool));
+            }
+            emptyPool.run();
+            assertEquals("the restore left entries in the pool before a timed add pass", 0, (int) pool.getOrphanSize());
+            assertEquals("the restore left ORPHANIND rows before a timed add pass", 0, (int) persistedOrphanSize(pool));
+        }, fillPool)));
+        assertEquals("orphan.add must leave one pool entry per paying block", orphans.size(), (int) pool.getOrphanSize());
+        assertEquals("orphan.add must leave one ORPHANIND row per paying block", orphans.size(), (int) persistedOrphanSize(pool));
+        int[] removePass = {0};
+        results.add(phaseRow("orphan.remove", orphans.size(), bestOf3(() -> {
+            if (removePass[0]++ > 0) {
+                assertEquals("a timed removal pass did not drain the pool", 0, (int) pool.getOrphanSize());
+            }
+            emptyPool.run();
+            fillPool.run();
+            assertEquals("the restore left a partial pool before a timed removal pass", orphans.size(), (int) pool.getOrphanSize());
+            persist().flushSync();
+        }, () -> {
+            for (OrphanEntry e : orphans) {
+                pool.deleteFromQueue(e.block(), e.isTx(), e.nonce(), e.fee(), e.address());
+            }
+        })));
+        assertEquals("orphan.remove must leave the pool empty", 0, (int) pool.getOrphanSize());
+        emptyPool.run();
+
+        // orphan.removeWorst.d*: the same removal against the flood this subproject exists to
+        // survive (spec §7.2 "垃圾分片洪泛" / §3 "移除复杂度"), because orphan.remove above is the BEST
+        // case and would show nothing after the rework. Measured at two bucket depths, because the
+        // question is whether a removal costs more when the queue is deeper — a ratio, not a number.
+        // See worstRow for the shape and floodEntries for how it is built.
+        int deepest = 0;
+        for (int depth : WORST_DEPTHS) {
+            int items = Math.min(depth * WORST_SENDERS, orphans.size());
+            if (items <= deepest) {
+                continue; // a reduced -Dxdag.bench.blocks can collapse both depths onto one row
+            }
+            deepest = items;
+            results.add(worstRow(pool, w, orphans, items));
+        }
         // A scratch store of the node's layout in its own directory: RocksDB is single-writer per
         // directory, so the fixture's store dir must never be reopened.
         DevnetConfig scratchConfig = new DevnetConfig();
@@ -544,6 +817,24 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
 
     private static long bestOf3(Runnable body) {
         return Arrays.stream(runs(3, body)).min().orElseThrow();
+    }
+
+    /**
+     * Best of three timed runs of {@code body}, each preceded by an UNTIMED {@code restore} that puts
+     * the state {@code body} mutates back where the first run found it. {@link #bestOf3(Runnable)} is
+     * only honest for a body that leaves nothing behind; a body that does (the orphan-pool rows fill
+     * or drain a queue) would otherwise have its three runs measure three different things and the
+     * minimum would report the cheapest of them.
+     */
+    private static long bestOf3(Runnable restore, Runnable body) {
+        long best = Long.MAX_VALUE;
+        for (int i = 0; i < 3; i++) {
+            restore.run();
+            long t0 = System.nanoTime();
+            body.run();
+            best = Math.min(best, System.nanoTime() - t0);
+        }
+        return best;
     }
 
     /** A phase row: {@code nanos} of wall time over {@code count} units; the per-unit figure is a mean. */
