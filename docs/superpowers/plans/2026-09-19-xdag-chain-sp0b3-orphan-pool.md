@@ -860,6 +860,8 @@ public void removalCostDoesNotGrowLinearlyWithPoolSize() {
 }
 ```
 
+**`comparisonsForOneRemoval` 必须造最坏情况，不是最好情况。** Task 1 发现按 nonce 升序移除会每次命中堆顶，走 O(log n)，那样即使不改任何代码这个测试也会通过。要少量发送方、深队列、与比较器不相关的移除顺序（固定种子打乱），并且要覆盖 `mainRef`——它是 `ConcurrentLinkedDeque`，`remove(Object)` 是纯线性走查，没有堆结构可借力，而 `deleteFromQueue` 每次移除都会碰它，不分类别。
+
 - [ ] **Step 3: 锁序未被破坏**
 
 断言 `getOrphan` 仍在区块链监视器下执行，且不存在「先持孤块池后取监视器」的反向路径。沿用 `OrphanBlockStoreConcurrencyTest` 既有的闩锁交错手法，不改写它的断言。
@@ -888,7 +890,19 @@ mvn -o test
 mvn -o -q license:check
 ```
 
-- [ ] **Step 2: 重跑基准，把 AFTER 表写进同一份文档**，与 Task 1 的 BEFORE 并列，给出 `phase.orphan.add` / `phase.orphan.remove` 的前后对比与 `pipeline.rN` 的变化。
+- [ ] **Step 2: 重跑基准，把 AFTER 表写进同一份文档**，与 Task 1 的 BEFORE 并列。
+
+三行各有各的用途，报告时必须分开讲，**不要把它们混成一个「孤块池变快了」的结论**：
+
+| 行 | 它回答什么 |
+|---|---|
+| `phase.orphan.add` | 快乐路径有没有退步 |
+| `phase.orphan.remove` | 快乐路径有没有退步 |
+| `phase.orphan.removeWorst` | **SP0b-3 到底有没有修好它要修的东西** |
+
+Task 1 查明 `orphan.remove` 测的是当前移除的**最好情况**：基准按工作负载顺序移除，对每个发送方就是 nonce 升序，而那正是堆序，于是 `contains()` 与 `remove()` 每次命中索引 0，走 O(log n) 下沉而非 O(n) 扫描。所以前两行前后持平只说明没退步，**不能拿来证明线性移除的问题被解决了**。`removeWorst`（少量发送方、深队列、乱序移除、覆盖 `mainRef`）才是验收标准第 3 条的依据。
+
+**必须与 Task 1 的 BEFORE 表比，不能与 `docs/benchmarks/2026-09-19-l1-import-pipeline.md` 比**——那份是在更快的机器状态下记的，跨表对比会凭空造出改进或盖掉退步。
 
 - [ ] **Step 3: 诚实结论**：若锁内时间没有下降，明说没有下降；本子项目的验收标准是公平性与可负担性，不是吞吐目标。吞吐目标属于 SP0b-2b。
 
