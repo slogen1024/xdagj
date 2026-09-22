@@ -324,7 +324,20 @@ public enum OrphanCategory {
 
 `OrphanEntry.java`：`OrphanMeta meta`、`OrphanCategory category`、`String peerKey`（null = 无归属）、`Bytes32 chainHead`（仅 CHUNK，null = 无主）、`Block body`（仅 CHUNK，其余 null）。`hashlow()` 委托给 meta。`equals`/`hashCode` 仍以 hashlow 为准，与 `OrphanMeta` 一致。
 
-`ChainOrphanPool.java`：四个 `TreeSet<OrphanEntry>`（`ACCOUNT_TX` 与按地址分桶的结构见 Task 7 接线时处理，本任务先做单集合）加一张 `HashMap<Bytes, OrphanEntry>` 索引。比较器逐条抄自 `OrphanBlockStoreImpl:56/60/65` 现有定义，一字不改。`add` 返回 `OrphanAdmission`，`remove(Bytes32)` 返回被移除的条目或 null，`peekAll` 仅供测试。
+`ChainOrphanPool.java`：**一开始就按真实形状建，不要先做单集合再由 Task 7 拆**。账户交易在代码里本就是按地址分桶的两层结构，先做单集合等于让 Task 7 推倒重来。
+
+| 类别 | 结构 |
+|---|---|
+| `LINK` | 一个 `TreeSet<OrphanEntry>` |
+| `MTX` | 一个 `TreeSet<OrphanEntry>` |
+| `CHUNK` | 一个 `TreeSet<OrphanEntry>`（新增，今天不存在） |
+| `ACCOUNT_TX` | `Map<String 十六进制地址, TreeSet<OrphanEntry>>` **两份**：普通桶与 VIP 快车道，对应今天的 `accountTxMap`（`:65`）与 `vipTxMap`（`:69`） |
+
+外加一张 `Map<Bytes, OrphanEntry>` 索引。**索引项必须能定位到持有它的那个集合**（在 `OrphanEntry` 上记类别 + 地址键，或索引直接存集合引用），否则 `remove(Bytes32)` 查到条目后还要遍历四类去找它在哪，移除又退回线性。
+
+VIP 准入判定（`nonce == executedNonce + 1` 且 `fee > averageFee`）与 `accountNonce` 的推进逻辑在 Task 7 接线时搬入，本任务只需把两层桶的容器建好，行为搬迁留到 Task 7。
+
+比较器逐条抄自 `OrphanBlockStoreImpl:56/60/342` 现有定义，一字不改（`linkQueue` 与 `mtxQueue` 在 `:56`/`:60`，每地址桶在 `:342`；`CHUNK` 沿用 `linkQueue` 的时间升序加 hashlow）。`add` 返回 `OrphanAdmission`，`remove(Bytes32)` 返回被移除的条目或 null，`peekAll` 仅供测试。
 
 不加 `synchronized`：池由调用方（区块链监视器）保护，这一点写在类注释里。
 
