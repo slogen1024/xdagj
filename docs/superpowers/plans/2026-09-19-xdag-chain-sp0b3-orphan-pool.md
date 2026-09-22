@@ -559,7 +559,15 @@ public void evictionReleasesEveryQuotaCounter() {
 mvn -o -Dtest='io.xdag.db.rocksdb.OrphanBlockStoreConcurrencyTest,io.xdag.core.BlockchainTest' test
 ```
 
-- [ ] **Step 2: 把七件内存集合搬进池**
+- [ ] **Step 2a: 先把 `OrphanMeta` 提升到 `io.xdag.chain.orphan`（机械移动）**
+
+Task 3 现在从 `io.xdag.chain.orphan` 导入 `io.xdag.db.rocksdb.OrphanBlockStoreImpl.OrphanMeta`（`OrphanEntry.java:27`）。本任务会让 `db.rocksdb` 反过来依赖 `chain.orphan`，于是两个包互指——包循环。
+
+这一步是断开它的唯一自然时机：存储类本来就要被掏空。把这个嵌套类原样移出成 `io.xdag.chain.orphan.OrphanMeta`，**只改包名与引用点，不改字段、不改 `equals`/`hashCode`、不改 `parse`**。已知的跨包引用点：`OrphanEntry`、`BlockchainTest`（以 `OrphanBlockStoreImpl.OrphanMeta` 命名）。移动完先跑一次全量编译确认没有漏网的引用，再进 Step 2b。
+
+如果移动过程中发现它与存储格式耦合到无法干净移出，**停下来说明**，不要强搬——那意味着分层判断需要重议。
+
+- [ ] **Step 2b: 把七件内存集合搬进池**
 
 `linkQueue`/`mtxQueue`/`accountTxMap`/`vipTxMap`/`orphanInsertTimeMap`/`mainRef`/`accountNonce` 全部从 `OrphanBlockStoreImpl` 删除，改为持有一个 `ChainOrphanPool`。`addOrphanToMemory` 的路由逻辑搬进 `OrphanCategory.of` 与池的 `add`；VIP 判定（`nonce == executedNonce + 1` 且 `fee > averageFee`）连同 `accountNonce` 的推进逻辑一并搬入，行为一字不改。
 
