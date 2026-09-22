@@ -807,6 +807,21 @@ public void concurrentLookupsDuringImportNeverThrowOrLoseABlock() throws Excepti
 
 所以 `CHAIN_FEE_POLICY` 的价值不在「别冤枉发送方」，而在**让等待的子块能继续推进**。核对分支时重点看的是 `syncPopBlock` 这一侧，不是封禁那一侧。
 
+- [ ] **Step 0（必修，先于本任务其余部分）：补上应用路径的空值检查——本子项目新引入的崩溃点**
+
+Task 12 发现，`persistReferencedChunkChains` 的遍历预算是 `chain.chunk.maxPerChain`（4096），所以**超长链的尾部分片块会留在内存里，而链头已经落盘**。此时 `getBlockByHash(..., false)` 对那些尾部块返回 null。
+
+两处未加保护的解引用就在共识应用路径上：
+
+- `BlockchainImpl.java:1828-1829`：`Block ref = getBlockByHash(link.getAddress(), false);` 紧接 `ref.getInfo().flags`
+- `BlockchainImpl.java:1426-1427`：同样形状
+
+**分片块变成内存独有之前，这两处都不可达**（那时每个块都在磁盘上）。是本子项目把它们变活的，所以由本子项目负责堵上。
+
+补空值检查，并想清楚 null 该走哪条语义分支——「这个引用还没落盘」和「这个引用不存在」在这里是不是同一回事，要说明理由而不是随手 `continue`。写一个走到预算边界之外的测试，变异验证去掉检查会变红。
+
+Task 12 另外指出 `txNumber`（`:1191`）有同类形状但**未被本子项目拓宽**（进入递归需要入口块的 ref 非空，而已应用块的链接总是落了盘）。记录即可，不在本任务修。
+
 - [ ] **Step 1: 列出所有需要核对的分支**
 
 ```bash
