@@ -328,6 +328,12 @@ public enum OrphanCategory {
 
 不加 `synchronized`：池由调用方（区块链监视器）保护，这一点写在类注释里。
 
+**硬陷阱：移除必须摘掉「存进去的那个实例」。** `remove(Bytes32)` 先查索引拿到原始 `OrphanEntry`，再用**那个实例**去 `treeSet.remove(...)`。绝不可以从 hashlow 或调用方参数重新构造一个 entry 再去摘。
+
+原因：`PriorityBlockingQueue.remove(Object)` 走 `equals`，而 `OrphanMeta.equals` 只比 hashlow，所以今天传进来的 fee 与存入时不一致也照删不误；`TreeSet.remove(Object)` 走的却是**比较器**。两侧的值确实会不一致——`dealOrphan` 用的是 `tryToConnect` 收到的块实例，而 `removeOrphan`（`BlockchainImpl.java:2308`）先 `b = getBlockByHash(b.getHashLow(), true)` 重新取块再算 `getTxFee(b)`，链在这之间改过 `info.fee`。而 `mtxQueue` 正是按费用降序排的。重构的 entry 会被比较器排到别处、永远够不到目标，于是静默失败：条目留在集合里，配额名额永远还不回来。
+
+索引里存的就是原始实例，用它去摘保证命中。**Step 5 的变异验证要额外加一条**：把 `remove` 改成「用调用方的 fee 重构 entry 再摘」，在 `mtxQueue` 上构造一个 fee 变过的条目，确认它变红。
+
 - [ ] **Step 4: 跑测试确认通过**
 
 - [ ] **Step 5: 变异验证**
