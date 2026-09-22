@@ -452,6 +452,14 @@ public void anUngroupedChunkStillCountsAgainstPeerAndGlobal() {
 
 Expected: 编译失败，`chunkFrom` 与 `head` 辅助方法以及 peer/链头两层计数都不存在。
 
+**配额键必须用 `Peer.getIp()`，不能用 `getPeerId()`。** 这一条决定该配额有没有意义。
+
+`peerId` 是对端在握手里自报的，虽然经过密码学绑定（`HandshakeMessage.java:170-172` 校验它等于公钥的 Base58 地址并验签），但生成一个新密钥对的成本近乎为零——**攻击者每次重连换一个身份就把配额清零了**，于是这层防护形同虚设。
+
+`ip` 则不是自报的：`msg.getPeer(channel.getRemoteIp())`（`XdagP2pHandler.java:256`、`:285`）传入的是 `Channel.getRemoteAddress().getAddress().getHostAddress()`，真实套接字地址。这也是路线图原文说的「来源 peer IP」。
+
+代价要知道：同一 IP 背后可能有多个合法节点（NAT、同机多实例），按 IP 限额会牵连它们。这是刻意取舍——配额的目的是让洪泛有成本，而按可任意再生的身份限额没有任何成本。把这个取舍写进代码注释。
+
 - [ ] **Step 3: 实现两层计数**
 
 池内加 `Map<String, Integer> perPeer` 与 `Map<Bytes32, Integer> perChain`，**只对 `CHUNK` 类别维护**。`peerKey` 为 null 或 `chainHead` 为 null 时跳过对应那一层（不建桶、不计数）。`add` 在通过全局与类别检查之后依次查这两层；`remove` 与淘汰两条路径都递减，**归零时必须删键**，否则一轮洪泛过后 map 会留下无界数量的空桶。
