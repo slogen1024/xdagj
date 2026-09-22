@@ -801,6 +801,12 @@ public void concurrentLookupsDuringImportNeverThrowOrLoseABlock() throws Excepti
 - Modify: `src/main/java/io/xdag/core/ImportResult.java`
 - Test: `src/test/java/io/xdag/consensus/ImportResultBranchTest.java`
 
+**Task 8 实测发现的真实代价，这是诚实结果码的主要论据：** `SyncManager` 对 `INVALID_BLOCK` 的处理**不调用 `syncPopBlock`**。所以每一个在 `syncMap` 里等待这个块的子块，会一直停在那里直到被淘汰——一句「我这儿满了」会**搁浅整棵子树**。
+
+相比之下惩罚性动作反而不是问题：`releaseWaiters` 的 `case INVALID_BLOCK` 是空的（日志都注释掉了），今天没有任何对端会因此被计分或封禁。
+
+所以 `CHAIN_FEE_POLICY` 的价值不在「别冤枉发送方」，而在**让等待的子块能继续推进**。核对分支时重点看的是 `syncPopBlock` 这一侧，不是封禁那一侧。
+
 - [ ] **Step 1: 列出所有需要核对的分支**
 
 ```bash
