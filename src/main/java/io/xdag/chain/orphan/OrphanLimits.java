@@ -58,11 +58,15 @@ public final class OrphanLimits {
 
     private final int chunkPerChain;
 
-    private OrphanLimits(int poolLimit, int[] categoryLimits, int chunkPerPeer, int chunkPerChain) {
+    private final int chunkTtlEpochs;
+
+    private OrphanLimits(int poolLimit, int[] categoryLimits, int chunkPerPeer, int chunkPerChain,
+            int chunkTtlEpochs) {
         this.poolLimit = poolLimit;
         this.categoryLimits = categoryLimits;
         this.chunkPerPeer = chunkPerPeer;
         this.chunkPerChain = chunkPerChain;
+        this.chunkTtlEpochs = chunkTtlEpochs;
     }
 
     public static Builder builder() {
@@ -100,20 +104,37 @@ public final class OrphanLimits {
         return chunkPerChain;
     }
 
+    /**
+     * How many epochs a {@link OrphanCategory#CHUNK} entry is retained for, counted in epochs of
+     * the block's own timestamp — never of the moment this node received it. See
+     * {@link ChainOrphanPool#evictExpired} for what the number means and why it is the one limit
+     * here that is not purely node-local.
+     *
+     * <p><b>There is no floor of two here, and that is deliberate.</b> The floor belongs to the
+     * configuration layer, which refuses {@code chain.orphan.chunkTtlEpochs} below {@code
+     * ChainSpec.MIN_ORPHAN_CHUNK_TTL_EPOCHS} at startup rather than clamping it. Repeating it here
+     * would give a reader two places to loosen and one of them with no fail-fast attached; this
+     * type's whole contract is that it enforces what it was handed and nothing else, which is also
+     * what lets a test drive a boundary with numbers no shipping node would use.
+     */
+    public int chunkTtlEpochs() {
+        return chunkTtlEpochs;
+    }
+
     @Override
     public String toString() {
         return "OrphanLimits{pool=" + poolLimit + " accountTx=" + limit(OrphanCategory.ACCOUNT_TX)
                 + " mtx=" + limit(OrphanCategory.MTX) + " chunk=" + limit(OrphanCategory.CHUNK)
                 + " link=" + limit(OrphanCategory.LINK) + " chunkPerPeer=" + chunkPerPeer
-                + " chunkPerChain=" + chunkPerChain + "}";
+                + " chunkPerChain=" + chunkPerChain + " chunkTtlEpochs=" + chunkTtlEpochs + "}";
     }
 
     /**
      * Names one cap at a time. Everything not named stays {@link #UNLIMITED}.
      *
-     * <p>Later tiers — the chunk TTL — get their own methods here as they arrive, which is why
-     * this is a builder and not a constructor with a row of same-typed ints waiting to be
-     * transposed. The per-peer and per-chain chunk quotas arrived that way.
+     * <p>Each tier got its own method here as it arrived, which is why this is a builder and not a
+     * constructor with a row of same-typed ints waiting to be transposed: the per-peer and
+     * per-chain chunk quotas came that way, and so did the chunk TTL.
      */
     public static final class Builder {
 
@@ -121,6 +142,7 @@ public final class OrphanLimits {
         private final int[] categoryLimits = new int[OrphanCategory.values().length];
         private int chunkPerPeer = UNLIMITED;
         private int chunkPerChain = UNLIMITED;
+        private int chunkTtlEpochs = UNLIMITED;
 
         private Builder() {
             Arrays.fill(categoryLimits, UNLIMITED);
@@ -157,8 +179,20 @@ public final class OrphanLimits {
             return this;
         }
 
+        /**
+         * Unset, a chunk is never evicted by age — {@link #UNLIMITED} epochs of retention, the same
+         * "not enforced at all" this type gives every other unset cap. The shipping value and its
+         * hard floor of two live in {@code ChainSpec}; see {@link OrphanLimits#chunkTtlEpochs()}
+         * for why the floor is not repeated here.
+         */
+        public Builder chunkTtlEpochs(int epochs) {
+            this.chunkTtlEpochs = requirePositive("chunkTtlEpochs", epochs);
+            return this;
+        }
+
         public OrphanLimits build() {
-            return new OrphanLimits(poolLimit, categoryLimits.clone(), chunkPerPeer, chunkPerChain);
+            return new OrphanLimits(poolLimit, categoryLimits.clone(), chunkPerPeer, chunkPerChain,
+                    chunkTtlEpochs);
         }
 
         private Builder category(OrphanCategory category, String name, int limit) {
@@ -168,7 +202,10 @@ public final class OrphanLimits {
 
         /**
          * A cap of zero would mean "admit nothing, ever", which no caller wants and a typo reaches
-         * easily; the configuration layer floors each of these keys at one for the same reason.
+         * easily; the configuration layer floors each of these keys at one for the same reason. For
+         * {@code chunkTtlEpochs} zero reads as "evict every chunk the moment it arrives", which is
+         * the same typo wearing different clothes — its real floor is two, and it is enforced at
+         * startup.
          */
         private static int requirePositive(String name, int limit) {
             if (limit < 1) {

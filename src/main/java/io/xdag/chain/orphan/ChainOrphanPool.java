@@ -28,6 +28,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
@@ -70,13 +71,20 @@ import org.apache.tuweni.bytes.Bytes32;
  * <p>Each category is capped on its own, and the pool as a whole is capped behind them. Without the
  * per-category caps a flood of one kind fills the pool and every other kind starts being refused —
  * which is what the live code does today, where {@code MAX_ORPHAN_SIZE} counts all four queues
- * together but is only consulted when an account transaction arrives. The TTL and the VIP
- * admission rule arrive in later tasks.
+ * together but is only consulted when an account transaction arrives. The VIP admission rule
+ * arrives in a later task.
  *
  * <p>Under the chunk category sit two more tiers, chunks only: one per source peer and one per
  * chunk chain. They exist because a category cap alone does not stop a single attacker — one
  * flooder can fill the whole chunk category on its own and lock every honest peer out of it. The
  * second tier makes a flood cost the flooder its own budget instead of everybody's.
+ *
+ * <h2>Two TTL regimes</h2>
+ *
+ * <p>{@link #evictExpired} ages entries out on two different clocks: a chunk on the epoch of its
+ * own header, everything else on the fifteen minutes of local wall clock the store already uses.
+ * The chunk rule is the one on the consensus path — see that method for the argument that makes it
+ * safe, which is the reason the two are not merged into one.
  */
 public final class ChainOrphanPool {
 
@@ -181,6 +189,17 @@ public final class ChainOrphanPool {
      * eviction that forgot to release what it held.
      */
     private final int[] counts = new int[OrphanCategory.values().length];
+
+    /**
+     * How long an orphan that is not a chunk is kept, on this node's wall clock. Fifteen minutes,
+     * which is what {@code startCleaner} passes {@code cleanExpiredOrphans} today ({@code
+     * OrphanBlockStoreImpl.java:117-119}).
+     *
+     * <p>A constant and not a limit: unlike the chunk TTL there is no configuration key behind it,
+     * because there is no protocol rule it has to line up with. These categories carry no age
+     * bound at all, so the number is a memory policy and stays the one already shipping.
+     */
+    static final long NON_CHUNK_TTL_MILLIS = 15 * 60 * 1000L;
 
     private int total;
 
@@ -287,7 +306,7 @@ public final class ChainOrphanPool {
      * other block's entry and reports it as this one's.
      */
     public OrphanEntry remove(Bytes32 hashlow) {
-        OrphanEntry stored = index.remove(hashlow);
+        OrphanEntry stored = index.get(hashlow);
         if (stored == null) {
             return null;
         }
@@ -298,12 +317,162 @@ public final class ChainOrphanPool {
             throw new IllegalStateException(
                     "the stored orphan entry was not in the set that claimed to hold it: " + stored);
         }
+        unbook(stored, holder);
+        return stored;
+    }
+
+    /**
+     * Ages entries out on the two clocks they are each timed by, in one pass: a
+     * {@link OrphanCategory#CHUNK} against {@code currentEpoch} and nothing else, every other
+     * category against {@code nowMillis} and nothing else. Returns what left, in the order it
+     * left, so the caller can undo the rest of what an orphan owns — its database key, the orphan
+     * count, {@code nnoref} — for each one.
+     *
+     * <h2>Why a chunk may be dropped at all, and what that depends on</h2>
+     *
+     * <p>{@code ChunkChain}'s age rule takes a chunk only from the paying block's epoch or the one
+     * immediately before it — {@code minEpoch = XdagTime.getEpoch(paying.getTimestamp()) - 1}
+     * ({@code ChunkChain.java:76-88}, enforced at {@code :145} and {@code :210}) — and {@code
+     * ChainL1Processor} passes that bound on every walk it makes at {@code setMain} time, with the
+     * unbounded overloads explicitly forbidden ({@code ChainL1Processor.java:80-89}). So a chunk in
+     * epoch N can only ever be referenced legitimately from epoch N or N+1: a later reference is
+     * refused <b>whether or not this node still holds the bytes</b>, which is exactly why dropping
+     * them afterwards cannot change any consensus outcome.
+     *
+     * <p>The argument holds only while retention covers through the end of epoch N+1, so the
+     * condition is {@code currentEpoch > chunkEpoch + chunkTtlEpochs - 1} — strictly past, never
+     * "at". Keeping a chunk an epoch too long costs memory that three tiers of quota already bound;
+     * dropping one an epoch too early makes this node reject a chain every other node accepts.
+     * {@code chain.orphan.chunkTtlEpochs} is refused at startup below {@code
+     * ChainSpec.MIN_ORPHAN_CHUNK_TTL_EPOCHS} for that reason, and the condition here must not be
+     * loosened to compensate for anything: the fail-fast is the floor, this is not a second one.
+     *
+     * <h2>Why the chunk clock is the header and not the receipt</h2>
+     *
+     * <p>The rule the safety argument rests on is stated in epochs of block timestamps, so the
+     * retention that has to cover it must be too. Timing a chunk from when this node happened to
+     * receive it would make a consensus-relevant answer depend on arrival order and on how long
+     * this node has been up — {@code rebuildMemoryFromDb} restamps every rebuilt entry with "now"
+     * ({@code OrphanBlockStoreImpl.java:315} via {@code :107}), so a restart would silently extend
+     * every chunk's life. Timed by the header, a restart changes nothing.
+     *
+     * <h2>Clock skew</h2>
+     *
+     * <p>{@code currentEpoch} comes from this node's wall clock while a chunk's comes from its
+     * header, so a node running fast evicts early. Two things bound that. The node's clock is
+     * <em>already</em> load-bearing on the accept path — {@code BlockchainImpl:462} refuses any
+     * block more than {@code MAIN_CHAIN_PERIOD / 4} (16 s) ahead of {@code
+     * XdagTime.getCurrentTimestamp()} — so a clock skewed enough to matter here is a divergence
+     * this node has already got, not one eviction introduces. And the slack here is far wider than
+     * that check's: the strict {@code >} plus a floor of two epochs means a chunk outlives the last
+     * epoch that can reference it by a full epoch, 64 s, with every epoch configured above the
+     * floor buying another 64 s. That is also why this method is <b>handed</b> the epoch rather
+     * than reading {@code XdagTime.getCurrentEpoch()} itself: a caller that wants more slack than
+     * the configured TTL — while catching up on a long sync, say — can lag what it passes, and the
+     * package stays free of the clock the same way it is free of {@code Config}.
+     *
+     * <h2>Non-chunk orphans keep the local fifteen minutes</h2>
+     *
+     * <p>They have no protocol age bound at all, so there is nothing to derive one from and no
+     * reason to invent one: {@link #NON_CHUNK_TTL_MILLIS} and the strict {@code >} are what {@code
+     * cleanExpiredOrphans} applies today ({@code OrphanBlockStoreImpl.java:117-119}, {@code :178}),
+     * term for term.
+     *
+     * @param nowMillis this node's wall clock, the clock every non-chunk category is aged on
+     * @param currentEpoch the current epoch, the clock chunks are aged on
+     * @return the entries evicted, chunks first, each already released from every tier it held
+     */
+    public List<OrphanEntry> evictExpired(long nowMillis, long currentEpoch) {
+        List<OrphanEntry> evicted = new ArrayList<>();
+        evictExpiredChunks(currentEpoch, evicted);
+        evictByReceipt(linkSet, nowMillis, evicted);
+        evictByReceipt(mtxSet, nowMillis, evicted);
+        evictAccountLane(AccountLane.REGULAR, nowMillis, evicted);
+        evictAccountLane(AccountLane.VIP, nowMillis, evicted);
+        return List.copyOf(evicted);
+    }
+
+    /**
+     * The chunk sweep, and the one that gets to stop early.
+     *
+     * <p>{@link #chunkSet} is ordered by {@link #LINK_ORDER}, time ascending, and an epoch is
+     * {@code time >> 16} — monotone non-decreasing in time for every long, negative ones included,
+     * since an arithmetic shift preserves the signed order. So the expired chunks are a
+     * <em>prefix</em>: the first entry still inside the age rule's reach proves every entry behind
+     * it is too, and the sweep returns there. At the chunk cap that is the difference between
+     * touching the handful about to go and walking sixty thousand entries under the blockchain
+     * monitor on every tick.
+     *
+     * <p>No overflow to guard: an epoch is a timestamp shifted down by 16, so it is inside
+     * ±2<sup>47</sup> even for a hostile header, and the TTL is an int.
+     */
+    private void evictExpiredChunks(long currentEpoch, List<OrphanEntry> evicted) {
+        long ttlEpochs = limits.chunkTtlEpochs();
+        for (Iterator<OrphanEntry> it = chunkSet.iterator(); it.hasNext(); ) {
+            OrphanEntry entry = it.next();
+            if (currentEpoch <= entry.epoch() + ttlEpochs - 1) {
+                return;
+            }
+            it.remove();
+            unbook(entry, chunkSet);
+            evicted.add(entry);
+        }
+    }
+
+    /**
+     * The non-chunk sweep, and it has to be a full scan.
+     *
+     * <p>Neither order these sets are kept in is receipt order: {@link #LINK_ORDER} is by the
+     * block's own timestamp, which a peer can send late, and {@link #MTX_ORDER} leads with the fee.
+     * So no prefix of either is the expired part and there is nothing to stop early on. That is
+     * what {@code cleanExpiredOrphans} does today as well — it walks all of
+     * {@code orphanInsertTimeMap} every tick — and at a five-minute period it is a scan of live
+     * references, not a cost worth a second index to avoid.
+     */
+    private void evictByReceipt(NavigableSet<OrphanEntry> set, long nowMillis,
+            List<OrphanEntry> evicted) {
+        for (Iterator<OrphanEntry> it = set.iterator(); it.hasNext(); ) {
+            OrphanEntry entry = it.next();
+            if (nowMillis - entry.receivedAtMillis() > NON_CHUNK_TTL_MILLIS) {
+                it.remove();
+                unbook(entry, set);
+                evicted.add(entry);
+            }
+        }
+    }
+
+    /**
+     * The same sweep over one account lane, bucket by bucket.
+     *
+     * <p>The addresses are copied out first because {@link #unbook} drops a bucket the moment it
+     * empties, and that is a write into the very map this walks.
+     */
+    private void evictAccountLane(AccountLane lane, long nowMillis, List<OrphanEntry> evicted) {
+        Map<String, NavigableSet<OrphanEntry>> buckets = laneMap(lane);
+        for (String address : new ArrayList<>(buckets.keySet())) {
+            NavigableSet<OrphanEntry> bucket = buckets.get(address);
+            if (bucket != null) {
+                evictByReceipt(bucket, nowMillis, evicted);
+            }
+        }
+    }
+
+    /**
+     * Everything an entry leaving the pool gives back, minus taking it out of its set — which
+     * removal does by hashlow and a sweep does through its iterator.
+     *
+     * <p><b>Every exit comes through here.</b> There are four counters an entry can hold (its
+     * category, the pool total, its peer's chunk budget and its chain's) plus an address bucket to
+     * reclaim, and a second copy of this that forgot one would not fail any test that reads
+     * verdicts — it would leak, quietly, until the tier it forgot could never be entered again.
+     */
+    private void unbook(OrphanEntry stored, NavigableSet<OrphanEntry> holder) {
+        index.remove(stored.hashlow());
         stored.holder = null;
         reclaimIfEmpty(stored, holder);
         releaseChunkQuotas(stored);
         counts[stored.category().ordinal()]--;
         total--;
-        return stored;
     }
 
     /** The stored entry for this hashlow, or null. Never a copy. */
@@ -419,8 +588,9 @@ public final class ChainOrphanPool {
 
     /**
      * Hands back what a chunk held. <b>Every path that takes an entry out of the pool must come
-     * through here</b> — removal today, TTL eviction next — because a path that forgets leaves the
-     * slot spent forever and the peer or chain it belonged to slowly locked out.
+     * through here</b> — removal and TTL eviction both do, via {@link #unbook} — because a path
+     * that forgets leaves the slot spent forever and the peer or chain it belonged to slowly
+     * locked out.
      */
     private void releaseChunkQuotas(OrphanEntry entry) {
         if (entry.category() != OrphanCategory.CHUNK) {

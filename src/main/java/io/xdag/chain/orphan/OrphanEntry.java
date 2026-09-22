@@ -25,6 +25,7 @@ package io.xdag.chain.orphan;
 
 import io.xdag.core.Block;
 import io.xdag.db.rocksdb.OrphanBlockStoreImpl.OrphanMeta;
+import io.xdag.utils.XdagTime;
 import java.util.NavigableSet;
 import java.util.Objects;
 import org.apache.tuweni.bytes.Bytes32;
@@ -84,6 +85,20 @@ public final class OrphanEntry {
     private final Block body;
 
     /**
+     * When this node took the block in, on its own wall clock, in milliseconds. This is the clock
+     * the flat fifteen-minute TTL runs on for every category <b>except</b> {@link
+     * OrphanCategory#CHUNK}, and it is exactly what {@code addOrphanToMemory} stamps into {@code
+     * orphanInsertTimeMap} today ({@code OrphanBlockStoreImpl.java:315}).
+     *
+     * <p><b>Ignored for a chunk, deliberately.</b> A chunk is timed in epochs of its own header —
+     * see {@link #epoch()} and {@link ChainOrphanPool#evictExpired} — because its retention is on
+     * the consensus path and a local clock would make it a node-local answer to a network-wide
+     * question. Stamping it anyway costs a long and keeps one shape for all four categories; what
+     * it must not do is become the thing a chunk is judged on.
+     */
+    private final long receivedAtMillis;
+
+    /**
      * The set that currently holds this entry, written by the pool on add and cleared on remove.
      * This is what keeps {@code remove(hashlow)} logarithmic: the index leads to the entry, and the
      * entry leads to its holding collection, so nothing has to search the categories to find out
@@ -94,13 +109,24 @@ public final class OrphanEntry {
     /** Which of the two account lanes this entry went into; meaningless outside ACCOUNT_TX. */
     boolean vip;
 
+    /**
+     * Takes the receipt moment from the wall clock, which is when this constructor runs — the same
+     * instant {@code addOrphanToMemory} stamps today. Every factory without an explicit millis
+     * lands here, so the clock is read in exactly one place.
+     */
     public OrphanEntry(OrphanMeta meta, OrphanCategory category, String peerKey, Bytes32 chainHead,
             Block body) {
+        this(meta, category, peerKey, chainHead, body, System.currentTimeMillis());
+    }
+
+    public OrphanEntry(OrphanMeta meta, OrphanCategory category, String peerKey, Bytes32 chainHead,
+            Block body, long receivedAtMillis) {
         this.meta = Objects.requireNonNull(meta, "meta");
         this.category = Objects.requireNonNull(category, "category");
         this.peerKey = peerKey;
         this.chainHead = chainHead;
         this.body = body;
+        this.receivedAtMillis = receivedAtMillis;
         this.addressKey = category == OrphanCategory.ACCOUNT_TX
                 ? Hex.toHexString(meta.getAddress())
                 : null;
@@ -110,12 +136,28 @@ public final class OrphanEntry {
         return new OrphanEntry(meta, OrphanCategory.LINK, peerKey, null, null);
     }
 
+    /** As {@link #link(OrphanMeta, String)}, with the receipt moment supplied rather than read. */
+    public static OrphanEntry link(OrphanMeta meta, String peerKey, long receivedAtMillis) {
+        return new OrphanEntry(meta, OrphanCategory.LINK, peerKey, null, null, receivedAtMillis);
+    }
+
     public static OrphanEntry mtx(OrphanMeta meta, String peerKey) {
         return new OrphanEntry(meta, OrphanCategory.MTX, peerKey, null, null);
     }
 
+    /** As {@link #mtx(OrphanMeta, String)}, with the receipt moment supplied rather than read. */
+    public static OrphanEntry mtx(OrphanMeta meta, String peerKey, long receivedAtMillis) {
+        return new OrphanEntry(meta, OrphanCategory.MTX, peerKey, null, null, receivedAtMillis);
+    }
+
     public static OrphanEntry accountTx(OrphanMeta meta, String peerKey) {
         return new OrphanEntry(meta, OrphanCategory.ACCOUNT_TX, peerKey, null, null);
+    }
+
+    /** As {@link #accountTx(OrphanMeta, String)}, with the receipt moment supplied. */
+    public static OrphanEntry accountTx(OrphanMeta meta, String peerKey, long receivedAtMillis) {
+        return new OrphanEntry(meta, OrphanCategory.ACCOUNT_TX, peerKey, null, null,
+                receivedAtMillis);
     }
 
     public static OrphanEntry chunk(OrphanMeta meta, String peerKey, Bytes32 chainHead, Block body) {
@@ -149,6 +191,25 @@ public final class OrphanEntry {
 
     public Block body() {
         return body;
+    }
+
+    /** When this node took the block in, on its own clock. Not what a chunk is judged on. */
+    public long receivedAtMillis() {
+        return receivedAtMillis;
+    }
+
+    /**
+     * The epoch of the block's <b>own timestamp</b>, which is the only clock a chunk's retention
+     * may be measured against.
+     *
+     * <p>Derived, not stored. {@link #meta} is a frozen snapshot — it is a {@code TreeSet} sort key
+     * and mutating it is already forbidden above — so an epoch field would be a second copy of a
+     * value that cannot change, and a second place for the conversion to drift from {@code
+     * XdagTime.getEpoch}. The conversion is one arithmetic shift, and the sweep that asks for it
+     * visits only the entries it is about to evict plus the first one it keeps.
+     */
+    public long epoch() {
+        return XdagTime.getEpoch(meta.getTime());
     }
 
     /** True when this entry sits in the VIP account lane. Only meaningful for ACCOUNT_TX. */
