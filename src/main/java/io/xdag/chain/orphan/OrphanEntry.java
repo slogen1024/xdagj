@@ -23,10 +23,10 @@
  */
 package io.xdag.chain.orphan;
 
-import io.xdag.core.Block;
 import io.xdag.utils.XdagTime;
 import java.util.NavigableSet;
 import java.util.Objects;
+import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 import org.bouncycastle.util.encoders.Hex;
 
@@ -85,8 +85,28 @@ public final class OrphanEntry {
      */
     private final Bytes32 chainHead;
 
-    /** The chunk body, held only in memory; null for every other category. */
-    private final Block body;
+    /**
+     * The chunk's own 512 wire bytes, held only in memory; null for every other category.
+     *
+     * <p><b>Bytes and not a {@code Block}, deliberately.</b> This is the one thing in the pool that
+     * is read off the blockchain monitor — {@link ChainOrphanPool#chunkBody} hands it to netty's
+     * serve path and to the import path's reference check — and a {@code Block} could not be. A
+     * {@code Block} is mutable (the chain writes {@code info.fee}, {@code info.flags} and
+     * {@code info.height} into the instance it holds) and it is a <em>lazy</em> mutator besides:
+     * {@code getXdagBlock()} builds and caches the 512 bytes when they are missing, so even a
+     * reader that only wanted the bytes could be writing. Both are exactly the class of bug
+     * {@code a51e09c5} fixed on this path, and the fix it settled on — serve a copy re-parsed from
+     * the raw bytes, never the pooled instance — is only available if the pool keeps the raw bytes.
+     *
+     * <p>So the bytes are copied out once, here, on the thread that admits the block and under the
+     * monitor, and what is stored is immutable for the rest of the entry's life. A reader takes its
+     * own array from it and parses its own {@code Block}; two readers share nothing.
+     *
+     * <p>It is also the cheap half: 512 bytes against the ~2 KB a parsed {@code Block} retains
+     * (the {@code XdagBlock}, sixteen {@code Bytes32} fields, the {@code BlockInfo}, the link
+     * list), which at the chunk cap is the difference between tens and hundreds of megabytes.
+     */
+    private final Bytes body;
 
     /**
      * When this node took the block in, on its own wall clock, in milliseconds. This is the clock
@@ -119,12 +139,12 @@ public final class OrphanEntry {
      * lands here, so the clock is read in exactly one place.
      */
     public OrphanEntry(OrphanMeta meta, OrphanCategory category, String peerKey, Bytes32 chainHead,
-            Block body) {
+            Bytes body) {
         this(meta, category, peerKey, chainHead, body, System.currentTimeMillis());
     }
 
     public OrphanEntry(OrphanMeta meta, OrphanCategory category, String peerKey, Bytes32 chainHead,
-            Block body, long receivedAtMillis) {
+            Bytes body, long receivedAtMillis) {
         this.meta = Objects.requireNonNull(meta, "meta");
         this.category = Objects.requireNonNull(category, "category");
         this.peerKey = peerKey;
@@ -164,7 +184,7 @@ public final class OrphanEntry {
                 receivedAtMillis);
     }
 
-    public static OrphanEntry chunk(OrphanMeta meta, String peerKey, Bytes32 chainHead, Block body) {
+    public static OrphanEntry chunk(OrphanMeta meta, String peerKey, Bytes32 chainHead, Bytes body) {
         return new OrphanEntry(meta, OrphanCategory.CHUNK, peerKey, chainHead, body);
     }
 
@@ -193,7 +213,8 @@ public final class OrphanEntry {
         return chainHead;
     }
 
-    public Block body() {
+    /** The chunk's 512 wire bytes, immutable, or null. See {@link #body}. */
+    public Bytes body() {
         return body;
     }
 

@@ -32,7 +32,6 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import io.xdag.Network;
-import io.xdag.chain.ext.ChainBlockClassifier;
 import io.xdag.chain.ext.ChunkChainBuilder;
 import io.xdag.chain.ext.ChunkExt;
 import io.xdag.chain.ext.ExtKind;
@@ -55,7 +54,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import org.apache.tuweni.bytes.Bytes32;
-import org.apache.tuweni.units.bigints.UInt64;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -249,13 +247,15 @@ public class OrphanPeerAttributionTest extends ChainL1TestBase {
 
         deliver(head, peer("peer-a", PEER_A_IP));
         drain();
-        // Importing the head un-orphaned the tail it references -- that is what tryToConnect does
-        // with every link, before it pools the block itself -- so the tail is out of the pool and
-        // the head is the only chunk left. It is still charged to the chain it named.
-        assertNull("the head's import un-orphans the tail it references", pool().get(hashLow(tail)));
+        // The head's import no longer un-orphans the tail. removeOrphan finds a block through
+        // getBlockByHash, and since chunks became memory-only there is nothing there to find -- so
+        // both chunks stay pooled, on one chain key, which is what the per-chain tier is for.
+        assertNotNull("a chunk is not un-orphaned by another chunk that names it",
+                pool().get(hashLow(tail)));
         assertEquals("the head attaches to the chain it names, not to nothing",
                 hashLow(tail), pooled(head).chainHead());
         assertEquals(1, pool().chainBucketCount());
+        assertEquals("both hops charged to the one chain", 2, pool().chunksOnChain(hashLow(tail)));
     }
 
     /**
@@ -264,13 +264,14 @@ public class OrphanPeerAttributionTest extends ChainL1TestBase {
      * hop. Three chunks are the shortest chain that tells the two apart — with two, the successor's
      * key and the successor's hashlow are the same value.
      *
-     * <p>Driven through the store rather than through an import, because an import cannot reach
-     * this branch today: {@code tryToConnect} un-orphans everything a block references before it
-     * pools the block itself, so by the time a chunk is admitted its successor has just left the
-     * pool. That is a property of the import path, not of the derivation, and it stops being true
-     * as soon as a chunk stops being reachable through {@code getBlockByHash} — {@code
-     * removeOrphan} then finds nothing to un-orphan and the successor stays. Pinning the branch
-     * here is what makes that a change of retention rather than a rediscovery of the grouping.
+     * <p><b>This branch used to be unreachable from an import, and now is not.</b> While chunks
+     * still went to the block store, {@code tryToConnect} un-orphaned everything a block referenced
+     * before pooling the block itself, so by the time the middle chunk was admitted the tail had
+     * just left the pool and there was nothing to inherit from; the branch could only be pinned by
+     * driving the store directly. Deferred persistence is what changed it: a memory-only chunk is
+     * not reachable through {@code getBlockByHash}, so {@code removeOrphan} finds nothing to
+     * un-orphan and the successor stays. So the test now goes through the real import path, which
+     * is what it was waiting for.
      */
     @Test
     public void aChunkInheritsThePooledSuccessorsChainKey() {
@@ -280,9 +281,13 @@ public class OrphanPeerAttributionTest extends ChainL1TestBase {
         Block tail = chain.get(2);
         Block mid = chain.get(1);
         Block head = chain.get(0);
-        poolDirectly(tail);
-        poolDirectly(mid);
-        poolDirectly(head);
+        // Oldest first: a block may not reference one that came after it.
+        deliver(tail, peer("peer-a", PEER_A_IP));
+        drain();
+        deliver(mid, peer("peer-a", PEER_A_IP));
+        drain();
+        deliver(head, peer("peer-a", PEER_A_IP));
+        drain();
 
         assertEquals(hashLow(tail), pooled(tail).chainHead());
         assertEquals(hashLow(tail), pooled(mid).chainHead());
@@ -312,8 +317,10 @@ public class OrphanPeerAttributionTest extends ChainL1TestBase {
         }
 
         assertEquals("one chain bucket, not three", 1, pool().chainBucketCount());
+        // Four, not three: the block they all name is itself a pooled chunk rooting that chain, and
+        // it stays pooled now that another chunk naming it no longer un-orphans it.
         assertEquals("every chunk naming that block is charged to the same chain",
-                3, pool().chunksOnChain(hashLow(target)));
+                4, pool().chunksOnChain(hashLow(target)));
         for (Block naming : pile) {
             assertEquals(hashLow(target), pooled(naming).chainHead());
         }
@@ -341,15 +348,6 @@ public class OrphanPeerAttributionTest extends ChainL1TestBase {
     }
 
     // ---- helpers -------------------------------------------------------------------------
-
-    /**
-     * Admits a block into the pool without importing it, with the classification the pipeline would
-     * have computed. For the one derivation branch the import path cannot currently produce.
-     */
-    private void poolDirectly(Block block) {
-        ((OrphanBlockStoreImpl) blockchain.getOrphanBlockStore()).addOrphan(block, false,
-                UInt64.ZERO, XAmount.ZERO, null, PEER_A_IP, ChainBlockClassifier.classify(block));
-    }
 
     private ChainOrphanPool pool() {
         return ((OrphanBlockStoreImpl) blockchain.getOrphanBlockStore()).getPool();

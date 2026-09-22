@@ -100,6 +100,15 @@ import org.apache.tuweni.bytes.Bytes32;
  * that block's own links, so the whole chunk chain is persisted, on every node, before any main
  * block can confirm the block that pays for it.
  *
+ * <p>Chunk blocks now take a second route to the same place, and it lands them there at the same
+ * moment. A chunk is no longer written to the block store when it arrives: it is held in the orphan
+ * pool's body store until something references it, and it is aged out in two epochs if nothing
+ * ever does. What persists it is {@code BlockchainImpl.persistReferencedChunkChains}, which runs
+ * while the referencing block is being connected and before that block's own links are un-orphaned
+ * — so by the time any main block can confirm a paying block, every chunk on the chains it names is
+ * on disk, exactly as before. A node that no longer holds a chain cannot import the paying block at
+ * all ({@code NO_PARENT}), so it never reaches a verdict here on a chain it could not assemble.
+ *
  * <p><b>Raw blocks required.</b> Both hooks and the {@code lookup} must be handed blocks parsed
  * from their 512 bytes — see {@link ChainL1Hooks}.
  */

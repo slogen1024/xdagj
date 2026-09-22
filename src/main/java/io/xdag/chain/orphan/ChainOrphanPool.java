@@ -38,6 +38,7 @@ import java.util.Map;
 import java.util.NavigableSet;
 import java.util.Objects;
 import java.util.TreeSet;
+import java.util.concurrent.ConcurrentHashMap;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 import org.apache.tuweni.units.bigints.UInt64;
@@ -54,6 +55,13 @@ import org.apache.tuweni.units.bigints.UInt64;
  * inside the synchronized {@code tryToConnect}, and the packing path since {@code 811deec0} put it
  * under the same monitor. Adding a lock here would be a second lock over state that already has
  * one; the absence of {@code synchronized} is a decision, not an oversight.
+ *
+ * <p><b>One exception, and it is the only one:</b> {@link #chunkBodies}, read through
+ * {@link #chunkBody}. A chunk is held in memory and nowhere else, so the question "do you have
+ * this block" can only be answered from here — including by netty I/O threads on the P2P serve
+ * path, which hold no monitor at all. That map is concurrent and its values are immutable; see its
+ * own javadoc for why those two together are what make an off-monitor read correct rather than
+ * merely usually-correct. Every other member of this class still requires the monitor.
  *
  * <h2>Why ordered sets and not priority queues</h2>
  *
@@ -150,6 +158,47 @@ public final class ChainOrphanPool {
 
     /** hashlow to the stored entry. The one way in to a removal. */
     private final Map<Bytes, OrphanEntry> index = new HashMap<>();
+
+    /**
+     * The chunk bodies this node is holding but has not written to disk: hashlow to the block's own
+     * 512 wire bytes. Chunks only — no other category has a body here, because no other category is
+     * kept out of the block store.
+     *
+     * <h2>The one collection in this class that is read off the monitor</h2>
+     *
+     * <p>Everything else here is protected by the blockchain monitor every caller already holds
+     * (see the class header). This is not: a chunk that is nowhere on disk can only be answered for
+     * out of memory, and the two places that ask — the import path's reference check, and the P2P
+     * serve path, which runs on netty I/O threads — do not both hold that monitor. So it is a
+     * {@link ConcurrentHashMap} and the others are not, and that difference is the point rather
+     * than an inconsistency.
+     *
+     * <p><b>A reader must not have to hold anything to be right.</b> {@code a51e09c5} fixed exactly
+     * this shape on exactly this path — a plain {@code LinkedHashMap} read with no synchronization
+     * could hand a netty thread a spurious null during a resize, so a peer's request for a freshly
+     * arrived block went unanswered — and the lesson it left is that a read path must not depend on
+     * an invariant only the monitor holder has. Two things make that true here. The map is
+     * concurrent, so a read racing a write is defined rather than undefined. And every value is
+     * immutable {@link Bytes} taken once at admission, so a reader parses its own {@code Block} out
+     * of them and no reader can see another's half-built object — the copy-on-serve rule
+     * {@code a51e09c5} settled on, enforced by the type rather than remembered by each caller.
+     *
+     * <p>What a reader can still see is a <em>stale</em> answer: a chunk that has just been
+     * persisted and dropped from here, or one admitted a moment ago. Both are benign. A hash that
+     * has left this map is on disk (persist writes the block before the drop) or gone for good
+     * (TTL), and a reader that misses it asks the block store next, which is where the import path
+     * looks first anyway.
+     *
+     * <h2>What bounds it</h2>
+     *
+     * <p>Nothing of its own: an entry goes in when {@link #add} admits a chunk and comes out in
+     * {@link #unbook}, which is the single exit every removal and every eviction goes through, so
+     * the map holds one body per pooled chunk and never more. Its size is therefore
+     * {@code chain.orphan.chunkLimit} bodies in the worst case — 60,000 × 512 bytes of payload
+     * plus the key, the node and the wrapper, about 40 MB — and the three chunk quotas are what
+     * hold it there. Adding a cap here would be a second, weaker copy of those.
+     */
+    private final Map<Bytes32, Bytes> chunkBodies = new ConcurrentHashMap<>();
 
     /**
      * How many chunks each source peer currently holds. Chunks only — every other category is
@@ -338,6 +387,11 @@ public final class ChainOrphanPool {
         counts[entry.category().ordinal()]++;
         total++;
         reserveChunkQuotas(entry);
+        if (entry.category() == OrphanCategory.CHUNK && entry.body() != null) {
+            // The chunk's only copy anywhere on this node: nothing wrote it to the block store and
+            // nothing will until a block that references it is imported. See #chunkBodies.
+            chunkBodies.put(entry.hashlow(), entry.body());
+        }
         return OrphanAdmission.ADMITTED;
     }
 
@@ -562,6 +616,10 @@ public final class ChainOrphanPool {
      */
     private void unbook(OrphanEntry stored, NavigableSet<OrphanEntry> holder) {
         index.remove(stored.hashlow());
+        // The body goes with the entry, always. It is the one thing here that is not bounded by a
+        // counter somebody would notice going wrong -- a forgotten body is 512 bytes that nothing
+        // will ever come back for, and the leak outlives the flood that caused it.
+        chunkBodies.remove(stored.hashlow());
         stored.holder = null;
         reclaimIfEmpty(stored, holder);
         releaseChunkQuotas(stored);
@@ -572,6 +630,28 @@ public final class ChainOrphanPool {
     /** The stored entry for this hashlow, or null. Never a copy. */
     public OrphanEntry get(Bytes32 hashlow) {
         return index.get(hashlow);
+    }
+
+    /**
+     * The 512 wire bytes of a chunk this node is holding in memory only, or null when it holds no
+     * such chunk. <b>Safe to call without the blockchain monitor</b> — see {@link #chunkBodies} for
+     * what makes that true, and note that it is true of this method alone: every other reader here
+     * walks a plain {@link HashMap} or {@link TreeSet} and needs the monitor.
+     *
+     * <p>Returns the bytes rather than a block, so that the caller parses its own. Handing out a
+     * shared {@code Block} would put the pool back in the business {@code a51e09c5} took it out of.
+     */
+    public Bytes chunkBody(Bytes32 hashlow) {
+        return chunkBodies.get(hashlow);
+    }
+
+    /**
+     * How many chunk bodies are held in memory. Test-only, and what pins the invariant that matters:
+     * a body is admitted with its entry and dropped with it, so this can never exceed
+     * {@code size(CHUNK)} and can never outlive the flood that produced it.
+     */
+    public int chunkBodyCount() {
+        return chunkBodies.size();
     }
 
     /**
@@ -684,6 +764,7 @@ public final class ChainOrphanPool {
         accountTxMap.clear();
         vipTxMap.clear();
         index.clear();
+        chunkBodies.clear();
         chunkPerPeer.clear();
         chunkPerChain.clear();
         mainRef.clear();

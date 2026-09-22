@@ -84,6 +84,11 @@ import com.google.common.collect.Lists;
  * changing the row format. And a chunk's whole life is two epochs, so losing them to a restart
  * costs one refetch down a path that already exists.
  *
+ * <p><b>Nor does it reach the block store.</b> The pool holds the block's own 512 bytes and is the
+ * only holder of them on this node until something references the chunk, at which point
+ * {@code BlockchainImpl} writes the chain out and the bodies are dropped. So the first reason above
+ * is not a coincidence of the row format: a chunk really has no body on disk to point a row at.
+ *
  * <p>The consequence worth naming: {@link #rebuildMemoryFromDb} can only ever produce non-chunk
  * entries, by construction rather than by a check, which is why the rebuild needs no category byte.
  */
@@ -173,7 +178,7 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
             // who sent it, and by construction no row belongs to a chunk. Nothing is lost — the
             // two chunk-only quotas have nothing to count here.
             OrphanMeta meta = OrphanMeta.parse(pair);
-            admit(meta, categoryOf(meta, null), null, null);
+            admit(meta, categoryOf(meta, null), null, null, null);
         }
         log.debug("init orphan size:{}", BytesUtils.bytesToLong(orphanSource.get(ORPHAN_SIZE), 0, false));
 
@@ -376,7 +381,8 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
         OrphanMeta meta = OrphanMeta.parse(key, value);
         ExtKind kind = classified == null ? null : classified.kind();
         OrphanCategory category = categoryOf(meta, kind);
-        OrphanAdmission verdict = admit(meta, category, peerKey, chunkChainKeyFor(meta, classified));
+        OrphanAdmission verdict = admit(meta, category, peerKey, chunkChainKeyFor(meta, classified),
+                category == OrphanCategory.CHUNK ? wireBytesOf(block) : null);
 
         if (verdict != OrphanAdmission.ADMITTED && verdict != OrphanAdmission.DUPLICATE) {
             // The import path refuses a block whose category is full before it ever reaches here,
@@ -390,7 +396,9 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
             return;
         }
         if (category == OrphanCategory.CHUNK) {
-            // Memory-only: no row, no ORPHAN_SIZE. See this class's header for the three reasons.
+            // Memory-only: no row, no ORPHAN_SIZE, and -- since the deferred-persist change -- no
+            // block-store write either. The pool is now holding the only copy of these 512 bytes
+            // that exists anywhere on this node. See this class's header.
             return;
         }
 
@@ -414,11 +422,42 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
      * source peer and the chain key are supplied by the caller above.
      */
     private OrphanAdmission admit(OrphanMeta meta, OrphanCategory category, String peerKey,
-            Bytes32 chainKey) {
-        OrphanEntry entry = new OrphanEntry(meta, category, peerKey, chainKey, null);
+            Bytes32 chainKey, Bytes body) {
+        OrphanEntry entry = new OrphanEntry(meta, category, peerKey, chainKey, body);
         return category == OrphanCategory.ACCOUNT_TX
                 ? pool.add(entry, laneFor(meta))
                 : pool.add(entry);
+    }
+
+    /**
+     * An immutable, private copy of a block's 512 wire bytes, for a chunk the pool is about to
+     * become the only holder of.
+     *
+     * <p>Copied rather than referenced: {@code XdagBlock.getData()} hands back the block's own
+     * {@link org.apache.tuweni.bytes.MutableBytes}, and what goes into the pool is read by threads
+     * that hold no monitor. {@code toArray()} is what makes the stored value genuinely immutable,
+     * and it is taken here, once, on the import thread — not in each reader, where it would be a
+     * race against whatever else still holds the block.
+     *
+     * <p>Null when the block carries no wire form at all, which cannot happen for a block that
+     * arrived over the network (it was parsed from those very bytes). The pool then simply holds no
+     * body for it; that chunk is unservable and unpersistable, which is the honest outcome for a
+     * block whose bytes this node does not have.
+     */
+    private static Bytes wireBytesOf(Block block) {
+        XdagBlock wire = block == null ? null : block.getXdagBlock();
+        return wire == null ? null : Bytes.wrap(wire.getData().toArray());
+    }
+
+    /**
+     * The 512 wire bytes of a chunk this node holds in memory only, or null.
+     *
+     * <p>Pure delegation, and deliberately the only route out of the pool that does not want the
+     * blockchain monitor: see {@code ChainOrphanPool.chunkBody}.
+     */
+    @Override
+    public Bytes getChunkBody(Bytes32 hashlow) {
+        return pool.chunkBody(hashlow);
     }
 
     /**
@@ -467,15 +506,18 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
      * admitted. Where it does not, the key is the successor's hashlow: the furthest point on the
      * chain this node can name without reading blocks off disk.
      *
-     * <p><b>Today the fallback is the live branch, and that is a property of the import path, not
-     * of this method.</b> {@code tryToConnect} un-orphans everything an imported block references
-     * before it pools the block itself, so a chunk's successor has just been taken out of the pool
-     * by this very import and there is nothing left to inherit from. Going further would mean
-     * walking the chain through the block store from inside the blockchain monitor, turning an
-     * O(log n) admission into an O(chain length) one — the trade {@code ChainOrphanPool} refused
-     * when it made the key an argument instead of deriving it. The inherit branch becomes the live
-     * one as soon as a chunk stops being reachable through {@code getBlockByHash}, since
-     * {@code removeOrphan} then finds nothing to un-orphan and the successor stays pooled.
+     * <p><b>The inherit branch is the live one, and that is a property of the import path rather
+     * than of this method.</b> While chunks still went to the block store it was unreachable:
+     * {@code tryToConnect} un-orphans everything an imported block references before it pools the
+     * block itself, so a chunk's successor had just been taken out of the pool by this very import
+     * and there was nothing left to inherit from. Deferred persistence changed that —
+     * {@code removeOrphan} finds a block through {@code getBlockByHash} and a memory-only chunk is
+     * not there, so the successor stays pooled and a whole chain collapses onto one bucket instead
+     * of one bucket per hop. The fallback below is now what a chunk naming a block this node does
+     * not hold gets. Going further than one hop would mean walking the chain through the block
+     * store from inside the blockchain monitor, turning an O(log n) admission into an O(chain
+     * length) one — the trade {@code ChainOrphanPool} refused when it made the key an argument
+     * instead of deriving it.
      *
      * <p>What the fallback still buys is the shape the tier exists to bound: many chunks naming one
      * block — a distributed flood piling onto a single chain — all land in one bucket and are cut
@@ -710,8 +752,8 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
         // carrying the classification, a chunk sits in its own category and no block this node
         // mines packs one. That is the intended shape -- an unpaid chunk is data nobody has paid to
         // have referenced, and the block that pays for it is what brings the chain into the DAG --
-        // but it does mean an arriving chunk raises `nnoref` and only gives it back when its two
-        // epochs are up. Chunks that arrive with no classification (locally produced, or re-imported
+        // but it does mean an arriving chunk raises `nnoref` and gives it back only when something
+        // references it (which persists the chain and un-orphans it) or when its two epochs are up. Chunks that arrive with no classification (locally produced, or re-imported
         // after NO_PARENT on a node with the pipeline off) are LINK and are packed exactly as before.
         int linkCount = pool.size(OrphanCategory.LINK);
         // The link block's gate, unchanged. A main block no longer enters here: its link fill comes

@@ -449,6 +449,12 @@ public class BlockchainImpl implements Blockchain {
         // than degraded -- see peerKeyOf and OrphanBlockStore.addOrphan.
         String peerKey = peerKeyOf(pv);
         Classified classified = pv.classified();
+        // Computed where the admission gate needs it and reused where the deferred persist does,
+        // rather than worked out twice: the gate decides whether this block may occupy a chunk slot
+        // and the commit below decides whether it is written to disk, and the two answering
+        // differently is the imported-but-unpooled block orphanCategoryOf exists to prevent. Null
+        // until the gate runs, because a BI_EXTRA block skips the gate; the commit fills it in.
+        OrphanCategory category = null;
 
         // TODO: if current height is snapshot height, we need change logic to process new block
 
@@ -492,6 +498,17 @@ public class BlockchainImpl implements Blockchain {
                 return ImportResult.IN_MEM;
             }
 
+            // And the third place a block this node already holds can be: the orphan pool's chunk
+            // body store. A chunk reaches neither the block store nor memOrphanPool, so without
+            // this a peer could re-send the same chunk for ever and every copy would be imported
+            // again -- nblocks and nnoref climbing once per delivery while the pool itself, which
+            // refuses the repeat as a duplicate, stayed exactly where it was. EXIST rather than
+            // IN_MEM because that is the honest statement (this node has the block) and because
+            // SyncManager treats the two the same: both pop the waiting children.
+            if (orphanBlockStore.getChunkBody(block.getHashLow()) != null) {
+                return ImportResult.EXIST;
+            }
+
             // Check if extra block
             if (isExtraBlock(block)) {
                 updateBlockFlag(block, BI_EXTRA, true);
@@ -526,7 +543,7 @@ public class BlockchainImpl implements Blockchain {
             // any block this node's own builders produce -- a transaction block is built with
             // mining == false, so getNonce() is null and isExtraBlock() is false for it.
             if ((block.getInfo().flags & BI_EXTRA) == 0) {
-                OrphanCategory category = orphanCategoryOf(block, classified);
+                category = orphanCategoryOf(block, classified);
                 if (orphanBlockStore.isFull(category)) {
                     result = ImportResult.INVALID_BLOCK;
                     result.setErrorInfo("Orphan block pool is full");
@@ -555,7 +572,20 @@ public class BlockchainImpl implements Blockchain {
                         log.debug("Address's amount isn't zero");
                         return result;
                     }
+                    // The block store first, then the chunk bodies the pool is holding for blocks
+                    // that were never written to it. Without the second half a chunk chain could
+                    // not be received at all: chunk i names chunk i+1, and i+1 is memory-only until
+                    // something pays for the chain, so every chunk past the tail would be
+                    // NO_PARENT and the chain could never be completed or paid for.
+                    //
+                    // This is NOT the getBlockByHash merge -- that is a separate change, because
+                    // that lookup is on the consensus path and is called off the monitor. Here the
+                    // fallback is explicit, at the one call site that must see a pooled chunk to
+                    // keep working, and it goes away when the merge lands.
                     Block refBlock = getBlockByHash(ref.getAddress(), false);
+                    if (refBlock == null) {
+                        refBlock = pooledChunkBody(ref.getAddress());
+                    }
                     if (refBlock == null) {
                         result = ImportResult.NO_PARENT;
                         result.setHashlow(ref.getAddress());
@@ -685,6 +715,13 @@ public class BlockchainImpl implements Blockchain {
                 return ImportResult.INVALID_BLOCK;
             }
 
+            if (category == null) {
+                category = orphanCategoryOf(block, classified);
+            }
+            // The chunk chains this block references stop being memory-only here, before anything
+            // reads them back. See persistReferencedChunkChains for why this is the place.
+            persistReferencedChunkChains(block, all, category);
+
             int id = 0;
             // Remove links
             for (Address ref : all) {
@@ -780,7 +817,9 @@ public class BlockchainImpl implements Blockchain {
                 memOrphanPool.put(block.getHashLow(), block);
                 xdagStats.nextra++;
             } else {
-                saveBlock(block);
+                if (category != OrphanCategory.CHUNK) {
+                    saveBlock(block);
+                }
                 dealOrphan(block, peerKey, classified);
                 xdagStats.nnoref++;
             }
@@ -960,6 +999,167 @@ public class BlockchainImpl implements Blockchain {
         byte[] address = orphanAddressOf(block);
         return OrphanCategory.of(isTxBlock(block), address == null ? NO_ORPHAN_ADDRESS : address,
                 classified == null ? null : classified.kind());
+    }
+
+    /**
+     * The chunk the orphan pool is holding in memory for this hash, re-parsed into a block of the
+     * caller's own, or null when it holds none.
+     *
+     * <p><b>A copy, every time, and that is the rule rather than an optimisation left undone.</b>
+     * {@code a51e09c5} fixed this node serving peers the very {@code Block} instance the chain goes
+     * on mutating; the conclusion it left is that what leaves an in-memory pool is parsed afresh
+     * from the raw bytes. The pool stores bytes precisely so that this is the only thing that can
+     * be done with them.
+     *
+     * <p>The hash is normalised the way {@link #getBlockByHash} normalises it: a reference field
+     * comes off the wire as a peer wrote it, and the pool is keyed by hashlow.
+     */
+    private Block pooledChunkBody(Bytes32 hash) {
+        if (hash == null) {
+            return null;
+        }
+        Bytes body = orphanBlockStore.getChunkBody(hashLowOf(hash));
+        return body == null ? null : new Block(new XdagBlock(body.toArray()));
+    }
+
+    /** A reference field as a hashlow: the low 24 bytes, the high 8 zeroed. */
+    private static Bytes32 hashLowOf(Bytes32 hash) {
+        MutableBytes32 hashlow = MutableBytes32.create();
+        hashlow.set(8, hash.slice(8, 24));
+        return hashlow;
+    }
+
+    /**
+     * Writes out every memory-only chunk chain this block references, and un-orphans what it wrote.
+     * The other half of the deferred persist: a chunk arrives and is kept in memory at nobody's
+     * expense but this node's, and it reaches disk here, when a block that references it is
+     * imported — the block that, in the protocol, is the one paying for the chain.
+     *
+     * <h2>Why here, and not at the commit</h2>
+     *
+     * <p>Three later steps read these blocks straight back out of the block store, so the chain has
+     * to be on disk before them or their answers change:
+     *
+     * <ul>
+     *   <li>{@code removeOrphan} in the loop immediately below, which un-orphans each reference. It
+     *       finds a block through {@link #getBlockByHash} and would find nothing at all for a
+     *       memory-only chunk — so the chunk would stay pooled, keep its quota slot, and keep
+     *       {@code nnoref} one too high until its TTL expired.</li>
+     *   <li>{@link #calculateBlockDiff}, which reads each reference's stored difficulty. A missing
+     *       reference stops that walk early ({@code break}), so the importing block would be given
+     *       a different chain weight than it gets today, and chain weight decides the top.</li>
+     *   <li>{@code ChainL1Processor}'s chunk-chain assembly at {@code setMain}, which is the point
+     *       of the whole exercise and which only ever sees raw blocks from the store.</li>
+     * </ul>
+     *
+     * <p>Placed here, those three are handed exactly what they were handed before chunks became
+     * memory-only, so this change is invisible to all of them. Placed at the commit instead, all
+     * three would read a hole.
+     *
+     * <p>It is also late enough to be honest about "the block imported". Every rejection
+     * {@code tryToConnect} can return is behind it — the type, timestamp, existence, admission,
+     * fee, reference and signature checks, and {@code canUseInput} — so what follows only fails by
+     * throwing, and this sits beside a loop that already deletes ORPHANIND rows and writes flags
+     * into other blocks at exactly the same point. A paying block that is rejected has therefore
+     * not persisted anything, which is the property that matters: an unreferenced chunk stays off
+     * disk, and a chunk whose paying block never arrives, or arrives and is refused, is simply aged
+     * out in two epochs with nothing written.
+     *
+     * <h2>Tail first</h2>
+     *
+     * <p>The chain is collected head-first by following references and then written in reverse, so
+     * a chunk is saved only after the chunk it names. That is the order the chunks were imported in
+     * to begin with (a block may not reference one that came later), and it is what lets
+     * {@link #calculateBlockDiff} give each one the same difficulty its own import would have
+     * computed — the value a node that had them all on disk would have stored. Written head-first
+     * instead, every chunk's difficulty walk would stop at a successor that was not there yet, and
+     * two nodes could store different weights for the same block.
+     *
+     * <h2>Exactly once</h2>
+     *
+     * <p>A chunk is dropped from the body store by the {@code removeOrphan} that follows its save
+     * (through {@code deleteFromQueue}, which is the pool's single exit), so the second block to
+     * reference the same chain finds nothing here and writes nothing: it reads the chain out of the
+     * block store like any other block. {@code removeOrphan} is idempotent in its own right as
+     * well — it does nothing to a block already flagged {@code BI_REF}.
+     *
+     * @param block the importing block, needed only for the {@code BI_EXTRA} half of the removal
+     *     action so that an extra block un-orphans exactly what it un-orphans today
+     * @param links the importing block's distinct references
+     * @param category the importing block's own orphan category. A chunk referencing a chunk
+     *     persists nothing: a chain that is only referenced from inside itself has still not been
+     *     paid for, and persisting on that would hand a flooder the disk write this change exists
+     *     to withhold.
+     */
+    private void persistReferencedChunkChains(Block block, List<Address> links,
+            OrphanCategory category) {
+        if (category == OrphanCategory.CHUNK || links.isEmpty()) {
+            return;
+        }
+        // One budget for the whole block, not one per reference: a block carries up to fifteen
+        // references and each could name a chain of its own, so a per-reference bound would be a
+        // fifteen-fold one. A chain longer than this can never assemble (ChunkChain refuses it), so
+        // nothing that could ever be settled is left behind, and every node cuts at the same count.
+        int budget = kernel.getConfig().getChainSpec().getChainMaxChunksPerChain();
+        List<Block> chain = null;
+        Set<Bytes> seen = null;
+        Deque<Bytes32> pending = null;
+        for (Address ref : links) {
+            if (ref == null || ref.isAddress) {
+                continue;
+            }
+            Bytes32 head = hashLowOf(ref.getAddress());
+            // The whole cost for every block that references no memory-only chunk, which is very
+            // nearly all of them: one lookup in a concurrent map per reference, and not a single
+            // allocation. Everything below is built only once there is a chain to walk.
+            if (orphanBlockStore.getChunkBody(head) == null) {
+                continue;
+            }
+            if (pending == null) {
+                pending = new ArrayDeque<>();
+                seen = new HashSet<>();
+                chain = new ArrayList<>();
+            }
+            pending.add(head);
+            while (!pending.isEmpty() && chain.size() < budget) {
+                Bytes32 hash = pending.poll();
+                if (!seen.add(hash)) {
+                    continue;
+                }
+                Bytes body = orphanBlockStore.getChunkBody(hash);
+                if (body == null) {
+                    continue;
+                }
+                Block chunk = new Block(new XdagBlock(body.toArray()));
+                chain.add(chunk);
+                for (Address next : chunk.getLinks()) {
+                    if (next != null && !next.isAddress) {
+                        pending.add(hashLowOf(next.getAddress()));
+                    }
+                }
+            }
+            pending.clear();
+        }
+        if (chain == null) {
+            return;
+        }
+        OrphanRemoveActions action = (block.getInfo().flags & BI_EXTRA) != 0
+                ? OrphanRemoveActions.ORPHAN_REMOVE_EXTRA
+                : OrphanRemoveActions.ORPHAN_REMOVE_NORMAL;
+        for (int i = chain.size() - 1; i >= 0; i--) {
+            Block chunk = chain.get(i);
+            // The difficulty this chunk's own import would have written, recomputed now that its
+            // successor is on disk. A block re-parsed from its bytes carries a virgin BlockInfo, and
+            // saving that would leave a null difficulty behind for the next block's weight walk to
+            // trip over.
+            calculateBlockDiff(chunk, calculateCurrentBlockDiff(chunk));
+            saveBlock(chunk);
+            // Now that it is loadable, the ordinary un-orphaning applies to it -- the same call the
+            // loop below makes for the reference itself, which is why the chain's interior blocks
+            // are passed through it too: they were un-orphaned by their successor's import before
+            // chunks became memory-only, and nothing else would do it now.
+            removeOrphan(chunk.getHashLow(), action);
+        }
     }
 
     public XAmount getTxFee(Block block) {

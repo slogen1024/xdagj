@@ -31,6 +31,8 @@ import io.xdag.core.Address;
 import io.xdag.core.Block;
 import java.util.List;
 
+import org.apache.tuweni.bytes.Bytes;
+import org.apache.tuweni.bytes.Bytes32;
 import org.apache.tuweni.units.bigints.UInt64;
 import org.bouncycastle.util.encoders.Hex;
 
@@ -82,6 +84,24 @@ public interface OrphanBlockStore extends XdagLifecycle {
             String peerKey, Classified classified);
 
     long getOrphanSize();
+
+    /**
+     * The 512 wire bytes of a chunk this node is holding in memory and has written nowhere, or null
+     * when it holds no such chunk.
+     *
+     * <p>Since the deferred-persist change a chunk block reaches neither the block store nor
+     * ORPHANIND: it lives in the pool until a block that references it is imported, and is aged out
+     * in two epochs if none ever is. So for those blocks, and only for those, this is the one place
+     * that can answer "do you have this block" — the import path's reference check asks it when the
+     * block store says no, and the persist-on-reference walk reads the bytes it writes out of it.
+     *
+     * <p><b>The one method here that does not want the blockchain monitor.</b> The bytes come out of
+     * a concurrent map and are immutable, so a caller with no lock at all gets either the block or
+     * null and never a half-built answer; the caller parses its own {@code Block} from them and
+     * never shares one. That is the rule {@code a51e09c5} established for serving blocks, made a
+     * property of the return type rather than a habit of each caller.
+     */
+    Bytes getChunkBody(Bytes32 hashlow);
 
     /**
      * Whether an orphan of this category would be refused for want of room — its own category cap,
