@@ -587,6 +587,24 @@ Task 3 现在从 `io.xdag.chain.orphan` 导入 `io.xdag.db.rocksdb.OrphanBlockSt
 
 `addOrphan` 中，类别为 `CHUNK` 时只入池，不写 DB 行、不动 `ORPHAN_SIZE`。`deleteFromQueue` 对称处理。`rebuildMemoryFromDb` 因此按构造只会重建出非分片块，不需要类别字节。
 
+- [ ] **Step 3b: 断言每一个上限都被接线命名（Task 4 留下的债）**
+
+`OrphanLimits` 里未命名的上限是 `UNLIMITED`（`Integer.MAX_VALUE`），不是保守默认值。所以**接线时漏掉任何一个上限，那个类别就变成无界的**——SP0b-3 要加的防护静默失效，而且没有任何征兆。
+
+写一个测试：用真实 `ChainSpec` 构造生产用的 `OrphanLimits`，断言四个类别上限与全局上限**没有一个等于 `UNLIMITED`**，并断言它们等于 Task 2 的九个键的当前值。将来新增类别时这个测试会立刻响。
+
+```java
+@Test
+public void everyCapIsNamedByTheProductionWiring() {
+    OrphanLimits limits = OrphanBlockStoreImpl.limitsFrom(new DevnetConfig().getChainSpec());
+    for (OrphanCategory c : OrphanCategory.values()) {
+        assertNotEquals("category " + c + " was left unbounded by the wiring",
+                OrphanLimits.UNLIMITED, limits.capFor(c));
+    }
+    assertNotEquals(OrphanLimits.UNLIMITED, limits.poolLimit());
+}
+```
+
 - [ ] **Step 4: 跑既有测试，必须全绿且断言未改**
 - [ ] **Step 5: 提交**
 
