@@ -114,18 +114,16 @@ public class ChainOrphanConfigTest {
     /** 低于 2 会让本节点拒绝其它节点接受的链，是共识分歧，必须启动即失败。 */
     @Test
     public void chunkTtlEpochsBelowTwoIsRefused() {
-        Config config = new DevnetConfig();
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
-                () -> applyOverride(config, "chain.orphan.chunkTtlEpochs", 1));
+                () -> withProperty("chain.orphan.chunkTtlEpochs", "1", DevnetConfig::new));
         assertTrue("the message must name the key and the floor: " + e.getMessage(),
                 e.getMessage().contains("chain.orphan.chunkTtlEpochs") && e.getMessage().contains("2"));
     }
 
     @Test
     public void perPeerQuotaAboveTheChunkLimitIsRefused() {
-        Config config = new DevnetConfig();
         assertThrows(IllegalArgumentException.class,
-                () -> applyOverride(config, "chain.orphan.chunkPerPeer", 999999));
+                () -> withProperty("chain.orphan.chunkPerPeer", "999999", DevnetConfig::new));
     }
 
     @Test
@@ -145,7 +143,14 @@ public class ChainOrphanConfigTest {
 }
 ```
 
-`applyOverride` 用 `ConfigFactory.parseString` 合成一个带该键的 typesafe Config 再喂给 `AbstractConfig` 的解析入口；照 `ChainSpec` 既有测试的做法。
+**覆盖机制用既有的 `ChainSpecTest.withProperty`**（`src/test/java/io/xdag/config/ChainSpecTest.java:51`）：设置 JVM 系统属性 → `ConfigFactory.invalidateCaches()` → 跑 body → `finally` 清理并再次失效缓存。`AbstractConfig.getSetting()`（`:329`）走的是 `ConfigFactory.load(getConfigName())`，系统属性会叠加在资源文件之上；而 `getSetting()` 由构造路径（`:180`）调用，所以校验失败会从构造器抛出。测试写成：
+
+```java
+assertThrows(IllegalArgumentException.class,
+        () -> withProperty("chain.orphan.chunkTtlEpochs", "1", DevnetConfig::new));
+```
+
+把 `withProperty` 抽成一个测试工具或在新测试类里复制一份，**不要**去找 `ConfigFactory.parseString`——仓库里没有那种写法。
 
 - [ ] **Step 2: 跑测试确认失败**
 
