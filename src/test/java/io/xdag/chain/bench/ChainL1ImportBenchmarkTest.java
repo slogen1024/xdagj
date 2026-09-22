@@ -57,6 +57,8 @@ import io.xdag.db.OrphanBlockStore;
 import io.xdag.db.PersistControl;
 import io.xdag.db.rocksdb.BlockStoreImpl;
 import io.xdag.db.rocksdb.DatabaseFactory;
+import io.xdag.chain.orphan.ChainOrphanPool.AccountLane;
+import io.xdag.chain.orphan.OrphanCategory;
 import io.xdag.db.rocksdb.OrphanBlockStoreImpl;
 import io.xdag.db.rocksdb.RocksdbFactory;
 import io.xdag.db.rocksdb.WriteBehindFactory;
@@ -79,7 +81,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -300,15 +301,19 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
     // none of them is on the OrphanBlockStore interface, and without them the row could silently
     // stop being the worst case (an empty linkQueue, an unseeded mainRef) and still look healthy.
     private static Collection<?> mainRef(OrphanBlockStore pool) {
-        return ((OrphanBlockStoreImpl) pool).getMainRef();
+        return ((OrphanBlockStoreImpl) pool).getPool().mainRefView();
     }
 
     private static Collection<?> linkQueue(OrphanBlockStore pool) {
-        return ((OrphanBlockStoreImpl) pool).getLinkQueue();
+        return ((OrphanBlockStoreImpl) pool).getPool().peekAll(OrphanCategory.LINK);
     }
 
-    private static Map<?, ?> accountBuckets(OrphanBlockStore pool) {
-        return ((OrphanBlockStoreImpl) pool).getAccountTxMap();
+    /**
+     * How many per-address buckets the regular account lane holds. A count rather than the map
+     * itself: the buckets live inside the pool now and it hands out counts, not its collections.
+     */
+    private static int accountBuckets(OrphanBlockStore pool) {
+        return ((OrphanBlockStoreImpl) pool).getPool().accountBucketCount(AccountLane.REGULAR);
     }
 
     /**
@@ -378,7 +383,7 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
             // The shape is the row's whole point, so assert it rather than assume it.
             assertEquals("the restore left a partial pool before a timed worst-case pass", flood.size(), (int) pool.getOrphanSize());
             assertEquals("chunks must flood linkQueue", links, linkQueue(pool).size());
-            assertEquals("the paying blocks must be concentrated on WORST_SENDERS buckets", WORST_SENDERS, accountBuckets(pool).size());
+            assertEquals("the paying blocks must be concentrated on WORST_SENDERS buckets", WORST_SENDERS, accountBuckets(pool));
             // Seeds mainRef exactly as a main block's selection does. The exact count is selectBlocks'
             // business (a linkQueue draw plus whatever the VIP branch contributes) and SP0b-3 is
             // going to change that order, so pin mainRef against what getOrphan actually handed out

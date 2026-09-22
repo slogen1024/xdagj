@@ -24,7 +24,6 @@
 package io.xdag.chain.orphan;
 
 import io.xdag.core.Block;
-import io.xdag.db.rocksdb.OrphanBlockStoreImpl.OrphanMeta;
 import io.xdag.utils.XdagTime;
 import java.util.NavigableSet;
 import java.util.Objects;

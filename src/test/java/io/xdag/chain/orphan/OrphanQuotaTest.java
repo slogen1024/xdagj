@@ -30,7 +30,6 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import io.xdag.chain.orphan.ChainOrphanPool.AccountLane;
-import io.xdag.db.rocksdb.OrphanBlockStoreImpl.OrphanMeta;
 import java.util.List;
 import org.apache.tuweni.bytes.Bytes32;
 import org.bouncycastle.util.encoders.Hex;

@@ -29,6 +29,7 @@ import io.xdag.crypto.keys.Signer;import io.xdag.crypto.hash.HashUtils;import io
 import com.google.common.collect.Lists;
 import io.xdag.Kernel;
 import io.xdag.Wallet;
+import io.xdag.chain.orphan.OrphanMeta;
 import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
 import io.xdag.crypto.SampleKeys;
@@ -2383,7 +2384,7 @@ public class BlockchainTest {
         long feeLong = UInt64.fromBytes(Bytes.wrap(BytesUtils.bigIntegerToBytes(fee.toXAmount(), 8))).toLong();
         //examine
         List<Pair<byte[], byte[]>> raw = ((OrphanBlockStoreImpl) (kernel.getOrphanBlockStore())).getOrphanSource().prefixKeyAndValueLookup(BytesUtils.of(ORPHAN_PREFEX));
-        OrphanBlockStoreImpl.OrphanMeta meta = OrphanBlockStoreImpl.OrphanMeta.parse(raw.getFirst());
+        OrphanMeta meta = OrphanMeta.parse(raw.getFirst());
         assertArrayEquals(hashlow.toArray(), meta.getHashlow().toArray());
         assertEquals(nonceLong, meta.getNonce());
         assertTrue(meta.isTx());
@@ -2429,7 +2430,7 @@ public class BlockchainTest {
         time = txAccount.getTimestamp();
 
         raw = ((OrphanBlockStoreImpl) (kernel.getOrphanBlockStore())).getOrphanSource().prefixKeyAndValueLookup(BytesUtils.of(ORPHAN_PREFEX));
-        meta = OrphanBlockStoreImpl.OrphanMeta.parse(raw.getFirst());
+        meta = OrphanMeta.parse(raw.getFirst());
 //        feeLong = BytesUtils.bytesToLong(fee.toXAmount().toBytes().toArray(), 0, true);
         feeLong = UInt64.fromBytes(Bytes.wrap(BytesUtils.bigIntegerToBytes(fee.toXAmount(), 8))).toLong();
 
@@ -2473,7 +2474,7 @@ public class BlockchainTest {
         time = txAccount.getTimestamp();
 
         raw = ((OrphanBlockStoreImpl) (kernel.getOrphanBlockStore())).getOrphanSource().prefixKeyAndValueLookup(BytesUtils.of(ORPHAN_PREFEX));
-        meta = OrphanBlockStoreImpl.OrphanMeta.parse(raw.getFirst());
+        meta = OrphanMeta.parse(raw.getFirst());
         feeLong = UInt64.fromBytes(Bytes.wrap(BytesUtils.bigIntegerToBytes(fee.toXAmount(), 8))).toLong();
         assertArrayEquals(hashlow.toArray(), meta.getHashlow().toArray());
         assertEquals(nonceLong, meta.getNonce());

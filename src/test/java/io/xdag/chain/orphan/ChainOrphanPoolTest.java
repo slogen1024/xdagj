@@ -31,7 +31,6 @@ import static org.junit.Assert.assertTrue;
 
 import io.xdag.chain.ext.ExtKind;
 import io.xdag.chain.orphan.ChainOrphanPool.AccountLane;
-import io.xdag.db.rocksdb.OrphanBlockStoreImpl.OrphanMeta;
 import java.util.List;
 import java.util.NavigableSet;
 import java.util.TreeSet;

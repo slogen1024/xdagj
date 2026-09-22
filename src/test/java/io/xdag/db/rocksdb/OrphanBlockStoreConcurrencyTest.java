@@ -33,6 +33,7 @@ import static org.mockito.Mockito.when;
 
 import io.xdag.Kernel;
 import io.xdag.chain.InMemoryKVSource;
+import io.xdag.config.DevnetConfig;
 import io.xdag.core.Block;
 import io.xdag.core.Blockchain;
 import io.xdag.core.XAmount;
@@ -77,6 +78,10 @@ public class OrphanBlockStoreConcurrencyTest {
         Kernel kernel = mock(Kernel.class);
         when(kernel.getBlockchain()).thenReturn(blockchain);
         when(kernel.getAddressStore()).thenReturn(addressStore);
+        // The store reads the orphan caps out of the chain specification when it is built. A real
+        // configuration rather than another mock: the caps it hands over are the shipping numbers,
+        // so these tests exercise the pool the node actually runs with.
+        when(kernel.getConfig()).thenReturn(new DevnetConfig());
 
         // start() is deliberately not called: it would also schedule the expiry cleaner, whose
         // ticks take the very monitor these tests hold on purpose.

@@ -25,10 +25,14 @@ package io.xdag.chain.orphan;
 
 import com.google.common.primitives.UnsignedBytes;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
@@ -36,6 +40,7 @@ import java.util.Objects;
 import java.util.TreeSet;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
+import org.apache.tuweni.units.bigints.UInt64;
 
 /**
  * The orphan pool's in-memory side: four categories kept in separate ordered sets, plus one hashlow
@@ -191,6 +196,47 @@ public final class ChainOrphanPool {
     private final int[] counts = new int[OrphanCategory.values().length];
 
     /**
+     * The orphans already handed to a main block and not yet confirmed — today's {@code mainRef}
+     * ({@code OrphanBlockStoreImpl.java:72}), moved here with the rest of the in-memory state.
+     *
+     * <p><b>Its entries are not pooled.</b> Selection takes an orphan out of its category set (and
+     * out of {@link #index}, and off every counter) and then parks it here, so nothing in this
+     * deque is reachable through {@link #get} and nothing in it counts towards {@link #totalSize}.
+     * That is why every operation below is spelled out separately instead of riding on the index:
+     * the index is about what the pool still holds, and this is about what it has already given
+     * away.
+     *
+     * <p>A {@link LinkedList} and not the old {@code ConcurrentLinkedDeque}: the concurrent
+     * collection is unnecessary under the blockchain monitor (see this class's header), and a
+     * linked list keeps exactly the semantics the packing walk depends on — insertion order, and an
+     * iterator whose {@code remove()} does not disturb the elements behind the cursor. An {@code
+     * ArrayDeque} would be the usual swap, but its interior removal moves elements between the ends
+     * of the ring, and the consuming walk in {@code selectBlocks} is order-sensitive.
+     */
+    private final Deque<OrphanEntry> mainRef = new LinkedList<>();
+
+    /**
+     * The VIP lane's nonce watermark per address — today's {@code accountNonce} ({@code
+     * OrphanBlockStoreImpl.java:74}).
+     *
+     * <p>What it is for: the VIP rule admits the transaction whose nonce is exactly one past the
+     * <em>executed</em> nonce, and {@code AddressStore.getExecutedNonceNum} only advances once a
+     * transaction is applied. Without a watermark a sender could never get two VIP transactions
+     * into the pool at once. Recording the nonce of each VIP admission lets the lane run ahead of
+     * the address store by as many contiguous transactions as the sender sends.
+     *
+     * <p>Written here rather than by the caller so that it cannot drift from the lane it describes:
+     * it is set when an entry is admitted into {@link AccountLane#VIP} and dropped when that
+     * address's VIP bucket empties ({@link #reclaimIfEmpty}), which is what the three separate
+     * removal sites in the old store each did by hand.
+     *
+     * <p>The pool does not evaluate the VIP rule — that needs the address store and the fee
+     * constant, neither of which this package knows about. The caller decides the lane; this only
+     * remembers what the decision was.
+     */
+    private final Map<String, UInt64> vipNonce = new HashMap<>();
+
+    /**
      * How long an orphan that is not a chunk is kept, on this node's wall clock. Fifteen minutes,
      * which is what {@code startCleaner} passes {@code cleanExpiredOrphans} today ({@code
      * OrphanBlockStoreImpl.java:117-119}).
@@ -281,6 +327,13 @@ public final class ChainOrphanPool {
         holder.add(entry);
         entry.holder = holder;
         entry.vip = entry.category() == OrphanCategory.ACCOUNT_TX && lane == AccountLane.VIP;
+        if (entry.vip) {
+            // The watermark the next VIP decision for this address reads back. The old store wrote
+            // it one statement before offering the entry to the queue and wrote it even when the
+            // offer was a no-op; writing it on admission instead is the same value — a repeat of a
+            // hashlow is a repeat of its nonce — and it cannot outlive an entry that never went in.
+            vipNonce.put(entry.addressKey(), UInt64.valueOf(entry.meta().getNonce()));
+        }
         index.put(entry.hashlow(), entry);
         counts[entry.category().ordinal()]++;
         total++;
@@ -480,6 +533,123 @@ public final class ChainOrphanPool {
         return index.get(hashlow);
     }
 
+    /**
+     * The entry this category would hand out next — the head of its ordered set — or null when the
+     * category is empty. The packing walk reads this, takes the entry, then {@link #remove}s it by
+     * hashlow, which is the only way an entry ever leaves.
+     *
+     * @throws IllegalArgumentException for {@link OrphanCategory#ACCOUNT_TX}, which has no single
+     *     head; ask an address for its own with {@link #firstOf}
+     */
+    public OrphanEntry first(OrphanCategory category) {
+        NavigableSet<OrphanEntry> set = setFor(category);
+        return set.isEmpty() ? null : set.first();
+    }
+
+    /** The head of one address's bucket in one lane, or null when the address holds nothing. */
+    public OrphanEntry firstOf(String addressKey, AccountLane lane) {
+        NavigableSet<OrphanEntry> bucket = laneMap(lane).get(addressKey);
+        return bucket == null ? null : bucket.first();
+    }
+
+    /**
+     * The addresses holding something in this lane, as a snapshot.
+     *
+     * <p>A copy, because the caller walks it while removing entries, and removing the last entry of
+     * an address drops that address's bucket — a write into the very map a live key set would be a
+     * view of.
+     */
+    public List<String> addressKeys(AccountLane lane) {
+        return new ArrayList<>(laneMap(lane).keySet());
+    }
+
+    /**
+     * The VIP lane's nonce watermark for this address, or null when it holds no VIP entry. See
+     * {@link #vipNonce} for what it is and who writes it.
+     */
+    public UInt64 vipNonce(String addressKey) {
+        return vipNonce.get(addressKey);
+    }
+
+    /** Parks an entry already handed to a main block. See {@link #mainRef}. */
+    public void mainRefAdd(OrphanEntry entry) {
+        mainRef.add(entry);
+    }
+
+    /** Whether this hashlow has already been handed to a main block. */
+    public boolean mainRefContains(Bytes32 hashlow) {
+        return mainRefFind(hashlow) != null;
+    }
+
+    /**
+     * Drops this hashlow from the handed-out deque and says whether anything was there.
+     *
+     * <p>By hashlow rather than by instance, because the two callers have no instance to give: an
+     * entry parked here is no longer in {@link #index}, so a removal or an expiry that wants it
+     * gone has only the hash it is working from. The scan is what the old {@code
+     * ConcurrentLinkedDeque.remove(Object)} did too.
+     */
+    public boolean mainRefRemove(Bytes32 hashlow) {
+        OrphanEntry found = mainRefFind(hashlow);
+        return found != null && mainRef.remove(found);
+    }
+
+    public int mainRefSize() {
+        return mainRef.size();
+    }
+
+    public boolean mainRefIsEmpty() {
+        return mainRef.isEmpty();
+    }
+
+    /**
+     * The handed-out deque's own iterator, in the order entries were parked. Live and removing:
+     * the link-block packing path consumes what it takes, so the walk and the removal have to be
+     * the same traversal.
+     */
+    public Iterator<OrphanEntry> mainRefIterator() {
+        return mainRef.iterator();
+    }
+
+    /** The handed-out deque, read-only, for assertions and logging. */
+    public Collection<OrphanEntry> mainRefView() {
+        return Collections.unmodifiableCollection(mainRef);
+    }
+
+    private OrphanEntry mainRefFind(Bytes32 hashlow) {
+        for (OrphanEntry entry : mainRef) {
+            if (entry.hashlow().equals(hashlow)) {
+                return entry;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Empties every collection an entry can sit in, for a rebuild from the database.
+     *
+     * <p><b>{@link #vipNonce} is deliberately left alone.</b> Today's {@code rebuildMemoryFromDb}
+     * clears six collections and not {@code accountNonce} ({@code
+     * OrphanBlockStoreImpl.java:97-102}), and that is preserved rather than tidied: the watermark
+     * only ever moves a VIP decision <em>forward</em>, so a surviving one can at worst deny the fast
+     * lane to a nonce already admitted once — while clearing it would let the lane re-admit a nonce
+     * it has already seen. It is left as it is because it was written that way, not because nobody
+     * looked.
+     */
+    public void clearEntries() {
+        linkSet.clear();
+        mtxSet.clear();
+        chunkSet.clear();
+        accountTxMap.clear();
+        vipTxMap.clear();
+        index.clear();
+        chunkPerPeer.clear();
+        chunkPerChain.clear();
+        mainRef.clear();
+        Arrays.fill(counts, 0);
+        total = 0;
+    }
+
     public boolean contains(Bytes32 hashlow) {
         return index.containsKey(hashlow);
     }
@@ -495,6 +665,24 @@ public final class ChainOrphanPool {
 
     public int totalSize() {
         return total;
+    }
+
+    /**
+     * How many account transactions one lane holds across every address.
+     *
+     * <p>Summed, not counted: the two lanes share the {@link OrphanCategory#ACCOUNT_TX} cap, so
+     * there is one counter for both and no cheaper answer. This is the same sum the old store
+     * computed inline at each of its call sites ({@code accountTxMap.values().stream()
+     * .mapToLong(Queue::size).sum()}), at the same cost — linear in the number of addresses, not in
+     * the number of entries. The packing walk needs the lanes apart, which is why it cannot use
+     * {@link #size}.
+     */
+    public int laneSize(AccountLane lane) {
+        int sum = 0;
+        for (NavigableSet<OrphanEntry> bucket : laneMap(lane).values()) {
+            sum += bucket.size();
+        }
+        return sum;
     }
 
     /**
@@ -574,6 +762,13 @@ public final class ChainOrphanPool {
     private void reclaimIfEmpty(OrphanEntry stored, NavigableSet<OrphanEntry> holder) {
         if (stored.category() == OrphanCategory.ACCOUNT_TX && holder.isEmpty()) {
             laneMap(stored.isVip() ? AccountLane.VIP : AccountLane.REGULAR).remove(stored.addressKey());
+            if (stored.isVip()) {
+                // The watermark goes with the lane it describes. The old store dropped it in all
+                // three places a VIP bucket could empty — removal, expiry and selection — and
+                // keeping it past the last VIP entry would hold the lane's nonce ahead of the
+                // address store with nothing left in the pool to justify it.
+                vipNonce.remove(stored.addressKey());
+            }
         }
     }
 
