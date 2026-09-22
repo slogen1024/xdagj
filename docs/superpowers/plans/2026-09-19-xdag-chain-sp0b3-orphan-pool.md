@@ -690,7 +690,11 @@ public void aLinkBlockStillDrainsTheLinkQueue() {
 
 - [ ] **Step 1: 写失败测试**：经 `IngestPipeline` 投递两个不同 peer 的分片块，断言池内两条的 `peerKey` 不同且各计各的配额。
 - [ ] **Step 2: 跑测试确认失败**
-- [ ] **Step 3: 实现**：`tryToConnect(PreValidated pv)` 从 `pv.wrapper().getRemotePeer()` 取来源、从 `pv.classified().kind()` 取分类，一路传到 `dealOrphan(block, peerKey, kind)` 与 `addOrphan(..., peerKey, kind)`。`tryToConnect(Block)` 传 null/null。分片链头由沿 `next` 归组得到，归不到则为 null。
+- [ ] **Step 3: 实现**：`tryToConnect(PreValidated pv)` 从 `pv.wrapper().getRemotePeer()` 取来源、从 `pv.classified().kind()` 取分类，一路传到 `dealOrphan(block, peerKey, kind)` 与 `addOrphan(..., peerKey, kind)`。`tryToConnect(Block)` 传 null/null。
+
+**`peerKey` 取 `Peer.getIp()`，不是 `getPeerId()`**——理由见 Task 5 前置说明，那里有完整论证，这里只重申结论：`peerId` 可零成本再生，拿它当配额键等于没有配额。
+
+**链头归组的质量直接决定按链配额的强度。** Task 5 查明：归不到链头（head 为 null）的分片块完全绕过按链那一层，只受按 peer 与全局约束。所以归组越弱，攻击者越容易把自己的分片块做成「无主」来只付按 IP 的 5000 而不碰按链的 20000。这仍然是有界的，可以接受，但**不要为了省事而让归组轻易返回 null**：沿 `next` 能走到的就走到，走不到再记为无主。在实现里注明这层关系，免得后来者以为 null 只是个无所谓的缺省。
 - [ ] **Step 4–6**: 跑测试、变异验证、提交。
 
 ---
