@@ -108,9 +108,10 @@ public class ChunkDeferredPersistTest extends ChainL1TestBase {
         assertFalse("nor leave a BlockInfo row behind for a body that is not there",
                 kernel.getBlockStore().hasBlockInfo(chunk.getHashLow()));
 
-        // Still held, and still answerable for. The plan's sketch asserted this through
-        // getBlockByHash; that lookup is on the consensus path and is merged with the body store in
-        // its own task, so what is pinned here is the store the merge will read.
+        // Still held, and still answerable for -- through the merged lookup, which reads the body
+        // store as its third source, and through that store directly.
+        assertNotNull("but it must still be servable from memory",
+                blockchain.getBlockByHash(hashLow(chunk), true));
         Bytes body = blockchain.getOrphanBlockStore().getChunkBody(hashLow(chunk));
         assertNotNull("but it must still be servable from memory", body);
         assertEquals("and byte for byte what arrived", chunk.getXdagBlock().getData(), body);

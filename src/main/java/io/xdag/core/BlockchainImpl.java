@@ -578,10 +578,15 @@ public class BlockchainImpl implements Blockchain {
                     // something pays for the chain, so every chunk past the tail would be
                     // NO_PARENT and the chain could never be completed or paid for.
                     //
-                    // This is NOT the getBlockByHash merge -- that is a separate change, because
-                    // that lookup is on the consensus path and is called off the monitor. Here the
-                    // fallback is explicit, at the one call site that must see a pooled chunk to
-                    // keep working, and it goes away when the merge lands.
+                    // The getBlockByHash merge has landed and this fallback still stands, because
+                    // the merge answers the RAW form only and this check is deliberately not the
+                    // raw form. "Have you got this block" is satisfied here by a BlockInfo alone,
+                    // and that is what lets a snapshot-bootstrapped node accept references to
+                    // blocks from before its snapshot time -- it has their BlockInfo and not their
+                    // bytes, so asking getBlockByHash(ref, true) instead would turn every one of
+                    // those references into NO_PARENT. (It is also the reason ChunkChain has an age
+                    // rule at all: see its class documentation.) So the two questions stay
+                    // separate, and this is the one call site that needs both answered.
                     Block refBlock = getBlockByHash(ref.getAddress(), false);
                     if (refBlock == null) {
                         refBlock = pooledChunkBody(ref.getAddress());
@@ -1018,7 +1023,16 @@ public class BlockchainImpl implements Blockchain {
         if (hash == null) {
             return null;
         }
-        Bytes body = orphanBlockStore.getChunkBody(hashLowOf(hash));
+        return chunkBodyAt(hashLowOf(hash));
+    }
+
+    /**
+     * As {@link #pooledChunkBody}, for a hash already normalised to a hashlow — the form
+     * {@link #getBlockByHash} has built by the time it gets here, so the merged lookup does not
+     * normalise twice on a path that runs for every block that is not found at all.
+     */
+    private Block chunkBodyAt(Bytes32 hashlow) {
+        Bytes body = orphanBlockStore.getChunkBody(hashlow);
         return body == null ? null : new Block(new XdagBlock(body.toArray()));
     }
 
@@ -2575,6 +2589,72 @@ public class BlockchainImpl implements Blockchain {
         return getBlockByHeightNew(height);
     }
 
+    /**
+     * The node's one block lookup, over the three places a block this node holds can be: the extra
+     * blocks in {@link #memOrphanPool}, the block store, and — since the deferred persist — the
+     * orphan pool's chunk body store, which is the only copy anywhere of a chunk nothing has paid
+     * to store yet.
+     *
+     * <h2>Order: the body store goes last, and that is load-bearing</h2>
+     *
+     * <p><b>Equivalence.</b> The first two sources are consulted exactly as they were, in the same
+     * order, with the same arguments, and the third is reached only when both answered null. So no
+     * answer that used to be non-null can change — the merge is invisible to every block that could
+     * already be found, by construction rather than by inspection of each caller. That is the
+     * property {@code BlockLookupEquivalenceTest} pins, and this shape is why it holds.
+     *
+     * <p><b>The three are not disjoint.</b> {@code persistReferencedChunkChains} writes a chunk to
+     * the block store and only then drops its body (through the {@code removeOrphan} that follows
+     * each save), so between those two statements the hash is in both — and netty threads read this
+     * method throughout, holding nothing. Store-first decides that race in favour of the persisted
+     * form, which is the complete one: it carries the {@link BlockInfo} the import just computed,
+     * where a body carries none at all. Body-first would hand a caller a difficulty-less,
+     * flag-less block for one this node has fully imported.
+     *
+     * <p><b>Cost.</b> This is the lookup on the consensus path ({@code ChainL1Processor} reaches it
+     * through the lambda this class hands its constructor) and the one the P2P serve paths call.
+     * Last means a found block costs exactly what it cost before; only a lookup that was going to
+     * return null pays for one extra hash-map read.
+     *
+     * <h2>{@code isRaw}: the body store answers the raw form only</h2>
+     *
+     * <p>{@code isRaw} does not choose a representation of one thing, it chooses <em>which stored
+     * artifact</em> is wanted: {@code true} is {@code getRawBlockByHash}, the block's 512 wire
+     * bytes; {@code false} is {@code getBlockInfoByHash}, the chain metadata the store keeps about
+     * it — flags, difficulty, ref, amount, height — and a block loaded that way carries neither
+     * links nor extension fields. The body store holds the wire bytes and nothing else, so it can
+     * answer the first question exactly and has no answer at all to the second: a memory-only chunk
+     * has no stored {@code BlockInfo} anywhere on this node, and a freshly parsed one is all
+     * zeroes, which is not "unknown" but a set of specific wrong claims — not referenced, not main,
+     * not applied, no difficulty — that {@code isRaw=false} callers read and act on.
+     *
+     * <p>Two of them show what that would cost, and they are why this is a rule and not a taste:
+     *
+     * <ul>
+     *   <li>{@code removeOrphan} opens with {@code getBlockByHash(hashlow, false)} and, on any
+     *       non-null answer whose {@code BI_REF} is clear, calls {@code deleteFromQueue}. A chunk
+     *       names the chunk after it, so importing chunk <i>i</i> would evict chunk <i>i+1</i> from
+     *       the pool and destroy the only copy of its bytes in existence — a chain that can then
+     *       never be assembled and never be paid for. Before the deferred persist the identical
+     *       removal was harmless, because the successor was already on disk; it is the storage that
+     *       changed, not the removal.</li>
+     *   <li>{@link #calculateBlockDiff} reads {@code refBlock.getInfo().getDifficulty()} off an
+     *       {@code isRaw=false} lookup. A virgin body would contribute zero there, which is neither
+     *       what a node holding the chunk on disk computes nor what one that never received it
+     *       does.</li>
+     * </ul>
+     *
+     * <p>This is also what every caller the merge exists for asks for. {@code ChunkChain} documents
+     * that its lookup must return raw blocks and the consensus lambda passes {@code true};
+     * {@code XdagP2pHandler}'s two serve paths pass {@code true}. What it does not reach is
+     * {@code getBlocksByTime}, which walks the block store's TIME index — written only by
+     * {@code saveBlock} — and resolves each row through the store's own lookup: a memory-only chunk
+     * has no row there to be found by, and giving it one is a different change from this one.
+     *
+     * <p>What leaves the body store is a block parsed afresh from immutable bytes, so a caller can
+     * do what it likes to it without any other reader seeing it — {@code a51e09c5}'s copy-on-serve
+     * rule, made a property of the storage rather than a habit of each caller.
+     */
     @Override
     public Block getBlockByHash(Bytes32 hashlow, boolean isRaw) {
         if (hashlow == null) {
@@ -2587,6 +2667,9 @@ public class BlockchainImpl implements Blockchain {
         Block b = memOrphanPool.get(Bytes32.wrap(keyHashlow));
         if (b == null) {
             b = blockStore.getBlockByHash(keyHashlow, isRaw);
+        }
+        if (b == null && isRaw) {
+            b = chunkBodyAt(Bytes32.wrap(keyHashlow));
         }
         return b;
     }
