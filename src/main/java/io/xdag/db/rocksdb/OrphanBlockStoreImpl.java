@@ -26,6 +26,9 @@ package io.xdag.db.rocksdb;
 
 import com.google.common.primitives.UnsignedBytes;
 import io.xdag.Kernel;
+import io.xdag.chain.ext.ChunkExt;
+import io.xdag.chain.ext.Classified;
+import io.xdag.chain.ext.ExtKind;
 import io.xdag.chain.orphan.ChainOrphanPool;
 import io.xdag.chain.orphan.ChainOrphanPool.AccountLane;
 import io.xdag.chain.orphan.OrphanAdmission;
@@ -166,7 +169,11 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
 
         List<Pair<byte[], byte[]>> raw = orphanSource.prefixKeyAndValueLookup(BytesUtils.of(ORPHAN_PREFEX));
         for (Pair<byte[], byte[]> pair : raw) {
-            admit(OrphanMeta.parse(pair));
+            // No peer, no classification and so no chain key: a row says what the block was, never
+            // who sent it, and by construction no row belongs to a chunk. Nothing is lost — the
+            // two chunk-only quotas have nothing to count here.
+            OrphanMeta meta = OrphanMeta.parse(pair);
+            admit(meta, categoryOf(meta, null), null, null);
         }
         log.debug("init orphan size:{}", BytesUtils.bytesToLong(orphanSource.get(ORPHAN_SIZE), 0, false));
 
@@ -353,7 +360,8 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
                 pool.size(OrphanCategory.MTX), pool.size(OrphanCategory.LINK), pool.mainRefSize());
     }
 
-    public void addOrphan(Block block, boolean isTxBlock, UInt64 nonce, XAmount fee, byte[] address) {
+    public void addOrphan(Block block, boolean isTxBlock, UInt64 nonce, XAmount fee, byte[] address,
+            String peerKey, Classified classified) {
         // key: 0x00 + hashlow(24B) + nonce(8B) + isTx(1B)
         byte[] hashlow = Arrays.copyOfRange(block.getHashLow().toArray(), 8, 32); // Extract effective 24B
         byte[] nonceBytes = BytesUtils.bigIntegerToBytes(nonce, 8);
@@ -366,8 +374,9 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
         byte[] value = BytesUtils.merge(timeBytes, feeBytes, addrBytes);
 
         OrphanMeta meta = OrphanMeta.parse(key, value);
-        OrphanCategory category = categoryOf(meta);
-        OrphanAdmission verdict = admit(meta);
+        ExtKind kind = classified == null ? null : classified.kind();
+        OrphanCategory category = categoryOf(meta, kind);
+        OrphanAdmission verdict = admit(meta, category, peerKey, chunkChainKeyFor(meta, classified));
 
         if (verdict != OrphanAdmission.ADMITTED && verdict != OrphanAdmission.DUPLICATE) {
             // The import path refuses a block whose category is full before it ever reaches here,
@@ -400,28 +409,101 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
     /**
      * The routing {@code addOrphanToMemory} used to do, now one pool call: the category picks the
      * collection, and for an account transaction {@link #laneFor} picks which of the two lanes.
+     *
+     * <p>The chunk body is still null here. That one arrives with the deferred-persist change; the
+     * source peer and the chain key are supplied by the caller above.
      */
-    private OrphanAdmission admit(OrphanMeta meta) {
-        OrphanCategory category = categoryOf(meta);
-        // The source peer, the chunk chain head and the chunk body are all null here. They arrive
-        // with the ingest pipeline that carries them — peer and kind first, the deferred body after
-        // — and until then no orphan is attributed to a peer and none classifies as a chunk.
-        OrphanEntry entry = new OrphanEntry(meta, category, null, null, null);
+    private OrphanAdmission admit(OrphanMeta meta, OrphanCategory category, String peerKey,
+            Bytes32 chainKey) {
+        OrphanEntry entry = new OrphanEntry(meta, category, peerKey, chainKey, null);
         return category == OrphanCategory.ACCOUNT_TX
                 ? pool.add(entry, laneFor(meta))
                 : pool.add(entry);
     }
 
     /**
-     * The category, from exactly the two fields the old routing looked at.
+     * The category, from the two fields the old routing looked at plus the block's extension kind.
      *
-     * <p>The kind is null because nothing on this path carries one yet, and a null kind can never
-     * be {@link OrphanCategory#CHUNK} — so chunk blocks keep landing in {@link OrphanCategory#LINK}
-     * exactly as they do today, and the chunk handling above stays dormant until the ingest
-     * pipeline supplies the classification.
+     * <p>A null kind can never be {@link OrphanCategory#CHUNK}, so every path that carries no
+     * classification — a locally produced block, the roll-back's re-orphan, the rebuild below —
+     * files a chunk-shaped block under {@link OrphanCategory#LINK} exactly as the whole import path
+     * did before the pipeline started carrying one. That is a node-local difference in which bucket
+     * the block sits in, never a disagreement: {@code BlockchainImpl}'s admission gate is handed the
+     * same classification this method is, so the two halves always name the same category.
+     *
+     * <p>A block whose kind byte says CHUNK but whose CHUNK extension does not decode is still
+     * filed as a chunk, deliberately. It can never be part of a chain any paying block can settle
+     * ({@code ChunkChain.assemble} refuses it), so the question is only which bucket this node
+     * carries the garbage in — and the chunk bucket is the cheap one: memory-only, aged out in two
+     * epochs, capped per source. Filing it as a link block would put it on disk, in ORPHANIND, and
+     * in the queue a mined block packs from.
      */
-    private static OrphanCategory categoryOf(OrphanMeta meta) {
-        return OrphanCategory.of(meta.isTx(), meta.getAddress(), null);
+    private static OrphanCategory categoryOf(OrphanMeta meta, ExtKind kind) {
+        return OrphanCategory.of(meta.isTx(), meta.getAddress(), kind);
+    }
+
+    /**
+     * Which chunk chain this block is charged to, or null when it belongs to no chain the node can
+     * name. Only chunks have one.
+     *
+     * <h2>Null is not free, so it is not the default</h2>
+     *
+     * <p>A chunk with no chain key skips the per-chain tier altogether — {@code ChainOrphanPool}
+     * charges nothing to a null key — and is left standing on the per-peer and global caps alone.
+     * So every chunk that comes back null is a chunk a flooder got a tier cheaper, and "could not
+     * work it out" must therefore mean <em>could not</em>, not "did not try". The single null this
+     * method returns for a chunk is the one where the chain link genuinely cannot be read: the
+     * block's own CHUNK extension failed to decode, so there is no {@code next} field to believe.
+     *
+     * <h2>Grouping along {@code next}, and why one hop is the whole cheap walk</h2>
+     *
+     * <p>A chunk names its successor and nothing else ({@code ChunkExt.next}, absent on the tail);
+     * chains are built and imported tail-first, because XDAG will not import a block before the
+     * block it references. So a tail roots its own chain and is keyed by itself, and every other
+     * chunk is keyed by the chain it attaches to.
+     *
+     * <p>Where the pool still holds the successor, its key is inherited — that is the walk,
+     * collapsed to one hop by the fact that the successor already did the walking when it was
+     * admitted. Where it does not, the key is the successor's hashlow: the furthest point on the
+     * chain this node can name without reading blocks off disk.
+     *
+     * <p><b>Today the fallback is the live branch, and that is a property of the import path, not
+     * of this method.</b> {@code tryToConnect} un-orphans everything an imported block references
+     * before it pools the block itself, so a chunk's successor has just been taken out of the pool
+     * by this very import and there is nothing left to inherit from. Going further would mean
+     * walking the chain through the block store from inside the blockchain monitor, turning an
+     * O(log n) admission into an O(chain length) one — the trade {@code ChainOrphanPool} refused
+     * when it made the key an argument instead of deriving it. The inherit branch becomes the live
+     * one as soon as a chunk stops being reachable through {@code getBlockByHash}, since
+     * {@code removeOrphan} then finds nothing to un-orphan and the successor stays pooled.
+     *
+     * <p>What the fallback still buys is the shape the tier exists to bound: many chunks naming one
+     * block — a distributed flood piling onto a single chain — all land in one bucket and are cut
+     * off at {@code chunkPerChain}. What no derivation can bound is a flooder that gives every
+     * chunk a different successor, because that really is a chunk per chain; the per-peer and
+     * global caps are what hold that, and the per-peer one (5000) bites long before the per-chain
+     * one (20000) for any single source.
+     *
+     * <p><b>Cost:</b> one hash-map lookup and no I/O, under the blockchain monitor the caller
+     * already holds.
+     */
+    private Bytes32 chunkChainKeyFor(OrphanMeta meta, Classified classified) {
+        if (classified == null || classified.kind() != ExtKind.CHUNK) {
+            return null;
+        }
+        if (!classified.isOk()) {
+            return null;
+        }
+        Bytes32 next = classified.as(ChunkExt.class).next();
+        if (next == null) {
+            return meta.getHashlow();
+        }
+        OrphanEntry successor = pool.get(next);
+        if (successor != null && successor.category() == OrphanCategory.CHUNK
+                && successor.chainHead() != null) {
+            return successor.chainHead();
+        }
+        return next;
     }
 
     /**
@@ -520,11 +602,11 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
      *
      * <p>The link branch used to come first for a main block and {@code return} unconditionally
      * once it had drained what it could, so the merged account-transaction and mtx walk below it
-     * was reached only when {@code linkQueue} was empty. Chunk blocks live in {@code linkQueue}
-     * (nothing classifies them as {@link OrphanCategory#CHUNK} until the ingest pipeline carries a
-     * kind this far), so a steady trickle of link traffic kept account transactions out of main
-     * blocks indefinitely. Task 8 closed the admission half of that starvation; this is the other
-     * half, and closing only one of them closes neither.
+     * was reached only when {@code linkQueue} was empty. A steady trickle of link traffic therefore kept
+     * account transactions out of main blocks indefinitely — and at the time chunk blocks were part
+     * of that trickle, since nothing classified them as {@link OrphanCategory#CHUNK} until the
+     * ingest pipeline began carrying a kind this far. Task 8 closed the admission half of that
+     * starvation; this is the other half, and closing only one of them closes neither.
      *
      * <p>Which queue gets a slot is now decided in this order:
      *
@@ -624,8 +706,13 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
         // size(ACCOUNT_TX) counts the two together — it would answer this gate with transactions
         // this walk has already taken.
         long accountTxCount = pool.laneSize(AccountLane.REGULAR);
-        // LINK alone, as before: to this walk a chunk is a link block until the ingest pipeline
-        // classifies it, and separating the two in the packing order is a later change.
+        // LINK alone, and now that really is link blocks alone: since the ingest pipeline began
+        // carrying the classification, a chunk sits in its own category and no block this node
+        // mines packs one. That is the intended shape -- an unpaid chunk is data nobody has paid to
+        // have referenced, and the block that pays for it is what brings the chain into the DAG --
+        // but it does mean an arriving chunk raises `nnoref` and only gives it back when its two
+        // epochs are up. Chunks that arrive with no classification (locally produced, or re-imported
+        // after NO_PARENT on a node with the pipeline off) are LINK and are packed exactly as before.
         int linkCount = pool.size(OrphanCategory.LINK);
         // The link block's gate, unchanged. A main block no longer enters here: its link fill comes
         // after the account transactions and mtx below, which is the whole of this task.

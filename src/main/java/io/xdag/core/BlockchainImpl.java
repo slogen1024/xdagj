@@ -30,6 +30,7 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import io.xdag.Kernel;
 import io.xdag.Wallet;
+import io.xdag.chain.ext.Classified;
 import io.xdag.chain.ingest.PreValidated;
 import io.xdag.chain.ingest.PreValidator;
 import io.xdag.chain.l1.ChainL1Hooks;
@@ -55,6 +56,7 @@ import io.xdag.db.rocksdb.SnapshotStoreImpl;
 import io.xdag.listener.BlockMessage;
 import io.xdag.listener.Listener;
 import io.xdag.listener.PretopMessage;
+import io.xdag.net.Peer;
 import io.xdag.utils.BasicUtils;
 import io.xdag.utils.BytesUtils;
 import io.xdag.utils.XdagTime;
@@ -441,6 +443,12 @@ public class BlockchainImpl implements Blockchain {
     @Override
     public synchronized ImportResult tryToConnect(PreValidated pv) {
         Block block = pv.block();
+        // The two facts the orphan pool's quotas and its chunk clock need, taken once, here, and
+        // carried to both places that must agree about them: the admission gate below and
+        // dealOrphan at the end. Both null on a path that carries neither, which is correct rather
+        // than degraded -- see peerKeyOf and OrphanBlockStore.addOrphan.
+        String peerKey = peerKeyOf(pv);
+        Classified classified = pv.classified();
 
         // TODO: if current height is snapshot height, we need change logic to process new block
 
@@ -518,7 +526,7 @@ public class BlockchainImpl implements Blockchain {
             // any block this node's own builders produce -- a transaction block is built with
             // mining == false, so getNonce() is null and isExtraBlock() is false for it.
             if ((block.getInfo().flags & BI_EXTRA) == 0) {
-                OrphanCategory category = orphanCategoryOf(block);
+                OrphanCategory category = orphanCategoryOf(block, classified);
                 if (orphanBlockStore.isFull(category)) {
                     result = ImportResult.INVALID_BLOCK;
                     result.setErrorInfo("Orphan block pool is full");
@@ -773,7 +781,7 @@ public class BlockchainImpl implements Blockchain {
                 xdagStats.nextra++;
             } else {
                 saveBlock(block);
-                dealOrphan(block);
+                dealOrphan(block, peerKey, classified);
                 xdagStats.nnoref++;
             }
             blockStore.saveXdagStatus(xdagStats);
@@ -852,7 +860,24 @@ public class BlockchainImpl implements Blockchain {
         }
     }
 
+    /**
+     * Pools a block that arrived carrying nothing about its origin. In production its one caller is
+     * the roll-back, which re-orphans a transaction block this node already holds: there is no peer
+     * to name and no classification to pass, and a transaction block is never a chunk anyway.
+     */
     public void dealOrphan(Block block) {
+        dealOrphan(block, null, null);
+    }
+
+    /**
+     * Pools a block with what the import path learned about it. {@code peerKey} is the source
+     * peer's IP or null; {@code classified} is the chain-extension classification or null.
+     *
+     * <p>Both travel all the way to {@code addOrphan} because the pool's two chunk-only quotas and
+     * its epoch clock have no other way to learn them — a block carries neither its sender nor, as
+     * far as the orphan store can see, its kind.
+     */
+    public void dealOrphan(Block block, String peerKey, Classified classified) {
         if (kernel.getConfig().getEnableGenerateBlock() && kernel.getPow() != null) {
             UInt64 nonce = UInt64.ZERO;
             XAmount fee = getTxFee(block);
@@ -860,8 +885,35 @@ public class BlockchainImpl implements Blockchain {
             if (address != null) {
                 nonce = block.getTxNonceField().getTransactionNonce();
             }
-            getOrphanBlockStore().addOrphan(block, isTxBlock(block), nonce, fee, address);
+            getOrphanBlockStore().addOrphan(block, isTxBlock(block), nonce, fee, address, peerKey,
+                    classified);
         }
+    }
+
+    /**
+     * The key the orphan pool charges this block's source for, or null when it came from no peer.
+     *
+     * <p><b>The IP, never {@code getPeerId()}.</b> The id is cryptographically bound — the
+     * handshake checks it is the Base58 address of the presented public key and verifies the
+     * signature — so one peer cannot claim another's. That makes it unforgeable and useless as a
+     * quota key at the same time, because nothing stops a flooder minting a fresh keypair and
+     * reconnecting: a per-id budget is reset for free, as often as the flooder likes, and a quota
+     * with no cost to evade is not a quota. {@code Peer.getIp()} is not self-reported — the handler
+     * builds the peer with {@code channel.getRemoteIp()}, the socket's own address — so spending
+     * that budget costs an attacker addresses.
+     *
+     * <p>The cost of this choice is real and deliberate: several honest nodes behind one NAT, or
+     * several instances on one host, share a single chunk budget. Throttling something an attacker
+     * can regenerate for nothing would not.
+     *
+     * <p>Null for every block that reached the chain without a wrapper from the network — mined
+     * here, built over RPC or the CLI, replayed by a repair tool. Those owe no peer, and charging
+     * them to some catch-all bucket would let this node's own mining shut its own intake down.
+     */
+    private static String peerKeyOf(PreValidated pv) {
+        BlockWrapper wrapper = pv.wrapper();
+        Peer peer = wrapper == null ? null : wrapper.getRemotePeer();
+        return peer == null ? null : peer.getIp();
     }
 
     /**
@@ -898,15 +950,16 @@ public class BlockchainImpl implements Blockchain {
      * same call: the {@code isTxBlock} flag and the address {@link #orphanAddressOf} returns, fed to
      * {@code OrphanCategory.of}.
      *
-     * <p>The kind is null here for the same reason it is null there — the import path carries no
-     * {@code ExtKind} as far as the orphan store yet, so chunk blocks are filed under
-     * {@link OrphanCategory#LINK} and the chunk cap is not yet reachable from here. <b>Whoever
-     * threads the classification through to {@code addOrphan} has to thread it through here in the
-     * same commit</b>, or the two halves come apart in exactly the way above.
+     * <p>The kind comes from the same {@code Classified} that travels on to {@code addOrphan},
+     * which is what keeps the two halves from coming apart: not "both compute it the same way" but
+     * "both are handed the same value". A path that carries no classification passes null on both
+     * sides, and a null kind is never {@link OrphanCategory#CHUNK}, so such a block is gated and
+     * filed as a link block — consistently.
      */
-    private OrphanCategory orphanCategoryOf(Block block) {
+    private OrphanCategory orphanCategoryOf(Block block, Classified classified) {
         byte[] address = orphanAddressOf(block);
-        return OrphanCategory.of(isTxBlock(block), address == null ? NO_ORPHAN_ADDRESS : address, null);
+        return OrphanCategory.of(isTxBlock(block), address == null ? NO_ORPHAN_ADDRESS : address,
+                classified == null ? null : classified.kind());
     }
 
     public XAmount getTxFee(Block block) {

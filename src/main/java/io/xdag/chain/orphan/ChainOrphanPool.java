@@ -176,15 +176,17 @@ public final class ChainOrphanPool {
      * How many chunks each chunk chain currently holds, across every source together. Chunks only,
      * and buckets are dropped as they empty.
      *
-     * <p>The key is the chain's head hashlow, not a target chain id. A chain id is not computable
+     * <p>The key is a position on the chain, not a target chain id. A chain id is not computable
      * when a chunk is admitted: {@code ChunkExt} carries {@code (seq, totalLen, dataLen, next,
      * data)} and no chain identity at all, and the paying block that would name one has usually
-     * not arrived yet. The head is derivable from what a chunk already carries.
+     * not arrived yet. What is derivable is what a chunk already carries — the block it names as
+     * {@code next}, or itself when it names none.
      *
-     * <p>The pool does not derive it. The head is supplied on the entry, the same way the peer key
+     * <p>The pool does not derive it. The key is supplied on the entry, the same way the peer key
      * is, and the caller that groups a chunk onto its chain owns that walk; a pool that followed
      * {@code next} itself would have to reach for the block store from inside the blockchain
-     * monitor and would turn an O(log n) admission into a chain walk.
+     * monitor and would turn an O(log n) admission into a chain walk. See
+     * {@code OrphanBlockStoreImpl}'s derivation for how far the caller's walk actually gets.
      */
     private final Map<Bytes32, Integer> chunkPerChain = new HashMap<>();
 
@@ -356,8 +358,10 @@ public final class ChainOrphanPool {
      *
      * <p>It deliberately answers for the capacity tiers only. The per-peer and per-chain chunk
      * quotas depend on attribution ({@code peerKey}, {@code chainHead}) that a category alone does
-     * not carry, and the import path does not carry either until the peer/kind pipeline supplies
-     * it; they stay where they are, inside {@code add}.
+     * not carry, so they stay where they are, inside {@code add}. The gate could be given those
+     * facts now that the import path carries them, and it still must not use them: a source that
+     * has spent its own chunk budget is not this node being out of room, and a gate that knows only
+     * a category cannot say "full for you" without saying it to every other source too.
      */
     public boolean isFull(OrphanCategory category) {
         return capacityVerdict(category) != OrphanAdmission.ADMITTED;
@@ -759,6 +763,24 @@ public final class ChainOrphanPool {
     /** How many chunk chains currently hold a chunk. Test-only; see the reclaim rule. */
     public int chainBucketCount() {
         return chunkPerChain.size();
+    }
+
+    /**
+     * How much of its chunk budget this source has spent. Zero for a key the pool has never seen
+     * and for the unattributed (null) key, which never spends anything.
+     *
+     * <p>Test-only, and what pins the <em>wiring</em> rather than the counting: the pool cannot
+     * tell whether the key it was handed is a socket address or a self-announced identity, so the
+     * only way to catch a caller keying on {@code Peer.getPeerId()} is to show that two identities
+     * behind one IP share the number this returns.
+     */
+    public int chunksHeldBy(String peerKey) {
+        return held(chunkPerPeer, peerKey);
+    }
+
+    /** How much of its budget this chunk chain has spent. Zero for an unknown or ungrouped key. */
+    public int chunksOnChain(Bytes32 chainHead) {
+        return held(chunkPerChain, chainHead);
     }
 
     private void appendLane(Map<String, NavigableSet<OrphanEntry>> lane, List<OrphanEntry> out) {

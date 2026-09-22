@@ -55,11 +55,13 @@ import org.junit.Test;
  *
  * <h2>Why the flood here is built as link entries</h2>
  *
- * <p>The same reason {@code OrphanFloodTest} gives. Real chunk blocks are filed under
- * {@link OrphanCategory#LINK} today, because no {@code ExtKind} reaches the orphan store yet and
- * {@code OrphanCategory.of} is handed a null kind on every path into it. Task 10 supplies the
- * classification. So {@code linkQueue} is where chunk blocks actually sit, and it is the queue this
- * fix has to stop giving the first pick of a main block's references to.
+ * <p>The starvation this fix is about is a link-queue starvation, and the flood is built out of
+ * link entries because that is the queue it has to stop giving a main block's first pick to. When
+ * these tests were written chunk blocks sat in that queue too — nothing classified them, so
+ * {@code OrphanCategory.of} was handed a null kind on every path into it. Blocks arriving from the
+ * network are classified now and chunks have a queue of their own, which changes who the flooder
+ * is and not what the fix does; a chunk arriving with no classification (locally produced, or
+ * re-imported on a node with the ingest pipeline off) still lands here.
  *
  * <h2>The over-correction these tests also guard</h2>
  *
@@ -203,8 +205,9 @@ public class OrphanPackingFairnessTest {
     // ---- helpers -------------------------------------------------------------------------
 
     /**
-     * A chunk block as the pool really holds one today: an unclassified link entry. See the class
-     * comment — the kind that would make it a {@link OrphanCategory#CHUNK} arrives in Task 10.
+     * A chunk block as the pool holds an unclassified one: a link entry. See the class comment —
+     * the kind that would make it a {@link OrphanCategory#CHUNK} reaches the store only for blocks
+     * that arrived through the ingest pipeline.
      */
     private static OrphanEntry chunkAsPooledToday(Bytes32 hashlow, long time) {
         return link(hashlow, time);

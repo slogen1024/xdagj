@@ -28,6 +28,7 @@ import com.google.common.collect.Queues;
 import io.xdag.Kernel;
 import io.xdag.chain.ingest.IngestPipeline;
 import io.xdag.chain.ingest.PreValidated;
+import io.xdag.chain.ingest.PreValidator;
 import io.xdag.config.*;
 import io.xdag.config.spec.ChainSpec;
 import io.xdag.core.*;
@@ -266,8 +267,13 @@ public class SyncManager extends AbstractXdagLifecycle {
         // Re-parsed from the raw 512 bytes on purpose, and that has to stay: a block sitting in
         // syncMap carries the flags a previous attempt wrote (tryToConnect sets BI_EXTRA before it
         // can decide NO_PARENT), so every attempt has to start from a clean BlockInfo.
-        return relayImported(blockWrapper, blockchain
-                .tryToConnect(new Block(new XdagBlock(blockWrapper.getBlock().getXdagBlock().getData().toArray()))));
+        Block fresh = new Block(new XdagBlock(blockWrapper.getBlock().getXdagBlock().getData().toArray()));
+        // reimport() rather than the bare-Block entry point: this block came from a peer and the
+        // wrapper still says which one, so the orphan pool's per-source quota can charge it. The
+        // bare entry point fabricates a peerless wrapper and would throw that away, which on the
+        // NO_PARENT retry -- routine traffic while a node catches up, not an edge case -- would
+        // hand a flooder an unattributed, unclassified chunk for nothing.
+        return relayImported(blockWrapper, blockchain.tryToConnect(PreValidator.reimport(blockWrapper, fresh)));
     }
 
     /** Gossips a block this node has just accepted onward, unless it is old, ours, or out of ttl. */

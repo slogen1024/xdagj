@@ -59,12 +59,17 @@ import org.mockito.Mockito;
  * <h2>Why the flood is counted as LINK</h2>
  *
  * <p>These really are chunk blocks, built by {@link ChunkChainBuilder}. They are nonetheless filed
- * under {@link OrphanCategory#LINK} today, because the import path carries no {@code ExtKind} as
- * far as the orphan store yet — {@code OrphanCategory.of} is handed a null kind on both sides, and
- * a null kind is never {@code CHUNK}. Task 10 is what supplies the classification. So this test
- * deliberately asserts nothing about the chunk cap, which cannot fire from the import path yet; it
- * floods the category chunks actually land in and pins the only thing that matters here — that
- * filling one category does not close another.
+ * under {@link OrphanCategory#LINK}, because they are delivered through
+ * {@code blockchain.tryToConnect(block)} — the bare entry point, the one local mining and the tools
+ * use — and that path asks for no classification at all. {@code OrphanCategory.of} is handed a null
+ * kind on both sides of the decision, the gate and the store, and a null kind is never
+ * {@code CHUNK}. (Blocks arriving from the network do carry one; see
+ * {@code OrphanPeerAttributionTest}.)
+ *
+ * <p>So this test asserts nothing about the chunk cap. It floods the category these blocks actually
+ * land in and pins the only thing that matters here — that filling one category does not close
+ * another. Keeping the flood in LINK is if anything the harder case: a link block is the expensive
+ * kind to hold, and it is the queue a mined block packs from.
  */
 public class OrphanFloodTest extends ChainL1TestBase {
 

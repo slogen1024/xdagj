@@ -70,13 +70,18 @@ public final class OrphanEntry {
     private final String peerKey;
 
     /**
-     * The chunk chain this block hangs off, as the head block's hashlow; null when it could not be
-     * grouped, or when this is not a chunk.
+     * The chunk chain this block hangs off; null when it could not be grouped, or when this is not
+     * a chunk.
      *
-     * <p>The head, not a target chain id: a chain id is not computable at admission — {@code
-     * ChunkExt} carries no chain identity and the paying block that would name one has usually not
-     * arrived. Grouping a chunk onto its head is the caller's walk, not the pool's; the pool only
-     * counts what it is given.
+     * <p>A chain position, not a target chain id: a chain id is not computable at admission —
+     * {@code ChunkExt} carries no chain identity and the paying block that would name one has
+     * usually not arrived. What the caller supplies instead is the point on the chain it could name
+     * by following {@code next}: the successor's hashlow for a chunk that has one, the chunk's own
+     * hashlow for a tail, which is the root of its own chain. Every chunk naming the same block
+     * therefore shares a bucket, which is the shape the per-chain tier exists to bound.
+     *
+     * <p>The grouping is the caller's walk, not the pool's; the pool only counts what it is given.
+     * See {@code OrphanBlockStoreImpl}'s derivation for how far that walk goes and why.
      */
     private final Bytes32 chainHead;
 

@@ -58,6 +58,29 @@ public final class PreValidator {
     }
 
     /**
+     * For a re-import of a block that <em>did</em> arrive from a peer: the caller has already made
+     * its own private copy, and this attaches the arriving wrapper and the ext classification to it.
+     *
+     * <p>This is {@code SyncManager.importBlock}'s path — the NO_PARENT retry, and every import on
+     * a node with the pipeline switched off. It used to go through {@link #inline}, which fabricates
+     * a peerless wrapper, so the source peer sitting right there on the real wrapper was dropped on
+     * the floor. It is not a fact this path lacks, so it must not be one this path discards: the
+     * orphan pool's per-source chunk quota charges that peer, and a retried chunk that arrives
+     * unattributed is a chunk the flooder got for free — and NO_PARENT retries are routine, not
+     * exceptional, while a node is catching up.
+     *
+     * <p>The classification is computed for the same reason: without it the retried chunk is filed
+     * as an ordinary link block, which is the expensive bucket (on disk, in ORPHANIND, and packed
+     * into mined blocks) rather than the cheap one.
+     *
+     * <p>Otherwise identical to {@link #inline}: the caller's instance is imported as-is, and a
+     * pre-validation that throws travels on carrying the cause exactly as it does there.
+     */
+    public static PreValidated reimport(BlockWrapper wrapper, Block block) {
+        return facts(-1, wrapper, block, true);
+    }
+
+    /**
      * The pipeline's pre-validation, on a pool thread: parses a <b>private copy</b> of the wrapper's
      * 512 bytes and computes the facts from it.
      *

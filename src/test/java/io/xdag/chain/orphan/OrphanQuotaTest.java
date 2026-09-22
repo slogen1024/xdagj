@@ -410,8 +410,8 @@ public class OrphanQuotaTest {
     }
 
     /**
-     * A chunk with both quota keys named. {@code peerKey} stands for what Task 10 will pass — the
-     * source peer's IP — and null for a block this node produced itself; {@code chainHead} for the
+     * A chunk with both quota keys named. {@code peerKey} is what the import path passes — the
+     * source peer's IP — and null for a block this node produced itself; {@code chainHead} is the
      * chunk chain it groups onto, null when it groups onto none.
      */
     private static OrphanEntry chunkFrom(String peerKey, Bytes32 hashlow, Bytes32 chainHead) {

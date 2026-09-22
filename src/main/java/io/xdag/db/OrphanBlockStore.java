@@ -23,6 +23,7 @@
  */
 package io.xdag.db;
 
+import io.xdag.chain.ext.Classified;
 import io.xdag.chain.orphan.OrphanCategory;
 import io.xdag.core.XAmount;
 import io.xdag.core.XdagLifecycle;
@@ -49,7 +50,36 @@ public interface OrphanBlockStore extends XdagLifecycle {
 
     void deleteFromQueue(Block block, boolean isTxBlock , UInt64 nonce, XAmount fee, byte[] address);
 
-    void addOrphan(Block block, boolean isTxBlock, UInt64 nonce, XAmount fee, byte[] address);
+    /**
+     * Pools an orphan that arrived with nothing known about where it came from or what it is.
+     *
+     * <p>Not a shorthand for the full call: this is the honest signature for the paths that really
+     * do carry neither fact — a block this node produced itself (mined, RPC, CLI), and the
+     * roll-back that re-orphans a transaction block it already holds. Unattributed is the correct
+     * reading of those, not a degraded one; see the {@code peerKey} parameter below.
+     */
+    default void addOrphan(Block block, boolean isTxBlock, UInt64 nonce, XAmount fee, byte[] address) {
+        addOrphan(block, isTxBlock, nonce, fee, address, null, null);
+    }
+
+    /**
+     * Pools an orphan together with the two facts the import path learns about it: who sent it, and
+     * what kind of block it is.
+     *
+     * @param peerKey    the source peer's <b>IP address</b>, or null when the block came from no
+     *                   peer. It must be the IP and never {@code Peer.getPeerId()}: the id is
+     *                   cryptographically bound to a keypair at handshake so it cannot be borrowed,
+     *                   but minting a fresh keypair costs nothing, so a flooder keyed on it zeroes
+     *                   its own quota by reconnecting — and a quota that is free to evade is not a
+     *                   quota. The IP comes off the real socket. The price, knowingly paid: several
+     *                   honest nodes behind one NAT share one budget.
+     * @param classified this block's chain-extension classification, or null on a path that did not
+     *                   compute one. It decides the {@link OrphanCategory} — a null classification
+     *                   can never be {@link OrphanCategory#CHUNK} — and, for a chunk, it is where
+     *                   the chunk chain this block attaches to is read from.
+     */
+    void addOrphan(Block block, boolean isTxBlock, UInt64 nonce, XAmount fee, byte[] address,
+            String peerKey, Classified classified);
 
     long getOrphanSize();
 
