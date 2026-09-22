@@ -128,8 +128,7 @@ public class ChainOrphanConfigTest {
 
     @Test
     public void defaultsMatchTheSpec() {
-        Config c = new DevnetConfig();
-        c.initializeRootDir(rootDir);
+        ChainSpec c = new DevnetConfig().getChainSpec();
         assertEquals(100000, c.getChainOrphanPoolLimit());
         assertEquals(3750, c.getChainOrphanAccountTxLimit());
         assertEquals(3750, c.getChainOrphanMtxLimit());
@@ -182,7 +181,7 @@ int MIN_ORPHAN_CHUNK_TTL_EPOCHS = 2;
 boolean DEFAULT_INGEST_FEE_POLICY = true;
 ```
 
-同文件加九个 getter 声明。
+同文件加九个 getter 声明。**九个 getter 都声明在 `ChainSpec` 接口上**，与既有的 `getChainIngestThreads()`（`ChainSpec.java:199`）到 `getChainPersistReadCache()`（`:214`）并列——`AbstractConfig implements ... ChainSpec`，所以测试要走 `config.getChainSpec().getXxx()`，不能直接在 `Config` 上调。
 
 - [ ] **Step 4: 加解析与校验**
 
