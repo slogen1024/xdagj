@@ -168,6 +168,15 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected int chainPersistFlushMs = ChainSpec.DEFAULT_PERSIST_FLUSH_MS;
     protected int chainPersistFlushEntries = ChainSpec.DEFAULT_PERSIST_FLUSH_ENTRIES;
     protected int chainPersistReadCache = ChainSpec.DEFAULT_PERSIST_READ_CACHE;
+    protected int chainOrphanPoolLimit = ChainSpec.DEFAULT_ORPHAN_POOL_LIMIT;
+    protected int chainOrphanAccountTxLimit = ChainSpec.DEFAULT_ORPHAN_ACCOUNT_TX_LIMIT;
+    protected int chainOrphanMtxLimit = ChainSpec.DEFAULT_ORPHAN_MTX_LIMIT;
+    protected int chainOrphanChunkLimit = ChainSpec.DEFAULT_ORPHAN_CHUNK_LIMIT;
+    protected int chainOrphanLinkLimit = ChainSpec.DEFAULT_ORPHAN_LINK_LIMIT;
+    protected int chainOrphanChunkPerPeer = ChainSpec.DEFAULT_ORPHAN_CHUNK_PER_PEER;
+    protected int chainOrphanChunkPerChain = ChainSpec.DEFAULT_ORPHAN_CHUNK_PER_CHAIN;
+    protected int chainOrphanChunkTtlEpochs = ChainSpec.DEFAULT_ORPHAN_CHUNK_TTL_EPOCHS;
+    protected boolean chainIngestFeePolicy = ChainSpec.DEFAULT_INGEST_FEE_POLICY;
 
     // RandomX configuration
     protected boolean flag;
@@ -265,6 +274,51 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     @Override
     public int getChainPersistReadCache() {
         return chainPersistReadCache;
+    }
+
+    @Override
+    public int getChainOrphanPoolLimit() {
+        return chainOrphanPoolLimit;
+    }
+
+    @Override
+    public int getChainOrphanAccountTxLimit() {
+        return chainOrphanAccountTxLimit;
+    }
+
+    @Override
+    public int getChainOrphanMtxLimit() {
+        return chainOrphanMtxLimit;
+    }
+
+    @Override
+    public int getChainOrphanChunkLimit() {
+        return chainOrphanChunkLimit;
+    }
+
+    @Override
+    public int getChainOrphanLinkLimit() {
+        return chainOrphanLinkLimit;
+    }
+
+    @Override
+    public int getChainOrphanChunkPerPeer() {
+        return chainOrphanChunkPerPeer;
+    }
+
+    @Override
+    public int getChainOrphanChunkPerChain() {
+        return chainOrphanChunkPerChain;
+    }
+
+    @Override
+    public int getChainOrphanChunkTtlEpochs() {
+        return chainOrphanChunkTtlEpochs;
+    }
+
+    @Override
+    public boolean isChainIngestFeePolicy() {
+        return chainIngestFeePolicy;
     }
 
     @Override
@@ -464,6 +518,46 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
             throw new IllegalArgumentException(
                     "Invalid chain.persist.flushEntries: " + chainPersistFlushEntries
                             + " (must be <= chain.persist.maxPending: " + chainPersistMaxPending + ")");
+        }
+
+        // Node-local (SP0b-3): orphan pool tiers and the ingest fee policy. Never consensus, with one
+        // exception noted below.
+        chainOrphanPoolLimit = readNodeLocalInt(config, "chain.orphan.poolLimit", chainOrphanPoolLimit, 1);
+        chainOrphanAccountTxLimit = readNodeLocalInt(config, "chain.orphan.accountTxLimit", chainOrphanAccountTxLimit, 1);
+        chainOrphanMtxLimit = readNodeLocalInt(config, "chain.orphan.mtxLimit", chainOrphanMtxLimit, 1);
+        chainOrphanChunkLimit = readNodeLocalInt(config, "chain.orphan.chunkLimit", chainOrphanChunkLimit, 1);
+        chainOrphanLinkLimit = readNodeLocalInt(config, "chain.orphan.linkLimit", chainOrphanLinkLimit, 1);
+        chainOrphanChunkPerPeer = readNodeLocalInt(config, "chain.orphan.chunkPerPeer", chainOrphanChunkPerPeer, 1);
+        chainOrphanChunkPerChain = readNodeLocalInt(config, "chain.orphan.chunkPerChain", chainOrphanChunkPerChain, 1);
+        // The one that is not merely node-local: the chunk age rule accepts a chunk only from the
+        // paying block's epoch or the one immediately before it, so two epochs is the point below
+        // which evicting a chunk starts changing consensus outcomes — a node configured lower would
+        // reject chains other nodes accept. Refused outright rather than clamped, so the operator
+        // who set it learns at startup instead of forking in production.
+        chainOrphanChunkTtlEpochs = readNodeLocalInt(config, "chain.orphan.chunkTtlEpochs",
+                chainOrphanChunkTtlEpochs, ChainSpec.MIN_ORPHAN_CHUNK_TTL_EPOCHS);
+        chainIngestFeePolicy = config.hasPath("chain.ingest.feePolicy")
+                ? config.getBoolean("chain.ingest.feePolicy") : chainIngestFeePolicy;
+
+        // The four category limits are reservations: each category is promised its own share so a
+        // flood in one cannot starve another. A pool limit below their sum breaks that promise —
+        // the global bound would bind first, and a category well inside its own tier could still be
+        // refused because some other category had filled the pool.
+        long categorySum = (long) chainOrphanAccountTxLimit + chainOrphanMtxLimit
+                + chainOrphanChunkLimit + chainOrphanLinkLimit;
+        if (categorySum > chainOrphanPoolLimit) {
+            throw new IllegalArgumentException("Invalid chain.orphan.poolLimit: " + chainOrphanPoolLimit
+                    + " (must be >= the sum of the four category limits: " + categorySum + ")");
+        }
+        // Both sub-tiers carve up the CHUNK tier; one larger than the tier it sits inside can never
+        // be the binding bound.
+        if (chainOrphanChunkPerPeer > chainOrphanChunkLimit) {
+            throw new IllegalArgumentException("Invalid chain.orphan.chunkPerPeer: " + chainOrphanChunkPerPeer
+                    + " (must be <= chain.orphan.chunkLimit: " + chainOrphanChunkLimit + ")");
+        }
+        if (chainOrphanChunkPerChain > chainOrphanChunkLimit) {
+            throw new IllegalArgumentException("Invalid chain.orphan.chunkPerChain: " + chainOrphanChunkPerChain
+                    + " (must be <= chain.orphan.chunkLimit: " + chainOrphanChunkLimit + ")");
         }
     }
 

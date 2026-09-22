@@ -69,6 +69,38 @@ public interface ChainSpec {
     int DEFAULT_PERSIST_FLUSH_ENTRIES = 256;
     int DEFAULT_PERSIST_READ_CACHE = 65536;
 
+    /** Node-local defaults for the SP0b-3 orphan pool: the whole pool, then its four category tiers. */
+    int DEFAULT_ORPHAN_POOL_LIMIT = 100000;
+    int DEFAULT_ORPHAN_ACCOUNT_TX_LIMIT = 3750;
+    int DEFAULT_ORPHAN_MTX_LIMIT = 3750;
+    int DEFAULT_ORPHAN_CHUNK_LIMIT = 60000;
+    int DEFAULT_ORPHAN_LINK_LIMIT = 30000;
+
+    /** Node-local defaults for the two sub-tiers that carve up the CHUNK tier, by peer and by chain. */
+    int DEFAULT_ORPHAN_CHUNK_PER_PEER = 5000;
+    int DEFAULT_ORPHAN_CHUNK_PER_CHAIN = 20000;
+
+    /**
+     * Retention for a CHUNK block, in epochs.
+     *
+     * <p>NOT a free tunable below {@link #MIN_ORPHAN_CHUNK_TTL_EPOCHS}: the chunk age rule (see the
+     * "Age rule" section of {@code io.xdag.chain.ext.ChunkChain}) accepts a chunk only from the
+     * paying block's epoch or the one immediately before it, so two epochs is the floor at which
+     * eviction can no longer change a consensus outcome. Below it this node would evict a chunk
+     * another node still holds, and would then reject a chain that node accepts.
+     */
+    int DEFAULT_ORPHAN_CHUNK_TTL_EPOCHS = 2;
+
+    /**
+     * The hard floor under {@code chain.orphan.chunkTtlEpochs}, refused at startup rather than
+     * clamped. Anyone tempted to lower it should read {@link #DEFAULT_ORPHAN_CHUNK_TTL_EPOCHS}
+     * first: one epoch of retention is a consensus divergence, not a tighter memory budget.
+     */
+    int MIN_ORPHAN_CHUNK_TTL_EPOCHS = 2;
+
+    /** Node-local default for {@code chain.ingest.feePolicy}: the import-time fee gate is on. */
+    boolean DEFAULT_INGEST_FEE_POLICY = true;
+
     /**
      * The maximum size, in bytes, of the inline argument payload a CALL/DEPLOY ext may
      * carry directly in its fixed block fields (larger argument sets must instead reference
@@ -212,4 +244,37 @@ public interface ChainSpec {
 
     /** INDEX read cache entries ({@code chain.persist.readCache}); 0 disables it. Node-local. */
     int getChainPersistReadCache();
+
+    /** Entries the whole orphan pool may hold ({@code chain.orphan.poolLimit}); positive. Node-local. */
+    int getChainOrphanPoolLimit();
+
+    /** Account-transaction tier bound ({@code chain.orphan.accountTxLimit}); positive. Node-local. */
+    int getChainOrphanAccountTxLimit();
+
+    /** Chain-transaction (mtx) tier bound ({@code chain.orphan.mtxLimit}); positive. Node-local. */
+    int getChainOrphanMtxLimit();
+
+    /** CHUNK tier bound ({@code chain.orphan.chunkLimit}); positive. Node-local. */
+    int getChainOrphanChunkLimit();
+
+    /** Link-block tier bound ({@code chain.orphan.linkLimit}); positive. Node-local. */
+    int getChainOrphanLinkLimit();
+
+    /** CHUNK entries one peer may hold ({@code chain.orphan.chunkPerPeer}); at most the CHUNK tier. Node-local. */
+    int getChainOrphanChunkPerPeer();
+
+    /** CHUNK entries one chunk chain may hold ({@code chain.orphan.chunkPerChain}); at most the CHUNK tier. Node-local. */
+    int getChainOrphanChunkPerChain();
+
+    /**
+     * How long a CHUNK entry is retained, in epochs ({@code chain.orphan.chunkTtlEpochs}).
+     *
+     * <p>The one key here that is not merely node-local below its floor: values under
+     * {@link #MIN_ORPHAN_CHUNK_TTL_EPOCHS} are refused at startup, because they would make this
+     * node reject chunk chains other nodes accept.
+     */
+    int getChainOrphanChunkTtlEpochs();
+
+    /** Whether the import-time chunk fee gate is applied ({@code chain.ingest.feePolicy}). Node-local. */
+    boolean isChainIngestFeePolicy();
 }

@@ -90,6 +90,15 @@ public class ChainL1ProcessorTest {
         @Override public int getChainPersistFlushMs() { return ChainSpec.DEFAULT_PERSIST_FLUSH_MS; }
         @Override public int getChainPersistFlushEntries() { return ChainSpec.DEFAULT_PERSIST_FLUSH_ENTRIES; }
         @Override public int getChainPersistReadCache() { return ChainSpec.DEFAULT_PERSIST_READ_CACHE; }
+        @Override public int getChainOrphanPoolLimit() { return ChainSpec.DEFAULT_ORPHAN_POOL_LIMIT; }
+        @Override public int getChainOrphanAccountTxLimit() { return ChainSpec.DEFAULT_ORPHAN_ACCOUNT_TX_LIMIT; }
+        @Override public int getChainOrphanMtxLimit() { return ChainSpec.DEFAULT_ORPHAN_MTX_LIMIT; }
+        @Override public int getChainOrphanChunkLimit() { return ChainSpec.DEFAULT_ORPHAN_CHUNK_LIMIT; }
+        @Override public int getChainOrphanLinkLimit() { return ChainSpec.DEFAULT_ORPHAN_LINK_LIMIT; }
+        @Override public int getChainOrphanChunkPerPeer() { return ChainSpec.DEFAULT_ORPHAN_CHUNK_PER_PEER; }
+        @Override public int getChainOrphanChunkPerChain() { return ChainSpec.DEFAULT_ORPHAN_CHUNK_PER_CHAIN; }
+        @Override public int getChainOrphanChunkTtlEpochs() { return ChainSpec.DEFAULT_ORPHAN_CHUNK_TTL_EPOCHS; }
+        @Override public boolean isChainIngestFeePolicy() { return ChainSpec.DEFAULT_INGEST_FEE_POLICY; }
     }
 
     /** A handler that records nothing; used where only registration behaviour is under test. */

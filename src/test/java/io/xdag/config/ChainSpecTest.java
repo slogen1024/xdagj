@@ -24,40 +24,22 @@
 
 package io.xdag.config;
 
+import static io.xdag.config.ConfigOverrides.withProperty;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
-import com.typesafe.config.ConfigFactory;
 import io.xdag.chain.ChainActivation;
 import io.xdag.chain.ext.CallExt;
 import io.xdag.chain.ext.ChunkExt;
 import io.xdag.config.spec.ChainSpec;
 import io.xdag.core.XAmount;
 import io.xdag.core.XUnit;
-import java.util.function.Supplier;
 import org.junit.Test;
 
 public class ChainSpecTest {
-
-    /**
-     * Sets a JVM system property, invalidates Typesafe's config caches so the next
-     * {@code ConfigFactory.load(...)} overlays it above the resource file, runs {@code body},
-     * then always clears the property afterwards (and invalidates the caches again) — even if
-     * {@code body} throws.
-     */
-    private static <T> T withProperty(String key, String value, Supplier<T> body) {
-        System.setProperty(key, value);
-        ConfigFactory.invalidateCaches();
-        try {
-            return body.get();
-        } finally {
-            System.clearProperty(key);
-            ConfigFactory.invalidateCaches();
-        }
-    }
 
     @Test
     public void devnetIsActiveFromGenesisWithProtocolDefaults() {
