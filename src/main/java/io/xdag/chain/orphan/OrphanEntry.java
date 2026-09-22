@@ -54,10 +54,30 @@ public final class OrphanEntry {
     /** Hex of the 20-byte address for {@link OrphanCategory#ACCOUNT_TX}, null for every other. */
     private final String addressKey;
 
-    /** The peer the block arrived from; null for a locally produced block, which owes no peer. */
+    /**
+     * The peer the block arrived from, as <b>its IP address</b>; null for a locally produced block,
+     * which owes no peer.
+     *
+     * <p><b>Whoever fills this in must pass the IP and not {@code peerId}.</b> The pool charges
+     * this key for the per-peer chunk quota, and the quota is only worth having if evading it costs
+     * something. {@code peerId} is cryptographically bound — the handshake checks it is the Base58
+     * address of the presented public key and verifies the signature ({@code
+     * HandshakeMessage.java:170-172}) — so it cannot be borrowed; but minting a fresh keypair is
+     * free, so a flooder keyed on it resets its own budget by reconnecting. The IP is the real
+     * socket address {@code XdagP2pHandler} already carries, {@code channel.getRemoteIp()} ({@code
+     * :256}, {@code :285}). See {@link ChainOrphanPool}'s per-peer map for the trade this accepts.
+     */
     private final String peerKey;
 
-    /** The chunk chain this block hangs off; null when it could not be grouped, or not a chunk. */
+    /**
+     * The chunk chain this block hangs off, as the head block's hashlow; null when it could not be
+     * grouped, or when this is not a chunk.
+     *
+     * <p>The head, not a target chain id: a chain id is not computable at admission — {@code
+     * ChunkExt} carries no chain identity and the paying block that would name one has usually not
+     * arrived. Grouping a chunk onto its head is the caller's walk, not the pool's; the pool only
+     * counts what it is given.
+     */
     private final Bytes32 chainHead;
 
     /** The chunk body, held only in memory; null for every other category. */

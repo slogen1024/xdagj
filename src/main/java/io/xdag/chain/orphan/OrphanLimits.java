@@ -54,9 +54,15 @@ public final class OrphanLimits {
     /** Indexed by {@link OrphanCategory#ordinal()}, so a lookup on the admission path is an array read. */
     private final int[] categoryLimits;
 
-    private OrphanLimits(int poolLimit, int[] categoryLimits) {
+    private final int chunkPerPeer;
+
+    private final int chunkPerChain;
+
+    private OrphanLimits(int poolLimit, int[] categoryLimits, int chunkPerPeer, int chunkPerChain) {
         this.poolLimit = poolLimit;
         this.categoryLimits = categoryLimits;
+        this.chunkPerPeer = chunkPerPeer;
+        this.chunkPerChain = chunkPerChain;
     }
 
     public static Builder builder() {
@@ -73,24 +79,48 @@ public final class OrphanLimits {
         return categoryLimits[category.ordinal()];
     }
 
+    /**
+     * The most {@link OrphanCategory#CHUNK} entries one source peer may hold at once.
+     *
+     * <p>A second tier under the chunk cap, and chunk-only. The category cap on its own stops a
+     * chunk flood from starving the other three categories but does nothing about one flooder
+     * starving every other <em>peer</em> of the chunk category: one source can fill all of it.
+     * Sized below the category cap on purpose, so the category is only reachable by several
+     * independent sources together.
+     */
+    public int chunkPerPeer() {
+        return chunkPerPeer;
+    }
+
+    /**
+     * The most {@link OrphanCategory#CHUNK} entries one chunk chain may hold at once, across every
+     * source together. The per-peer tier alone still lets a set of sources pile onto one chain.
+     */
+    public int chunkPerChain() {
+        return chunkPerChain;
+    }
+
     @Override
     public String toString() {
         return "OrphanLimits{pool=" + poolLimit + " accountTx=" + limit(OrphanCategory.ACCOUNT_TX)
                 + " mtx=" + limit(OrphanCategory.MTX) + " chunk=" + limit(OrphanCategory.CHUNK)
-                + " link=" + limit(OrphanCategory.LINK) + "}";
+                + " link=" + limit(OrphanCategory.LINK) + " chunkPerPeer=" + chunkPerPeer
+                + " chunkPerChain=" + chunkPerChain + "}";
     }
 
     /**
      * Names one cap at a time. Everything not named stays {@link #UNLIMITED}.
      *
-     * <p>Later tiers — the per-peer and per-chain chunk quotas, the chunk TTL — get their own
-     * methods here as they arrive, which is why this is a builder and not a constructor with a row
-     * of same-typed ints waiting to be transposed.
+     * <p>Later tiers — the chunk TTL — get their own methods here as they arrive, which is why
+     * this is a builder and not a constructor with a row of same-typed ints waiting to be
+     * transposed. The per-peer and per-chain chunk quotas arrived that way.
      */
     public static final class Builder {
 
         private int poolLimit = UNLIMITED;
         private final int[] categoryLimits = new int[OrphanCategory.values().length];
+        private int chunkPerPeer = UNLIMITED;
+        private int chunkPerChain = UNLIMITED;
 
         private Builder() {
             Arrays.fill(categoryLimits, UNLIMITED);
@@ -117,8 +147,18 @@ public final class OrphanLimits {
             return category(OrphanCategory.LINK, "link", limit);
         }
 
+        public Builder chunkPerPeer(int limit) {
+            this.chunkPerPeer = requirePositive("chunkPerPeer", limit);
+            return this;
+        }
+
+        public Builder chunkPerChain(int limit) {
+            this.chunkPerChain = requirePositive("chunkPerChain", limit);
+            return this;
+        }
+
         public OrphanLimits build() {
-            return new OrphanLimits(poolLimit, categoryLimits.clone());
+            return new OrphanLimits(poolLimit, categoryLimits.clone(), chunkPerPeer, chunkPerChain);
         }
 
         private Builder category(OrphanCategory category, String name, int limit) {

@@ -70,8 +70,13 @@ import org.apache.tuweni.bytes.Bytes32;
  * <p>Each category is capped on its own, and the pool as a whole is capped behind them. Without the
  * per-category caps a flood of one kind fills the pool and every other kind starts being refused —
  * which is what the live code does today, where {@code MAX_ORPHAN_SIZE} counts all four queues
- * together but is only consulted when an account transaction arrives. The per-peer and per-chain
- * chunk quotas, the TTL and the VIP admission rule arrive in later tasks.
+ * together but is only consulted when an account transaction arrives. The TTL and the VIP
+ * admission rule arrive in later tasks.
+ *
+ * <p>Under the chunk category sit two more tiers, chunks only: one per source peer and one per
+ * chunk chain. They exist because a category cap alone does not stop a single attacker — one
+ * flooder can fill the whole chunk category on its own and lock every honest peer out of it. The
+ * second tier makes a flood cost the flooder its own budget instead of everybody's.
  */
 public final class ChainOrphanPool {
 
@@ -134,6 +139,43 @@ public final class ChainOrphanPool {
     private final Map<Bytes, OrphanEntry> index = new HashMap<>();
 
     /**
+     * How many chunks each source peer currently holds. Chunks only — every other category is
+     * bounded by its own cap and the global one, and nothing else.
+     *
+     * <p><b>The key is the peer's IP, never the id it announced.</b> {@code peerId} is
+     * cryptographically bound — the handshake checks it is the Base58 address of the presented
+     * public key and verifies the signature ({@code HandshakeMessage.java:170-172}) — so it cannot
+     * be borrowed from somebody else. But a fresh keypair costs nothing, so keying on it lets a
+     * flooder zero its own quota by reconnecting under a new identity, and a quota that is free to
+     * evade is not a quota. The IP is not self-reported: {@code XdagP2pHandler} passes {@code
+     * channel.getRemoteIp()} into {@code getPeer} ({@code :256}, {@code :285}), which is the real
+     * socket address.
+     *
+     * <p>The price is known and accepted: several honest nodes can share one IP (NAT, or several
+     * instances on one host) and they will share one budget. That is the trade — throttling by an
+     * identity anyone can mint again costs an attacker nothing at all.
+     *
+     * <p>Buckets are dropped as they empty; see {@link #release}.
+     */
+    private final Map<String, Integer> chunkPerPeer = new HashMap<>();
+
+    /**
+     * How many chunks each chunk chain currently holds, across every source together. Chunks only,
+     * and buckets are dropped as they empty.
+     *
+     * <p>The key is the chain's head hashlow, not a target chain id. A chain id is not computable
+     * when a chunk is admitted: {@code ChunkExt} carries {@code (seq, totalLen, dataLen, next,
+     * data)} and no chain identity at all, and the paying block that would name one has usually
+     * not arrived yet. The head is derivable from what a chunk already carries.
+     *
+     * <p>The pool does not derive it. The head is supplied on the entry, the same way the peer key
+     * is, and the caller that groups a chunk onto its chain owns that walk; a pool that followed
+     * {@code next} itself would have to reach for the block store from inside the blockchain
+     * monitor and would turn an O(log n) admission into a chain walk.
+     */
+    private final Map<Bytes32, Integer> chunkPerChain = new HashMap<>();
+
+    /**
      * Per-category counts, kept in step with add and remove rather than summed from the sets.
      * Summing would be O(number of addresses) for account transactions, and it would also hide an
      * eviction that forgot to release what it held.
@@ -176,10 +218,27 @@ public final class ChainOrphanPool {
      * configured node the global cap is a backstop that can only be reached once every category is
      * already at its own.
      *
+     * <p>Then, for a chunk and only for a chunk, the two second-tier quotas: the source peer's
+     * share and the chunk chain's share. <b>Over both at once the refusal names the peer.</b> The
+     * two are orthogonal — neither one being full makes the other irrelevant the way the global cap
+     * makes the category cap irrelevant — so the tie is broken on what the verdict says.
+     * {@link OrphanAdmission#PEER_FULL} is a statement about this sender alone and is true whenever
+     * it is returned; {@link OrphanAdmission#CHAIN_FULL} is about state the sender shares with
+     * every other source and may well have been filled by one of them, so it is kept for the case
+     * where this sender really was still inside its own budget. A sender over its own budget is
+     * told so, rather than pointed at its neighbours.
+     *
+     * <p>A null peer key is unattributed and spends no peer budget: a block this node produced
+     * itself — mined, or built over RPC or the CLI — arrived from no peer and owes none. A null
+     * chain head likewise spends no chain budget, but it is still a chunk from somewhere, so the
+     * peer and global tiers still hold it; otherwise "send chunks that group onto nothing" would be
+     * a way past every tier at once.
+     *
      * <p><b>Every refusal happens before anything is touched.</b> The checks come before {@link
      * #holderFor}, which is what would create an address bucket — a refused account transaction for
      * an address the pool has never seen must not leave an empty bucket behind for the reclaim on
-     * removal to never come and collect.
+     * removal to never come and collect. The same holds for the two quota maps: both are asked
+     * before either is charged, so a chunk refused by one tier has not spent the other.
      */
     public OrphanAdmission add(OrphanEntry entry, AccountLane lane) {
         if (index.containsKey(entry.hashlow())) {
@@ -191,6 +250,14 @@ public final class ChainOrphanPool {
         if (counts[entry.category().ordinal()] >= limits.limit(entry.category())) {
             return OrphanAdmission.CATEGORY_FULL;
         }
+        if (entry.category() == OrphanCategory.CHUNK) {
+            if (held(chunkPerPeer, entry.peerKey()) >= limits.chunkPerPeer()) {
+                return OrphanAdmission.PEER_FULL;
+            }
+            if (held(chunkPerChain, entry.chainHead()) >= limits.chunkPerChain()) {
+                return OrphanAdmission.CHAIN_FULL;
+            }
+        }
         NavigableSet<OrphanEntry> holder = holderFor(entry, lane);
         holder.add(entry);
         entry.holder = holder;
@@ -198,6 +265,7 @@ public final class ChainOrphanPool {
         index.put(entry.hashlow(), entry);
         counts[entry.category().ordinal()]++;
         total++;
+        reserveChunkQuotas(entry);
         return OrphanAdmission.ADMITTED;
     }
 
@@ -232,6 +300,7 @@ public final class ChainOrphanPool {
         }
         stored.holder = null;
         reclaimIfEmpty(stored, holder);
+        releaseChunkQuotas(stored);
         counts[stored.category().ordinal()]--;
         total--;
         return stored;
@@ -288,6 +357,16 @@ public final class ChainOrphanPool {
         return laneMap(lane).size();
     }
 
+    /** How many source peers currently hold a chunk. Test-only; see the reclaim rule. */
+    public int peerBucketCount() {
+        return chunkPerPeer.size();
+    }
+
+    /** How many chunk chains currently hold a chunk. Test-only; see the reclaim rule. */
+    public int chainBucketCount() {
+        return chunkPerChain.size();
+    }
+
     private void appendLane(Map<String, NavigableSet<OrphanEntry>> lane, List<OrphanEntry> out) {
         List<String> addresses = new ArrayList<>(lane.keySet());
         Collections.sort(addresses);
@@ -327,5 +406,59 @@ public final class ChainOrphanPool {
         if (stored.category() == OrphanCategory.ACCOUNT_TX && holder.isEmpty()) {
             laneMap(stored.isVip() ? AccountLane.VIP : AccountLane.REGULAR).remove(stored.addressKey());
         }
+    }
+
+    /** Charges an admitted chunk to its peer and its chain. A no-op for every other category. */
+    private void reserveChunkQuotas(OrphanEntry entry) {
+        if (entry.category() != OrphanCategory.CHUNK) {
+            return;
+        }
+        reserve(chunkPerPeer, entry.peerKey());
+        reserve(chunkPerChain, entry.chainHead());
+    }
+
+    /**
+     * Hands back what a chunk held. <b>Every path that takes an entry out of the pool must come
+     * through here</b> — removal today, TTL eviction next — because a path that forgets leaves the
+     * slot spent forever and the peer or chain it belonged to slowly locked out.
+     */
+    private void releaseChunkQuotas(OrphanEntry entry) {
+        if (entry.category() != OrphanCategory.CHUNK) {
+            return;
+        }
+        release(chunkPerPeer, entry.peerKey());
+        release(chunkPerChain, entry.chainHead());
+    }
+
+    /** What this key holds now; an unattributed entry (null key) holds nothing and never will. */
+    private static <K> int held(Map<K, Integer> buckets, K key) {
+        return key == null ? 0 : buckets.getOrDefault(key, 0);
+    }
+
+    private static <K> void reserve(Map<K, Integer> buckets, K key) {
+        if (key == null) {
+            return;
+        }
+        buckets.merge(key, 1, Integer::sum);
+    }
+
+    /**
+     * Gives one slot back and <b>deletes the bucket the moment it reaches zero</b>. Without the
+     * delete, one flood across many peers or many chains leaves an unbounded number of empty
+     * entries behind and the leak outlives the flood that caused it — the pool drains, the maps do
+     * not.
+     */
+    private static <K> void release(Map<K, Integer> buckets, K key) {
+        if (key == null) {
+            return;
+        }
+        buckets.compute(key, (bucket, count) -> {
+            if (count == null) {
+                // Unreachable: a pooled chunk was charged for this key when it was admitted.
+                throw new IllegalStateException(
+                        "released a chunk quota slot that was never held: " + bucket);
+            }
+            return count == 1 ? null : count - 1;
+        });
     }
 }

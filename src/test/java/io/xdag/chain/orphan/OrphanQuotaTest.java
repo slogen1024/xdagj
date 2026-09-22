@@ -175,6 +175,175 @@ public class OrphanQuotaTest {
         assertEquals(OrphanLimits.UNLIMITED, limits.poolLimit());
     }
 
+    // ---- the two chunk-only tiers --------------------------------------------------------
+
+    /**
+     * One source cannot take the whole chunk category. This is the tier the category cap cannot
+     * stand in for: a single flooder fills all sixty thousand chunk slots on its own and locks
+     * every honest peer out of the category. With a per-source budget the flood costs the flooder
+     * its own share and nobody else's.
+     */
+    @Test
+    public void onePeerCannotUseTheWholeChunkBudget() {
+        ChainOrphanPool pool = newPool(limits().chunk(100).chunkPerPeer(2).build());
+        assertEquals(OrphanAdmission.ADMITTED, pool.add(chunkFrom("peerA", hash(1), head(1))));
+        assertEquals(OrphanAdmission.ADMITTED, pool.add(chunkFrom("peerA", hash(2), head(1))));
+        assertEquals(OrphanAdmission.PEER_FULL, pool.add(chunkFrom("peerA", hash(3), head(1))));
+        assertEquals("another peer must be unaffected",
+                OrphanAdmission.ADMITTED, pool.add(chunkFrom("peerB", hash(4), head(2))));
+    }
+
+    /**
+     * And one chunk chain cannot take it either, however many sources feed it. The per-peer tier
+     * alone leaves a coordinated set of addresses free to pile everything onto one chain.
+     */
+    @Test
+    public void oneChunkChainCannotUseTheWholeChunkBudget() {
+        ChainOrphanPool pool = newPool(limits().chunk(100).chunkPerChain(2).build());
+        assertEquals(OrphanAdmission.ADMITTED, pool.add(chunkFrom("peerA", hash(1), head(1))));
+        assertEquals(OrphanAdmission.ADMITTED, pool.add(chunkFrom("peerA", hash(2), head(1))));
+        assertEquals("the chain is full even though peerB has spent nothing",
+                OrphanAdmission.CHAIN_FULL, pool.add(chunkFrom("peerB", hash(3), head(1))));
+        assertEquals("another chain must be unaffected",
+                OrphanAdmission.ADMITTED, pool.add(chunkFrom("peerB", hash(4), head(2))));
+    }
+
+    /**
+     * A locally produced block — mined, or built by RPC or the CLI — arrived from no peer, so
+     * there is no budget for it to spend. Unattributed is the correct reading of a null source,
+     * not a degraded one: charging local blocks to some catch-all bucket would let this node's own
+     * mining shut its own chunk intake down.
+     */
+    @Test
+    public void locallyOriginatedChunksAreUnattributed() {
+        ChainOrphanPool pool = newPool(limits().chunk(100).chunkPerPeer(1).build());
+        assertEquals(OrphanAdmission.ADMITTED, pool.add(chunkFrom(null, hash(1), head(1))));
+        assertEquals("an unattributed chunk must not consume a peer's budget",
+                OrphanAdmission.ADMITTED, pool.add(chunkFrom(null, hash(2), head(1))));
+        assertEquals("and it must not open a bucket either", 0, pool.peerBucketCount());
+    }
+
+    /**
+     * A chunk that could not be grouped onto a chain head is ungrouped, and an ungrouped chunk
+     * spends no chain budget — but it is still a chunk from somewhere, so the peer and global
+     * tiers still hold it. Otherwise "send chunks that group onto nothing" would be a way past
+     * every tier at once.
+     */
+    @Test
+    public void anUngroupedChunkStillCountsAgainstPeerAndGlobal() {
+        ChainOrphanPool pool = newPool(limits().chunk(100).chunkPerPeer(1).build());
+        assertEquals(OrphanAdmission.ADMITTED, pool.add(chunkFrom("peerA", hash(1), null)));
+        assertEquals(OrphanAdmission.PEER_FULL, pool.add(chunkFrom("peerA", hash(2), null)));
+        assertEquals("an ungrouped chunk must not open a chain bucket", 0, pool.chainBucketCount());
+    }
+
+    /**
+     * Over both budgets at once, the refusal names the peer. The two tiers are orthogonal, so
+     * neither "could not have been got around" in the way the global cap outranks the category
+     * cap; the tie is broken on what the verdict tells whoever reads the Task 8 log. PEER_FULL is
+     * a statement about this sender alone and is always true when it is returned. CHAIN_FULL is a
+     * statement about shared state that another peer's traffic may have filled, so it is kept for
+     * the case where this sender really was still within its own rights — never used to blame a
+     * sender's neighbours for a budget the sender had itself already spent.
+     */
+    @Test
+    public void whenBothChunkQuotasAreReachedTheRefusalNamesThePeer() {
+        ChainOrphanPool pool = newPool(limits().chunk(100).chunkPerPeer(1).chunkPerChain(1).build());
+        pool.add(chunkFrom("peerA", hash(1), head(1)));
+        assertEquals(OrphanAdmission.PEER_FULL, pool.add(chunkFrom("peerA", hash(2), head(1))));
+    }
+
+    /**
+     * A refusal by one tier must not have spent the other. Reserving the peer slot before the
+     * chain check — or the reverse — leaks one count per refused block, and a flood of refusals is
+     * cheap: the leak would close the pool to that peer, or that chain, permanently.
+     */
+    @Test
+    public void aRefusedChunkTouchesNeitherQuotaCounter() {
+        ChainOrphanPool pool = newPool(limits().chunk(100).chunkPerPeer(1).chunkPerChain(1).build());
+        pool.add(chunkFrom("peerA", hash(1), head(1)));
+
+        // Refused by the peer tier, naming a chain head the pool has never seen.
+        assertEquals(OrphanAdmission.PEER_FULL, pool.add(chunkFrom("peerA", hash(2), head(2))));
+        assertEquals("a refusal must not open a bucket for a head that never went in",
+                1, pool.chainBucketCount());
+        assertEquals(1, pool.peerBucketCount());
+        assertEquals(1, pool.size(OrphanCategory.CHUNK));
+        assertFalse(pool.contains(hash(2)));
+        assertEquals("the head the refusal named must still have its whole budget",
+                OrphanAdmission.ADMITTED, pool.add(chunkFrom("peerB", hash(3), head(2))));
+
+        // Refused by the chain tier, from a peer the pool has never seen.
+        assertEquals(OrphanAdmission.CHAIN_FULL, pool.add(chunkFrom("peerC", hash(4), head(1))));
+        assertEquals("a refusal must not open a bucket for a peer that never got in",
+                2, pool.peerBucketCount());
+        assertEquals("and peerC must still have its whole budget",
+                OrphanAdmission.ADMITTED, pool.add(chunkFrom("peerC", hash(5), head(3))));
+    }
+
+    /** Both tiers are chunk-only: nothing else is bucketed by peer, so nothing else is charged. */
+    @Test
+    public void theChunkQuotasDoNotReachOtherCategories() {
+        ChainOrphanPool pool = newPool(limits().chunkPerPeer(1).chunkPerChain(1).build());
+        assertEquals(OrphanAdmission.ADMITTED, pool.add(linkFrom("peerA", hash(1), 1L)));
+        assertEquals("a link block is bounded by its category and the pool, nothing else",
+                OrphanAdmission.ADMITTED, pool.add(linkFrom("peerA", hash(2), 2L)));
+        assertEquals(OrphanAdmission.ADMITTED, pool.add(mtxFrom("peerA", hash(3), 10L, 1L)));
+        assertEquals(OrphanAdmission.ADMITTED,
+                pool.add(accountTxFrom("peerA", hash(4), addr(1), 1L)));
+        assertEquals("a non-chunk must not open a peer bucket", 0, pool.peerBucketCount());
+    }
+
+    /** Removing one chunk hands back that chunk's slots and no one else's. */
+    @Test
+    public void removingOneChunkFreesOnlyItsOwnQuotaSlot() {
+        ChainOrphanPool pool = newPool(limits().chunk(100).chunkPerPeer(2).chunkPerChain(2).build());
+        pool.add(chunkFrom("peerA", hash(1), head(1)));
+        pool.add(chunkFrom("peerA", hash(2), head(1)));
+        assertEquals(OrphanAdmission.PEER_FULL, pool.add(chunkFrom("peerA", hash(3), head(1))));
+        pool.remove(hash(1));
+        assertEquals(OrphanAdmission.ADMITTED, pool.add(chunkFrom("peerA", hash(3), head(1))));
+        assertEquals("a bucket still in use must not have been dropped", 1, pool.peerBucketCount());
+        assertEquals(1, pool.chainBucketCount());
+    }
+
+    /** Dropping to zero deletes the key: otherwise one flood leaves an unbounded number of empty buckets. */
+    @Test
+    public void emptyQuotaBucketsAreReclaimed() {
+        ChainOrphanPool pool = newPool(limits().chunk(100).chunkPerPeer(10).build());
+        for (int i = 0; i < 10_000; i++) {
+            pool.add(chunkFrom("peer" + i, hash(i), head(i)));
+            pool.remove(hash(i));
+        }
+        assertEquals("a per-peer bucket must be dropped when it reaches zero", 0, pool.peerBucketCount());
+        assertEquals("a per-chain bucket must be dropped when it reaches zero", 0, pool.chainBucketCount());
+        assertEquals(0, pool.totalSize());
+    }
+
+    /** The two new tiers obey the same "unnamed is unenforced" bargain as the caps before them. */
+    @Test
+    public void theChunkQuotasAreUnenforcedUntilNamed() {
+        OrphanLimits named = limits().chunkPerPeer(7).chunkPerChain(9).build();
+        assertEquals(7, named.chunkPerPeer());
+        assertEquals(9, named.chunkPerChain());
+        OrphanLimits unnamed = limits().chunk(2).build();
+        assertEquals(OrphanLimits.UNLIMITED, unnamed.chunkPerPeer());
+        assertEquals(OrphanLimits.UNLIMITED, unnamed.chunkPerChain());
+    }
+
+    /** And the same floor of one: a quota of zero admits nothing and is only ever a typo. */
+    @Test
+    public void aChunkQuotaBelowOneIsRefused() {
+        IllegalArgumentException perPeer = assertThrows(IllegalArgumentException.class,
+                () -> limits().chunkPerPeer(0));
+        assertTrue("the message must name the limit: " + perPeer.getMessage(),
+                perPeer.getMessage().contains("chunkPerPeer"));
+        IllegalArgumentException perChain = assertThrows(IllegalArgumentException.class,
+                () -> limits().chunkPerChain(-1));
+        assertTrue("the message must name the limit: " + perChain.getMessage(),
+                perChain.getMessage().contains("chunkPerChain"));
+    }
+
     // ---- helpers -------------------------------------------------------------------------
 
     private static OrphanLimits.Builder limits() {
@@ -191,6 +360,29 @@ public class OrphanQuotaTest {
 
     private static OrphanEntry chunk(Bytes32 hashlow) {
         return OrphanEntry.chunk(meta(hashlow, false, 0L, 0L, 0L, new byte[20]), null, null, null);
+    }
+
+    /**
+     * A chunk with both quota keys named. {@code peerKey} stands for what Task 10 will pass — the
+     * source peer's IP — and null for a block this node produced itself; {@code chainHead} for the
+     * chunk chain it groups onto, null when it groups onto none.
+     */
+    private static OrphanEntry chunkFrom(String peerKey, Bytes32 hashlow, Bytes32 chainHead) {
+        return OrphanEntry.chunk(meta(hashlow, false, 0L, 0L, 0L, new byte[20]), peerKey, chainHead,
+                null);
+    }
+
+    private static OrphanEntry linkFrom(String peerKey, Bytes32 hashlow, long time) {
+        return OrphanEntry.link(meta(hashlow, false, 0L, time, 0L, new byte[20]), peerKey);
+    }
+
+    private static OrphanEntry mtxFrom(String peerKey, Bytes32 hashlow, long fee, long time) {
+        return OrphanEntry.mtx(meta(hashlow, true, 0L, time, fee, new byte[20]), peerKey);
+    }
+
+    private static OrphanEntry accountTxFrom(String peerKey, Bytes32 hashlow, byte[] address,
+            long nonce) {
+        return OrphanEntry.accountTx(meta(hashlow, true, nonce, 0L, 0L, address), peerKey);
     }
 
     private static OrphanEntry mtx(Bytes32 hashlow, long fee, long time) {
@@ -218,6 +410,17 @@ public class OrphanQuotaTest {
         raw[29] = (byte) (seed >>> 16);
         raw[30] = (byte) (seed >>> 8);
         raw[31] = (byte) seed;
+        return Bytes32.wrap(raw);
+    }
+
+    /**
+     * A chunk chain head. Shaped like a hashlow because that is what one is — the hashlow of the
+     * chain's head block — with a leading marker byte so a head and a block hash never read alike
+     * in a failure message.
+     */
+    private static Bytes32 head(int seed) {
+        byte[] raw = hash(seed).toArray();
+        raw[0] = (byte) 0xc4;
         return Bytes32.wrap(raw);
     }
 
