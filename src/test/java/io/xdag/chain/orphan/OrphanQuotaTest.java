@@ -174,6 +174,54 @@ public class OrphanQuotaTest {
         assertEquals(OrphanLimits.UNLIMITED, limits.poolLimit());
     }
 
+    /**
+     * What the import gate asks, and it has to be the same question {@code add} answers.
+     *
+     * <p>{@code BlockchainImpl.tryToConnect} refuses a block whose category is full <em>before</em>
+     * importing it, because a block admitted past a full category is imported and then not pooled:
+     * on disk, counted in {@code nnoref}, and referenced by nothing this node can ever mine. That
+     * only holds while the gate and the admission agree exactly — a gate that says "room" where
+     * {@code add} says CATEGORY_FULL produces precisely that block. So this pins both directions
+     * on both caps.
+     */
+    @Test
+    public void isFullAgreesWithWhatAddRefuses() {
+        ChainOrphanPool pool = newPool(limits().poolLimit(3).chunk(1).link(10).build());
+        assertFalse("an empty category is not full", pool.isFull(OrphanCategory.CHUNK));
+
+        pool.add(chunk(hash(1)));
+        assertTrue("a category at its cap must report itself full", pool.isFull(OrphanCategory.CHUNK));
+        assertEquals(OrphanAdmission.CATEGORY_FULL, pool.add(chunk(hash(2))));
+        assertFalse("and it must not report another category full", pool.isFull(OrphanCategory.LINK));
+        assertEquals(OrphanAdmission.ADMITTED, pool.add(link(hash(3), 1L)));
+
+        // The global cap closes every category at once, including ones with room of their own.
+        pool.add(link(hash(4), 2L));
+        assertEquals(3, pool.totalSize());
+        assertTrue(pool.isFull(OrphanCategory.LINK));
+        assertTrue("a category with an unnamed cap is still held by the global one",
+                pool.isFull(OrphanCategory.MTX));
+        assertEquals(OrphanAdmission.POOL_FULL, pool.add(link(hash(5), 3L)));
+
+        // A slot handed back is reported free, not merely admitted on the next try.
+        pool.remove(hash(1));
+        assertFalse(pool.isFull(OrphanCategory.CHUNK));
+        assertFalse(pool.isFull(OrphanCategory.LINK));
+    }
+
+    /**
+     * And it answers for the capacity tiers only. A peer that has spent its chunk budget is not
+     * this node being out of room, and the gate — which knows a category and nothing else — must
+     * not turn one into the other: that would refuse every other source's chunks as well.
+     */
+    @Test
+    public void isFullIgnoresTheChunkQuotaTiers() {
+        ChainOrphanPool pool = newPool(limits().chunk(100).chunkPerPeer(1).chunkPerChain(1).build());
+        pool.add(chunkFrom("peerA", hash(1), head(1)));
+        assertEquals(OrphanAdmission.PEER_FULL, pool.add(chunkFrom("peerA", hash(2), head(1))));
+        assertFalse("a spent peer budget is not a full pool", pool.isFull(OrphanCategory.CHUNK));
+    }
+
     // ---- the two chunk-only tiers --------------------------------------------------------
 
     /**

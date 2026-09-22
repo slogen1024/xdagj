@@ -628,6 +628,16 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
         return pool.totalSize();
     }
 
+    /**
+     * Straight through to the pool, which owns both the counts and the caps. The database half has
+     * no say: ORPHANIND is a record of what the pool holds, never a second opinion on whether there
+     * is room for more.
+     */
+    @Override
+    public boolean isFull(OrphanCategory category) {
+        return pool.isFull(category);
+    }
+
     @Getter
     public static class CandidateEntry {
         public enum EntryType {ACCOUNT_TX, MTX}

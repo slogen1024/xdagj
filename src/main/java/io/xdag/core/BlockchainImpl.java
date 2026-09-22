@@ -36,6 +36,7 @@ import io.xdag.chain.l1.ChainL1Hooks;
 import io.xdag.chain.l1.ChainL1Processor;
 import io.xdag.chain.l1.ChainL1SnapshotGate;
 import io.xdag.chain.l1.ChainL1Store;
+import io.xdag.chain.orphan.OrphanCategory;
 import io.xdag.chain.repair.ChainConsistencyCheck;
 import io.xdag.config.MainnetConfig;
 import io.xdag.config.spec.ChainSpec;
@@ -95,7 +96,13 @@ public class BlockchainImpl implements Blockchain {
 
     // Static gas fee accumulator
     private static XAmount sumGas = XAmount.ZERO;
-    private static final long MAX_ORPHAN_SIZE = 3750;
+
+    /**
+     * The address an orphan with no account behind it is filed under: twenty zero bytes, which is
+     * what {@code OrphanBlockStore.addOrphan} writes into the ORPHANIND row for a link or main
+     * transaction block. Shared and never handed out, so it cannot be written through.
+     */
+    private static final byte[] NO_ORPHAN_ADDRESS = new byte[20];
 
     // Thread factory for main chain checking
     private static final ThreadFactory factory = BasicThreadFactory.builder()
@@ -468,13 +475,6 @@ public class BlockchainImpl implements Blockchain {
                 return result;
             }
 
-            if (isAccountTx(block) && orphanBlockStore.getOrphanSize() >= MAX_ORPHAN_SIZE) {
-                result = ImportResult.INVALID_BLOCK;
-                result.setErrorInfo("Orphan block pool is full");
-                log.debug("Orphan block pool is full");
-                return result;
-            }
-
             // Check if block already exists
             if (isExist(block.getHashLow())) {
                 return ImportResult.EXIST;
@@ -487,6 +487,44 @@ public class BlockchainImpl implements Blockchain {
             // Check if extra block
             if (isExtraBlock(block)) {
                 updateBlockFlag(block, BI_EXTRA, true);
+            }
+
+            // Orphan-pool admission, per category (SP0b-3). This used to be
+            // `isAccountTx(block) && getOrphanSize() >= MAX_ORPHAN_SIZE`: one count of all four
+            // queues together, against one constant, consulted only when an account transaction
+            // arrived. Link, chunk and mtx blocks were never asked, so they filled the pool for
+            // free and the first category to be refused was the only one that had been checked.
+            // Asking for the arriving block's own category makes that shape impossible: a full
+            // category closes itself and nothing else.
+            //
+            // Placed here, after the existence checks and after the BI_EXTRA determination,
+            // because those are what decide whether this block is ever going to occupy a pool
+            // slot, and nothing above mutates any state:
+            //
+            //   - a block this node already holds (EXIST / IN_MEM) is not going to be pooled
+            //     again, so a full pool is no reason to refuse it. Under the old account-tx-only
+            //     gate that mattered rarely; now that link blocks are gated too it is the common
+            //     case during a sync, where the same blocks arrive repeatedly.
+            //   - a BI_EXTRA block is never pooled at all -- the import parks it in memOrphanPool
+            //     and the removeOrphan that later evicts it does not call dealOrphan -- so gating
+            //     one on a full LINK category would refuse traffic that costs the pool nothing.
+            //     That traffic is every freshly mined block on the network, main blocks included,
+            //     so gating it would let a link flood stop this node following the chain.
+            //
+            // The residual case is a block that is BI_EXTRA here and has the flag cleared further
+            // down (a mined block carrying a non-zero-amount reference): it skips the gate and can
+            // reach a full category, where the pool refuses it and it is imported unpooled. The
+            // pool's refusal is the backstop for exactly that, and the shape cannot be reached by
+            // any block this node's own builders produce -- a transaction block is built with
+            // mining == false, so getNonce() is null and isExtraBlock() is false for it.
+            if ((block.getInfo().flags & BI_EXTRA) == 0) {
+                OrphanCategory category = orphanCategoryOf(block);
+                if (orphanBlockStore.isFull(category)) {
+                    result = ImportResult.INVALID_BLOCK;
+                    result.setErrorInfo("Orphan block pool is full");
+                    log.debug("Orphan block pool is full for category {}", category);
+                    return result;
+                }
             }
 
             if (isTxBlock(block) && XAmount.ZERO.compareTo(getTxFee(block)) == 0) {
@@ -818,19 +856,57 @@ public class BlockchainImpl implements Blockchain {
         if (kernel.getConfig().getEnableGenerateBlock() && kernel.getPow() != null) {
             UInt64 nonce = UInt64.ZERO;
             XAmount fee = getTxFee(block);
-            byte[] address = null;
-            if (isAccountTx(block)) {
-                List<Address> refs = block.getLinks();
-                for (Address txRef : refs) {
-                    if (txRef.getType().equals(XDAG_FIELD_INPUT)) {
-                        address = BytesUtils.byte32ToArray(txRef.getAddress()).toArray();
-                        nonce = block.getTxNonceField().getTransactionNonce();
-                        break;
-                    }
-                }
+            byte[] address = orphanAddressOf(block);
+            if (address != null) {
+                nonce = block.getTxNonceField().getTransactionNonce();
             }
             getOrphanBlockStore().addOrphan(block, isTxBlock(block), nonce, fee, address);
         }
+    }
+
+    /**
+     * The sender address this block is filed under in the orphan pool, or null when it is not an
+     * account transaction — which the store turns into twenty zero bytes, the shared main-address
+     * lane.
+     *
+     * <p>Walks the links rather than the inputs because that is what it always walked, and the two
+     * cannot disagree for a block {@link #isAccountTx} accepted: {@code getLinks()} is the inputs
+     * followed by the outputs, and the single {@code XDAG_FIELD_INPUT} that made it an account
+     * transaction is in the inputs.
+     */
+    private byte[] orphanAddressOf(Block block) {
+        if (!isAccountTx(block)) {
+            return null;
+        }
+        for (Address txRef : block.getLinks()) {
+            if (txRef.getType().equals(XDAG_FIELD_INPUT)) {
+                return BytesUtils.byte32ToArray(txRef.getAddress()).toArray();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Which orphan category this block would occupy a slot in, for the admission gate in
+     * {@link #tryToConnect(PreValidated)}.
+     *
+     * <p><b>It must give the same answer as the store does on the way in, always.</b> The gate and
+     * {@code OrphanBlockStoreImpl.categoryOf} are the two halves of one decision: a gate that says
+     * LINK where the store files CHUNK lets a block past a cap the store then enforces, and the
+     * block is imported and silently not pooled — on disk, counted in {@code nnoref}, referenced by
+     * nothing this node can ever mine. So both are computed from exactly the same two facts, in the
+     * same call: the {@code isTxBlock} flag and the address {@link #orphanAddressOf} returns, fed to
+     * {@code OrphanCategory.of}.
+     *
+     * <p>The kind is null here for the same reason it is null there — the import path carries no
+     * {@code ExtKind} as far as the orphan store yet, so chunk blocks are filed under
+     * {@link OrphanCategory#LINK} and the chunk cap is not yet reachable from here. <b>Whoever
+     * threads the classification through to {@code addOrphan} has to thread it through here in the
+     * same commit</b>, or the two halves come apart in exactly the way above.
+     */
+    private OrphanCategory orphanCategoryOf(Block block) {
+        byte[] address = orphanAddressOf(block);
+        return OrphanCategory.of(isTxBlock(block), address == null ? NO_ORPHAN_ADDRESS : address, null);
     }
 
     public XAmount getTxFee(Block block) {

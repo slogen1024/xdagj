@@ -23,6 +23,7 @@
  */
 package io.xdag.db;
 
+import io.xdag.chain.orphan.OrphanCategory;
 import io.xdag.core.XAmount;
 import io.xdag.core.XdagLifecycle;
 import io.xdag.core.Address;
@@ -51,5 +52,17 @@ public interface OrphanBlockStore extends XdagLifecycle {
     void addOrphan(Block block, boolean isTxBlock, UInt64 nonce, XAmount fee, byte[] address);
 
     long getOrphanSize();
+
+    /**
+     * Whether an orphan of this category would be refused for want of room — its own category cap,
+     * or the pool-wide one.
+     *
+     * <p>The import path's admission gate. It is asked per category rather than against one total
+     * because a total is what let a flood of one kind of block close the door on every other kind:
+     * before SP0b-3 the check was a single count of all four queues, consulted only when an account
+     * transaction arrived, so link, chunk and mtx blocks filled the pool with nothing stopping them
+     * and account transactions paid for it.
+     */
+    boolean isFull(OrphanCategory category);
 
 }

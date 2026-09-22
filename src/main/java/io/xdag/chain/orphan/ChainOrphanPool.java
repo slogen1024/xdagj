@@ -309,11 +309,9 @@ public final class ChainOrphanPool {
         if (index.containsKey(entry.hashlow())) {
             return OrphanAdmission.DUPLICATE;
         }
-        if (total >= limits.poolLimit()) {
-            return OrphanAdmission.POOL_FULL;
-        }
-        if (counts[entry.category().ordinal()] >= limits.limit(entry.category())) {
-            return OrphanAdmission.CATEGORY_FULL;
+        OrphanAdmission capacity = capacityVerdict(entry.category());
+        if (capacity != OrphanAdmission.ADMITTED) {
+            return capacity;
         }
         if (entry.category() == OrphanCategory.CHUNK) {
             if (held(chunkPerPeer, entry.peerKey()) >= limits.chunkPerPeer()) {
@@ -338,6 +336,45 @@ public final class ChainOrphanPool {
         counts[entry.category().ordinal()]++;
         total++;
         reserveChunkQuotas(entry);
+        return OrphanAdmission.ADMITTED;
+    }
+
+    /**
+     * Whether an entry of this category would be refused <em>on a capacity ground</em> right now:
+     * the global cap, or this category's own.
+     *
+     * <p>For the import gate ({@code BlockchainImpl.tryToConnect}), which has to answer "is there
+     * room for this block" before any state is touched, rather than import the block and discover
+     * on the way out that there was not. A block admitted past a full category is imported and
+     * then quietly not pooled, which is strictly worse than refusing it: it is on disk, counted in
+     * {@code nnoref}, and no main block this node ever mines can reference it.
+     *
+     * <p><b>Same comparisons as {@link #add}, by construction and not by copy.</b> The two must
+     * agree exactly — a gate that says "room" where {@code add} says CATEGORY_FULL produces
+     * precisely the imported-but-unpooled block it exists to prevent — so both route through
+     * {@link #capacityVerdict}.
+     *
+     * <p>It deliberately answers for the capacity tiers only. The per-peer and per-chain chunk
+     * quotas depend on attribution ({@code peerKey}, {@code chainHead}) that a category alone does
+     * not carry, and the import path does not carry either until the peer/kind pipeline supplies
+     * it; they stay where they are, inside {@code add}.
+     */
+    public boolean isFull(OrphanCategory category) {
+        return capacityVerdict(category) != OrphanAdmission.ADMITTED;
+    }
+
+    /**
+     * The two capacity comparisons, in the order the verdict has to name them, with
+     * {@link OrphanAdmission#ADMITTED} standing for "no capacity objection" — the entry may still
+     * be refused by a quota tier {@link #add} asks about afterwards.
+     */
+    private OrphanAdmission capacityVerdict(OrphanCategory category) {
+        if (total >= limits.poolLimit()) {
+            return OrphanAdmission.POOL_FULL;
+        }
+        if (counts[category.ordinal()] >= limits.limit(category)) {
+            return OrphanAdmission.CATEGORY_FULL;
+        }
         return OrphanAdmission.ADMITTED;
     }
 
