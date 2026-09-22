@@ -940,6 +940,14 @@ public void removalCostDoesNotGrowLinearlyWithPoolSize() {
 
 断言 `getOrphan` 仍在区块链监视器下执行，且不存在「先持孤块池后取监视器」的反向路径。沿用 `OrphanBlockStoreConcurrencyTest` 既有的闩锁交错手法，不改写它的断言。
 
+- [ ] **Step 3b: 量一量分片块离开 link 队列之后 `checkOrphan` 的空转（Task 10 留下的代价）**
+
+Task 10 指出：分片块归入 CHUNK 类之后就不再进 link 队列，所以本节点挖的任何块都不会引用它们。但一个到达的分片块仍然会抬高 `nnoref`，而且要等两个纪元后清理线程才还回来。`checkOrphan` 用 `nblk = nnoref / 11` 决定挖多少 link 块——于是**洪泛期间节点会挖出一批根本无法引用任何东西的 link 块**。
+
+计数本身是对的（Task 7 已把递减改成按条目而非按行），变的是时机。但「对的计数」不等于「没有浪费」。
+
+测：在分片洪泛下记录 `checkOrphan` 触发的 link 块数量，与同等规模的非分片洪泛对比。如果空转显著，把数字写进 Task 16 的文档并作为待办列出——**不要在本子项目里顺手改 `checkOrphan` 的计数口径**，那会动到出块节奏，属于另一个变更的范围。若不显著，同样据实记录，这个疑虑就此关闭。
+
 - [ ] **Step 4: 单 peer 与单链洪泛的端到端**
 
 经真实 `IngestPipeline` 投递，而非直接调池：断言单一来源被 `chunkPerPeer` 截断后，其它来源的分片块与账户交易都不受影响。
