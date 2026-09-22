@@ -512,12 +512,82 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
     }
 
     /**
-     * The packing walk, branch for branch as it was, with every collection access going through the
-     * pool. Selection takes an entry <em>out</em> of the pool: what it hands back is no longer
-     * pooled, and for a main block the caller parks it in {@code mainRef}.
+     * The packing walk, with every collection access going through the pool. Selection takes an
+     * entry <em>out</em> of the pool: what it hands back is no longer pooled, and for a main block
+     * the caller parks it in {@code mainRef}.
+     *
+     * <h2>The order, and the starvation it used to cause</h2>
+     *
+     * <p>The link branch used to come first for a main block and {@code return} unconditionally
+     * once it had drained what it could, so the merged account-transaction and mtx walk below it
+     * was reached only when {@code linkQueue} was empty. Chunk blocks live in {@code linkQueue}
+     * (nothing classifies them as {@link OrphanCategory#CHUNK} until the ingest pipeline carries a
+     * kind this far), so a steady trickle of link traffic kept account transactions out of main
+     * blocks indefinitely. Task 8 closed the admission half of that starvation; this is the other
+     * half, and closing only one of them closes neither.
+     *
+     * <p>Which queue gets a slot is now decided in this order:
+     *
+     * <table><caption>Who is served first when the budget is short</caption>
+     * <tr><th>path</th><th>order</th></tr>
+     * <tr><td>main block</td><td>{@code mainRef} &rarr; VIP (at most 6) &rarr; account transactions
+     *     and mtx merged &rarr; {@code linkQueue} fills whatever slots remain</td></tr>
+     * <tr><td>link block</td><td>{@code mainRef} (consuming) &rarr; {@code linkQueue} &rarr;
+     *     account transactions and mtx</td></tr>
+     * </table>
+     *
+     * <p><b>Inverted priority, not prohibition.</b> The roadmap's wording was "a main block packs
+     * only from the account transaction queue". Taken literally that would leave {@code linkQueue}
+     * to {@code createLinkBlock} alone, which {@code checkOrphan} drives at {@code nnoref / 11}: on
+     * a quiet node with no account traffic a main block would carry almost no references at all and
+     * {@code nnoref} would climb while link blocks slowly caught up. Letting {@code linkQueue} fill
+     * the slots account transactions and mtx did not want costs the fairness nothing — they were
+     * offered first — and costs link throughput nothing either.
+     *
+     * <h2>Priority is about slots; the reference list still leads with link blocks</h2>
+     *
+     * <p><b>The table above is an allocation order, not the order the references come back in.</b>
+     * Account transactions and mtx are chosen first and then <em>appended after</em> the link fill,
+     * so the list a main block gets is {@code mainRef}, VIP, link blocks, account transactions and
+     * mtx — the order it has always had. That is deliberate and it is a correctness requirement,
+     * not a cosmetic one.
+     *
+     * <p>{@code applyBlock} walks a block's references in field order and descends into each one
+     * before moving on, and a transaction whose nonce is more than one past its sender's executed
+     * nonce is <em>permanently</em> rejected ({@code BlockchainImpl}: the nonce check also calls
+     * {@code resetTxQuantity}, and the {@code BI_MAIN_REF} it leaves behind means the block is never
+     * reconsidered). A link block received from a peer routinely carries the nonce-<i>n</i>
+     * predecessor of a nonce-<i>n+1</i> transaction still sitting in this pool — importing that link
+     * is what took the predecessor out of the pool in the first place. Emit the transaction ahead of
+     * the link and the predecessor has not executed yet when the nonce is checked, so a transaction
+     * that would have confirmed is killed instead.
+     *
+     * <p>{@code BlockchainTest.testLinkAndNonceImpactOnSorting} is built on exactly that shape, and
+     * emitting the transactions first turns five of its confirmations into permanent rejections
+     * (every pooled transaction is nonce 2 against an executed nonce of 0; the nonce-1 blocks are
+     * inside the three link blocks). Nothing about starvation requires a transaction to be early in
+     * the field list — only that it gets a field at all — so the fix takes the slots and leaves the
+     * layout alone.
+     *
+     * <p><b>The link block's gate is deliberately untouched.</b> It still leads with
+     * {@code linkQueue} only when there is nothing else to carry or when link traffic alone already
+     * fills the budget; with account transactions waiting and light link traffic it leads with
+     * them, exactly as it does today. The inversion is a main block's business: a link block is
+     * created <em>because</em> {@code nnoref} is high, so leading it with {@code linkQueue} is the
+     * point of it, and widening this task to the link path would change DAG shape for no starvation
+     * anyone can name. What did change there is the consequence of dropping the early return: a
+     * link block whose link drain stops short at the cutoff time now tops its remaining slots up
+     * from the account and mtx queues instead of going out half empty.
+     *
+     * <p>The {@code mainRef} asymmetry above is preserved as it was: offered without removal for a
+     * main block, consumed for a link block.
      */
     public List<OrphanEntry> selectBlocks(long totalRequired, long cutoffTime, boolean isMain) {
         List<OrphanEntry> result = new ArrayList<>();
+        // Account transactions and mtx: they take their slots before the link fill and are appended
+        // to the tail of the reference list once it is done. See the nonce-ordering section above —
+        // holding them here is the whole of the "priority is about slots" rule.
+        List<OrphanEntry> accountAndMtx = new ArrayList<>();
 
         if (!pool.mainRefIsEmpty() && (isMain || pool.mainRefSize() >= 9)) {
             Iterator<OrphanEntry> it = pool.mainRefIterator();
@@ -550,19 +620,18 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
             }
         }
 
+        // The regular lane alone, not both lanes: the VIP lane has just been walked above, and
+        // size(ACCOUNT_TX) counts the two together — it would answer this gate with transactions
+        // this walk has already taken.
         long accountTxCount = pool.laneSize(AccountLane.REGULAR);
         // LINK alone, as before: to this walk a chunk is a link block until the ingest pipeline
         // classifies it, and separating the two in the packing order is a later change.
         int linkCount = pool.size(OrphanCategory.LINK);
-        if ((isMain || (accountTxCount + pool.size(OrphanCategory.MTX)) == 0 || linkCount >= totalRequired)
-                && linkCount != 0) {
-            while (result.size() < totalRequired) {
-                OrphanEntry e = pool.first(OrphanCategory.LINK);
-                if (e == null || e.meta().getTime() > cutoffTime) break;
-                result.add(e);
-                pool.remove(e.hashlow());
-            }
-            return result;
+        // The link block's gate, unchanged. A main block no longer enters here: its link fill comes
+        // after the account transactions and mtx below, which is the whole of this task.
+        if (!isMain && linkCount != 0
+                && ((accountTxCount + pool.size(OrphanCategory.MTX)) == 0 || linkCount >= totalRequired)) {
+            fillFromLinkQueue(result, totalRequired, cutoffTime);
         }
 
         if ((pool.size(OrphanCategory.MTX) != 0 || accountTxCount != 0) && result.size() < totalRequired) {
@@ -578,10 +647,10 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
                 }
             }
 
-            while (!candidateQueue.isEmpty() && result.size() < totalRequired) {
+            while (!candidateQueue.isEmpty() && result.size() + accountAndMtx.size() < totalRequired) {
                 CandidateEntry chosen = candidateQueue.poll();
                 if (chosen == null) continue;
-                result.add(chosen.entry);
+                accountAndMtx.add(chosen.entry);
                 pool.remove(chosen.entry.hashlow());
                 if (chosen.type == CandidateEntry.EntryType.MTX) {
                     OrphanEntry next = pool.first(OrphanCategory.MTX);
@@ -597,7 +666,30 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
             }
         }
 
+        // The main block's link fill: it gets only the slots the account transactions and mtx left
+        // behind, which is why the budget it is given is the remainder. linkCount is still current —
+        // nothing above this removes a link entry.
+        if (isMain && linkCount != 0 && result.size() + accountAndMtx.size() < totalRequired) {
+            fillFromLinkQueue(result, totalRequired - accountAndMtx.size(), cutoffTime);
+        }
+
+        // Appended, not interleaved: the slots were won above, the field order is the old one.
+        result.addAll(accountAndMtx);
         return result;
+    }
+
+    /**
+     * Takes link entries in the set's own order until the budget is full or the head is newer than
+     * the cutoff. The cutoff break is not a {@code continue}: the set is ordered by time, so the
+     * first entry past the cutoff means every entry after it is too.
+     */
+    private void fillFromLinkQueue(List<OrphanEntry> result, long totalRequired, long cutoffTime) {
+        while (result.size() < totalRequired) {
+            OrphanEntry e = pool.first(OrphanCategory.LINK);
+            if (e == null || e.meta().getTime() > cutoffTime) break;
+            result.add(e);
+            pool.remove(e.hashlow());
+        }
     }
 
     /**

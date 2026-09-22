@@ -4211,6 +4211,11 @@ public class BlockchainTest {
         assertEquals(0, blockchain.getOrphanBlockStore().getOrphanSize());
         assertEquals(19, orphan.size());
 
+        // The same nineteen blocks, drained over three calls. The regular-lane transactions
+        // (tx3, tx4, b3, b4, b5) used to come out in the second call, behind a second batch of six
+        // VIP ones, because the link branch returned before the merged walk could run; a main block
+        // now takes them in the first call instead, which is the SP0b-3 packing fix. Set, count and
+        // per-call VIP cap are unchanged -- only where in the drain the five appear.
         for (int i = 0; i < orphan.size(); i++) {
             Address orp = orphan.get(i);
             if (i == 0) {
@@ -4228,27 +4233,27 @@ public class BlockchainTest {
             } else if (i == 6) {
                 assertArrayEquals(orp.addressHash.toArray(), linkDeep.getHashLow().toArray());
             } else if (i == 7) {
-                assertArrayEquals(orp.addressHash.toArray(), a5.getHashLow().toArray());
-            } else if (i == 8) {
-                assertArrayEquals(orp.addressHash.toArray(), a6.getHashLow().toArray());
-            } else if (i == 9) {
-                assertArrayEquals(orp.addressHash.toArray(), a7.getHashLow().toArray());
-            } else if (i == 10) {
-                assertArrayEquals(orp.addressHash.toArray(), c2.getHashLow().toArray());
-            } else if (i == 11) {
-                assertArrayEquals(orp.addressHash.toArray(), c3.getHashLow().toArray());
-            } else if (i == 12) {
-                assertArrayEquals(orp.addressHash.toArray(), c4.getHashLow().toArray());
-            } else if (i == 13) {
                 assertArrayEquals(orp.addressHash.toArray(), tx3.getHashLow().toArray());
-            } else if (i == 14) {
+            } else if (i == 8) {
                 assertArrayEquals(orp.addressHash.toArray(), tx4.getHashLow().toArray());
-            } else if (i == 15) {
+            } else if (i == 9) {
                 assertArrayEquals(orp.addressHash.toArray(), b3.getHashLow().toArray());
-            } else if (i == 16) {
+            } else if (i == 10) {
                 assertArrayEquals(orp.addressHash.toArray(), b4.getHashLow().toArray());
-            } else if (i == 17) {
+            } else if (i == 11) {
                 assertArrayEquals(orp.addressHash.toArray(), b5.getHashLow().toArray());
+            } else if (i == 12) {
+                assertArrayEquals(orp.addressHash.toArray(), a5.getHashLow().toArray());
+            } else if (i == 13) {
+                assertArrayEquals(orp.addressHash.toArray(), a6.getHashLow().toArray());
+            } else if (i == 14) {
+                assertArrayEquals(orp.addressHash.toArray(), a7.getHashLow().toArray());
+            } else if (i == 15) {
+                assertArrayEquals(orp.addressHash.toArray(), c2.getHashLow().toArray());
+            } else if (i == 16) {
+                assertArrayEquals(orp.addressHash.toArray(), c3.getHashLow().toArray());
+            } else if (i == 17) {
+                assertArrayEquals(orp.addressHash.toArray(), c4.getHashLow().toArray());
             } else {
                 assertArrayEquals(orp.addressHash.toArray(), a8.getHashLow().toArray());
             }
