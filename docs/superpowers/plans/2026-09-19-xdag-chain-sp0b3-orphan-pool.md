@@ -927,7 +927,20 @@ public final class ChunkFeePolicy {
 ### Task 15: 对抗测试
 
 **Files:**
-- Test: `src/test/java/io/xdag/chain/orphan/OrphanFloodTest.java`（补齐）
+- Test: `src/test/java/io/xdag/chain/orphan/ChunkFloodAdversarialTest.java`（Step 1 / 3b / 5，新增）
+- Test: `src/test/java/io/xdag/chain/orphan/OrphanRemovalComplexityTest.java`（Step 2，新增）
+- Test: `src/test/java/io/xdag/chain/orphan/OrphanLockOrderTest.java`（Step 3，新增）
+- Test: `src/test/java/io/xdag/chain/orphan/ChunkFloodQuotaPipelineTest.java`（Step 4，新增）
+- Modify: `src/test/java/io/xdag/chain/orphan/ChunkOrphanTestBase.java`（`linkTo` 增一个显式时间戳的重载）
+
+> **本任务原先只写了一个文件名 `OrphanFloodTest.java`（补齐），这条是执行时改的。**
+> `OrphanFloodTest` 是 Task 8 的回归面，它**故意**不在 `ChunkOrphanTestBase` 上——
+> 它的 `armTheOrphanPool` 不挖主块，投递走裸 `tryToConnect`，两者都被写进了
+> `ChunkOrphanTestBase` 的类文档（提交 `80865599`）。而 Task 15 的每一步要么需要
+> 分类投递（必须上那个基类），要么根本不需要夹具（Step 2 直接建池），要么需要
+> mock kernel（Step 3）。把它们塞进那一个文件只能靠改掉它的夹具，那正是
+> 「不要随手迁移」要挡的事。所以按主题拆成四个文件，每个文件的类文档说明自己
+> 为什么在／不在共享基类上。
 
 - [ ] **Step 1: TTL 淘汰后被引用，两个节点结论必须一致**
 
@@ -959,6 +972,20 @@ public void removalCostDoesNotGrowLinearlyWithPoolSize() {
 }
 ```
 
+> **实现时改了三处，都记在 `OrphanRemovalComplexityTest` 的类文档里：**
+>
+> 1. **计数器不在池上，在条目上。** 池自己不做比较——`TreeSet.remove` 的比较发生在 JDK 里，
+>    由池的 `static final` 比较器驱动，池实例上的计数器根本不在那条调用路径上；让比较器去加
+>    一个 static 计数，等于在生产每一次比较上都写一次。而且**只数比较会看漏它要抓的回归**：
+>    被换掉的 `PriorityBlockingQueue.remove` 是 `indexOf` 线性走查，调的是 `equals` 不是比较器。
+>    所以探针做成测试里的 `OrphanMeta` 子类，数四个排序字段的读取**加** `equals`，生产代码一行未动。
+> 2. **阈值改成绝对增量 `large - small <= 64`，不是比值 `< small * 4`。** `mainRef` 的常数项
+>    （128 次探测）占了两个数的大头，比值 4 会默许被测部分多出几百次探测。实测
+>    1000 → 149、100000 → 163（+14）；把线性走查放回去实测 254 → 11927（+11673）。
+> 3. **`mainRef` 在两次测量里长度相同。** 它装的不是池，是已经交出去、链还没确认的条目，
+>    长度由出块节奏决定而不是由洪泛决定；让它跟着池一起变深是在量生产造不出来的形状。
+>    这一条另写了一个测试，把「移除代价里仍然与 `mainRef` 长度成正比的那一段」显式钉住。
+
 **`comparisonsForOneRemoval` 必须造最坏情况，不是最好情况。** Task 1 发现按 nonce 升序移除会每次命中堆顶，走 O(log n)，那样即使不改任何代码这个测试也会通过。要少量发送方、深队列、与比较器不相关的移除顺序（固定种子打乱），并且要覆盖 `mainRef`——它是 `ConcurrentLinkedDeque`，`remove(Object)` 是纯线性走查，没有堆结构可借力，而 `deleteFromQueue` 每次移除都会碰它，不分类别。
 
 - [ ] **Step 3: 锁序未被破坏**
@@ -973,13 +1000,45 @@ Task 10 指出：分片块归入 CHUNK 类之后就不再进 link 队列，所�
 
 测：在分片洪泛下记录 `checkOrphan` 触发的 link 块数量，与同等规模的非分片洪泛对比。如果空转显著，把数字写进 Task 16 的文档并作为待办列出——**不要在本子项目里顺手改 `checkOrphan` 的计数口径**，那会动到出块节奏，属于另一个变更的范围。若不显著，同样据实记录，这个疑虑就此关闭。
 
+> **结论：显著，作为待办交给 Task 16。** 测法与数字（`ChunkFloodAdversarialTest`）：
+> `nnoref` 打到 **671**，`nblk = 671/11 = 61`，`61 % 61 == 0` ⇒ `0 > nextLong(0,61)` 恒假，
+> 抽样这一步被**解除**而不是被平均掉——每个 tick 恰好一个 link 块，没有随机性。
+> 670 个洪泛块，各 8 个 tick：
+>
+> - **非分片洪泛（对照）**：每个挖出的 link 块带 12 个引用、退掉 12 个孤块，`nnoref` 每块降 11
+>   （671 → 583）。挖 link 块正是消化 link 洪泛的手段，它确实在消化。
+> - **分片洪泛**：`nnoref` 一动不动（671 → 671），670 个池内分片块一个都没被碰到。
+>   而且比空转更糟：池子里除了分片块什么都没有时，`getOrphan` 一条都给不出，
+>   于是挖出来的块引用数为 0、时间戳为 1（选择为空时 `sendtime[1]` 保持 0），
+>   **被本节点自己的导入路径以「Block's time is illegal」拒掉**——8 个 tick，
+>   8 个块建好、签好名，一个都没进去。
+> - 并且不会自己停：`nnoref` 不动 ⇒ `nblk` 每个 tick 都还是 61 ⇒ 一直挖到两个纪元后
+>   清理线程把计数还回来为止。**浪费的上界是 TTL，不是挖矿本身。**
+
 - [ ] **Step 4: 单 peer 与单链洪泛的端到端**
 
 经真实 `IngestPipeline` 投递，而非直接调池：断言单一来源被 `chunkPerPeer` 截断后，其它来源的分片块与账户交易都不受影响。
 
-- [ ] **Step 5: TTL 重启稳定的端到端**
+- [ ] **Step 5: 重启后的孤块池，走真实的 `rebuildMemoryFromDb`**
 
-重启节点后分片块的剩余寿命不被重置（与 Task 6 的单元测试互补，这一条走真实的 `rebuildMemoryFromDb`）。
+> **这一步的原文是「重启节点后分片块的剩余寿命不被重置」，写于 Task 11 之前，已经作废。**
+> Task 11 定下分片块**既不进块库也不进 ORPHANIND**，只在内存里；
+> `OrphanBlockStoreImpl` 的类文档（`:92-93`）把结论写死了：`rebuildMemoryFromDb`
+> 「by construction 只可能产出非分片条目」。所以重启之后分片块根本不存在，
+> 「剩余寿命没被重置」是**空真**——照原文写的测试无论代码怎么改都是绿的。
+
+按 Task 11 当初的理由重新定范围（「TTL 只有两个纪元（128 秒），重启丢失无害，
+需要时走既有拉取路径」）——真正值得端到端钉住的是那句「无害」本身，以及重启到底带回了什么：
+
+1. **重启丢光分片块之后，节点仍然是对的**：随后到达的付费块得到的结论，与
+   「本节点从未收到过这些分片块」逐字段相同。这与 Step 1 是同一条年龄规则论证，
+   只是把 TTL 清扫换成真实的 `rebuildMemoryFromDb`。
+2. **非分片孤块确实被带回来了，而且带回的是打包顺序**：ORPHANIND 的行里存的是块自己的
+   时间戳（排序键），所以按到达顺序倒着投递的三个 link 块，重建前后队头必须是同一个。
+   分片块没有行，所以一条都回不来——这就是「重建不需要类别字节」的那句论证，落成断言。
+3. **不跟着回来的是十五分钟的收件时刻**（`rebuildMemoryFromDb` 给每个重建条目重新盖章）。
+   这是有意的：非分片 TTL 是本地内存策略，背后没有协议规则，重启多给十五分钟无害。
+   需要重启稳定的是分片 TTL，而它按块头的纪元计算，本来就与本节点无关。
 - [ ] **Step 6: 每一条都做变异验证并记录失败文本**
 - [ ] **Step 7: 提交**
 
