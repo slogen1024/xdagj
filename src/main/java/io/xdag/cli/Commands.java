@@ -315,10 +315,28 @@ public class Commands {
                 str.append(hash2Address(blockWrapper.getBlock().getHashLow())).append("\n");
             } else if (result == ImportResult.INVALID_BLOCK) {
                 str.append(result.getErrorInfo());
+            } else if (result == ImportResult.CHAIN_FEE_POLICY) {
+                str.append(policyRefusal(blockWrapper));
             }
         }
 
         return str.append("}, it will take several minutes to complete the transaction. \n").toString();
+    }
+
+    /**
+     * What this node prints for a block its own chunk fee policy declined (SP0b-3 §5).
+     *
+     * <p>The block is well formed and every other node may well take it, so this is not an error
+     * string: it is this node saying it will not store a chain block whose header fee does not cover
+     * the chunk blocks it references. An ordinary transfer references no chunk chain and can never
+     * reach this; a chain block built with too small a header fee can. Without it the caller sees
+     * neither a hash nor a reason, just the "several minutes" tail for a transaction that was never
+     * sent.
+     */
+    private static String policyRefusal(BlockWrapper blockWrapper) {
+        return "Declined by this node's chunk fee policy (chain.ingest.feePolicy): the header fee does not"
+                + " cover the chunk chains this block references. Tx hash:"
+                + BasicUtils.hash2Address(blockWrapper.getBlock().getHashLow()) + "\n";
     }
 
     /**
@@ -817,6 +835,8 @@ public class Commands {
             if (result == ImportResult.IMPORTED_BEST || result == ImportResult.IMPORTED_NOT_BEST) {
                 kernel.getChannelMgr().sendNewBlock(blockWrapper);
                 str.append(BasicUtils.hash2Address(blockWrapper.getBlock().getHashLow())).append("\n");
+            } else if (result == ImportResult.CHAIN_FEE_POLICY) {
+                str.append(policyRefusal(blockWrapper));
             }
         }
         return str.append("}, it will take several minutes to complete the transaction.").toString();
@@ -841,6 +861,8 @@ public class Commands {
             if (result == ImportResult.IMPORTED_BEST || result == ImportResult.IMPORTED_NOT_BEST) {
                 kernel.getChannelMgr().sendNewBlock(blockWrapper);
                 str.append(BasicUtils.hash2Address(blockWrapper.getBlock().getHashLow()));
+            } else if (result == ImportResult.CHAIN_FEE_POLICY) {
+                return new StringBuilder(policyRefusal(blockWrapper));
             } else {
                 return new StringBuilder("This transaction block is invalid. Tx hash:")
                         .append(BasicUtils.hash2Address(blockWrapper.getBlock().getHashLow()));

@@ -182,6 +182,10 @@ public class ImportResultBranchTest {
             when(kernel.getBlockchain()).thenReturn(blockchain);
             when(kernel.getChannelMgr()).thenReturn(channelMgr);
             when(kernel.getTxHistoryStore()).thenReturn(mock(TransactionHistoryStore.class));
+            // A real config, not a mock: SyncManager builds its chunk fee gate from the chain spec,
+            // and the devnet default has the gate ON — so these tests run with it live. Nothing here
+            // carries an extension field, so it has nothing to have an opinion about.
+            when(kernel.getConfig()).thenReturn(config);
             syncManager = new SyncManager(kernel);
             syncManager.setSyncMap(syncMap);
         }

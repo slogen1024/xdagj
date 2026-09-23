@@ -997,6 +997,12 @@ public class XdagApiImpl extends AbstractXdagLifecycle implements XdagApi {
                 resInfo.add(hash2Address(blockWrapper.getBlock().getHashLow()));
             } else if (result == ImportResult.INVALID_BLOCK) {
                 resInfo.add(result.getErrorInfo());
+            } else if (result == ImportResult.CHAIN_FEE_POLICY) {
+                // This node declined the block under its own chunk fee policy (SP0b-3 §5): well
+                // formed, but its header fee does not cover the chunk chains it references. Reported
+                // rather than dropped, or the caller gets an empty result for a block never sent.
+                resInfo.add("Declined by this node's chunk fee policy (chain.ingest.feePolicy): "
+                        + hash2Address(blockWrapper.getBlock().getHashLow()));
             }
         }
 

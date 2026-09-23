@@ -29,6 +29,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import io.xdag.Kernel;
+import io.xdag.config.Config;
+import io.xdag.config.spec.ChainSpec;
 import io.xdag.core.BlockWrapper;
 import io.xdag.core.Blockchain;
 import io.xdag.core.XdagStats;
@@ -141,6 +143,11 @@ public class SyncManagerEvictionTest {
         when(blockchain.getXdagStats()).thenReturn(stats);
         when(kernel.getBlockchain()).thenReturn(blockchain);
         when(kernel.getChannelMgr()).thenReturn(mock(ChannelManager.class));
+        // SyncManager builds its chunk fee gate from the chain spec. A mocked spec leaves the gate
+        // off, which is what this test wants: nothing here goes near the ingest paths it guards.
+        Config config = mock(Config.class);
+        when(config.getChainSpec()).thenReturn(mock(ChainSpec.class));
+        when(kernel.getConfig()).thenReturn(config);
         return new SyncManager(kernel);
     }
 

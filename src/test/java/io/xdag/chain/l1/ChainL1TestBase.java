@@ -337,6 +337,30 @@ public abstract class ChainL1TestBase {
      * {@code confirm()}'s "block not applied after 6 main blocks".
      */
     protected Block mineMain(List<Bytes32> extraRefs, boolean expectBest) {
+        Block candidate = buildMain(extraRefs);
+        ImportResult r = blockchain.tryToConnect(candidate);
+        if (expectBest) {
+            assertSame("main block must extend the best chain: " + r.getErrorInfo(), ImportResult.IMPORTED_BEST, r);
+        } else {
+            assertTrue("fork block rejected: " + r + " " + r.getErrorInfo(),
+                    r == ImportResult.IMPORTED_BEST || r == ImportResult.IMPORTED_NOT_BEST);
+        }
+        topRef = hashLow(candidate);
+        blockchain.checkMain();
+        return candidate;
+    }
+
+    /**
+     * The mining half of {@link #mineMain(List, boolean)}: advances the mining clock one epoch and
+     * searches a nonce, but imports nothing and leaves {@code topRef} where it is.
+     *
+     * <p>For a test that has to hand a main block to something other than {@code tryToConnect} — the
+     * network entry point, say, where it may legitimately come back {@code NO_PARENT} because one of
+     * its links has not been admitted yet. {@link #mineMain(List, boolean)} asserts the import
+     * outcome itself and so cannot be used for that. A caller that does import the block is
+     * responsible for {@code topRef} and {@code checkMain()} afterwards.
+     */
+    protected Block buildMain(List<Bytes32> extraRefs) {
         generateTime += 64000L;
         List<Address> pending = new ArrayList<>();
         pending.add(new Address(topRef, XDAG_FIELD_OUT, false));
@@ -356,15 +380,6 @@ public abstract class ChainL1TestBase {
             Block candidate = new Block(new XdagBlock(template.toBytes()));
             BigInteger diff = blockchain.calculateCurrentBlockDiff(candidate);
             if (diff.compareTo(DIFF_LO) >= 0 && diff.compareTo(DIFF_HI) < 0) {
-                ImportResult r = blockchain.tryToConnect(candidate);
-                if (expectBest) {
-                    assertSame("main block must extend the best chain: " + r.getErrorInfo(), ImportResult.IMPORTED_BEST, r);
-                } else {
-                    assertTrue("fork block rejected: " + r + " " + r.getErrorInfo(),
-                            r == ImportResult.IMPORTED_BEST || r == ImportResult.IMPORTED_NOT_BEST);
-                }
-                topRef = hashLow(candidate);
-                blockchain.checkMain();
                 return candidate;
             }
         }

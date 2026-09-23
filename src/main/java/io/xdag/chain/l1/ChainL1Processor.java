@@ -554,13 +554,17 @@ public final class ChainL1Processor implements ChainL1Hooks {
      * does. {@code BlockInfo.fee} is overwritten with the collected fees while the block is applied,
      * so {@code Block.getFee()} would not answer "what did this block declare".
      *
+     * <p>Public because the ingest-side chunk fee gate ({@code ChunkFeePolicy}) compares against
+     * this same field: it has to ask the same question of the same bytes this class does, or the two
+     * answers drift.
+     *
      * <p><b>Requires a raw block</b> (SP0a principle P6: the hooks are handed blocks parsed from
      * their 512 bytes). This reads {@code block.getXdagBlock()}, which for a block that carries no
      * raw bytes is re-encoded from the very {@code info} whose {@code fee} was just overwritten —
      * the declared fee would then be indistinguishable from the collected one, and the consensus
      * fee check would silently use the wrong number.
      */
-    static XAmount headerFee(Block block) {
+    public static XAmount headerFee(Block block) {
         XdagBlock raw = block.getXdagBlock();
         Bytes32 header = Bytes32.wrap(raw.getField(0).getData());
         return XAmount.of(header.getLong(24, ByteOrder.LITTLE_ENDIAN), XUnit.NANO_XDAG);

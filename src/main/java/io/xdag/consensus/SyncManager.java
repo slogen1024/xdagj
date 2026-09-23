@@ -26,6 +26,7 @@ package io.xdag.consensus;
 
 import com.google.common.collect.Queues;
 import io.xdag.Kernel;
+import io.xdag.chain.ingest.ChunkFeePolicy;
 import io.xdag.chain.ingest.IngestPipeline;
 import io.xdag.chain.ingest.PreValidated;
 import io.xdag.chain.ingest.PreValidator;
@@ -48,6 +49,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.concurrent.BasicThreadFactory;
 import org.apache.commons.lang3.time.FastDateFormat;
 import org.apache.tuweni.bytes.Bytes32;
+import org.apache.tuweni.bytes.MutableBytes32;
 
 import java.util.Date;
 import java.util.List;
@@ -131,6 +133,15 @@ public class SyncManager extends AbstractXdagLifecycle {
     @Setter(AccessLevel.NONE)
     private volatile Thread stateListenerThread;
 
+    /**
+     * The node-local chunk fee gate (SP0b-3 §5), in front of both ingest paths. Final, and built
+     * here rather than in {@link #doStart}: it is consulted by {@link #validateAndAddNewBlock},
+     * which the CLI, the RPC and the award manager call on a {@code SyncManager} that was never
+     * started, and a gate that only existed on a started one would be a policy that depended on
+     * who was asking.
+     */
+    private final ChunkFeePolicy feePolicy;
+
     public SyncManager(Kernel kernel) {
         this.kernel = kernel;
         this.blockchain = kernel.getBlockchain();
@@ -138,6 +149,10 @@ public class SyncManager extends AbstractXdagLifecycle {
         this.stateListener = new StateListener();
         checkStateTask = new ScheduledThreadPoolExecutor(1, factory);
         this.txHistoryStore = kernel.getTxHistoryStore();
+        // The same lookup BlockchainImpl hands ChainL1Processor, and that is the point: the gate
+        // has to count what the consensus fee check will count.
+        this.feePolicy = new ChunkFeePolicy(kernel.getConfig().getChainSpec(),
+                hash -> blockchain.getBlockByHash(hash, true));
     }
 
     @Override
@@ -301,9 +316,14 @@ public class SyncManager extends AbstractXdagLifecycle {
      * {@code IngestPipeline.submit} holds its backpressure permit from here until the commit of that
      * block returns, and the committer is {@link #importPreValidated}, which IS synchronized on this
      * object: a caller parked here at queue capacity while holding this monitor would deadlock the
-     * pipeline. For the same reason nothing here touches the block — {@code Block.parse()} and
-     * {@code Block.getHashLow()} are unsynchronized lazy mutators, and a caller-side {@code parse()}
-     * racing the pool's would duplicate the block's inputs and outputs.
+     * pipeline. {@link #refuseOnPolicy} takes the monitor, but only on the branch that does not
+     * submit, so it can never be held across a park.
+     *
+     * <p>The gate reads the block; nothing else here may. {@code Block.parse()} and {@code
+     * Block.getHashLow()} are unsynchronized lazy mutators and the race they lose is against the
+     * pool thread — which starts at {@code submit}, so a read strictly before the handover, on the
+     * thread that still solely owns the block, is not in that race. Past the handover the rule is
+     * unchanged: nothing may touch it.
      *
      * @throws IngestPipeline.SubmitRejectedException if the pipeline is not accepting blocks: a
      *                                                shutdown, or a commit thread that has died and
@@ -315,6 +335,13 @@ public class SyncManager extends AbstractXdagLifecycle {
     public void submitBlock(BlockWrapper blockWrapper) {
         IngestPipeline p = pipeline;
         if (p != null) {
+            // SP0b-3 §5.3, half one of two: equally in front of the pipeline. The synchronous branch
+            // below is gated inside validateAndAddNewBlock, which is where the CLI, the RPC and the
+            // award manager come in as well, so each path is gated exactly once.
+            if (feePolicy.refuse(blockWrapper.getBlock())) {
+                refuseOnPolicy(blockWrapper);
+                return;
+            }
             p.submit(blockWrapper);
         } else {
             validateAndAddNewBlock(blockWrapper);
@@ -344,7 +371,23 @@ public class SyncManager extends AbstractXdagLifecycle {
         return result;
     }
 
-    public synchronized ImportResult validateAndAddNewBlock(BlockWrapper blockWrapper) {
+    /**
+     * The synchronous ingest path: this node's own blocks (the CLI, the RPC, the award manager), and
+     * every arriving block on a node running with {@code chain.ingest.threads = 0}.
+     *
+     * <p>No longer {@code synchronized} itself, and that is what lets the gate read off the lock as
+     * SP0b-3 §5.1 requires: the import proper is, in {@link #addNewBlock}, so everything that was
+     * under the monitor still is.
+     */
+    public ImportResult validateAndAddNewBlock(BlockWrapper blockWrapper) {
+        // SP0b-3 §5.3, half two of two. See submitBlock for the other.
+        if (feePolicy.refuse(blockWrapper.getBlock())) {
+            return refuseOnPolicy(blockWrapper);
+        }
+        return addNewBlock(blockWrapper);
+    }
+
+    private synchronized ImportResult addNewBlock(BlockWrapper blockWrapper) {
         blockWrapper.getBlock().parse();
         ImportResult result = importBlock(blockWrapper);
         log.debug("validateAndAddNewBlock:{}, {}", blockWrapper.getBlock().getHashLow(), result);
@@ -353,35 +396,31 @@ public class SyncManager extends AbstractXdagLifecycle {
     }
 
     /**
+     * What both ingest paths do with a block the chunk fee gate declined: nothing is imported,
+     * nothing is stored, nothing is passed on — and the children already parked behind it are
+     * released, which is the whole reason {@link ImportResult#CHAIN_FEE_POLICY} is not
+     * {@code INVALID_BLOCK}.
+     *
+     * <p>{@code synchronized} because {@link #releaseWaiters} re-imports through the chain. Reached
+     * from {@link #submitBlock} on a netty thread, which is safe precisely because this branch never
+     * calls {@code IngestPipeline.submit}: the monitor is never held across the backpressure park
+     * that would otherwise shut the committer out.
+     */
+    private synchronized ImportResult refuseOnPolicy(BlockWrapper blockWrapper) {
+        log.debug("chunk fee policy declined block {}", blockWrapper.getBlock().getHashLow());
+        releaseWaiters(blockWrapper, CHAIN_FEE_POLICY);
+        return CHAIN_FEE_POLICY;
+    }
+
+    /**
      * Releases the children waiting on this block, or queues it behind the parent it is missing.
      *
-     * <h2>What Task 14 still owes {@link ImportResult#CHAIN_FEE_POLICY}</h2>
-     *
-     * <p>Nothing returns that code yet, so none of this is live; it is the record of the branch
-     * search that added the constant, kept where the arm that pops for it can be seen.
-     *
-     * <p>TODO(Task 14): the re-parked child re-requests the very block that was refused, and there
-     * is nothing to stop the second copy being refused the same way. The design's §5.2 exemption —
-     * a block this node asked for is not subject to the policy that turned away the unsolicited
-     * broadcast — is what turns this into a loop that closes rather than one that repeats.
-     *
-     * <p>TODO(Task 14): {@link #syncPopBlock} removes the queue <em>before</em> re-importing, so the
-     * child's re-park takes {@link #syncPushBlock}'s fresh-insert path, which always returns true.
-     * The 64-second dampener lives in the merge path and is bypassed, so once the policy is live
-     * every refusal of P fires {@code sendGetBlock(P)} at every active channel.
-     *
-     * <p>TODO(Task 14): {@code IngestPipeline}'s rejection log is gated on
-     * {@code ERROR || INVALID_BLOCK}, so a policy refusal would go unlogged there. Reachable only
-     * if the gate is placed where the pipeline commits rather than at the ingest boundary the
-     * design's §5.3 requires, but it is a branch with an opinion about refusals either way.
-     *
-     * <p>TODO(Task 14): {@code Commands.xfer} and its two siblings append a hash on success and an
-     * error string on {@code INVALID_BLOCK} and nothing at all otherwise, so a locally built block
-     * refused on policy prints the "several minutes" tail with neither. Locally built blocks do
-     * reach this gate — {@code validateAndAddNewBlock} is one of the two ingest entry points §5.3
-     * says the policy must sit equally in front of — and while an ordinary wallet transfer
-     * references no chunk chain and so can never fail the fee test, a chain block built through the
-     * CLI or RPC with too small a header fee can.
+     * <p>{@link ImportResult#CHAIN_FEE_POLICY} pops although the block is NOT in the DAG: one
+     * re-import beats stranding the whole subtree, which is what the {@code INVALID_BLOCK} arm
+     * below costs. That is a loop that closes rather than one that repeats, because of the arm just
+     * above it: the released child re-imports, finds the parent still missing, and re-requests it —
+     * and {@link #requestFromPeers} records the request with the fee gate, so the copy that comes
+     * back is exempt from the policy that turned the unsolicited one away (SP0b-3 §5.2).
      */
     private void releaseWaiters(BlockWrapper blockWrapper, ImportResult result) {
         switch (result) {
@@ -389,24 +428,63 @@ public class SyncManager extends AbstractXdagLifecycle {
             case NO_PARENT -> {
                 if (syncPushBlock(blockWrapper, result.getHashlow())) {//Return true to indicate that it has been more than 60 seconds since the last time it was placed here due to the lack of a parent reference, and request to inquire about the parent block from other nodes again
                     log.debug("push block:{}, NO_PARENT {}", blockWrapper.getBlock().getHashLow(), result);
-                    List<Channel> channels = channelMgr.getActiveChannels();
-                    for (Channel channel : channels) {
-                        // if (channel.getRemotePeer().equals(blockWrapper.getRemotePeer())) {
-                        channel.getP2pHandler().sendGetBlock(result.getHashlow(), blockWrapper.isOld());
-                        //}
-                    }
-
+                    requestFromPeers(result.getHashlow(), blockWrapper.isOld());
                 }
             }
-            // Pops although the block is NOT in the DAG: one re-import beats stranding the whole
-            // subtree, which is what the INVALID_BLOCK arm below costs. See ImportResult for the
-            // argument and this method's javadoc for what Task 14 still owes it.
             case CHAIN_FEE_POLICY -> syncPopBlock(blockWrapper);
             case INVALID_BLOCK -> {
 //                log.error("invalid block:{}", Hex.toHexString(blockWrapper.getBlock().getHashLow()));
             }
             default -> {
             }
+        }
+    }
+
+    /**
+     * Asks every peer for one block this node is missing, and records the request so the answer is
+     * not turned away by this node's own chunk fee policy.
+     *
+     * <p>The record is what makes SP0b-3 §5.2 work, and it has to be kept here because the answer
+     * carries no mark of its own: {@code sendGetBlock} sends a {@code BlockRequestMessage} when
+     * {@code isOld} is false, and a peer answers that with a {@code NewBlockMessage} — which
+     * arrives as an ordinary gossip wrapper, {@code isOld == false}, indistinguishable from a
+     * broadcast nobody asked for. {@code isOld} is not the flag to key an exemption on in either
+     * direction: it is false for exactly the answer that must be exempt, and true for every block
+     * streamed during a bulk range sync, none of which was individually asked for.
+     *
+     * <h2>One broadcast per missing block, not one per waiter</h2>
+     *
+     * <p>{@link #syncPushBlock}'s own 64-second rule is per (waiting block, missing parent) pair: a
+     * second, different block parking behind the same parent asks for it again, and
+     * {@link #syncPopBlock} removes the parent's queue before re-importing what was in it, so every
+     * child released by a pop that still cannot connect takes the fresh-insert path and asks again
+     * too. {@link ImportResult#CHAIN_FEE_POLICY} makes that the normal case rather than a rare one —
+     * the block is deliberately not in the DAG, so <em>every</em> released child re-parks — and the
+     * broadcast goes to every active channel, so the cost is (waiters x channels) messages for one
+     * block this node already has one outstanding request for.
+     *
+     * <p>So the record doubles as the dampener: {@link ChunkFeePolicy#markRequested} answers false
+     * when this node asked for the same hash inside the same 64 seconds, and the broadcast is
+     * skipped. It cannot stall anything — a suppressed request is one that is already outstanding,
+     * and the next round past 64 seconds sends it again — and it cannot weaken §5.2, because a hash
+     * suppressed here is a hash that is on the record, which is what the exemption reads.
+     *
+     * @param hashLow the missing block, as the failed import named it
+     * @param isOld   which request message to send; the sync-state flag off the waiting block, and
+     *                nothing to do with whether this node asked for anything
+     */
+    private void requestFromPeers(MutableBytes32 hashLow, boolean isOld) {
+        // Both call sites used to carry the same commented-out idea, of asking only the peer that
+        // sent the waiting block rather than all of them. It is recorded here, once, rather than
+        // duplicated: a peer that forwarded a block need not be the one holding its parent, so
+        // narrowing the ask would trade this traffic for stalls.
+        if (!feePolicy.markRequested(hashLow)) {
+            // Already asked every channel for this very block moments ago; a second broadcast
+            // fetches nothing the first one is not already fetching. See the method javadoc.
+            return;
+        }
+        for (Channel channel : channelMgr.getActiveChannels()) {
+            channel.getP2pHandler().sendGetBlock(hashLow, isOld);
         }
     }
 
@@ -525,14 +603,7 @@ public class SyncManager extends AbstractXdagLifecycle {
                         if (syncPushBlock(bw, importResult.getHashlow())) {
                             log.debug("push block:{}, NO_PARENT {}", bw.getBlock().getHashLow(),
                                     importResult.getHashlow().toHexString());
-                            List<Channel> channels = channelMgr.getActiveChannels();
-                            for (Channel channel : channels) {
-//                            Peer remotePeer = channel.getRemotePeer();
-//                            Peer blockPeer = bw.getRemotePeer();
-                                // if (StringUtils.equals(remotePeer.getIp(), blockPeer.getIp()) && remotePeer.getPort() == blockPeer.getPort() ) {
-                                channel.getP2pHandler().sendGetBlock(importResult.getHashlow(), blockWrapper.isOld());
-                                //}
-                            }
+                            requestFromPeers(importResult.getHashlow(), blockWrapper.isOld());
                         }
                     }
                     default -> {

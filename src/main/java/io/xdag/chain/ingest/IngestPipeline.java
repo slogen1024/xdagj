@@ -190,10 +190,10 @@ public final class IngestPipeline {
      * <ul>
      * <li><b>Hold no monitor the committer needs.</b> The slot is held from {@code submit} until the
      * commit of that block returns, so a caller that blocks here at capacity while holding lock L
-     * deadlocks the moment the committer also needs L. Concretely: {@code
-     * SyncManager.validateAndAddNewBlock} is {@code synchronized} today, so the entry point that
-     * calls {@code submit} must not be — the committer runs {@code tryToConnect} on the commit
-     * thread and would be blocked out by the caller's own monitor.
+     * deadlocks the moment the committer also needs L. Concretely: the import inside {@code
+     * SyncManager.validateAndAddNewBlock} is {@code synchronized} on the {@code SyncManager}, so the
+     * entry point that calls {@code submit} must not be — the committer runs {@code tryToConnect} on
+     * the commit thread and would be blocked out by the caller's own monitor.
      * <li><b>Do not touch the block afterwards.</b> The {@link io.xdag.core.Block} is handed to the
      * pool; {@code Block.parse()} and {@code Block.getHashLow()} are unsynchronized lazy mutators
      * guarded by a plain {@code boolean}, so a {@code parse()} on the caller thread racing the
@@ -375,7 +375,13 @@ public final class IngestPipeline {
     private void commit(PreValidated head) {
         try {
             ImportResult result = committer.commit(head);
-            if (result == ImportResult.ERROR || result == ImportResult.INVALID_BLOCK) {
+            // CHAIN_FEE_POLICY is listed although this branch cannot reach it today: the chunk fee
+            // gate sits in front of submit(), as SP0b-3 §5.3 requires, so a refused block is never
+            // handed to the pipeline at all and the refusal is logged there instead. It is listed so
+            // that a gate moved inside the commit later is logged rather than silently swallowed by
+            // a condition that only ever knew about two of the three ways a block can be turned away.
+            if (result == ImportResult.ERROR || result == ImportResult.INVALID_BLOCK
+                    || result == ImportResult.CHAIN_FEE_POLICY) {
                 log.debug("ingest rejected block {}: {}", head.hashLow(), result);
             }
         } catch (Throwable t) {
