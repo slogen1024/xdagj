@@ -225,8 +225,20 @@ public class OrphanRemovalComplexityTest {
         }
         long probes = CountingMeta.probes;
         assertEquals("every removal must find the entry it is being measured on", SAMPLE, found);
-        assertTrue("nothing was measured at all", probes > 0);
-        return probes / SAMPLE;
+        long perRemoval = probes / SAMPLE;
+        // The floor is on the part being measured, not on the total, and that is the point. The
+        // deque walk is a known constant -- one probe per parked entry -- so everything above it is
+        // the tree search. A probe that went PARTIALLY blind (a comparator gains a field
+        // CountingMeta does not override) shrinks BOTH measurements, and the assertion the two feed
+        // is a difference, so going blind would make that assertion easier to pass, not harder: the
+        // claim in CountingMeta's header would become false and the test would stay green. A floor
+        // here is what makes that impossible. At a 128-deep deque the tree search is 21 probes, so
+        // 8 is ample margin and still fires the moment the search stops being counted.
+        assertTrue("the probe stopped seeing the tree search: " + perRemoval + " probes against a "
+                        + mainRefDepth + "-deep deque means a comparator is reading a field"
+                        + " CountingMeta does not override -- add it there",
+                perRemoval > mainRefDepth + 8);
+        return perRemoval;
     }
 
     // ---- fixture -------------------------------------------------------------------------
@@ -239,6 +251,13 @@ public class OrphanRemovalComplexityTest {
      * here too. Between them there is no way to touch a pooled entry without being counted, which
      * is what makes the number a complexity measurement rather than a measurement of one particular
      * collection's internals.
+     *
+     * <p><b>That claim is only true while this class overrides every field the comparators read,
+     * and nothing here enforces it — so {@link #probesPerRemoval} does.</b> A comparator that
+     * gained a fifth field would stop that work being counted, which shrinks both measurements and
+     * therefore makes the difference they feed <em>easier</em> to satisfy: the claim above would be
+     * false and the test would still be green. The floor on the tree-search part of each
+     * measurement is what turns that into a failure with instructions.
      */
     private static final class CountingMeta extends OrphanMeta {
 
@@ -274,6 +293,12 @@ public class OrphanRemovalComplexityTest {
             return super.equals(other);
         }
 
+        /**
+         * Deliberately not counted, in a class whose whole subject is what counts. The pool's
+         * hashlow index is keyed by {@code Bytes}, not by a meta, so a meta's {@code hashCode} is
+         * not on the removal path at all; counting it would add noise from whatever else happens to
+         * hash one. Overridden rather than left out so that a reader sees the decision.
+         */
         @Override
         public int hashCode() {
             return super.hashCode();
