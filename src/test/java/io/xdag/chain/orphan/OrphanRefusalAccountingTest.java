@@ -52,32 +52,15 @@ import org.mockito.Mockito;
  * {@code nnoref} counts the orphans this node is holding, and every increment has to be one
  * something can give back.
  *
- * <h2>The leak</h2>
+ * <p>The block that leaks one is a chunk that clears the import path's capacity gate and is then
+ * turned away by its sender's own quota: it skipped {@code saveBlock}, so the pool was its only
+ * home, and it is now in no pool and on no disk. {@code OrphanBlockStore#addOrphan} carries the
+ * argument for why that refusal is reachable at all and what the drift costs;
+ * {@code BlockchainImpl.isHeldByThisNode} carries the rule these four tests pin.
  *
- * <p>The import path increments {@code nnoref} for every non-extra block it takes, whatever the
- * orphan pool then did with it. That was harmless while a refused block was still written to disk:
- * {@code removeOrphan} decrements for any stored block that is not yet {@code BI_REF}, so whatever
- * the pool thought, the count came back the moment anything referenced the block.
- *
- * <p>Task 11 broke that for one category. A chunk skips {@code saveBlock} — the pool holds the only
- * copy — so a chunk the pool refuses is in no pool, on no disk, and referenced by nothing that could
- * ever give its increment back. The category gate in {@code tryToConnect} deliberately asks only
- * about capacity ({@code ChainOrphanPool.isFull}), because the per-peer and per-chain quotas are
- * about attribution and a gate that knew only a category would refuse one sender's flood in
- * everybody's name — so a chunk that clears the gate and is then refused by its sender's own budget
- * is exactly the block that leaks.
- *
- * <p>It matters because {@code checkNewMain} divides {@code nnoref} by eleven to decide how many
- * link blocks to mine. A count that only ever drifts upward has this node mining link blocks for
- * orphans it is not holding — which is what a flooder would be buying with each refused chunk.
- *
- * <h2>Why the fix is chunk-shaped</h2>
- *
- * <p>The pairing is not "counted if pooled". For every category but CHUNK the block is on disk when
- * the increment happens, and {@code removeOrphan} gives it back from the disk copy without asking
- * the pool anything — so making those conditional on admission would take the count one too low the
- * first time a reference arrived. The rule is "counted if this node is holding it somewhere", and
- * CHUNK is the one category where the pool is the only somewhere there is.
+ * <p>What they pin, in one line each: an admitted chunk counts, a refused one does not, another
+ * sender's chunk still does (so the rule is not "stop counting chunks"), and an ordinary link block
+ * counts unconditionally because its disk copy is what gives the count back.
  */
 public class OrphanRefusalAccountingTest extends ChainL1TestBase {
 
@@ -85,7 +68,7 @@ public class OrphanRefusalAccountingTest extends ChainL1TestBase {
     private static final String OTHER_PEER_IP = "203.0.113.17";
 
     /** Keeps a delivered block from out-weighing the mined chain top. */
-    private static final BigInteger MAX_FLOOD_DIFFICULTY = BigInteger.ONE.shiftLeft(46);
+    private static final BigInteger MAX_DELIVERED_DIFFICULTY = BigInteger.ONE.shiftLeft(46);
 
     /** Seed room per built block, so one block's redraws can never collide with the next one's. */
     private static final int SEEDS_PER_BLOCK = 64;
@@ -233,7 +216,7 @@ public class OrphanRefusalAccountingTest extends ChainL1TestBase {
     private Block lightChunk(int seed) {
         for (long s = (long) seed * SEEDS_PER_BLOCK; ; s++) {
             Block chunk = ChunkChainBuilder.split(config, payload(32, s), txTime()).get(0);
-            if (blockchain.calculateCurrentBlockDiff(chunk).compareTo(MAX_FLOOD_DIFFICULTY) < 0) {
+            if (blockchain.calculateCurrentBlockDiff(chunk).compareTo(MAX_DELIVERED_DIFFICULTY) < 0) {
                 return chunk;
             }
         }

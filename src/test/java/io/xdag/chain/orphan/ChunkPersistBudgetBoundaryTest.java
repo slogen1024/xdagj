@@ -82,7 +82,7 @@ public class ChunkPersistBudgetBoundaryTest extends ChainL1TestBase {
     private static final String PEER_IP = "198.51.100.23";
 
     /** Keeps a delivered block from out-weighing the mined chain top. */
-    private static final BigInteger MAX_FLOOD_DIFFICULTY = BigInteger.ONE.shiftLeft(46);
+    private static final BigInteger MAX_DELIVERED_DIFFICULTY = BigInteger.ONE.shiftLeft(46);
 
     /** Seed room per built block, so one block's redraws can never collide with the next one's. */
     private static final int SEEDS_PER_BLOCK = 64;
@@ -295,7 +295,7 @@ public class ChunkPersistBudgetBoundaryTest extends ChainL1TestBase {
             for (Block chunk : chain) {
                 total = total.add(blockchain.calculateCurrentBlockDiff(chunk));
             }
-            if (total.compareTo(MAX_FLOOD_DIFFICULTY) < 0) {
+            if (total.compareTo(MAX_DELIVERED_DIFFICULTY) < 0) {
                 return chain;
             }
         }
@@ -324,7 +324,7 @@ public class ChunkPersistBudgetBoundaryTest extends ChainL1TestBase {
                     List.of(new Address(target, XDAG_FIELD_OUT, false)), false, null, "s" + s, -1,
                     XAmount.ZERO, null);
             Block parsed = new Block(new XdagBlock(raw.toBytes()));
-            if (blockchain.calculateCurrentBlockDiff(parsed).compareTo(MAX_FLOOD_DIFFICULTY) < 0) {
+            if (blockchain.calculateCurrentBlockDiff(parsed).compareTo(MAX_DELIVERED_DIFFICULTY) < 0) {
                 return parsed;
             }
         }

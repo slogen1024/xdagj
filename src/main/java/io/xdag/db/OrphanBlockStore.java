@@ -60,6 +60,8 @@ public interface OrphanBlockStore extends XdagLifecycle {
      * do carry neither fact — a block this node produced itself (mined, RPC, CLI), and the
      * roll-back that re-orphans a transaction block it already holds. Unattributed is the correct
      * reading of those, not a degraded one; see the {@code peerKey} parameter below.
+     *
+     * @return exactly what the overload below returns; see its {@code @return}.
      */
     default OrphanAdmission addOrphan(Block block, boolean isTxBlock, UInt64 nonce, XAmount fee,
             byte[] address) {
@@ -81,12 +83,19 @@ public interface OrphanBlockStore extends XdagLifecycle {
      *                   compute one. It decides the {@link OrphanCategory} — a null classification
      *                   can never be {@link OrphanCategory#CHUNK} — and, for a chunk, it is where
      *                   the chunk chain this block attaches to is read from.
-     * @return what the pool did with the block. The caller needs it because admission is no longer
-     *         something it can infer: the import path's gate asks only about capacity, so a block
-     *         can clear the gate and still be turned away by one of the two chunk quotas, which are
-     *         about attribution and have to stay behind this call. A chunk turned away is held
-     *         nowhere at all — it skipped {@code saveBlock}, so the pool was its only home — and a
-     *         caller counting orphans must not count what nobody is holding.
+     * @return what the pool did with the block. <b>This is the canonical statement of why the
+     *         verdict has to travel back up; the call sites carry a sentence and a pointer here.</b>
+     *         <p>Admission is not something a caller can infer. The import path's gate asks {@code
+     *         isFull}, which is about capacity alone, so a block can clear it and still be turned
+     *         away by one of the two chunk quotas — those are about attribution, and a gate that
+     *         knows only a category must not enforce them (see {@code ChainOrphanPool#isFull}).
+     *         <p>What that costs if the caller guesses: a chunk turned away is held nowhere at all,
+     *         because it skipped {@code saveBlock} and the pool was its only home. Counting it as
+     *         an orphan leaks an increment of {@code nnoref} per refusal, and {@code
+     *         BlockchainImpl.checkNewMain} divides {@code nnoref} by eleven to decide how many link
+     *         blocks to mine — so a flooder spending its own chunk budget was buying this node link
+     *         blocks for orphans it was not holding. The counter must pair with a block this node
+     *         really is holding somewhere, which is what the verdict lets the caller decide.
      */
     OrphanAdmission addOrphan(Block block, boolean isTxBlock, UInt64 nonce, XAmount fee, byte[] address,
             String peerKey, Classified classified);

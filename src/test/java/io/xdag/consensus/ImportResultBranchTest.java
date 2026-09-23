@@ -58,28 +58,15 @@ import org.junit.Test;
  * What {@link ImportResult#CHAIN_FEE_POLICY} means to every branch that already had an opinion
  * about {@link ImportResult#INVALID_BLOCK}.
  *
- * <h2>The verdict the variant exists for</h2>
+ * <p>{@link ImportResult#CHAIN_FEE_POLICY} carries the argument for why the new code pops where
+ * {@code INVALID_BLOCK} does not. These tests measure it: the same shape answered with each code,
+ * so the difference between them is a test result rather than a claim.
  *
- * <p>The design's §5.5 asks for the new code to say "this node does not want this block", never
- * "this block is broken", and for no path to turn it into a punitive action. The punitive half is
- * easy to state and easy to check: there is no scoring, banning or blacklisting machinery in this
- * codebase at all — {@code releaseWaiters}' {@code INVALID_BLOCK} arm is an empty block with its
- * one log line commented out — so the only collaborator that could reach a peer at all is the
- * {@link ChannelManager}, and the assertion below is written against that.
- *
- * <p>The half that actually costs something is the other one. {@code INVALID_BLOCK} does not call
- * {@code syncPopBlock}, so every child waiting in {@code syncMap} on a block refused that way stays
- * there until it is evicted: one "I am full" answer strands a whole subtree. That is what the new
- * code is for, and it is why {@code CHAIN_FEE_POLICY} releases the waiters instead of landing in
- * the {@code default -> {}} arm a new enum constant would otherwise fall into silently.
- *
- * <h2>Why releasing them is right when the block really is not in the DAG</h2>
- *
- * <p>A released child is re-imported, finds its parent missing, answers {@code NO_PARENT} and is
- * pushed back under that parent's hash — which re-sends the request for it. That is the loop §5.2
- * completes: a block this node asked for is exempt from the policy, so the parent comes back and is
- * taken the second time. Leaving the children parked instead re-requests nothing and progresses
- * nothing; they simply wait out their eviction.
+ * <p>The design's §5.5 also asks that no path turn the new code into a punitive action. There is no
+ * scoring, banning or blacklisting machinery in this codebase at all — {@code releaseWaiters}'
+ * {@code INVALID_BLOCK} arm is an empty block with its one log line commented out — so the only
+ * collaborator that could reach a peer is the {@link ChannelManager}, and that is what
+ * {@link #aPolicyRefusalTouchesNoPeer} is written against.
  *
  * <p>{@code INVALID_BLOCK}'s stranding is pinned here too. It is not endorsed — it is the measured
  * cost the design argues from — and a change that makes it pop as well should replace that test

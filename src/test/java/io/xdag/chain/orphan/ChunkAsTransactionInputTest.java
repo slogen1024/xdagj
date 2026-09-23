@@ -95,7 +95,7 @@ public class ChunkAsTransactionInputTest extends ChainL1TestBase {
     private static final String PEER_IP = "198.51.100.55";
 
     /** Keeps a delivered block from out-weighing the mined chain top. */
-    private static final BigInteger MAX_FLOOD_DIFFICULTY = BigInteger.ONE.shiftLeft(46);
+    private static final BigInteger MAX_DELIVERED_DIFFICULTY = BigInteger.ONE.shiftLeft(46);
 
     /** Seed room per built block, so one block's redraws can never collide with the next one's. */
     private static final int SEEDS_PER_BLOCK = 64;
@@ -124,11 +124,7 @@ public class ChunkAsTransactionInputTest extends ChainL1TestBase {
         assertNull("so it has no chain metadata to authorise anything with",
                 blockchain.getBlockByHash(hashLow(chunk), false));
 
-        ImportResult r = blockchain.tryToConnect(spendingFrom(chunk));
-
-        assertSame("a spend this node cannot authorise is an unusable input, not an internal error",
-                ImportResult.INVALID_BLOCK, r);
-        assertEquals("Block's input can't be used", r.getErrorInfo());
+        assertRefusedAsUnusableInput(blockchain.tryToConnect(spendingFrom(chunk)));
     }
 
     /**
@@ -148,11 +144,7 @@ public class ChunkAsTransactionInputTest extends ChainL1TestBase {
         assertNotNull("and answers the non-raw lookup the memory-only one could not",
                 blockchain.getBlockByHash(hashLow(chunk), false));
 
-        ImportResult r = blockchain.tryToConnect(spendingFrom(chunk));
-
-        assertSame("the chunk still cannot authorise a spend: it carries no out-signature",
-                ImportResult.INVALID_BLOCK, r);
-        assertEquals("Block's input can't be used", r.getErrorInfo());
+        assertRefusedAsUnusableInput(blockchain.tryToConnect(spendingFrom(chunk)));
     }
 
     /**
@@ -169,9 +161,10 @@ public class ChunkAsTransactionInputTest extends ChainL1TestBase {
         long blocksBefore = blockchain.getXdagStats().nblocks;
 
         Block spend = spendingFrom(chunk);
-        assertSame(ImportResult.INVALID_BLOCK, blockchain.tryToConnect(spend));
+        assertRefusedAsUnusableInput(blockchain.tryToConnect(spend));
 
-        assertNotNull("the chunk is still pooled", pooledChunk(chunk));
+        assertNotNull("the chunk is still pooled",
+                blockchain.getOrphanBlockStore().getChunkBody(hashLow(chunk)));
         assertNull("still not on disk",
                 kernel.getBlockStore().getRawBlockByHash(chunk.getHashLow()));
         assertNull("and the refused block itself was not written either",
@@ -185,9 +178,15 @@ public class ChunkAsTransactionInputTest extends ChainL1TestBase {
 
     // ---- helpers -------------------------------------------------------------------------
 
-    private Bytes32 pooledChunk(Block chunk) {
-        return blockchain.getOrphanBlockStore().getChunkBody(hashLow(chunk)) == null
-                ? null : hashLow(chunk);
+    /**
+     * The one verdict both node states have to reach. Written once so that the equality the pair
+     * exists to pin lives in the code rather than in the reader's head: neither side can be edited
+     * without the other following.
+     */
+    private static void assertRefusedAsUnusableInput(ImportResult r) {
+        assertSame("a chunk cannot authorise a spend, and saying so is an unusable input"
+                + " -- not an internal error, and not a missing parent", ImportResult.INVALID_BLOCK, r);
+        assertEquals("Block's input can't be used", r.getErrorInfo());
     }
 
     /**
@@ -234,7 +233,7 @@ public class ChunkAsTransactionInputTest extends ChainL1TestBase {
     private Block lightChunk(int seed) {
         for (long s = (long) seed * SEEDS_PER_BLOCK; ; s++) {
             Block chunk = ChunkChainBuilder.split(config, payload(32, s), txTime()).get(0);
-            if (blockchain.calculateCurrentBlockDiff(chunk).compareTo(MAX_FLOOD_DIFFICULTY) < 0) {
+            if (blockchain.calculateCurrentBlockDiff(chunk).compareTo(MAX_DELIVERED_DIFFICULTY) < 0) {
                 return chunk;
             }
         }
@@ -247,7 +246,7 @@ public class ChunkAsTransactionInputTest extends ChainL1TestBase {
                     List.of(new Address(target, XDAG_FIELD_OUT, false)), false, null, "s" + s, -1,
                     XAmount.ZERO, null);
             Block parsed = new Block(new XdagBlock(raw.toBytes()));
-            if (blockchain.calculateCurrentBlockDiff(parsed).compareTo(MAX_FLOOD_DIFFICULTY) < 0) {
+            if (blockchain.calculateCurrentBlockDiff(parsed).compareTo(MAX_DELIVERED_DIFFICULTY) < 0) {
                 return parsed;
             }
         }

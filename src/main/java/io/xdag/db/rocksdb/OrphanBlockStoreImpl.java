@@ -256,12 +256,10 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
      * <p><b>{@code nnoref} is decremented per evicted entry, not per deleted row.</b> Those used to
      * be the same thing — every pooled orphan had a row — and the old tick gated the decrement on
      * finding one. A chunk has no row, so keeping that gate would leave {@code nnoref} permanently
-     * one too high for every chunk that expires, and {@code nnoref} is what
-     * {@code BlockchainImpl.checkNewMain} divides by eleven to decide how many link blocks to mine:
-     * a count that only ever drifts upwards would have this node mining link blocks for orphans it
-     * is no longer holding. The decrement is paired instead with leaving the pool, which is the
-     * event {@code nnoref} is really counting, and an entry leaves the pool exactly once. The
-     * database half stays gated on the row, because a chunk genuinely has none.
+     * one too high for every chunk that expires. The decrement is paired instead with leaving the
+     * pool, which is the event {@code nnoref} is really counting, and an entry leaves the pool
+     * exactly once. The database half stays gated on the row, because a chunk genuinely has none.
+     * For what a drifting {@code nnoref} costs, see {@code OrphanBlockStore#addOrphan}.
      */
     private void cleanExpiredOrphansLocked(Blockchain blockchain) {
         List<OrphanEntry> expired = pool.evictExpired(System.currentTimeMillis(), chainEpoch(blockchain));
@@ -365,6 +363,7 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
                 pool.size(OrphanCategory.MTX), pool.size(OrphanCategory.LINK), pool.mainRefSize());
     }
 
+    @Override
     public OrphanAdmission addOrphan(Block block, boolean isTxBlock, UInt64 nonce, XAmount fee,
             byte[] address, String peerKey, Classified classified) {
         // key: 0x00 + hashlow(24B) + nonce(8B) + isTx(1B)

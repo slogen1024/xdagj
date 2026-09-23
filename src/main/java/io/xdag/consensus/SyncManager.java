@@ -352,7 +352,37 @@ public class SyncManager extends AbstractXdagLifecycle {
         return result;
     }
 
-    /** Releases the children waiting on this block, or queues it behind the parent it is missing. */
+    /**
+     * Releases the children waiting on this block, or queues it behind the parent it is missing.
+     *
+     * <h2>What Task 14 still owes {@link ImportResult#CHAIN_FEE_POLICY}</h2>
+     *
+     * <p>Nothing returns that code yet, so none of this is live; it is the record of the branch
+     * search that added the constant, kept where the arm that pops for it can be seen.
+     *
+     * <p>TODO(Task 14): the re-parked child re-requests the very block that was refused, and there
+     * is nothing to stop the second copy being refused the same way. The design's §5.2 exemption —
+     * a block this node asked for is not subject to the policy that turned away the unsolicited
+     * broadcast — is what turns this into a loop that closes rather than one that repeats.
+     *
+     * <p>TODO(Task 14): {@link #syncPopBlock} removes the queue <em>before</em> re-importing, so the
+     * child's re-park takes {@link #syncPushBlock}'s fresh-insert path, which always returns true.
+     * The 64-second dampener lives in the merge path and is bypassed, so once the policy is live
+     * every refusal of P fires {@code sendGetBlock(P)} at every active channel.
+     *
+     * <p>TODO(Task 14): {@code IngestPipeline}'s rejection log is gated on
+     * {@code ERROR || INVALID_BLOCK}, so a policy refusal would go unlogged there. Reachable only
+     * if the gate is placed where the pipeline commits rather than at the ingest boundary the
+     * design's §5.3 requires, but it is a branch with an opinion about refusals either way.
+     *
+     * <p>TODO(Task 14): {@code Commands.xfer} and its two siblings append a hash on success and an
+     * error string on {@code INVALID_BLOCK} and nothing at all otherwise, so a locally built block
+     * refused on policy prints the "several minutes" tail with neither. Locally built blocks do
+     * reach this gate — {@code validateAndAddNewBlock} is one of the two ingest entry points §5.3
+     * says the policy must sit equally in front of — and while an ordinary wallet transfer
+     * references no chunk chain and so can never fail the fee test, a chain block built through the
+     * CLI or RPC with too small a header fee can.
+     */
     private void releaseWaiters(BlockWrapper blockWrapper, ImportResult result) {
         switch (result) {
             case EXIST, IMPORTED_BEST, IMPORTED_NOT_BEST, IN_MEM -> syncPopBlock(blockWrapper);
@@ -368,27 +398,9 @@ public class SyncManager extends AbstractXdagLifecycle {
 
                 }
             }
-            // Refused on this node's own policy, which is a statement about this node and not
-            // about the block. It pops for the same reason EXIST does -- not because the block is
-            // in the DAG (it is not), but because the children waiting on it have to be allowed to
-            // move: a released child re-imports, finds the parent genuinely missing, answers
-            // NO_PARENT and is parked again, which costs one re-import, while leaving it parked
-            // costs the whole subtree until eviction. Left in the default arm below -- where a new
-            // enum constant lands silently -- it would strand that subtree exactly as
-            // INVALID_BLOCK does, which is the cost this code exists to avoid.
-            //
-            // Two things Task 14 owes this arm, neither of which exists yet. Nothing returns this
-            // code today, so nothing below is live.
-            //
-            //   1. The re-parked child re-requests the very block that was just refused, and there
-            //      is nothing to stop the second copy being refused the same way. The design's
-            //      §5.2 exemption -- a block this node asked for is not subject to the policy that
-            //      turned away the unsolicited broadcast -- is what turns this into a loop that
-            //      closes rather than one that repeats.
-            //   2. syncPopBlock removes the queue BEFORE re-importing, so the child's re-park takes
-            //      syncPushBlock's fresh-insert path, which always returns true. The 64-second
-            //      dampener lives in the merge path and is bypassed, so once the policy is live
-            //      every refusal of P fires sendGetBlock(P) at every active channel.
+            // Pops although the block is NOT in the DAG: one re-import beats stranding the whole
+            // subtree, which is what the INVALID_BLOCK arm below costs. See ImportResult for the
+            // argument and this method's javadoc for what Task 14 still owes it.
             case CHAIN_FEE_POLICY -> syncPopBlock(blockWrapper);
             case INVALID_BLOCK -> {
 //                log.error("invalid block:{}", Hex.toHexString(blockWrapper.getBlock().getHashLow()));
@@ -502,10 +514,8 @@ public class SyncManager extends AbstractXdagLifecycle {
             queue.forEach(bw -> {
                 ImportResult importResult = importBlock(bw);
                 switch (importResult) {
-                    // CHAIN_FEE_POLICY rides with them for the reason releaseWaiters spells out:
-                    // this switch is the same decision one level down, and a child refused on
-                    // policy has waiters of its own to release. Handling it only in the outer
-                    // switch would move the stranding down a generation rather than end it.
+                    // CHAIN_FEE_POLICY rides along: this is the same decision one level down, and
+                    // a child refused on policy has waiters of its own to release.
                     case EXIST, IN_MEM, IMPORTED_BEST, IMPORTED_NOT_BEST, CHAIN_FEE_POLICY -> {
                         // TODO: Need to remove after successful import
                         syncPopBlock(bw);

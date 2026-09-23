@@ -826,25 +826,8 @@ public class BlockchainImpl implements Blockchain {
                 if (category != OrphanCategory.CHUNK) {
                     saveBlock(block);
                 }
-                boolean pooled = dealOrphan(block, peerKey, classified);
-                // nnoref counts the orphans this node is holding, and every increment has to be one
-                // something can give back. For every category but CHUNK that is the disk copy
-                // saveBlock has just written: removeOrphan decrements for any stored block that is
-                // not yet BI_REF, whatever the pool decided, so those must be counted
-                // unconditionally -- making them conditional on admission would take the count one
-                // too low the first time anything referenced such a block.
-                //
-                // A chunk has no disk copy. The pool is its only home, so a chunk the pool refused
-                // is in no pool, on no disk, and referenced by nothing that could ever give its
-                // increment back. That refusal is reachable: the gate above asks
-                // ChainOrphanPool.isFull, which is about capacity alone, while the per-peer and
-                // per-chain chunk quotas are about attribution and stay inside add() -- see
-                // isFull's own note on why a gate that knew only a category must not enforce them.
-                // So a chunk that clears the gate and is then turned away by its sender's own
-                // budget used to leak an increment per refusal, and nnoref is what checkNewMain
-                // divides by eleven to decide how many link blocks to mine: a flooder was buying
-                // link blocks for orphans this node was not holding.
-                if (category != OrphanCategory.CHUNK || pooled) {
+                boolean admitted = dealOrphan(block, peerKey, classified);
+                if (isHeldByThisNode(category, admitted)) {
                     xdagStats.nnoref++;
                 }
             }
@@ -928,9 +911,12 @@ public class BlockchainImpl implements Blockchain {
      * Pools a block that arrived carrying nothing about its origin. In production its one caller is
      * the roll-back, which re-orphans a transaction block this node already holds: there is no peer
      * to name and no classification to pass, and a transaction block is never a chunk anyway.
+     *
+     * <p>Stays {@code void} where the three-argument form answers a question: that answer exists for
+     * the import path's orphan counter, and the roll-back is not counting anything.
      */
-    public boolean dealOrphan(Block block) {
-        return dealOrphan(block, null, null);
+    public void dealOrphan(Block block) {
+        dealOrphan(block, null, null);
     }
 
     /**
@@ -941,12 +927,10 @@ public class BlockchainImpl implements Blockchain {
      * its epoch clock have no other way to learn them — a block carries neither its sender nor, as
      * far as the orphan store can see, its kind.
      *
-     * <p>Answers whether this call put the block in the pool. {@link OrphanAdmission#DUPLICATE} is
-     * false along with every refusal, and deliberately so: the question the caller is asking is not
-     * "is the pool holding this" but "did this call make the pool start holding it", which is the
-     * only event an increment of a holding count may pair with. A node that pools nothing at all —
-     * no PoW, or block generation turned off — answers false for the same reason, because it is
-     * true: nothing went in.
+     * <p>Answers {@link OrphanAdmission#ADMITTED} and nothing else, which is to say: did <em>this
+     * call</em> put the block in the pool. {@link OrphanAdmission#DUPLICATE} is therefore false
+     * along with every refusal, and so is a node that pools nothing at all — no PoW, or block
+     * generation turned off — because nothing went in there either.
      */
     public boolean dealOrphan(Block block, String peerKey, Classified classified) {
         if (kernel.getConfig().getEnableGenerateBlock() && kernel.getPow() != null) {
@@ -960,6 +944,27 @@ public class BlockchainImpl implements Blockchain {
                     peerKey, classified) == OrphanAdmission.ADMITTED;
         }
         return false;
+    }
+
+    /**
+     * Whether this node ends up holding the block anywhere — which is the thing {@code nnoref}
+     * counts, and the condition an increment of it has to pair with.
+     *
+     * <p><b>Not "was it pooled", and the difference is the whole of it.</b> For every category but
+     * {@link OrphanCategory#CHUNK} the block has just been written to the block store, and
+     * {@code removeOrphan} decrements off that disk copy for any stored block not yet
+     * {@code BI_REF} — without consulting the pool at all. Gating those on admission would take the
+     * count one too low the first time anything referenced such a block. A chunk has no disk copy:
+     * the pool is its only home, so one the pool turned away is held nowhere and its increment
+     * could never be given back.
+     *
+     * <p>See {@code OrphanBlockStore#addOrphan} for why a chunk can be turned away at all after the
+     * import path's gate has let it through, and for what the leak cost.
+     *
+     * @param admitted what {@link #dealOrphan(Block, String, Classified)} answered
+     */
+    private static boolean isHeldByThisNode(OrphanCategory category, boolean admitted) {
+        return category != OrphanCategory.CHUNK || admitted;
     }
 
     /**
@@ -1235,8 +1240,7 @@ public class BlockchainImpl implements Blockchain {
         // this walk has already loaded, and it is guarded by the very lookup above it. Reaching it
         // at all takes an applied block, whose own links were on disk when it was applied -- so
         // unlike applyBlock's and unApplyBlock's walks, the memory-only chunk blocks this
-        // subproject introduced do not widen this one. It has the same shape as the two sites that
-        // WERE widened and is left alone on purpose, not by oversight.
+        // subproject introduced do not widen this one.
         int sum = 0;
         if (getBlockByHash(refHashLow, true) != null) {
             Block block = getBlockByHash(refHashLow, true);
@@ -1981,14 +1985,11 @@ public class BlockchainImpl implements Blockchain {
                 sumIn = sumIn.add(link.getAmount());
 
             } else if (link.getType() == XDAG_FIELD_IN) {
-                // Unguarded on purpose, and the reason is a gate rather than luck. canUseInput
-                // walks getInputs(), which parse() fills with EVERY XDAG_FIELD_IN field, and
-                // getLinks() -- what this loop walks -- is exactly getInputs() plus getOutputs().
-                // So every IN link here was put through verifySignature at import, which refuses
-                // the block outright when this lookup would answer null. A block on disk never
-                // leaves the store, so a reference resolvable then is resolvable now. Before that
-                // check existed this site was unreachable only because verifySignature threw
-                // first, which is a bug standing in for a gate; it is a gate now.
+                // Never null, and gated rather than lucky. canUseInput walks getInputs(), which
+                // parse() fills with EVERY XDAG_FIELD_IN field, and getLinks() -- what this loop
+                // walks -- is exactly getInputs() plus getOutputs(). So every IN link here was put
+                // through verifySignature at import, which refuses the block outright when this
+                // lookup would answer null, and a block on disk never leaves the store.
                 Block ref = getBlockByHash(linkAddress, false);
                 if (compareAmountTo(ref.getInfo().getAmount(), link.getAmount()) < 0) {
                     log.info("ref balance is less than amount");
@@ -2024,12 +2025,12 @@ public class BlockchainImpl implements Blockchain {
         for (Address link : links) {
             MutableBytes32 linkAddress = link.addressHash;
             if (!link.isAddress) {
+                // May be null: an OUT link to a memory-only chunk. Only the IN branch below
+                // dereferences it; see there.
                 Block ref = getBlockByHash(linkAddress, false);
                 if (link.getType() == XDAG_FIELD_IN) {
                     // Same gate as the loop above: an IN reference that reaches an applied block
-                    // was resolvable at import or the block was refused. An OUT reference may well
-                    // be null here -- a memory-only chunk -- and is never dereferenced, which is
-                    // why this branch and not the enclosing block is where the argument belongs.
+                    // was resolvable at import or the block was refused.
                     subtractAndAccept(ref, link.getAmount());
                     XAmount allBalance = addressStore.getAllBalance();
                     allBalance = allBalance.add(link.getAmount().subtract(getTxFee(block)));
@@ -2106,13 +2107,13 @@ public class BlockchainImpl implements Blockchain {
             XAmount perOutput = outputAddresses == 0 ? XAmount.ZERO : block.getFee().divide(outputAddresses);
             for (Address link : links) {
                 if (!link.isAddress) {
+                    // May be null: an OUT link to a memory-only chunk. Only the IN branch below
+                    // dereferences it; see there.
                     Block ref = getBlockByHash(link.getAddress(), false);
                     if (link.getType() == XDAG_FIELD_IN) {
                         // The mirror of applyBlock's two IN loops, and unguarded for the same
                         // reason: a block being unapplied was applied, so it was imported, so
-                        // verifySignature resolved every one of its IN references. An OUT
-                        // reference can be null here and is not touched in this branch; the
-                        // trailing loop further down is where an OUT null had to be guarded.
+                        // verifySignature resolved every one of its IN references.
                         // Only input references to the main block transaction block will go through this.
                         addAndAccept(ref, link.getAmount());
                         XAmount allBalance = addressStore.getAllBalance();
