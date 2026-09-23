@@ -39,6 +39,7 @@ import lombok.Setter;
  * IMPORTED_EXTRA - Block imported as extra
  * IMPORTED_NOT_BEST - Block imported but not in main chain
  * IMPORTED_BEST - Block imported into main chain
+ * CHAIN_FEE_POLICY - This node declined the block on its own fee policy
  */
 public enum ImportResult {
     ERROR,
@@ -49,7 +50,30 @@ public enum ImportResult {
 
     IMPORTED_EXTRA,
     IMPORTED_NOT_BEST,
-    IMPORTED_BEST;
+    IMPORTED_BEST,
+
+    /**
+     * This node declined the block under a policy of its own, and makes no claim that the block is
+     * wrong. Nothing returns it yet; the gate that will is a later task.
+     *
+     * <p><b>Not a synonym for {@link #INVALID_BLOCK}, and the difference is not about blame.</b>
+     * There is no scoring, banning or blacklisting anywhere in this codebase — the {@code
+     * INVALID_BLOCK} arm of {@code SyncManager.releaseWaiters} is an empty block with its one log
+     * line commented out — so nothing would punish a sender for either code today. What that arm
+     * does instead is nothing at all, and nothing is the expensive part: it never calls {@code
+     * syncPopBlock}, so every child parked in {@code syncMap} waiting on the refused block stays
+     * there until it is evicted. Answering a block with "I am full" in that code strands its whole
+     * subtree.
+     *
+     * <p>So a node that declines a block on policy returns this instead, and {@code releaseWaiters}
+     * releases the waiters: they retry, discover the parent is genuinely absent, and re-request it
+     * — which is the loop the design's §5.2 closes by exempting a block this node asked for from the
+     * policy that refused it the first time.
+     *
+     * <p>Declared last so that no existing constant's ordinal moves. Nothing persists an ordinal
+     * today, and this keeps it that way by construction rather than by audit.
+     */
+    CHAIN_FEE_POLICY;
 
     // Truncated hash of the block
     private MutableBytes32 hashLow;

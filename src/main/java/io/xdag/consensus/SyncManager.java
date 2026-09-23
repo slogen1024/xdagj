@@ -368,6 +368,16 @@ public class SyncManager extends AbstractXdagLifecycle {
 
                 }
             }
+            // Refused on this node's own policy, which is a statement about this node and not
+            // about the block. It pops for the same reason EXIST does -- not because the block is
+            // in the DAG (it is not), but because the children waiting on it have to be allowed to
+            // move. A released child re-imports, finds the parent genuinely missing, answers
+            // NO_PARENT and is pushed back under that hash, which re-sends the request for it; and
+            // a block this node requests is exempt from the policy that refused the broadcast, so
+            // the second copy is taken. Left in the default arm below -- where a new enum constant
+            // lands silently -- it would strand the subtree exactly as INVALID_BLOCK does, which is
+            // the cost this code exists to avoid.
+            case CHAIN_FEE_POLICY -> syncPopBlock(blockWrapper);
             case INVALID_BLOCK -> {
 //                log.error("invalid block:{}", Hex.toHexString(blockWrapper.getBlock().getHashLow()));
             }
@@ -480,7 +490,11 @@ public class SyncManager extends AbstractXdagLifecycle {
             queue.forEach(bw -> {
                 ImportResult importResult = importBlock(bw);
                 switch (importResult) {
-                    case EXIST, IN_MEM, IMPORTED_BEST, IMPORTED_NOT_BEST -> {
+                    // CHAIN_FEE_POLICY rides with them for the reason releaseWaiters spells out:
+                    // this switch is the same decision one level down, and a child refused on
+                    // policy has waiters of its own to release. Handling it only in the outer
+                    // switch would move the stranding down a generation rather than end it.
+                    case EXIST, IN_MEM, IMPORTED_BEST, IMPORTED_NOT_BEST, CHAIN_FEE_POLICY -> {
                         // TODO: Need to remove after successful import
                         syncPopBlock(bw);
                         queue.remove(bw);
