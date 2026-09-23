@@ -24,6 +24,8 @@
 package io.xdag.chain.ingest;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -161,10 +163,50 @@ public class IngestEquivalenceTest extends ChainL1TestBase {
     /**
      * The network entry point needs a wired kernel: {@code SyncManager} takes the blockchain and the
      * channel manager from it, and {@code finishImport} evaluates {@code kernel.getClient().getNode()}
-     * on every IMPORTED_* result before it looks at the ttl. Never started, so it has no pipeline of
-     * its own -- run A drives one built here, which keeps the committer and the comparison explicit.
+     * on every IMPORTED_* result before it looks at the ttl.
      */
     private SyncManager syncManager() {
+        wireKernel();
+        return new SyncManager(kernel);
+    }
+
+    /**
+     * Run A's {@link SyncManager}: the production one, with the commit step instrumented in place.
+     *
+     * <p>Run A goes through {@code submitBlock}, which means it needs the {@code SyncManager}'s own
+     * pipeline (the one {@code start()} builds), not a pipeline of the test's. That entry point is
+     * the reason: since SP0b-3 it carries the chunk fee gate, and a run A that called
+     * {@code IngestPipeline.submit} directly would be the only ungated path in a test whose whole
+     * claim is that the two paths agree. A gate refusal in the workload would then surface as an
+     * {@code ImportResult} sequence mismatch and read as a pipeline/synchronous divergence that
+     * does not exist.
+     *
+     * <p>The committer is {@code this::importPreValidated}, so overriding it is how the two facts
+     * the pipeline exists to deliver are still counted. Counted, not asserted: {@code
+     * IngestPipeline.commit} catches {@code Throwable}, so an {@code AssertionError} raised on the
+     * commit thread would be logged and swallowed instead of failing the test.
+     */
+    private SyncManager instrumentedSyncManager(List<ImportResult> results, AtomicInteger signedBlocks,
+                                                AtomicInteger missingKeys) {
+        wireKernel();
+        return new SyncManager(kernel) {
+            @Override
+            public synchronized ImportResult importPreValidated(PreValidated pv) {
+                if (!pv.block().getInputs().isEmpty()) {
+                    signedBlocks.incrementAndGet();
+                    if (!pv.hasKeys()) {
+                        missingKeys.incrementAndGet();
+                    }
+                }
+                ImportResult r = super.importPreValidated(pv);
+                results.add(r);
+                return r;
+            }
+        };
+    }
+
+    /** Everything {@code new SyncManager(kernel)} reads out of the kernel, set before it is built. */
+    private void wireKernel() {
         ChannelManager channels = mock(ChannelManager.class);
         when(channels.getActiveChannels()).thenReturn(List.of());
         kernel.setChannelMgr(channels);
@@ -172,7 +214,6 @@ public class IngestEquivalenceTest extends ChainL1TestBase {
         when(client.getNode()).thenReturn(new Node("127.0.0.1", 8001));
         kernel.setClient(client);
         kernel.setBlockchain(blockchain);
-        return new SyncManager(kernel);
     }
 
     private TreeMap<Bytes, Bytes> dump(DatabaseName name) {
@@ -210,30 +251,28 @@ public class IngestEquivalenceTest extends ChainL1TestBase {
         Prepared p = prepareChain();
         BenchWorkload w = workload(p);
         List<Block> blocks = order(w);
-        SyncManager sync = syncManager();
         List<ImportResult> resultsA = Collections.synchronizedList(new ArrayList<>());
-        // Counted, not asserted, inside the committer: IngestPipeline.commit catches Throwable, so
-        // an AssertionError raised there would be logged and swallowed instead of failing the test.
         AtomicInteger signedBlocks = new AtomicInteger();
         AtomicInteger missingKeys = new AtomicInteger();
-        IngestPipeline pipeline = new IngestPipeline(4, 256, pv -> {
-            if (!pv.block().getInputs().isEmpty()) {
-                signedBlocks.incrementAndGet();
-                if (!pv.hasKeys()) {
-                    missingKeys.incrementAndGet();
-                }
+        SyncManager sync = instrumentedSyncManager(resultsA, signedBlocks, missingKeys);
+        sync.start();
+        try {
+            assertNotNull("chain.ingest.threads must be > 0 for run A to have a pipeline at all",
+                    sync.getPipeline());
+            for (Block b : blocks) {
+                // submitBlock returns nothing, so a block the fee gate refuses would leave run A one
+                // result short of run B and fail the sequence comparison below as if the two paths
+                // had diverged. This workload must not produce one -- every chain block pays
+                // minHeaderFee exactly -- and this says so instead of assuming it.
+                assertFalse("the chunk fee gate refused a workload block: run A cannot report that",
+                        sync.getFeePolicy().refuse(b));
+                // Nothing reads b after this: the pool parses it, and Block.parse() is a lazy mutator.
+                sync.submitBlock(new BlockWrapper(b, 0));
             }
-            ImportResult r = sync.importPreValidated(pv);
-            resultsA.add(r);
-            return r;
-        });
-        pipeline.start();
-        for (Block b : blocks) {
-            // Nothing reads b after this: the pool parses it, and Block.parse() is a lazy mutator.
-            pipeline.submit(new BlockWrapper(b, 0));
+            assertTrue("the pipeline did not drain", sync.getPipeline().awaitIdle(120, TimeUnit.SECONDS));
+        } finally {
+            sync.stop();
         }
-        assertTrue("the pipeline did not drain", pipeline.awaitIdle(120, TimeUnit.SECONDS));
-        pipeline.stop();
         // The point of the pipeline: a block whose inputs need verifying must reach the lock with
         // its keys already computed, or the ECDSA quietly moved back under the monitor.
         assertTrue("no block with inputs went through the pipeline", signedBlocks.get() > 0);

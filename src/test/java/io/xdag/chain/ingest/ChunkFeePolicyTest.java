@@ -115,6 +115,8 @@ public class ChunkFeePolicyTest extends ChunkOrphanTestBase {
     private SyncManager sync;
     /** Every hash this node asked a peer for, in order, as the fake channel saw it. */
     private final List<Bytes32> requested = Collections.synchronizedList(new ArrayList<>());
+    /** Whether the fake channel manager reports a peer; flipped to reproduce a reconnect window. */
+    private boolean channelsUp = true;
 
     @Override
     protected Config newConfig() {
@@ -200,7 +202,25 @@ public class ChunkFeePolicyTest extends ChunkOrphanTestBase {
     /** The policy changes when a block is stored, never whether it ends up stored. */
     @Test
     public void theDagIsTheSameWithThePolicyOnAndOff() throws Exception {
-        assertEquals(runScenario(true), runScenario(false));
+        Snapshot on = runScenario(true);
+        Snapshot off = runScenario(false);
+
+        // Before comparing, check there is something to compare. Equality between two empty
+        // snapshots is a pass this test must never be able to give, and a dump() that started
+        // reading the wrong database or the wrong fixture would hand it exactly that.
+        assertHasRows(on);
+        assertHasRows(off);
+
+        assertEquals(on, off);
+    }
+
+    private static void assertHasRows(Snapshot s) {
+        assertTrue("INDEX is empty; the comparison would be vacuous", !s.index().isEmpty());
+        assertTrue("BLOCK is empty; the comparison would be vacuous", !s.block().isEmpty());
+        assertTrue("TIME is empty; the comparison would be vacuous", !s.time().isEmpty());
+        assertTrue("ORPHANIND is empty; the comparison would be vacuous", !s.orphan().isEmpty());
+        assertTrue("no main block was confirmed; the comparison would be vacuous", s.nmain() > 0);
+        assertTrue("no block was accepted; the comparison would be vacuous", s.nblocks() > 0);
     }
 
     // ---- placement -----------------------------------------------------------------------
@@ -298,6 +318,30 @@ public class ChunkFeePolicyTest extends ChunkOrphanTestBase {
 
         assertTrue("a block that covers its whole chain must be imported",
                 isImported(submitAsGossip(paid.block())));
+    }
+
+    /**
+     * The dampener must not suppress a request on the strength of one that never went out. The
+     * record stamps its clock whether or not anything is listening, so a waiter that turns up while
+     * this node has no peers — boot, a reconnect window, a partition — would otherwise record a
+     * broadcast it could not send and mute the next 64 seconds of real ones, which is exactly the
+     * window in which the first channel comes back.
+     */
+    @Test
+    public void aRequestWithNobodyToSendItToDoesNotMuteTheNextOne() {
+        ChainBlockBuilder.Built underpaid = underpaidCall(14);
+        deliverChunks(underpaid);
+        Bytes32 refused = hashLow(underpaid.block());
+        assertSame(ImportResult.CHAIN_FEE_POLICY, submitAsGossip(underpaid.block()));
+
+        channelsUp = false;
+        assertSame(ImportResult.NO_PARENT, submitAsGossip(linkTo(refused, 14)));
+        assertEquals("there was nobody to ask", 0, requestsFor(refused));
+
+        channelsUp = true;
+        assertSame(ImportResult.NO_PARENT, submitAsGossip(linkTo(refused, 15)));
+        assertEquals("a request that was never sent must not suppress the first real one",
+                1, requestsFor(refused));
     }
 
     /**
@@ -409,6 +453,7 @@ public class ChunkFeePolicyTest extends ChunkOrphanTestBase {
         setUpChain();
         armTheOrphanPool();
         requested.clear();
+        channelsUp = true;
         sync = syncManager();
     }
 
@@ -426,7 +471,7 @@ public class ChunkFeePolicyTest extends ChunkOrphanTestBase {
         Channel channel = mock(Channel.class);
         when(channel.getP2pHandler()).thenReturn(handler);
         ChannelManager channels = mock(ChannelManager.class);
-        when(channels.getActiveChannels()).thenReturn(List.of(channel));
+        when(channels.getActiveChannels()).thenAnswer(call -> channelsUp ? List.of(channel) : List.of());
         kernel.setChannelMgr(channels);
         PeerClient client = mock(PeerClient.class);
         when(client.getNode()).thenReturn(new Node("127.0.0.1", 8001));

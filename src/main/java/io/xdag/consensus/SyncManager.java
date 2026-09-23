@@ -405,6 +405,13 @@ public class SyncManager extends AbstractXdagLifecycle {
      * from {@link #submitBlock} on a netty thread, which is safe precisely because this branch never
      * calls {@code IngestPipeline.submit}: the monitor is never held across the backpressure park
      * that would otherwise shut the committer out.
+     *
+     * <p><b>Known cost, no deadlock.</b> On a pipelined node this is the first and only thing that
+     * makes a netty I/O thread take this monitor, and it holds it across {@link #releaseWaiters} →
+     * {@link #syncPopBlock} → the re-imports that pop performs. So a refusal of a block with many
+     * parked waiters occupies an I/O thread and keeps the commit thread out for as long as those
+     * re-imports take. It is bounded — the waiters of one block, each re-importing once — and it
+     * cannot cycle, but it is the reason a future change must not make this branch do more.
      */
     private synchronized ImportResult refuseOnPolicy(BlockWrapper blockWrapper) {
         log.debug("chunk fee policy declined block {}", blockWrapper.getBlock().getHashLow());
@@ -467,7 +474,8 @@ public class SyncManager extends AbstractXdagLifecycle {
      * when this node asked for the same hash inside the same 64 seconds, and the broadcast is
      * skipped. It cannot stall anything — a suppressed request is one that is already outstanding,
      * and the next round past 64 seconds sends it again — and it cannot weaken §5.2, because a hash
-     * suppressed here is a hash that is on the record, which is what the exemption reads.
+     * suppressed here is a hash that is on the record, which is what the exemption reads. The one
+     * way it could have stalled something is the reason the channel list is read first: see below.
      *
      * @param hashLow the missing block, as the failed import named it
      * @param isOld   which request message to send; the sync-state flag off the waiting block, and
@@ -478,12 +486,21 @@ public class SyncManager extends AbstractXdagLifecycle {
         // sent the waiting block rather than all of them. It is recorded here, once, rather than
         // duplicated: a peer that forwarded a block need not be the one holding its parent, so
         // narrowing the ask would trade this traffic for stalls.
+        List<Channel> channels = channelMgr.getActiveChannels();
+        if (channels.isEmpty()) {
+            // Nothing to ask, so nothing to record. The order matters: markRequested stamps the
+            // clock whether or not anything goes out, so recording first would have this node
+            // suppress the next 64 seconds of real requests on the strength of a broadcast that
+            // never happened — and an empty channel list is boot, a reconnect window or a
+            // partition, exactly when the next waiter is the one that finally has somebody to ask.
+            return;
+        }
         if (!feePolicy.markRequested(hashLow)) {
             // Already asked every channel for this very block moments ago; a second broadcast
             // fetches nothing the first one is not already fetching. See the method javadoc.
             return;
         }
-        for (Channel channel : channelMgr.getActiveChannels()) {
+        for (Channel channel : channels) {
             channel.getP2pHandler().sendGetBlock(hashLow, isOld);
         }
     }

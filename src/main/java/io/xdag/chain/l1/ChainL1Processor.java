@@ -563,6 +563,14 @@ public final class ChainL1Processor implements ChainL1Hooks {
      * raw bytes is re-encoded from the very {@code info} whose {@code fee} was just overwritten —
      * the declared fee would then be indistinguishable from the collected one, and the consensus
      * fee check would silently use the wrong number.
+     *
+     * <p>That precondition is now reachable from a second direction. {@code ChunkFeePolicy} calls
+     * this at ingest, and on the synchronous path the block may be one this node built itself, whose
+     * {@code xdagBlock} is null until {@code getXdagBlock()} lazily re-encodes it. That is safe, but
+     * for a reason that belongs written down rather than rediscovered: {@code info.fee} is only
+     * overwritten while the block is applied, which is long after ingest, so the re-encode at that
+     * point still carries the declared fee. A change that moved the fee overwrite earlier, or that
+     * called this on an applied block, would break it silently in both callers at once.
      */
     public static XAmount headerFee(Block block) {
         XdagBlock raw = block.getXdagBlock();

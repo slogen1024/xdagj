@@ -90,19 +90,49 @@ import org.apache.tuweni.bytes.Bytes32;
  * free (no confirming main block is needed to know it), so the honest bound is the one consensus
  * uses, and with it the two counts read exactly the same chunks.
  *
- * <h2>Why a lenient count before any assemble is sound here</h2>
+ * <h2>A lenient count before any assemble, and the one false refusal it leaves</h2>
  *
  * <p>{@link ChunkChain}'s class documentation warns that a fee check built on {@code countLenient}
  * "must be evaluated together with, or strictly after, the {@code assemble} verdict — never in
  * place of it", because on a chain {@code assemble} rejects the lenient count may come out higher
- * than the chain's usable length. This gate runs strictly <em>before</em> any assemble, and that is
- * not a violation of the rule but the same exception {@code ChainL1Processor.chainCount} already
- * documents for args chains: over-counting can only happen on a chain that {@code assemble} would
- * reject, and a DEPLOY or CALL whose chain does not assemble is one consensus refuses at
- * {@code setMain} anyway. Refusing to store it early costs the network nothing. The rule exists to
- * stop a lenient count from <em>replacing</em> an assemble verdict in a decision that binds
- * consensus; nothing here binds consensus — the block is still admitted the moment anything asks
- * for it, and the real verdict is still taken under the lock, from the real chain, later.
+ * than the chain's usable length. This gate runs strictly <em>before</em> any assemble. That is not
+ * a violation of the rule the warning is about — the rule exists to stop a lenient count from
+ * <em>replacing</em> an assemble verdict in a decision that binds consensus, and nothing here binds
+ * consensus: the real verdict is still taken under the lock, from the real chain, later — but it
+ * does leave a residual gap, and the gap is real rather than theoretical.
+ *
+ * <p><b>Where the gate charges more than consensus.</b> {@code ChainL1Processor.applyDeploy} adds
+ * the code chain's chunks to the fee basis only <em>after</em> {@code assemble} has accepted it,
+ * and reaches {@code feeCovers} only while the input's status is still OK. So for every DEPLOY or
+ * CALL that consensus rejects before the fee check — a chain that does not assemble, code over
+ * {@code chain.wasm.maxBytes}, a code hash that does not match the assembled bytes, a chain config
+ * outside its bounds, a missing or mismatched vault output — consensus's required fee is zero,
+ * while this gate has already counted whatever {@code countLenient} could reach and charges for it.
+ * A block in that set can be refused here and taken by consensus.
+ *
+ * <p><b>And consensus does take it.</b> It is worth being exact, because the tempting shorthand is
+ * wrong: a failed {@code assemble} does not make consensus refuse the block. It sets the input's
+ * status to {@code INVALID_FORMAT} and records it; the block itself was admitted by
+ * {@code tryToConnect} long before and stays in the DAG, with only its deploy or call failed. So
+ * this is a genuine false refusal, in the direction §5.4's benign-error argument does not excuse.
+ *
+ * <p><b>Why it is tolerable.</b> It is node-local and recoverable, and it is one-directional: the
+ * gate only ever charges more than consensus, never less, so it cannot admit something consensus
+ * would reject. Nothing about a refusal reaches a verdict — the block is simply not stored here
+ * until something wants it, and §5.2 hands it over the moment anything references it, so the node
+ * can neither fork nor stall on the difference. And every block in the set is one whose chain
+ * semantics are already doomed; declining to store such a block unprompted is the policy's purpose
+ * rather than a failure of it.
+ *
+ * <p><b>Why the gate is not made to match.</b> Matching would mean reproducing the whole
+ * pre-fee half of {@code applyDeploy} out here: assemble the code chain, size it, hash it, and read
+ * {@code CHAIN_L1} for the contract and chain records. Two reasons not to. First, those store reads
+ * are only meaningful relative to a confirmed height, and reading them off the lock would make the
+ * gate's answer depend on where {@code setMain} happened to be when the block arrived — the same
+ * block refused or admitted by timing, which is worse than a stable over-approximation. Second,
+ * assembling at ingest buffers the whole payload (up to {@code chain.wasm.maxBytes}) on a netty I/O
+ * thread for a block that has not paid, which is a cost that scales with the sender's payload — the
+ * exact shape this gate exists to refuse to pay.
  *
  * <p>Under-counting is the direction that actually happens, and it is benign by construction: a
  * paying block that arrives before its own chunks (the normal order) has few or none of them to
