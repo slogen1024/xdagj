@@ -24,27 +24,43 @@
 package io.xdag.chain.orphan;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
+import io.xdag.core.Address;
+import io.xdag.utils.XdagTime;
+import java.util.List;
 import org.junit.Test;
 
 /**
- * A node holding nothing but chunk blocks builds link blocks with no references in them: eight
- * built and signed per flood in {@code ChunkFloodAdversarialTest
+ * A node holding nothing but chunk blocks used to build link blocks with no references in them:
+ * eight built and signed per flood in {@code ChunkFloodAdversarialTest
  * #aChunkFloodMintsLinkBlocksThatCanReferenceNothing}, none of them imported, each refused by this
- * node's own import as {@code Block's time is illegal}. This class is where that is taken apart.
+ * node's own import as {@code Block's time is illegal}. This class is where that is taken apart,
+ * and it now pins all three pieces of the answer.
  *
- * <h2>The two halves of that, and which one this class opens with</h2>
+ * <h2>The budget</h2>
  *
- * <p>The budget comes first. {@code getOrphanLocked} sized the packing budget from {@code
- * totalSize()}, which counts all four categories, while {@code selectBlocks} never offers a
- * {@link OrphanCategory#CHUNK} entry — a chunk is held for the block that will pay for it, not for
- * this node to reference. The gap between the two is exactly the pooled chunk count, so the budget
- * described work the selection could not do.
+ * <p>{@code getOrphanLocked} sized the packing budget from {@code totalSize()}, which counts all
+ * four categories, while {@code selectBlocks} never offers a {@link OrphanCategory#CHUNK} entry
+ * — a chunk is held for the block that will pay for it, not for this node to reference. The gap
+ * between the two was exactly the pooled chunk count, so the budget described work the selection
+ * could not do. It now comes from {@link ChainOrphanPool#selectableSize}.
+ *
+ * <h2>The block that was built anyway, and the timestamp it was stamped with</h2>
  *
  * <p>Correcting the budget does not on its own stop the empty block being built: {@code
- * checkOrphan} still decides to mine from {@code nnoref}, and an empty selection still fabricates
- * the timestamp that gets the block refused. Those are the second half; the task after this one
- * adds them to this class.
+ * checkOrphan} still decides to mine from {@code nnoref} — deliberately, that statistic is not
+ * redefined — so the node still reaches {@code createLinkBlock} with a pool that can hand it
+ * nothing. Two changes close it there, and they had to land together: {@code createLinkBlock}
+ * returns {@code null} rather than build a reference-less block, and {@code getOrphanLocked} runs
+ * its "one past the newest reference" line only when something was selected. Fixing the timestamp
+ * alone would have produced a block stamped 0 instead of 1 — worse, not better — and building
+ * alone would have kept stamping 1.
+ *
+ * <p>This is the one externally observable block-production change of the addendum: a node in the
+ * "nothing to reference" state stops emitting a link block. What it stops emitting is a block its
+ * own import refuses, so nothing is lost.
  */
 public class IdleLinkMintingTest extends ChunkOrphanTestBase {
 
@@ -80,5 +96,60 @@ public class IdleLinkMintingTest extends ChunkOrphanTestBase {
         assertEquals("a link block is selectable; the five chunks beside it still are not",
                 1, pool().selectableSize());
         assertEquals("and the total counts all six", 6, pool().totalSize());
+    }
+
+    /**
+     * The block this node used to build when the pool could hand it nothing: no references, and a
+     * timestamp of 1, because the empty selection still ran the "newest reference plus one" line.
+     * Its own import refused it as {@code Block's time is illegal} — eight built and signed per
+     * flood in {@code ChunkFloodAdversarialTest#aChunkFloodMintsLinkBlocksThatCanReferenceNothing},
+     * none of them imported.
+     */
+    @Test
+    public void aPoolHoldingOnlyChunksBuildsNoLinkBlockAtAll() {
+        drainSelectableEntries();
+        for (int i = 0; i < 5; i++) {
+            assertImported(deliver(lightChunk(770 + i)));
+        }
+        assertEquals("the pool holds only chunks", 0, pool().selectableSize());
+        assertEquals("and it really is holding them, so this is not an empty-pool test wearing"
+                + " a chunk-pool name", 5, pool().size(OrphanCategory.CHUNK));
+
+        assertNull("with nothing to reference there is no link block to build",
+                blockchain.createLinkBlock(null, false));
+    }
+
+    /** The latent half: an empty selection must not fabricate a timestamp for its caller. */
+    @Test
+    public void anEmptySelectionLeavesTheCallersTimestampAlone() {
+        drainSelectableEntries();
+        long[] sendTime = new long[2];
+        sendTime[0] = XdagTime.getCurrentTimestamp();
+
+        List<Address> refs = blockchain.getBlockFromOrphanPool(13, sendTime, false);
+
+        assertTrue("nothing was selected", refs.isEmpty());
+        assertEquals("so nothing may be claimed about when the newest reference was",
+                0, sendTime[1]);
+    }
+
+    /**
+     * Takes selectable entries away until the packing walk can hand out nothing, which is the
+     * premise both tests above rest on.
+     *
+     * <p>Arming leaves the pool empty today — {@link #theSelectableCountExcludesChunks} asserts
+     * exactly that — so this normally drains nothing at all. It is written to tolerate zero
+     * iterations rather than to require one, and capped so a fixture that started leaving entries
+     * behind fails here instead of spinning for ever.
+     */
+    private void drainSelectableEntries() {
+        for (int rounds = 0; pool().selectableSize() > 0; rounds++) {
+            assertTrue("the drain is not converging: selectable entries keep coming back, so the"
+                    + " fixture is no longer the one this helper was written against", rounds < 64);
+            blockchain.getBlockFromOrphanPool(16,
+                    new long[]{XdagTime.getCurrentTimestamp(), 0}, false);
+        }
+        assertEquals("the pool must hand out nothing before the caller's first delivery",
+                0, pool().selectableSize());
     }
 }

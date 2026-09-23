@@ -627,7 +627,14 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
             sendtime[1] = Math.max(sendtime[1], e.meta().getTime());
         }
 
-        sendtime[1] = Math.min(sendtime[1] + 1, sendtime[0]);
+        if (!selected.isEmpty()) {
+            // Only meaningful when something was selected: this is "one past the newest reference".
+            // Run unconditionally, an empty selection produced min(0 + 1, sendtime[0]) == 1, a
+            // timestamp before the era, which this node's own import refuses as "Block's time is
+            // illegal" -- and the only consumer of sendtime[1], createLinkBlock, stamped that onto
+            // the block it built. It now declines to build instead; see its own guard.
+            sendtime[1] = Math.min(sendtime[1] + 1, sendtime[0]);
+        }
         log.info("vipTxCount: {}, accountTxQueue.size(): {}, mtxQueue.size(): {}, linkQueue.size(): {}, mainRef.size() :{}",
                 pool.laneSize(AccountLane.VIP), pool.laneSize(AccountLane.REGULAR),
                 pool.size(OrphanCategory.MTX), pool.size(OrphanCategory.LINK), pool.mainRefSize());

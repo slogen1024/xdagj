@@ -54,7 +54,13 @@ public interface Blockchain {
         return tryToConnect(pv.block());
     }
 
-    // Create a new block with given parameters
+    /**
+     * Create a new block with given parameters.
+     *
+     * <p>May return {@code null}: when the fields the caller asked for do not fit in sixteen, and —
+     * on the {@code pairs == null && to == null && !mining} shape, which builds a link block — when
+     * the orphan pool hands out no references to carry. See {@code BlockchainImpl.createLinkBlock}.
+     */
     Block createNewBlock(
             Map<Address, ECKeyPair> pairs,
             List<Address> to,

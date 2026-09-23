@@ -2485,6 +2485,13 @@ public class BlockchainImpl implements Blockchain {
                 kernel.getConfig().getNodeSpec().getNodeTag(), -1, XAmount.ZERO, null);
     }
 
+    /**
+     * A block whose only purpose is to reference orphans, so that they stop being orphans.
+     *
+     * @return the block, or {@code null} when the non-roll path found nothing to reference. A block
+     *         with no references is one this node's own import refuses, so declining to build it is
+     *         the whole of what the caller loses; {@code checkOrphan} ends its round on it.
+     */
     public Block createLinkBlock(String remark, boolean isRoll) {
         // <header + remark + outsig + nonce>
         int hasRemark = remark == null ? 0 : 1;
@@ -2503,9 +2510,21 @@ public class BlockchainImpl implements Blockchain {
             log.debug("rollTxList.size:{}", rollTxList.size());
         } else {
             List<Address> orphans = getBlockFromOrphanPool(16 - res, sendTime, false);
-            if (CollectionUtils.isNotEmpty(orphans)) {
-                refs.addAll(orphans);
+            if (CollectionUtils.isEmpty(orphans)) {
+                // Nothing the packing walk will hand out -- an empty pool, or one holding only
+                // chunks, which selectBlocks never offers. Building anyway produced a block with no
+                // references and, before getOrphanLocked stopped fabricating it, sendTime[1] == 1:
+                // refused by this node's own import as "Block's time is illegal".
+                //
+                // Deliberately inside this branch and not shared with the roll branch above. That
+                // one packs from rollTxList, a different source with a different emptiness: whether
+                // a rollback with nothing to re-link should still emit a block is its own question,
+                // and no caller passes isRoll = true today (createNewBlock is the only caller and
+                // it passes false), so answering it here would be an unreviewed change to a path
+                // nothing reaches.
+                return null;
             }
+            refs.addAll(orphans);
         }
 
         return new Block(kernel.getConfig(), sendTime[1], null, refs, false, null,
@@ -3198,6 +3217,12 @@ public class BlockchainImpl implements Blockchain {
         while (nblk-- > 0) {
             Block linkBlock = createNewBlock(null, null, false,
                     kernel.getConfig().getNodeSpec().getNodeTag(), XAmount.ZERO, null);
+            if (linkBlock == null) {
+                // Nothing to link: createLinkBlock declines when the orphan pool hands out no
+                // references. Stop the round rather than spin -- this loop is synchronous, so the
+                // pool cannot gain a selectable entry between iterations.
+                break;
+            }
             linkBlock.signOut(kernel.getWallet().getDefKey());
             ImportResult result = this.tryToConnect(new Block(linkBlock.getXdagBlock()));
             if (result == IMPORTED_NOT_BEST || result == IMPORTED_BEST) {
