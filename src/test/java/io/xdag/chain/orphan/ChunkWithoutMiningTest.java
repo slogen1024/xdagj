@@ -141,9 +141,6 @@ public class ChunkWithoutMiningTest extends ChunkOrphanTestBase {
      * per-source budget is the first half of that: a non-mining node is not a node with no limits,
      * it is the same pool with the same bounds.
      *
-     * <p>The fixture's non-mining premise is the one pinned in the test above; nothing here
-     * installs a PoW instance either.
-     *
      * <p><b>Which tier stops this flood.</b> Both budgets are set to {@link #BUDGET}, so the count
      * alone would not say. {@link #lightChunk} builds a one-chunk chain whose successor is null, so
      * each delivery groups onto its own chain head and the per-chain tier holds one apiece — which
@@ -153,6 +150,8 @@ public class ChunkWithoutMiningTest extends ChunkOrphanTestBase {
      */
     @Test
     public void aNonMiningNodeStillChargesAFloodToItsSenderBudget() {
+        assertNull("a bounded flood on a node that turns out to mine tests the wrong node",
+                kernel.getPow());
         for (int i = 0; i < CHUNKS_SENT; i++) {
             deliver(lightChunk(720 + i), FLOODER_IP);
         }
@@ -170,6 +169,8 @@ public class ChunkWithoutMiningTest extends ChunkOrphanTestBase {
      */
     @Test
     public void aNonMiningNodeStillAgesChunksOut() {
+        assertNull("a chunk aged out of a node that turns out to mine tests the wrong node",
+                kernel.getPow());
         Block chunk = lightChunk(740);
         assertImported(deliver(chunk));
         assertNotNull("the chunk is held before its TTL runs out",
