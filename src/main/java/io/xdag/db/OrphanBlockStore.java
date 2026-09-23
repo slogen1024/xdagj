@@ -24,6 +24,7 @@
 package io.xdag.db;
 
 import io.xdag.chain.ext.Classified;
+import io.xdag.chain.orphan.OrphanAdmission;
 import io.xdag.chain.orphan.OrphanCategory;
 import io.xdag.core.XAmount;
 import io.xdag.core.XdagLifecycle;
@@ -60,8 +61,9 @@ public interface OrphanBlockStore extends XdagLifecycle {
      * roll-back that re-orphans a transaction block it already holds. Unattributed is the correct
      * reading of those, not a degraded one; see the {@code peerKey} parameter below.
      */
-    default void addOrphan(Block block, boolean isTxBlock, UInt64 nonce, XAmount fee, byte[] address) {
-        addOrphan(block, isTxBlock, nonce, fee, address, null, null);
+    default OrphanAdmission addOrphan(Block block, boolean isTxBlock, UInt64 nonce, XAmount fee,
+            byte[] address) {
+        return addOrphan(block, isTxBlock, nonce, fee, address, null, null);
     }
 
     /**
@@ -79,8 +81,14 @@ public interface OrphanBlockStore extends XdagLifecycle {
      *                   compute one. It decides the {@link OrphanCategory} — a null classification
      *                   can never be {@link OrphanCategory#CHUNK} — and, for a chunk, it is where
      *                   the chunk chain this block attaches to is read from.
+     * @return what the pool did with the block. The caller needs it because admission is no longer
+     *         something it can infer: the import path's gate asks only about capacity, so a block
+     *         can clear the gate and still be turned away by one of the two chunk quotas, which are
+     *         about attribution and have to stay behind this call. A chunk turned away is held
+     *         nowhere at all — it skipped {@code saveBlock}, so the pool was its only home — and a
+     *         caller counting orphans must not count what nobody is holding.
      */
-    void addOrphan(Block block, boolean isTxBlock, UInt64 nonce, XAmount fee, byte[] address,
+    OrphanAdmission addOrphan(Block block, boolean isTxBlock, UInt64 nonce, XAmount fee, byte[] address,
             String peerKey, Classified classified);
 
     long getOrphanSize();

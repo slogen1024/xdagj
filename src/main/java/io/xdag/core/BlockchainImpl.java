@@ -37,6 +37,7 @@ import io.xdag.chain.l1.ChainL1Hooks;
 import io.xdag.chain.l1.ChainL1Processor;
 import io.xdag.chain.l1.ChainL1SnapshotGate;
 import io.xdag.chain.l1.ChainL1Store;
+import io.xdag.chain.orphan.OrphanAdmission;
 import io.xdag.chain.orphan.OrphanCategory;
 import io.xdag.chain.repair.ChainConsistencyCheck;
 import io.xdag.config.MainnetConfig;
@@ -825,8 +826,27 @@ public class BlockchainImpl implements Blockchain {
                 if (category != OrphanCategory.CHUNK) {
                     saveBlock(block);
                 }
-                dealOrphan(block, peerKey, classified);
-                xdagStats.nnoref++;
+                boolean pooled = dealOrphan(block, peerKey, classified);
+                // nnoref counts the orphans this node is holding, and every increment has to be one
+                // something can give back. For every category but CHUNK that is the disk copy
+                // saveBlock has just written: removeOrphan decrements for any stored block that is
+                // not yet BI_REF, whatever the pool decided, so those must be counted
+                // unconditionally -- making them conditional on admission would take the count one
+                // too low the first time anything referenced such a block.
+                //
+                // A chunk has no disk copy. The pool is its only home, so a chunk the pool refused
+                // is in no pool, on no disk, and referenced by nothing that could ever give its
+                // increment back. That refusal is reachable: the gate above asks
+                // ChainOrphanPool.isFull, which is about capacity alone, while the per-peer and
+                // per-chain chunk quotas are about attribution and stay inside add() -- see
+                // isFull's own note on why a gate that knew only a category must not enforce them.
+                // So a chunk that clears the gate and is then turned away by its sender's own
+                // budget used to leak an increment per refusal, and nnoref is what checkNewMain
+                // divides by eleven to decide how many link blocks to mine: a flooder was buying
+                // link blocks for orphans this node was not holding.
+                if (category != OrphanCategory.CHUNK || pooled) {
+                    xdagStats.nnoref++;
+                }
             }
             blockStore.saveXdagStatus(xdagStats);
 
@@ -909,8 +929,8 @@ public class BlockchainImpl implements Blockchain {
      * the roll-back, which re-orphans a transaction block this node already holds: there is no peer
      * to name and no classification to pass, and a transaction block is never a chunk anyway.
      */
-    public void dealOrphan(Block block) {
-        dealOrphan(block, null, null);
+    public boolean dealOrphan(Block block) {
+        return dealOrphan(block, null, null);
     }
 
     /**
@@ -920,8 +940,15 @@ public class BlockchainImpl implements Blockchain {
      * <p>Both travel all the way to {@code addOrphan} because the pool's two chunk-only quotas and
      * its epoch clock have no other way to learn them — a block carries neither its sender nor, as
      * far as the orphan store can see, its kind.
+     *
+     * <p>Answers whether this call put the block in the pool. {@link OrphanAdmission#DUPLICATE} is
+     * false along with every refusal, and deliberately so: the question the caller is asking is not
+     * "is the pool holding this" but "did this call make the pool start holding it", which is the
+     * only event an increment of a holding count may pair with. A node that pools nothing at all —
+     * no PoW, or block generation turned off — answers false for the same reason, because it is
+     * true: nothing went in.
      */
-    public void dealOrphan(Block block, String peerKey, Classified classified) {
+    public boolean dealOrphan(Block block, String peerKey, Classified classified) {
         if (kernel.getConfig().getEnableGenerateBlock() && kernel.getPow() != null) {
             UInt64 nonce = UInt64.ZERO;
             XAmount fee = getTxFee(block);
@@ -929,9 +956,10 @@ public class BlockchainImpl implements Blockchain {
             if (address != null) {
                 nonce = block.getTxNonceField().getTransactionNonce();
             }
-            getOrphanBlockStore().addOrphan(block, isTxBlock(block), nonce, fee, address, peerKey,
-                    classified);
+            return getOrphanBlockStore().addOrphan(block, isTxBlock(block), nonce, fee, address,
+                    peerKey, classified) == OrphanAdmission.ADMITTED;
         }
+        return false;
     }
 
     /**

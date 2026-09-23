@@ -365,8 +365,8 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
                 pool.size(OrphanCategory.MTX), pool.size(OrphanCategory.LINK), pool.mainRefSize());
     }
 
-    public void addOrphan(Block block, boolean isTxBlock, UInt64 nonce, XAmount fee, byte[] address,
-            String peerKey, Classified classified) {
+    public OrphanAdmission addOrphan(Block block, boolean isTxBlock, UInt64 nonce, XAmount fee,
+            byte[] address, String peerKey, Classified classified) {
         // key: 0x00 + hashlow(24B) + nonce(8B) + isTx(1B)
         byte[] hashlow = Arrays.copyOfRange(block.getHashLow().toArray(), 8, 32); // Extract effective 24B
         byte[] nonceBytes = BytesUtils.bigIntegerToBytes(nonce, 8);
@@ -393,13 +393,13 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
             // pack.
             log.warn("orphan pool refused {} ({}): {}", Hex.toHexString(meta.getHashlow().toArray()),
                     category, verdict);
-            return;
+            return verdict;
         }
         if (category == OrphanCategory.CHUNK) {
             // Memory-only: no row, no ORPHAN_SIZE, and -- since the deferred-persist change -- no
             // block-store write either. The pool is now holding the only copy of these 512 bytes
             // that exists anywhere on this node. See this class's header.
-            return;
+            return verdict;
         }
 
         if (orphanSource.get(key) == null) {
@@ -412,6 +412,7 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
         log.debug("vipTxCount: {}, accountTxQueue.size(): {}, mtxQueue.size(): {}, linkQueue.size(): {}, mainRef.size() :{}",
                 pool.laneSize(AccountLane.VIP), pool.laneSize(AccountLane.REGULAR),
                 pool.size(OrphanCategory.MTX), pool.size(OrphanCategory.LINK), pool.mainRefSize());
+        return verdict;
     }
 
     /**
