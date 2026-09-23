@@ -25,12 +25,13 @@ package io.xdag.chain.orphan;
 
 import static io.xdag.chain.ext.ChunkChainTest.payload;
 import static io.xdag.config.Constants.BI_APPLIED;
+import static io.xdag.config.Constants.BI_MAIN_CHAIN;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUT;
-import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import io.xdag.Network;
 import io.xdag.chain.ext.ChunkChainBuilder;
@@ -47,7 +48,6 @@ import io.xdag.core.XdagBlock;
 import io.xdag.net.Peer;
 import java.math.BigInteger;
 import java.util.List;
-import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 import org.junit.Before;
 import org.junit.Test;
@@ -171,9 +171,9 @@ public class ChunkPersistBudgetBoundaryTest extends ChainL1TestBase {
      * skips the same link — and the unwind's trailing loop dereferences the reference <em>before</em>
      * it asks whether this main block ever applied it, so the guard has to be on both sides.
      *
-     * <p>The branch that overtakes is deliberately much longer than the one it replaces: every mined
-     * block here weighs at least 2^46 and less than 2^47, so eight of them are strictly heavier than
-     * the three they unwind.
+     * <p>The competing branch is mined until it really is the top rather than for a fixed count.
+     * Each block's weight is only bounded to [2^46, 2^47), so "enough blocks" is not something a
+     * count can promise; asking the chain is the only honest stopping condition.
      */
     @Test
     public void unwindingABlockWhoseChainRanPastTheBudgetDoesNotCrash() {
@@ -190,22 +190,22 @@ public class ChunkPersistBudgetBoundaryTest extends ChainL1TestBase {
                 (blockchain.getBlockByHash(hashLow(payer), false).getInfo().getFlags() & BI_APPLIED) != 0);
 
         rewindTo(forkPoint, forkTime);
-        Block tip = null;
-        for (int i = 0; i < 8; i++) {
-            tip = mineMain(List.of(), false);
-        }
-        assertNotNull(tip);
-        assertArrayEquals("the competing branch did not overtake", hashLow(tip).toArray(),
-                blockchain.getXdagTopStatus().getTop());
+        mineUntilTop();
         assertEquals("and the branch carrying the chunk chain was really unwound", 0,
                 blockchain.getBlockByHash(hashLow(carrier), false).getInfo().getFlags() & BI_APPLIED);
     }
 
     /**
-     * {@code updateNewChain}. One budget covers a whole block, however many chains it names, so a
-     * main block that names two chunk chains gets the first head written and leaves the second in
-     * memory. When that main block is later re-flagged onto the winning branch, the un-orphaning
-     * loop walks its links and reaches for chain metadata the second head does not have.
+     * {@code updateNewChain}. One budget covers a whole importing block however many chains it
+     * names, so a main block naming two chunk chains gets the first head written and leaves the
+     * second exactly where it was. When the fork path then flags a stretch of the competing branch
+     * onto the main chain, its un-orphaning loop walks that block's links and reaches for chain
+     * metadata the second head does not have.
+     *
+     * <p>The crash lands inside {@code tryToConnect}, which catches {@code Throwable} — so a node
+     * without the guard does not fall over, it silently answers {@code ERROR} to a perfectly good
+     * main block and stops following the chain. That is what the mining helper's rejection
+     * assertion catches here.
      */
     @Test
     public void reflaggingAMainBlockThatNamesAnUnwrittenChunkDoesNotCrash() {
@@ -230,18 +230,30 @@ public class ChunkPersistBudgetBoundaryTest extends ChainL1TestBase {
         assertNull("the second head had no budget left and is memory-only",
                 kernel.getBlockStore().getRawBlockByHash(second.get(0).getHashLow()));
 
-        Block tip = null;
-        for (int i = 0; i < 7; i++) {
-            tip = mineMain(List.of(), false);
-        }
-        assertNotNull(tip);
-        assertArrayEquals("the competing branch did not overtake", hashLow(tip).toArray(),
-                blockchain.getXdagTopStatus().getTop());
-        assertNotNull("and the block that names the unwritten chunk is on the winning branch now",
-                blockchain.getBlockByHash(hashLow(carrier), false));
+        mineUntilTop();
+        assertTrue("and the block that names the unwritten chunk was flagged onto the main chain,"
+                        + " which is the very loop that used to crash on it",
+                (blockchain.getBlockByHash(hashLow(carrier), false).getInfo().getFlags()
+                        & BI_MAIN_CHAIN) != 0);
     }
 
     // ---- helpers -------------------------------------------------------------------------
+
+    /**
+     * Mines the competing branch until it owns the top. A fixed count cannot promise an overtake —
+     * a mined block's weight is only bounded to [2^46, 2^47), so N new blocks are not reliably
+     * heavier than the M they replace — and the bound here is a runaway guard, not the stopping
+     * condition.
+     */
+    private void mineUntilTop() {
+        for (int i = 0; i < 40; i++) {
+            Block tip = mineMain(List.of(), false);
+            if (Bytes32.wrap(blockchain.getXdagTopStatus().getTop()).equals(hashLow(tip))) {
+                return;
+            }
+        }
+        fail("the competing branch did not overtake within 40 blocks");
+    }
 
     /**
      * Imports a block the way a block from a peer is imported: a private re-parse of its 512 bytes,
