@@ -929,11 +929,10 @@ public class BlockchainImpl implements Blockchain {
      *
      * <p>Answers {@link OrphanAdmission#ADMITTED} and nothing else, which is to say: did <em>this
      * call</em> put the block in the pool. {@link OrphanAdmission#DUPLICATE} is therefore false
-     * along with every refusal, and so is a node that pools nothing at all — no PoW instance, or
-     * block generation turned off — because for every category but one nothing went in there
-     * either.
+     * along with every refusal, and so is a <em>non-chunk</em> block on a node that does not mine —
+     * no PoW instance, or block generation turned off — because nothing went in there either.
      *
-     * <p><b>{@link OrphanCategory#CHUNK} is that one, and the mining gate does not apply to it.</b>
+     * <p><b>{@link OrphanCategory#CHUNK} is the exception: the mining gate does not apply to it.</b>
      * Every other category is on disk by the time this runs — {@code tryToConnect} saved it — so
      * for them the pool is only the queue of work a miner draws references from, and a node that
      * does not mine buys nothing by filling it. A chunk has no disk copy at all: {@code
@@ -946,11 +945,12 @@ public class BlockchainImpl implements Blockchain {
         // The address first because the category is computed from it, and then the pooling needs it
         // again: one walk of the links rather than two (see orphanCategoryOf).
         byte[] address = orphanAddressOf(block);
-        // A chunk's only home is this pool, so the mining gate below must not be what decides
-        // whether this node keeps it. See the javadoc for why the other three categories stay
-        // behind the gate.
+        // Pool it if it is a chunk -- this pool is a chunk's only home, so mining must not be what
+        // decides whether this node keeps it -- or if this node mines, which is what the other
+        // three categories are pooled for. See the javadoc.
         boolean chunk = orphanCategoryOf(block, address, classified) == OrphanCategory.CHUNK;
-        if (!chunk && !(kernel.getConfig().getEnableGenerateBlock() && kernel.getPow() != null)) {
+        boolean minesBlocks = kernel.getConfig().getEnableGenerateBlock() && kernel.getPow() != null;
+        if (!(chunk || minesBlocks)) {
             return false;
         }
         UInt64 nonce = UInt64.ZERO;

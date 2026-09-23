@@ -86,9 +86,10 @@ public class ChunkDeferredPersistTest extends ChainL1TestBase {
     private static final int SEEDS_PER_BLOCK = 64;
 
     /**
-     * {@code dealOrphan} pools nothing unless the node is configured to generate blocks and a PoW
-     * instance exists. Devnet supplies the first; the mock supplies the second, and nothing in the
-     * import path calls into it. One real main block first, so the chain top weighs at least 2^46.
+     * Arms the pool exactly as {@link ChunkOrphanTestBase#armTheOrphanPool()} does and for the
+     * reasons given there — the mock, the main block, and which categories the mining gate still
+     * applies to. A copy rather than an inheritance because this is an earlier task's regression
+     * fixture; see that class's header.
      */
     @Before
     public void armTheOrphanPool() {

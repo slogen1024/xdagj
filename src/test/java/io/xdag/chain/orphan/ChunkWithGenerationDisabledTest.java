@@ -24,12 +24,10 @@
 package io.xdag.chain.orphan;
 
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
 
 import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
 import io.xdag.core.Block;
-import io.xdag.core.ImportResult;
 import org.junit.Test;
 
 /**
@@ -44,11 +42,10 @@ import org.junit.Test;
  * installs the PoW mock, so that half is open and the config override below is the only half
  * holding the gate shut — the mirror image of {@link ChunkWithoutMiningTest}, which leaves config
  * alone and withholds the PoW instance. Written any other way the two would measure one thing
- * twice.
+ * twice, and the test below asserts both halves of that premise rather than trusting it.
  *
- * <p>They are two classes rather than two methods because
- * {@code AbstractConfig.enableGenerateBlock} is a field with no setter and
- * {@link io.xdag.chain.l1.ChainL1TestBase#newConfig()} is answered once per class.
+ * <p>Why this is a class of its own rather than a second method over there: see the last paragraph
+ * of {@link ChunkWithoutMiningTest}.
  */
 public class ChunkWithGenerationDisabledTest extends ChunkOrphanTestBase {
 
@@ -71,17 +68,20 @@ public class ChunkWithGenerationDisabledTest extends ChunkOrphanTestBase {
 
     @Test
     public void aNodeWithBlockGenerationOffStillKeepsAnArrivingChunk() {
-        // The base's @Before has already installed the PoW mock, so config is the only half
-        // holding the gate.
+        // The soft half of the premise, pinned rather than assumed. This class's own half -- a
+        // hard `return false` on the config above -- no base class can undo, but its dependence on
+        // the base still ARMING the fixture is exactly as fragile as the absence the sibling pins:
+        // let kernel.setPow(...) leave the base and both halves close here, this test passes for
+        // the sibling's reason, and the two classes silently become one test run twice.
+        assertNotNull("the base must have armed this fixture, or this is the sibling's test twice",
+                kernel.getPow());
+
         Block chunk = lightChunk(701);
         assertImported(deliver(chunk));
         assertNotNull("a node that does not mine must still hold the chunk it was sent",
-                pool().chunkBody(chunk.getHashLow()));
+                blockchain.getOrphanBlockStore().getChunkBody(hashLow(chunk)));
 
-        Block paying = linkTo(hashLow(chunk), 702);
-        ImportResult r = deliver(paying);
-        assertTrue("the block that pays for the chunk must import, not hang on NO_PARENT: "
-                + r + " " + r.getErrorInfo(),
-                r == ImportResult.IMPORTED_BEST || r == ImportResult.IMPORTED_NOT_BEST);
+        assertLanded("the block that pays for the chunk must not hang on NO_PARENT",
+                deliver(linkTo(hashLow(chunk), 702)));
     }
 }

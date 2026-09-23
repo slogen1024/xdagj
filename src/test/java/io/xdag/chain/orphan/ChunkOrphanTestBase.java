@@ -111,8 +111,12 @@ public abstract class ChunkOrphanTestBase extends ChainL1TestBase {
 
     /**
      * {@code dealOrphan} pools nothing unless the node is configured to generate blocks and a PoW
-     * instance exists. Devnet sets {@code node.generate.block.enable = true}; the mock supplies the
-     * other half, and nothing in the import path calls into it.
+     * instance exists — <b>for every category but {@link OrphanCategory#CHUNK}</b>, which is exempt
+     * because the pool is the only home a chunk has. So what the mock buys a test here is the
+     * pooling of <em>ordinary</em> orphans, link and transaction blocks; a chunk is pooled either
+     * way, and {@link ChunkWithoutMiningTest} is where that exemption is held in place. Devnet sets
+     * {@code node.generate.block.enable = true}; the mock supplies the other half, and nothing in
+     * the import path calls into it.
      *
      * <p>One real main block first, so the chain top weighs at least 2^46 — the floor every
      * delivered block below is kept under. Without it the top is the fixture's address block and
@@ -146,7 +150,16 @@ public abstract class ChunkOrphanTestBase extends ChainL1TestBase {
      * is being pinned.
      */
     protected void assertLanded(ImportResult r) {
-        assertTrue("import failed: " + r + " " + r.getErrorInfo(),
+        assertLanded("import failed", r);
+    }
+
+    /**
+     * As {@link #assertLanded(ImportResult)}, saying what the caller was claiming rather than that
+     * an import failed — "must not hang on {@code NO_PARENT}" names a specific way for it to fail
+     * and is worth more in a failure message than the generic line.
+     */
+    protected void assertLanded(String why, ImportResult r) {
+        assertTrue(why + ": " + r + " " + r.getErrorInfo(),
                 r == ImportResult.IMPORTED_BEST || r == ImportResult.IMPORTED_NOT_BEST);
     }
 

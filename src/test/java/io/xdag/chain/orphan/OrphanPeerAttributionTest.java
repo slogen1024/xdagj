@@ -90,9 +90,9 @@ public class OrphanPeerAttributionTest extends ChainL1TestBase {
     private final List<String> verdicts = new CopyOnWriteArrayList<>();
 
     /**
-     * {@code dealOrphan} pools nothing unless the node is configured to generate blocks and a PoW
-     * instance exists. Devnet sets {@code node.generate.block.enable = true}; the mock supplies the
-     * other half, and nothing in the import path calls into it.
+     * Arms the pool the way {@link ChunkOrphanTestBase#armTheOrphanPool()} does and for the reasons
+     * given there, which includes which categories the mining gate still applies to, then builds
+     * the pipeline this class delivers through.
      */
     @Before
     public void armTheOrphanPool() {
