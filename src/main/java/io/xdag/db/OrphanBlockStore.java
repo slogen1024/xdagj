@@ -100,6 +100,16 @@ public interface OrphanBlockStore extends XdagLifecycle {
     OrphanAdmission addOrphan(Block block, boolean isTxBlock, UInt64 nonce, XAmount fee, byte[] address,
             String peerKey, Classified classified);
 
+    /**
+     * How many orphans this node holds — all four categories, {@code mainRef} excluded.
+     *
+     * <p><b>An observation contract, not a budget.</b> Since the packing budget moved to
+     * {@code ChainOrphanPool.selectableSize}, this has no production reader left — but it is the
+     * surface a large body of tests asserts exact values from, and those assertions resolve through
+     * this declaration rather than the implementation, because that is the type the fields are
+     * declared as. Do not narrow it to match the budget, and do not delete it as unused: see
+     * {@code OrphanBlockStoreImpl#getOrphanSize} for the full argument.
+     */
     long getOrphanSize();
 
     /**

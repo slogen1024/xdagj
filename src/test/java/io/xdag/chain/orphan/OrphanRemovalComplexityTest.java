@@ -152,8 +152,10 @@ public class OrphanRemovalComplexityTest {
      * <p><b>Why that is not the slope acceptance criterion 3 is about.</b> {@code mainRef} does not
      * hold the pool; it holds what selection has already given away and the chain has not yet
      * confirmed. Its length is set by mining cadence — at most the reference budget of a main block
-     * per unconfirmed main block — and entries leave it as the blocks that named them are imported
-     * ({@code deleteFromQueue}) or as they expire. A flood makes the <em>pool</em> sixty thousand
+     * per unconfirmed main block — and entries leave it when the blocks that named them are
+     * imported ({@code deleteFromQueue}), which is the only drain there is: {@code mainRef} has no
+     * TTL, and the {@code mainRefRemove} inside {@code cleanExpiredOrphansLocked} is structurally a
+     * no-op, since a parked entry is no longer pooled and {@code evictExpired} never returns it. A flood makes the <em>pool</em> sixty thousand
      * deep; it cannot make {@code mainRef} sixty thousand deep, because nothing puts an entry there
      * but this node's own block production. That is why the measurement above holds it fixed: a
      * fixture that grew it with the pool would be measuring a shape production cannot produce.

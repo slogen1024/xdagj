@@ -122,6 +122,18 @@ P1 的修复**扩大了 P2 的暴露面**：修复后不挖矿的节点会把分
 
 它本身不造成损害——预算偏大时选择只是交回更少——但它让预算**描述它实际能服务的东西**，并让 D4 的第二条更少被触发。
 
+> **实施期更正（2026-09-23，规格评审确认）：上面这句「预算偏大时选择只是交回更少」不完整，它假设多出来的余量什么也买不到。**
+>
+> 实际上 `selectBlocks` 的 `mainRef` 循环**跑在最前面**并消费到预算上限（`OrphanBlockStoreImpl:716-721`：`if (!pool.mainRefIsEmpty() && (isMain || pool.mainRefSize() >= 9))`，非主块路径 `it.remove()`）。而 `mainRef` 不在 `!isMain` 的预算里——改动前后都不在。所以分片块的计数一直在**顺带为 link 路径提供可以花在 `mainRef` 上的余量**，那份余量是**被花掉了**，不是被丢弃。
+>
+> 改用可服务计数之后，这份顺带的抽干消失了。幅度被死死限住：`num` 是 `16 - res` = 12 或 13（`BlockchainImpl:2491`、`:2505`），所以池中非分片孤块 ≥13 时收窄为零，否则每个 link 块最多 13 条。
+>
+> **定性：时机变化，不是泄漏**，因此不在本次修复里改。`mainRef` 有一条一等排空路径——`tryToConnect` 的引用循环（`BlockchainImpl:736`）→ `removeOrphan` → `deleteFromQueue` → `pool.mainRefRemove`——任何引用了停泊条目的块被导入都会把它排掉；`isMain` 预算也仍然整份加上 `mainRefSize()` 且只提供不移除，所以每次主块构建都会把整个积压重新引用一遍。
+>
+> **与 D4 不叠加**：`mainRef` 只由 `isMain` 路径填充（`OrphanBlockStoreImpl:625`），所以**不挖矿的节点 `mainRef` 恒为空**，而那正是 D4「无引用不建块」发力最猛的地方——在那里这处收窄是空操作。
+>
+> 诚实的修法（link 分支也加 `mainRefSize()`）会改变**完全没有分片块的节点**的行为，即所有既有部署，远超 D5 的影响范围，属于 `mainRef` 不对称的归属者（见 `selectBlocks` 自身 javadoc，`OrphanBlockStoreImpl:707`，那里把这个不对称标注为刻意保留）。
+
 **`getOrphanSize()` 的含义必须保持不动**，理由在实施前核实过并且与直觉相反：它在生产代码里**没有其它读者**（`OrphanBlockStore` 接口声明，加上 `getOrphanLocked` 里那两个 `addNum` 调用点，仅此而已），但它是 `BlockchainTest` 中**二十余处断言精确数值**的断言面。所以它不是一个「可以顺手收紧的内部计数」，而是一大批既有测试的观测契约——改它的含义会静默改变那些断言所断言的东西，其中包含更早任务的回归测试。
 
 推论：新的可服务计数作为池上的具名方法提供，由 `getOrphanLocked` 直接使用；`getOrphanSize()` 因此在生产路径上不再有读者，但作为观测接口保留。这一点要在实施时写进它的 javadoc，否则下一个人会把它当成死代码删掉。
