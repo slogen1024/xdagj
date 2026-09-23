@@ -23,10 +23,14 @@
  */
 package io.xdag.chain.orphan;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 
+import io.xdag.config.AbstractConfig;
+import io.xdag.config.Config;
 import io.xdag.core.Block;
+import io.xdag.utils.XdagTime;
 import java.util.List;
 import org.junit.Before;
 import org.junit.Test;
@@ -49,8 +53,51 @@ import org.junit.Test;
  * is a field with no setter and {@link io.xdag.chain.l1.ChainL1TestBase#newConfig()} is answered
  * once per class, so one class cannot show generation enabled to one test and disabled to another.
  * This paragraph is the canonical statement of that; the sibling points here for it.
+ *
+ * <h2>The second thing this class holds: that the restored holding is still bounded</h2>
+ *
+ * <p>Opening the pool to chunks on a node that does not mine is new memory held on a class of node
+ * that held none before, and the design's answer to "is that safe" is that no new mechanism is
+ * needed — the CHUNK tier cap, the per-peer and per-chain chunk budgets and the two-epoch TTL were
+ * built to bound chunk holding and they do not consult the mining gate. That answer is worth no
+ * more than the evidence for it, and the two tests at the bottom of this class are that evidence.
+ * They belong here rather than in a flood class of their own because the shape they have to be
+ * shown in is the non-mining one, and this class is where that shape lives.
+ *
+ * <p>They take one bound of each kind — a budget, which limits how much is held at once, and the
+ * TTL, which limits for how long — because what is in question is whether the bounds apply in this
+ * shape at all, not how each one counts. {@link OrphanQuotaTest} is where the counting lives, per
+ * tier, including the two this class does not drive to their limit (the CHUNK tier cap and the
+ * per-chain budget); none of them so much as reads the mining gate.
  */
 public class ChunkWithoutMiningTest extends ChunkOrphanTestBase {
+
+    /** Small enough that a flood hits it, large enough that one chunk does not. */
+    private static final int BUDGET = 3;
+
+    /** Comfortably past {@link #BUDGET}, so what stops the flood is a budget and not the supply. */
+    private static final int CHUNKS_SENT = 10;
+
+    /** A source of its own, so the flood is charged to a budget no other delivery has spent. */
+    private static final String FLOODER_IP = "198.51.100.42";
+
+    /**
+     * Quotas only. <b>The generation switch is deliberately untouched</b> — devnet leaves
+     * {@code node.generate.block.enable = true} and this class's whole premise is that
+     * {@code getPow() == null} is the only half holding the mining gate shut. An override here that
+     * reached for {@code getEnableGenerateBlock} would close the other half too and quietly turn
+     * every test in this class into a second spelling of {@link ChunkWithGenerationDisabledTest}.
+     *
+     * <p>Shrinking both chunk budgets to {@link #BUDGET} is what lets a flood of ten reach one in a
+     * unit test; the production defaults are in the thousands.
+     */
+    @Override
+    protected Config newConfig() {
+        AbstractConfig cfg = (AbstractConfig) super.newConfig();
+        cfg.setChainOrphanChunkPerPeer(BUDGET);
+        cfg.setChainOrphanChunkPerChain(BUDGET);
+        return cfg;
+    }
 
     /**
      * The base's {@code @Before} minus the one line that installs the PoW mock, which is what makes
@@ -87,5 +134,55 @@ public class ChunkWithoutMiningTest extends ChunkOrphanTestBase {
 
         assertLanded("the block that pays for the chunk must not hang on NO_PARENT",
                 deliver(linkTo(hashLow(chunk), 712)));
+    }
+
+    /**
+     * The holding restored above is bounded by the machinery that already exists for it, and a
+     * per-source budget is the first half of that: a non-mining node is not a node with no limits,
+     * it is the same pool with the same bounds.
+     *
+     * <p>The fixture's non-mining premise is the one pinned in the test above; nothing here
+     * installs a PoW instance either.
+     *
+     * <p><b>Which tier stops this flood.</b> Both budgets are set to {@link #BUDGET}, so the count
+     * alone would not say. {@link #lightChunk} builds a one-chunk chain whose successor is null, so
+     * each delivery groups onto its own chain head and the per-chain tier holds one apiece — which
+     * the bucket count below states outright, making the per-peer tier the only one that can be
+     * refusing. That is the shape the two tiers are split for: per-chain bounds many chunks piling
+     * onto one chain, per-peer bounds one sender however it spreads them out.
+     */
+    @Test
+    public void aNonMiningNodeStillChargesAFloodToItsSenderBudget() {
+        for (int i = 0; i < CHUNKS_SENT; i++) {
+            deliver(lightChunk(720 + i), FLOODER_IP);
+        }
+        assertEquals("the per-peer budget binds whether or not this node mines",
+                BUDGET, pool().size(OrphanCategory.CHUNK));
+        assertEquals("one chain head apiece, so the per-chain tier was never the one refusing",
+                BUDGET, pool().chainBucketCount());
+    }
+
+    /**
+     * The other half: what is kept is kept for two epochs and not for ever. Without it, "a
+     * non-mining node's memory is bounded" would rest on the budget alone — and a budget bounds how
+     * much is held at once, never for how long, so a node fed one chunk per epoch for a week stays
+     * inside every budget it has.
+     */
+    @Test
+    public void aNonMiningNodeStillAgesChunksOut() {
+        Block chunk = lightChunk(740);
+        assertImported(deliver(chunk));
+        assertNotNull("the chunk is held before its TTL runs out",
+                blockchain.getOrphanBlockStore().getChunkBody(hashLow(chunk)));
+
+        // evictExpired(nowMillis, currentEpoch) -- the memory half of the cleaner tick, driven the
+        // way ChunkFloodAdversarialTest drives it. Two epochs past the chunk's own header is what
+        // the age rule makes the cut-off.
+        long epoch = XdagTime.getEpoch(chunk.getTimestamp());
+        assertEquals("the TTL must actually fire, or this is not the state the test says it is",
+                1, pool().evictExpired(0L, epoch + 2).size());
+
+        assertNull("the two-epoch TTL is what bounds a non-mining node's holding over time",
+                blockchain.getOrphanBlockStore().getChunkBody(hashLow(chunk)));
     }
 }
