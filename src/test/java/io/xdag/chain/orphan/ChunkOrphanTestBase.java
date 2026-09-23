@@ -68,6 +68,27 @@ import org.mockito.Mockito;
  * reorgs. Redrawing until the block is lighter than {@link #MAX_DELIVERED_DIFFICULTY} — the floor
  * of the window {@code mineMain} searches in — keeps the chain top where the test put it, at a cost
  * of a handful of extra draws in thousands.
+ *
+ * <h2>What is deliberately not on this base</h2>
+ *
+ * <p>Four classes that look like they belong here do not, and the reasons differ enough that a
+ * reader cannot otherwise tell deliberate from stale:
+ *
+ * <ul>
+ *   <li>{@code OrphanFloodTest} — its own {@code armTheOrphanPool} does not mine a main block, and
+ *       it delivers through the bare {@code tryToConnect}; both halves of this base's scaffolding
+ *       would change what it measures.</li>
+ *   <li>{@code OrphanPeerAttributionTest} — delivers through a real
+ *       {@link io.xdag.chain.ingest.IngestPipeline}{@code .submit}, collecting the committer's
+ *       verdicts, which is the path its subject (per-source attribution across pre-validation)
+ *       actually lives on.</li>
+ *   <li>{@code BlockLookupEquivalenceTest} — a different package, {@code io.xdag.core}: it is about
+ *       {@code BlockchainImpl}'s merged lookup rather than about the pool.</li>
+ *   <li>{@code ChunkDeferredPersistTest} — an earlier task's regression test, left on its own
+ *       fixture so that a change to this base cannot quietly change what it pins. Its {@code
+ *       deliver} body is byte for byte this one's, so "it delivers by a different mechanism" is
+ *       untrue of it; being a regression test is the whole of the reason.</li>
+ * </ul>
  */
 public abstract class ChunkOrphanTestBase extends ChainL1TestBase {
 

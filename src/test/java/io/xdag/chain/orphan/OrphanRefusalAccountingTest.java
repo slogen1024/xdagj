@@ -60,9 +60,12 @@ public class OrphanRefusalAccountingTest extends ChunkOrphanTestBase {
      */
     @Override
     protected Config newConfig() {
-        AbstractConfig config = (AbstractConfig) super.newConfig();
-        config.setChainOrphanChunkPerPeer(1);
-        return config;
+        // Named cfg, not config: this method's whole contract is "override this rather than
+        // assigning the inherited config field", and a local that shadows that field inside it
+        // reads like the thing the contract forbids.
+        AbstractConfig cfg = (AbstractConfig) super.newConfig();
+        cfg.setChainOrphanChunkPerPeer(1);
+        return cfg;
     }
 
     /**
