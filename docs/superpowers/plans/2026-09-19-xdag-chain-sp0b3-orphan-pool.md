@@ -986,7 +986,13 @@ public void removalCostDoesNotGrowLinearlyWithPoolSize() {
 >    长度由出块节奏决定而不是由洪泛决定；让它跟着池一起变深是在量生产造不出来的形状。
 >    这一条另写了一个测试，把「移除代价里仍然与 `mainRef` 长度成正比的那一段」显式钉住。
 
-**`comparisonsForOneRemoval` 必须造最坏情况，不是最好情况。** Task 1 发现按 nonce 升序移除会每次命中堆顶，走 O(log n)，那样即使不改任何代码这个测试也会通过。要少量发送方、深队列、与比较器不相关的移除顺序（固定种子打乱），并且要覆盖 `mainRef`——它是 `ConcurrentLinkedDeque`，`remove(Object)` 是纯线性走查，没有堆结构可借力，而 `deleteFromQueue` 每次移除都会碰它，不分类别。
+**`comparisonsForOneRemoval` 必须造最坏情况，不是最好情况。** Task 1 发现按 nonce 升序移除会每次命中堆顶，走 O(log n)，那样即使不改任何代码这个测试也会通过。要少量发送方、深队列、与比较器不相关的移除顺序（固定种子打乱），并且要覆盖 `mainRef`——`remove(Object)` 是纯线性走查，没有堆结构可借力，而 `deleteFromQueue` 每次移除都会碰它，不分类别。
+
+> **原文这里写的是「它是 `ConcurrentLinkedDeque`」，已过时。** Task 3 把它换成了
+> `LinkedList`（`ChainOrphanPool.mainRef`，该字段的文档写明「A `LinkedList` and not the old
+> `ConcurrentLinkedDeque`」：监视器下不需要并发集合，而 `ArrayDeque` 的内部移除会在环两端之间
+> 搬元素，打包遍历对顺序敏感）。**结论不变**——两者的 `remove(Object)` 都是线性走查，
+> 这一步要覆盖它的理由一个字都不用改，只是类型名错了。
 
 - [ ] **Step 3: 锁序未被破坏**
 
@@ -1014,6 +1020,15 @@ Task 10 指出：分片块归入 CHUNK 类之后就不再进 link 队列，所�
 >   8 个块建好、签好名，一个都没进去。
 > - 并且不会自己停：`nnoref` 不动 ⇒ `nblk` 每个 tick 都还是 61 ⇒ 一直挖到两个纪元后
 >   清理线程把计数还回来为止。**浪费的上界是 TTL，不是挖矿本身。**
+>
+> **缺陷真正的位置（Task 16 直接引这一段，或引测试里同名的一节）：** 驱动挖矿的是
+> `nnoref / 11`，但那不是唯一、也不是最窄的一处「计数含分片块、而选择给不出分片块」。
+> link 块的预算来自 `OrphanBlockStoreImpl.getOrphanLocked`，非主块分支取
+> `Math.min(getOrphanSize(), num)`；`getOrphanSize()` 就是 `ChainOrphanPool.totalSize()`，
+> **四个类别全算，分片块在内**（该方法自己的文档写明了）；而 `selectBlocks` 从不交出
+> CHUNK 条目。于是预算按一个「包含选择不肯交付的块」的总数算出来，两者之差正好是池内分片块数。
+> 修的时候要么让预算别数选择不会服务的东西，要么让驱动挖矿的计数别数——
+> 二选一，都不在本子项目范围内。（此处只写符号名不写行号：行号会漂，符号不会。）
 
 - [ ] **Step 4: 单 peer 与单链洪泛的端到端**
 
@@ -1057,6 +1072,32 @@ mvn -o -q license:check
 ```
 
 - [ ] **Step 2: 重跑基准，把 AFTER 表写进同一份文档**，与 Task 1 的 BEFORE 并列。
+
+> **先读这一条：基准现在跑不起来，而且原因不在基准里。** Task 15 收尾时验证 `freshFixture`
+> 上提没有影响基准，顺手跑了一次，发现 `ChainL1ImportBenchmarkTest` 在
+> `syncPath` 那一条腿上以 `NO_PARENT` 失败（`blocks=400` 与 `blocks=2000` 都失败，
+> 7 秒内就挂）。**这不是 Task 15 造成的**：把 Task 15 的全部改动 stash 掉，同一条命令在
+> 未改动的树上以同样的断言、同样的位置失败。基准平时被 `@BeforeClass` 的 `assumeTrue`
+> 跳过，所以 Task 8–14 之间没有人碰到它。
+>
+> **原因（已用实验判定，不是推断）：** 在 `prepareChain()` 里临时
+> `kernel.setPow(mock(XdagPow.class))` 之后，同一条命令整跑通过（138.8 s，
+> pipeline 中位 4821 blocks/s）。去掉又失败。三处凑成一条链：
+>
+> 1. `BlockchainImpl.tryToConnect` 在类别为 CHUNK 时**跳过 `saveBlock`**（Task 11）；
+> 2. `dealOrphan` 在 `getEnableGenerateBlock() && getPow() != null` 不成立时**直接返回 false**，
+>    根本不调用 `addOrphan`；
+> 3. 分片块的块体只能经 `addOrphan` 进入 `ChainOrphanPool.chunkBodies`。
+>
+> 于是**一个不挖矿的节点收到分类过的分片块之后，哪儿都没存**——不在块库、不在池里——
+> 随后引用它的付费块永远 `NO_PARENT`。Task 11 之前分片块无论池收不收都会落盘，所以
+> 不挖矿的节点留得住它。
+>
+> **这不是夹具的毛病，是生产形态。** 浏览器节点、纯 RPC 节点、以及任何节点在 PoW 实例
+> 建好之前的那一段，都是这个形态。**既不属于 Task 16，也不该在 Task 16 里顺手修**——
+> 它要决定的是「不挖矿的节点该把分片块放在哪里」，那是一次独立的设计变更。
+> Task 16 要做的是：先决定这件事怎么处理，再谈 AFTER 表；
+> **不要**为了让基准跑起来而给夹具加 pow（Task 1 的文档已经论证过那会让全部历史基线失去可比性）。
 
 三行各有各的用途，报告时必须分开讲，**不要把它们混成一个「孤块池变快了」的结论**：
 
