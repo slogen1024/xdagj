@@ -801,6 +801,19 @@ public final class ChainOrphanPool {
      * for this node to reference. A budget taken from the total therefore describes work the
      * selection cannot do — which is how a node holding nothing but chunks came to build link
      * blocks with no references in them.
+     *
+     * <p><b>{@code mainRef} is deliberately not counted here</b>, and the omission is not an
+     * oversight to tidy up. Parked entries are not pooled, so they are outside this count by
+     * construction — but {@code selectBlocks} does hand them out, consuming them on the link path.
+     * The main-block budget adds {@code mainRefSize()} to this explicitly; the link-block budget
+     * does not. That asymmetry predates this method, and making the two branches symmetric would
+     * change behaviour on every node holding no chunks at all — which is every existing
+     * deployment. It belongs to whoever owns the asymmetry {@code selectBlocks}' own javadoc marks
+     * as deliberately preserved; see also D5 of
+     * {@code docs/superpowers/specs/2026-09-23-sp0b3-chunk-pooling-without-mining-design.md}.
+     *
+     * <p>Stated as a subtraction because {@link OrphanCategory#CHUNK} is the only category
+     * {@code selectBlocks} will not serve. A second such category has to be subtracted here too.
      */
     public int selectableSize() {
         return total - counts[OrphanCategory.CHUNK.ordinal()];

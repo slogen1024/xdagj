@@ -526,6 +526,8 @@ mvn -o test
 
 同时把类 javadoc 和方法 javadoc 里描述「建好签好被自己拒掉」的段落改写为现在的事实，并指向本次的设计文档。
 
+**另有一段不在上述措辞之列，容易漏掉，必须一并改**：`ChunkFloodAdversarialTest` 里标题为「Where the mismatch actually lives」的那一段，引用了 `Math.min(getOrphanSize(), num)` 并说「`getOrphanSize()` 是 `ChainOrphanPool.totalSize()`，四类全算」。**追加 Task 3 之后这个表达式已经不存在**（预算现在是 `Math.min(pool.selectableSize(), num)`），而该段结尾的「That is the defect's address, and it is where a fix would go」现在读起来像一个尚未关闭的待办，实际上它已经被关闭了。改写为过去式并指向 `ChainOrphanPool#selectableSize`。
+
 - [ ] **Step 2: 跑这个类确认通过**
 
 ```bash

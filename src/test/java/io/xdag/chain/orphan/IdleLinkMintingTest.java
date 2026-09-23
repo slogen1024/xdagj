@@ -28,9 +28,10 @@ import static org.junit.Assert.assertEquals;
 import org.junit.Test;
 
 /**
- * A node holding nothing but chunk blocks used to build link blocks with no references in them:
- * eight built and signed per flood in the Task 15 measurement, none of them imported, each refused
- * by this node's own import as {@code Block's time is illegal}.
+ * A node holding nothing but chunk blocks builds link blocks with no references in them: eight
+ * built and signed per flood in {@code ChunkFloodAdversarialTest
+ * #aChunkFloodMintsLinkBlocksThatCanReferenceNothing}, none of them imported, each refused by this
+ * node's own import as {@code Block's time is illegal}. This class is where that is taken apart.
  *
  * <h2>The two halves of that, and which one this class opens with</h2>
  *
@@ -41,9 +42,9 @@ import org.junit.Test;
  * described work the selection could not do.
  *
  * <p>Correcting the budget does not on its own stop the empty block being built: {@code
- * checkOrphan} still decides to mine from {@code nnoref}, and an empty selection still fabricated
- * the timestamp that got the block refused. Those are the second half and they are held elsewhere
- * in this class.
+ * checkOrphan} still decides to mine from {@code nnoref}, and an empty selection still fabricates
+ * the timestamp that gets the block refused. Those are the second half; the task after this one
+ * adds them to this class.
  */
 public class IdleLinkMintingTest extends ChunkOrphanTestBase {
 
