@@ -81,7 +81,10 @@ import org.mockito.Mockito;
  *   <li>{@code OrphanPeerAttributionTest} — delivers through a real
  *       {@link io.xdag.chain.ingest.IngestPipeline}{@code .submit}, collecting the committer's
  *       verdicts, which is the path its subject (per-source attribution across pre-validation)
- *       actually lives on.</li>
+ *       actually lives on. Delivering that way is not on its own a reason to stay off this base —
+ *       {@code ChunkFloodQuotaPipelineTest} does the same and sits on it, for the builders and the
+ *       armed pool — but this class predates the base and is Task 10's regression surface, so it
+ *       keeps its own fixture.</li>
  *   <li>{@code BlockLookupEquivalenceTest} — it is about {@code BlockchainImpl}'s merged lookup
  *       rather than about the pool, so none of this scaffolding is what it needs. (Not because it
  *       lives in another package: this base is public and its members protected, and
@@ -184,8 +187,19 @@ public abstract class ChunkOrphanTestBase extends ChainL1TestBase {
      * chain is what pays for one.
      */
     protected Block linkTo(Bytes32 target, int seed) {
+        return linkTo(target, seed, txTime() + 1);
+    }
+
+    /**
+     * As {@link #linkTo(Bytes32, int)}, with the timestamp given rather than derived.
+     *
+     * <p>For a test about queue order: link entries are packed oldest-first on the block's own
+     * timestamp, so pinning that order needs blocks whose timestamps differ — and the seed only
+     * changes the remark the redraw searches on, never the time.
+     */
+    protected Block linkTo(Bytes32 target, int seed, long time) {
         for (long s = (long) seed * SEEDS_PER_BLOCK; ; s++) {
-            Block raw = new Block(config, txTime() + 1, null,
+            Block raw = new Block(config, time, null,
                     List.of(new Address(target, XDAG_FIELD_OUT, false)), false, null, "s" + s, -1,
                     XAmount.ZERO, null);
             Block parsed = new Block(new XdagBlock(raw.toBytes()));
