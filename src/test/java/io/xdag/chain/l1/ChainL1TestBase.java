@@ -213,7 +213,7 @@ public abstract class ChainL1TestBase {
         // ChainL1Processor from kernel.getChainL1Store() itself and drains kernel.getChainKindHandlers()
         // into it, and neither is consulted again afterwards.
         beforeBlockchain(kernel);
-        blockchain = new MockBlockchain(kernel);
+        blockchain = newBlockchain(kernel);
 
         Block addressBlock = BlockBuilder.generateAddressBlock(config, poolKey, generateTime);
         addressStore.updateBalance(poolKey.toAddress().toArray(), XAmount.of(1000, XUnit.XDAG));
@@ -310,12 +310,30 @@ public abstract class ChainL1TestBase {
     }
 
     /**
-     * Last chance to touch the kernel before {@code new MockBlockchain(kernel)}. Overridden by a
+     * Last chance to touch the kernel before {@link #newBlockchain(Kernel)} builds on it. Overridden by a
      * subclass that needs a {@link ChainKindHandler} in {@code kernel.getChainKindHandlers()}: that
      * map is read once, by the constructor, and a handler put there later never reaches the
      * processor at all.
      */
     protected void beforeBlockchain(Kernel kernel) {
+    }
+
+    /**
+     * The blockchain this fixture runs on, built once {@link #beforeBlockchain} has had the kernel.
+     *
+     * <p>A seam for the same reason {@link #newConfig()} is one, and it exists for the same kind of
+     * subclass: one that has to observe a decision the production code makes and neither a store nor
+     * a listener exposes — {@code createLinkBlock} declining to build, say, which leaves no trace
+     * anywhere because the block is never constructed. Overriding a method on the instance is the
+     * only place such a thing can be seen, and the instance is created here.
+     *
+     * <p>Override this rather than replacing {@link #blockchain} afterwards: {@link #setUpChain()}
+     * imports the address block into whatever it built, and {@link #freshFixture(long)} goes back
+     * through {@code setUpChain}, so an override is also what keeps the second fixture the same
+     * shape as the first without the caller reinstalling anything.
+     */
+    protected MockBlockchain newBlockchain(Kernel kernel) {
+        return new MockBlockchain(kernel);
     }
 
     protected UInt64 nextNonce() {

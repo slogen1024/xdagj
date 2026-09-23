@@ -1006,7 +1006,10 @@ Task 10 指出：分片块归入 CHUNK 类之后就不再进 link 队列，所�
 
 测：在分片洪泛下记录 `checkOrphan` 触发的 link 块数量，与同等规模的非分片洪泛对比。如果空转显著，把数字写进 Task 16 的文档并作为待办列出——**不要在本子项目里顺手改 `checkOrphan` 的计数口径**，那会动到出块节奏，属于另一个变更的范围。若不显著，同样据实记录，这个疑虑就此关闭。
 
-> **结论：显著，作为待办交给 Task 16。** 测法与数字（`ChunkFloodAdversarialTest`）：
+> **结论：显著。已由 2026-09-23 的追加修复解决**——设计见
+> `docs/superpowers/specs/2026-09-23-sp0b3-chunk-pooling-without-mining-design.md`，本条即其中的缺陷二（P2）。
+> **下面的测法与数字一律是修复前的事实，原样保留**：它们是 Task 16 的 AFTER 表要对照的 BEFORE。
+> 测法与数字（`ChunkFloodAdversarialTest`）：
 > `nnoref` 打到 **671**，`nblk = 671/11 = 61`，`61 % 61 == 0` ⇒ `0 > nextLong(0,61)` 恒假，
 > 抽样这一步被**解除**而不是被平均掉——每个 tick 恰好一个 link 块，没有随机性。
 > 670 个洪泛块，各 8 个 tick：
@@ -1021,14 +1024,31 @@ Task 10 指出：分片块归入 CHUNK 类之后就不再进 link 队列，所�
 > - 并且不会自己停：`nnoref` 不动 ⇒ `nblk` 每个 tick 都还是 61 ⇒ 一直挖到两个纪元后
 >   清理线程把计数还回来为止。**浪费的上界是 TTL，不是挖矿本身。**
 >
-> **缺陷真正的位置（Task 16 直接引这一段，或引测试里同名的一节）：** 驱动挖矿的是
+> **修复后的同一个测量（同一个测试、同一套夹具）：** 分片臂每个 tick 仍然进入挖矿回合
+> ——`nnoref` 的口径没有被重新定义，所以 `nblk` 还是 1——但一个块也没有建出来：
+> **进入 8 次，建成 0 个，导入 0 个**。非分片对照臂一字未动：进入 8 次、建成 8 个、
+> 导入 8 个，`nnoref` 671 → 583，退掉 96 个孤块（每块 12 个引用）。
+> 断言同时读「进入 / 建成 / 导入」三个数，是因为**原来只读了最后一个**：
+> `minted` 由 `onNewBlock` 监听器统计，而 `onNewBlock` 只在 `IMPORTED_*` 时被调用，
+> 于是「建好了但被自己拒掉」与「根本没建」满足同一个 `minted == 0`，
+> 这个测试因此在行为被改掉之后依然是绿的。
+>
+> **缺陷真正的位置（当时的诊断，现已修复）：** 驱动挖矿的是
 > `nnoref / 11`，但那不是唯一、也不是最窄的一处「计数含分片块、而选择给不出分片块」。
-> link 块的预算来自 `OrphanBlockStoreImpl.getOrphanLocked`，非主块分支取
-> `Math.min(getOrphanSize(), num)`；`getOrphanSize()` 就是 `ChainOrphanPool.totalSize()`，
+> link 块的预算来自 `OrphanBlockStoreImpl.getOrphanLocked`，非主块分支当时按
+> `getOrphanSize()` 取；`getOrphanSize()` 就是 `ChainOrphanPool.totalSize()`，
 > **四个类别全算，分片块在内**（该方法自己的文档写明了）；而 `selectBlocks` 从不交出
 > CHUNK 条目。于是预算按一个「包含选择不肯交付的块」的总数算出来，两者之差正好是池内分片块数。
-> 修的时候要么让预算别数选择不会服务的东西，要么让驱动挖矿的计数别数——
-> 二选一，都不在本子项目范围内。（此处只写符号名不写行号：行号会漂，符号不会。）
+>
+> **「二选一」选了前者：让预算别数选择不会服务的东西。** 预算现在取
+> `ChainOrphanPool.selectableSize()`（总数减去 CHUNK 类），即描述打包遍历真正交得出来的东西。
+> 没有选后者（改驱动挖矿的计数）是刻意的，理由记在追加设计文档的 D3：`nnoref` 会落盘、
+> 被多处读取，Task 13 刚刚把它的含义**特意**定成「本节点是否在某处持有它」；让一个挖矿决策
+> 去重新定义它，或者把一个持久计数器与一个活内存计数混进同一个表达式，都比问题本身更脏。
+> 收口因此放到了它的下游：节点仍然每个 tick 决定「该挖了」，然后 `BlockchainImpl.createLinkBlock`
+> 发现无可引用而返回 null（不建块），`checkOrphan` 收到 null 即结束本轮，
+> 而 `OrphanBlockStoreImpl.getOrphanLocked` 在选择为空时不再伪造那个时间戳。
+> （此处只写符号名不写行号：行号会漂，符号不会。）
 
 - [ ] **Step 4: 单 peer 与单链洪泛的端到端**
 
