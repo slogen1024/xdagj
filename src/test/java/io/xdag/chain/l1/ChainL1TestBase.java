@@ -344,7 +344,7 @@ public abstract class ChainL1TestBase {
                 if (expectBest) {
                     assertSame("main block must extend the best chain: " + r.getErrorInfo(), ImportResult.IMPORTED_BEST, r);
                 } else {
-                    assertTrue("fork block rejected: " + r.getErrorInfo(),
+                    assertTrue("fork block rejected: " + r + " " + r.getErrorInfo(),
                             r == ImportResult.IMPORTED_BEST || r == ImportResult.IMPORTED_NOT_BEST);
                 }
                 topRef = hashLow(candidate);

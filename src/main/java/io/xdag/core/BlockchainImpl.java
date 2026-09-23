@@ -1203,6 +1203,12 @@ public class BlockchainImpl implements Blockchain {
      * @return Number of transactions executed
      */
     public int txNumber(Bytes32 refHashLow, Bytes32 mHashLow) {
+        // Recorded, deliberately not guarded: the recursive call below passes a link of a block
+        // this walk has already loaded, and it is guarded by the very lookup above it. Reaching it
+        // at all takes an applied block, whose own links were on disk when it was applied -- so
+        // unlike applyBlock's and unApplyBlock's walks, the memory-only chunk blocks this
+        // subproject introduced do not widen this one. It has the same shape as the two sites that
+        // WERE widened and is left alone on purpose, not by oversight.
         int sum = 0;
         if (getBlockByHash(refHashLow, true) != null) {
             Block block = getBlockByHash(refHashLow, true);
@@ -1424,6 +1430,19 @@ public class BlockchainImpl implements Blockchain {
                     for(Address link : b.getLinks()){
                         if (link.isAddress) continue;
                         Block tx = getBlockByHash(link.getAddress(), false);
+                        // Same null as applyBlock's, from the same cause: a chunk block the
+                        // persist budget left in memory has no BlockInfo to read BI_REF out of.
+                        // One budget covers a whole importing block however many chains it names,
+                        // so a main block that names two of them gets the first head written and
+                        // leaves the second where it was -- and this loop walks a main block's
+                        // links.
+                        //
+                        // Skipping is not a choice about semantics here, it is what the call this
+                        // branch guards would itself do: removeOrphan opens with the very same
+                        // getBlockByHash(hashlow, false) and returns without touching anything when
+                        // it comes back null. The check only moves that no-op one line earlier,
+                        // instead of crashing on the way to it.
+                        if (tx == null) continue;
                         if((tx.getInfo().flags & BI_REF) == 0){
                             removeOrphan(link.getAddress(), OrphanRemoveActions.ORPHAN_REMOVE_NORMAL);
                         }
@@ -1826,6 +1845,39 @@ public class BlockchainImpl implements Blockchain {
         for (Address link : links) {
             if (!link.isAddress) {
                 Block ref = getBlockByHash(link.getAddress(), false);
+                if (ref == null) {
+                    // A reference this node has no chain metadata for. Unreachable until chunk
+                    // blocks became memory-only: every block the import accepted used to be on
+                    // disk, because the import itself refuses a block whose references it cannot
+                    // resolve. Now a reference can also be resolved out of the orphan pool's body
+                    // store, and persistReferencedChunkChains writes at most
+                    // chain.chunk.maxPerChain of them per importing block -- so the tail of a
+                    // longer chain, and every chain a block names after the budget has run out,
+                    // stays in memory. getBlockByHash(.., false) answers null for exactly those:
+                    // the merged lookup serves a memory-only chunk in its RAW form only, because a
+                    // BlockInfo parsed fresh out of 512 bytes is not "unknown", it is a set of
+                    // specific wrong claims about flags, difficulty and ref.
+                    //
+                    // Null here therefore means "a chunk this node never wrote", which is either
+                    // "not persisted yet" or "aged out and gone". The two ARE distinguishable --
+                    // the body store still answers for the first -- and the distinction changes
+                    // nothing, which is why this branch does not make it. All an apply does with a
+                    // reference is stamp BI_MAIN_REF and a ref into its BlockInfo and fold in its
+                    // gas, and a block that is not in the block store can hold neither:
+                    // updateBlockFlag and updateBlockRef persist only when block.isSaved, so a
+                    // block parsed from the pool's bytes would take the flags and lose them on the
+                    // next read. Persisting it here instead is worse -- it would hand back, at
+                    // setMain time and unbounded, exactly the disk write the deferred persist
+                    // exists to withhold from a chain nobody has paid for.
+                    //
+                    // So the link is skipped, and skipping costs nothing that was there to lose: a
+                    // chunk carries no value (a non-zero-amount XDAG_FIELD_OUT reference is refused
+                    // at import), so the subtree's gas contribution is zero whether it is walked or
+                    // not, and everything reachable through an unwritten chunk is unwritten too.
+                    // unApplyBlock skips the same link for the same reason, which is what keeps the
+                    // two halves the mirror image they are documented to be.
+                    continue;
+                }
                 if ((ref.getInfo().flags & BI_MAIN_REF) != 0) continue;
                 ref = getBlockByHash(link.getAddress(), true);
                 ref.getInfo().setFee(XAmount.ZERO);
@@ -2071,6 +2123,13 @@ public class BlockchainImpl implements Blockchain {
         for (Address link : links) {
             if (!link.isAddress) {
                 Block ref = getBlockByHash(link.getAddress(), false);
+                // The mirror of applyBlock's skip, and it has to be here as well as there: this
+                // loop dereferences the reference BEFORE it asks whether this main block ever
+                // applied it, so a link the apply walk stepped over would be a crash on the way
+                // back out. A memory-only chunk was never applied -- it holds no BI_MAIN_REF and
+                // no ref, because neither could have been persisted into a block that is not in
+                // the block store -- so there is nothing here to reverse.
+                if (ref == null) continue;
                 XAmount fee;
                 // Even if mainBlock duplicate links the TX_block which other mainBlock handled, we can check if this TX ref is this mainBlock
                 if (ref.getInfo().getRef() != null
