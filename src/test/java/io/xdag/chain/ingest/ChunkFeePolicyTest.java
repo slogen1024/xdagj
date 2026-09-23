@@ -61,13 +61,11 @@ import io.xdag.net.PeerClient;
 import io.xdag.net.XdagP2pHandler;
 import io.xdag.net.node.Node;
 import io.xdag.utils.BytesUtils;
-import java.io.File;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.TreeMap;
-import org.apache.commons.io.FileUtils;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 import org.apache.tuweni.bytes.MutableBytes32;
@@ -439,15 +437,13 @@ public class ChunkFeePolicyTest extends ChunkOrphanTestBase {
     // ---- fixture -------------------------------------------------------------------------
 
     /**
-     * A second fixture on the same mining timeline, so the two halves of the comparison build
-     * byte-identical blocks. {@code setUpChain} calls {@code root.newFolder("node")}, which throws
-     * if the directory is still there.
+     * The base's fresh fixture plus everything this class's {@code @Before} did, which JUnit will
+     * not run again: the pool has to be armed, and the request recorder and the channel have to be
+     * rebuilt around the new blockchain instance.
      */
-    private void freshFixture() throws Exception {
-        tearDownChain();
-        FileUtils.deleteDirectory(new File(root.getRoot(), "node"));
-        generateTime = FIXTURE_START;
-        setUpChain();
+    @Override
+    protected void freshFixture(long fixtureStart) throws Exception {
+        super.freshFixture(fixtureStart);
         armTheOrphanPool();
         requested.clear();
         channelsUp = true;

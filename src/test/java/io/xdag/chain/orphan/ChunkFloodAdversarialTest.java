@@ -34,10 +34,8 @@ import io.xdag.core.XdagBlock;
 import io.xdag.db.rocksdb.OrphanBlockStoreImpl;
 import io.xdag.listener.BlockMessage;
 import io.xdag.utils.XdagTime;
-import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
-import org.apache.commons.io.FileUtils;
 import org.apache.tuweni.bytes.Bytes32;
 import org.junit.Test;
 
@@ -412,15 +410,13 @@ public class ChunkFloodAdversarialTest extends ChunkOrphanTestBase {
     }
 
     /**
-     * A second node on the same mining timeline, so both halves of a comparison build byte-identical
-     * blocks. {@code setUpChain} calls {@code root.newFolder("node")}, which throws if the directory
-     * is still there.
+     * The base's fresh fixture plus the one thing this class's {@code @Before} did that JUnit will
+     * not run again: arming the pool, which is also what mines the main block every delivered block
+     * is kept lighter than.
      */
-    private void freshFixture() throws Exception {
-        tearDownChain();
-        FileUtils.deleteDirectory(new File(root.getRoot(), "node"));
-        generateTime = FIXTURE_START;
-        setUpChain();
+    @Override
+    protected void freshFixture(long fixtureStart) throws Exception {
+        super.freshFixture(fixtureStart);
         armTheOrphanPool();
     }
 }

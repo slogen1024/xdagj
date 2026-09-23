@@ -51,14 +51,12 @@ import io.xdag.db.rocksdb.WriteBehindQueue;
 import io.xdag.net.ChannelManager;
 import io.xdag.net.PeerClient;
 import io.xdag.net.node.Node;
-import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.apache.commons.io.FileUtils;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 import org.apache.tuweni.units.bigints.UInt64;
@@ -245,15 +243,6 @@ public class IngestEquivalenceTest extends ChainL1TestBase {
         return new Outcome(List.copyOf(results), dump(DatabaseName.INDEX), dump(DatabaseName.TIME),
                 dump(DatabaseName.BLOCK), dump(DatabaseName.ORPHANIND), blockchain.getXdagStats().nblocks,
                 Bytes.wrap(blockchain.getXdagTopStatus().getTop()));
-    }
-
-    /** A second fixture on the same mining timeline, so both runs build byte-identical blocks. */
-    private void freshFixture() throws Exception {
-        tearDownChain();
-        // setUpChain() calls root.newFolder("node"), which throws if the folder still exists.
-        FileUtils.deleteDirectory(new File(root.getRoot(), "node"));
-        generateTime = FIXTURE_START;
-        setUpChain();
     }
 
     @Test

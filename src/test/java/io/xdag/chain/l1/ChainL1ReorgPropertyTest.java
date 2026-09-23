@@ -49,7 +49,6 @@ import io.xdag.crypto.hash.HashUtils;
 import io.xdag.crypto.keys.ECKeyPair;
 import io.xdag.crypto.keys.PrivateKey;
 import io.xdag.utils.BytesUtils;
-import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -58,7 +57,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import org.apache.commons.io.FileUtils;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 import org.apache.tuweni.units.bigints.UInt64;
@@ -156,6 +154,9 @@ public class ChainL1ReorgPropertyTest extends ChainL1TestBase {
 
             // ---- run A: apply above a fork point
             if (!firstRun) {
+                // The base's fork salt survives this, so the main blocks differ from run to run;
+                // the paying blocks do not, and they are what the state hash and the balances
+                // depend on.
                 freshFixture(fixtureStart);
             }
             firstRun = false;
@@ -364,21 +365,6 @@ public class ChainL1ReorgPropertyTest extends ChainL1TestBase {
                 scalar = HashUtils.sha256(scalar);
             }
         }
-    }
-
-    /**
-     * Tears the fixture down and builds a fresh one on the same mining timeline, so a run reproduces
-     * another run's paying blocks byte for byte (RFC 6979 signatures, same keys, nonces, timestamps).
-     * The base fixture's fork salt deliberately survives, so the main blocks differ across runs;
-     * only the paying blocks, which are what the state hash and the balances depend on, are
-     * reproduced byte for byte.
-     */
-    private void freshFixture(long fixtureStart) throws Exception {
-        tearDownChain();
-        // setUpChain() calls root.newFolder("node"), which throws if the folder still exists.
-        FileUtils.deleteDirectory(new File(root.getRoot(), "node"));
-        generateTime = fixtureStart;
-        setUpChain();
     }
 
     /** Balances and executed nonces of the senders, plus the balances of every vault the scenario paid into. */

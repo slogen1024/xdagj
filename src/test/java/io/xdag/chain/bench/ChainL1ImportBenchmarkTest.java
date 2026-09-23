@@ -67,7 +67,6 @@ import io.xdag.net.ChannelManager;
 import io.xdag.net.PeerClient;
 import io.xdag.net.node.Node;
 import io.xdag.utils.BytesUtils;
-import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -84,7 +83,6 @@ import java.util.Locale;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
-import org.apache.commons.io.FileUtils;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 import org.apache.tuweni.units.bigints.UInt64;
@@ -229,18 +227,6 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
     /** The fixture's persistence control: the live write-behind queue, or a no-op when it is off. */
     private PersistControl persist() {
         return dbFactory instanceof WriteBehindFactory wb ? wb.queue() : PersistControl.NONE;
-    }
-
-    /**
-     * Tears the fixture down and builds a fresh one on the same mining timeline, so every round sees
-     * byte-identical blocks (the workload's senders are seed-derived as well).
-     */
-    private void freshFixture() throws Exception {
-        tearDownChain();
-        // setUpChain() calls root.newFolder("node"), which throws if the folder still exists.
-        FileUtils.deleteDirectory(new File(root.getRoot(), "node"));
-        generateTime = fixtureStart;
-        setUpChain();
     }
 
     /**
@@ -525,7 +511,7 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
             order[round] = directFirst ? "direct>syncPath" : "syncPath>direct";
             for (int leg = 0; leg < 2; leg++) {
                 if (round > 0 || leg > 0) {
-                    freshFixture();
+                    freshFixture(fixtureStart);
                 }
                 prepareChain();
                 BenchWorkload w = workload();
@@ -549,7 +535,7 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
         // persistence.
         Measure[] pipelineRows = new Measure[ROUNDS];
         for (int round = 0; round < ROUNDS; round++) {
-            freshFixture();
+            freshFixture(fixtureStart);
             prepareChain();
             BenchWorkload w = workload();
             SyncManager sync = syncManager();
@@ -596,7 +582,7 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
         }
         int mainsPerRound = 0;
         for (int round = 0; round < ROUNDS; round++) {
-            freshFixture();
+            freshFixture(fixtureStart);
             prepareChain();
             BenchWorkload w = workload();
             List<BenchWorkload.Item> items = w.items();
@@ -633,7 +619,7 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
             results.add(measure("confirmed.r" + round, perMain, mains, items.size() + w.chunkCount(), total));
         }
         // phase replay on the last workload's blocks (cost attribution, not a consensus path)
-        freshFixture();
+        freshFixture(fixtureStart);
         prepareChain();
         // Calibration: the fixture's own cost of one EMPTY main block (nonce search + tryToConnect +
         // checkMain with nothing to apply). confirmed.total - mains * this - direct.total ~ setMain/apply.

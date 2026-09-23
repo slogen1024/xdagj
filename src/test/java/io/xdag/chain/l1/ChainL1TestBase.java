@@ -65,12 +65,14 @@ import io.xdag.db.rocksdb.RocksdbFactory;
 import io.xdag.db.rocksdb.WriteBehindFactory;
 import io.xdag.utils.BasicUtils;
 import io.xdag.utils.XdagTime;
+import java.io.File;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.nio.file.NoSuchFileException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import org.apache.commons.io.FileUtils;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 import org.apache.tuweni.units.bigints.UInt64;
@@ -241,6 +243,39 @@ public abstract class ChainL1TestBase {
         if (dbFactory != null) {
             dbFactory.close();
         }
+    }
+
+    /**
+     * Tears this fixture down and builds a fresh one on the <b>same mining timeline</b>, so a
+     * second run reproduces the first run's blocks byte for byte — same keys, same nonces, same
+     * timestamps, and RFC 6979 signatures over all three.
+     *
+     * <p>That is what makes a two-node comparison a comparison: without it the two halves build
+     * different blocks and even a failure message differs for uninteresting reasons.
+     *
+     * <p>Two details a caller would otherwise have to rediscover. The store directory has to be
+     * deleted first, because {@link #setUpChain} calls {@code root.newFolder("node")} and that
+     * throws if the directory is still there. And the fork salt deliberately does <em>not</em>
+     * reset — it is not touched by {@code setUpChain} — so mined main blocks differ across runs
+     * while everything built from the timeline does not; a test that needs its main blocks
+     * reproduced too has to say so itself.
+     *
+     * <p>A subclass whose {@code @Before} does more than {@code setUpChain} — arms the orphan pool,
+     * starts a pipeline — <b>must override this and redo that work</b>, because JUnit's
+     * {@code @Before} methods run once, for the real fixture, and not again for this one.
+     *
+     * @param fixtureStart where to put the mining clock back to, usually {@link #FIXTURE_START}
+     */
+    protected void freshFixture(long fixtureStart) throws Exception {
+        tearDownChain();
+        FileUtils.deleteDirectory(new File(root.getRoot(), "node"));
+        generateTime = fixtureStart;
+        setUpChain();
+    }
+
+    /** {@link #freshFixture(long)} back at {@link #FIXTURE_START}, where {@code setUpChain} starts. */
+    protected void freshFixture() throws Exception {
+        freshFixture(FIXTURE_START);
     }
 
     /**
