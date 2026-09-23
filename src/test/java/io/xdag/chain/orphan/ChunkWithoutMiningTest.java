@@ -24,8 +24,11 @@
 package io.xdag.chain.orphan;
 
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 import io.xdag.core.Block;
+import io.xdag.core.ImportResult;
 import java.util.List;
 import org.junit.Before;
 import org.junit.Test;
@@ -69,11 +72,24 @@ public class ChunkWithoutMiningTest extends ChunkOrphanTestBase {
 
     @Test
     public void aNodeWhosePowDoesNotExistYetStillKeepsAnArrivingChunk() {
-        // Deliberately unarmed above: generation is on in config, and getPow() == null is the only
-        // half holding the gate.
+        // The premise, pinned rather than assumed. This class's half of the gate is an absence
+        // maintained by the override above, and an absence is the fragile kind of premise: let
+        // anything in a base class install a PoW instance by another route and devnet's
+        // node.generate.block.enable = true opens the gate, the chunk is pooled for the ordinary
+        // reason, and everything below stays green while testing nothing. The sibling class needs
+        // no such line -- its half is a hard `return false` no base class can undo.
+        assertNull("this fixture must be unarmed, or the gate is open for the ordinary reason",
+                kernel.getPow());
+
         Block chunk = lightChunk(711);
         assertImported(deliver(chunk));
         assertNotNull("the startup window before the PoW instance exists must not lose chunks",
                 pool().chunkBody(chunk.getHashLow()));
+
+        Block paying = linkTo(hashLow(chunk), 712);
+        ImportResult r = deliver(paying);
+        assertTrue("the block that pays for the chunk must import, not hang on NO_PARENT: "
+                + r + " " + r.getErrorInfo(),
+                r == ImportResult.IMPORTED_BEST || r == ImportResult.IMPORTED_NOT_BEST);
     }
 }
