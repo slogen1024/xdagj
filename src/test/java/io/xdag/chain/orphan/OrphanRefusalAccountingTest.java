@@ -23,30 +23,16 @@
  */
 package io.xdag.chain.orphan;
 
-import static io.xdag.chain.ext.ChunkChainTest.payload;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-import io.xdag.Network;
-import io.xdag.chain.ext.ChunkChainBuilder;
-import io.xdag.chain.ingest.PreValidator;
-import io.xdag.chain.l1.ChainL1TestBase;
 import io.xdag.config.AbstractConfig;
-import io.xdag.consensus.XdagPow;
+import io.xdag.config.Config;
 import io.xdag.core.Block;
-import io.xdag.core.BlockWrapper;
 import io.xdag.core.ImportResult;
-import io.xdag.core.XdagBlock;
-import io.xdag.db.rocksdb.OrphanBlockStoreImpl;
-import io.xdag.net.Peer;
-import java.math.BigInteger;
-import java.util.List;
-import org.apache.tuweni.bytes.Bytes32;
-import org.junit.Before;
 import org.junit.Test;
-import org.mockito.Mockito;
 
 /**
  * {@code nnoref} counts the orphans this node is holding, and every increment has to be one
@@ -62,36 +48,21 @@ import org.mockito.Mockito;
  * sender's chunk still does (so the rule is not "stop counting chunks"), and an ordinary link block
  * counts unconditionally because its disk copy is what gives the count back.
  */
-public class OrphanRefusalAccountingTest extends ChainL1TestBase {
+public class OrphanRefusalAccountingTest extends ChunkOrphanTestBase {
 
-    private static final String PEER_IP = "198.51.100.41";
+    /** A second source, so the per-peer budget can be shown to be per peer. */
     private static final String OTHER_PEER_IP = "203.0.113.17";
 
-    /** Keeps a delivered block from out-weighing the mined chain top. */
-    private static final BigInteger MAX_DELIVERED_DIFFICULTY = BigInteger.ONE.shiftLeft(46);
-
-    /** Seed room per built block, so one block's redraws can never collide with the next one's. */
-    private static final int SEEDS_PER_BLOCK = 64;
-
     /**
-     * One chunk of budget per source peer, in place of the production allowance. Set on the config
-     * before {@code setUpChain} builds the store, which reads the caps once in its constructor; the
-     * superclass's field initialiser assigns {@code config}, this instance initialiser runs next,
-     * and {@code @Before} runs after both.
+     * One chunk of budget per source peer, in place of the production allowance. The store reads the
+     * caps once, in its constructor, so the change has to be on the config before
+     * {@code setUpChain} builds it.
      */
-    {
-        ((AbstractConfig) config).setChainOrphanChunkPerPeer(1);
-    }
-
-    /**
-     * {@code dealOrphan} pools nothing unless the node is configured to generate blocks and a PoW
-     * instance exists. Devnet supplies the first; the mock supplies the second. One real main block
-     * first, so the chain top weighs at least 2^46.
-     */
-    @Before
-    public void armTheOrphanPool() {
-        kernel.setPow(Mockito.mock(XdagPow.class));
-        mineMain(List.of());
+    @Override
+    protected Config newConfig() {
+        AbstractConfig config = (AbstractConfig) super.newConfig();
+        config.setChainOrphanChunkPerPeer(1);
+        return config;
     }
 
     /**
@@ -176,49 +147,5 @@ public class OrphanRefusalAccountingTest extends ChainL1TestBase {
         assertNotNull("and a link block is written on arrival",
                 kernel.getBlockStore().getRawBlockByHash(link.getHashLow()));
         assertEquals(before + 1, blockchain.getXdagStats().nnoref);
-    }
-
-    // ---- helpers -------------------------------------------------------------------------
-
-    private ChainOrphanPool pool() {
-        return ((OrphanBlockStoreImpl) blockchain.getOrphanBlockStore()).getPool();
-    }
-
-    /**
-     * Imports a block the way a block from a peer is imported: a private re-parse of its 512 bytes,
-     * the arriving wrapper's source peer, and the extension classification. The classification is
-     * what makes the block a chunk at all, and the peer is what the quota charges.
-     */
-    private ImportResult deliver(Block block, String peerIp) {
-        BlockWrapper wrapper = new BlockWrapper(block, 0, peer(peerIp), false);
-        Block fresh = new Block(new XdagBlock(block.getXdagBlock().getData().toArray()));
-        return blockchain.tryToConnect(PreValidator.reimport(wrapper, fresh));
-    }
-
-    private void assertImported(ImportResult r) {
-        assertTrue("import failed: " + r + " " + r.getErrorInfo(),
-                r == ImportResult.IMPORTED_BEST || r == ImportResult.IMPORTED_NOT_BEST);
-        assertEquals("a delivered block hijacked the chain top; change the seed",
-                topRef, Bytes32.wrap(blockchain.getXdagTopStatus().getTop()));
-    }
-
-    private static Peer peer(String ip) {
-        return new Peer(Network.DEVNET, (short) 0, "peer-" + ip, ip, 8001, "xdagj", new String[0],
-                0, false, "tag");
-    }
-
-    /**
-     * A one-chunk chain, drawn again until its raw-hash difficulty is below the window
-     * {@code mineMain} searches in. A link-less block's chain weight is just its own difficulty,
-     * which is heavy-tailed, so an unfiltered chunk can out-weigh the mined top and drag a reorg
-     * through the middle of the measurement.
-     */
-    private Block lightChunk(int seed) {
-        for (long s = (long) seed * SEEDS_PER_BLOCK; ; s++) {
-            Block chunk = ChunkChainBuilder.split(config, payload(32, s), txTime()).get(0);
-            if (blockchain.calculateCurrentBlockDiff(chunk).compareTo(MAX_DELIVERED_DIFFICULTY) < 0) {
-                return chunk;
-            }
-        }
     }
 }

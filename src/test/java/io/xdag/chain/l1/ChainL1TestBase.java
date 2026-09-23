@@ -96,7 +96,7 @@ public abstract class ChainL1TestBase {
     private static final BigInteger DIFF_LO = BigInteger.ONE.shiftLeft(46);
     private static final BigInteger DIFF_HI = BigInteger.ONE.shiftLeft(47);
 
-    protected Config config = new DevnetConfig();
+    protected Config config;
     protected Wallet wallet;
     protected Kernel kernel;
     protected DatabaseFactory dbFactory;
@@ -143,8 +143,24 @@ public abstract class ChainL1TestBase {
         }
     }
 
+    /**
+     * The configuration this fixture runs on, built before anything else in {@link #setUpChain}
+     * touches it.
+     *
+     * <p><b>Override this rather than assigning {@link #config}.</b> Several chain settings have no
+     * setter on purpose, so a subclass that wants one changed has to supply a whole {@code Config};
+     * doing that from a constructor or an instance initialiser depends on a JLS ordering rule
+     * (superclass field initialisers, then subclass initialisers and constructor, then
+     * {@code @Before}) and {@link #setUpChain} now overwrites whatever it finds, so an assignment
+     * made that way is simply lost.
+     */
+    protected Config newConfig() {
+        return new DevnetConfig();
+    }
+
     @Before
     public void setUpChain() throws Exception {
+        config = newConfig();
         String rootDir = root.newFolder("node").getAbsolutePath();
         // Cast: these are Lombok setters on AbstractConfig, not part of the Config interface.
         AbstractConfig paths = (AbstractConfig) config;

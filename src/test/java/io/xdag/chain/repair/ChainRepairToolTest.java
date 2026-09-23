@@ -43,6 +43,7 @@ import io.xdag.chain.l1.ChainIds;
 import io.xdag.chain.l1.ChainKindHandler;
 import io.xdag.chain.l1.ChainL1Batch;
 import io.xdag.chain.l1.ChainL1TestBase;
+import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
 import io.xdag.core.Block;
 import io.xdag.core.BlockchainImpl;
@@ -101,8 +102,9 @@ public class ChainRepairToolTest extends ChainL1TestBase {
     /** Everything the tool printed, so a test can assert on what the operator was told. */
     private final List<String> said = new ArrayList<>();
 
-    public ChainRepairToolTest() {
-        config = new DevnetConfig() {
+    @Override
+    protected Config newConfig() {
+        return new DevnetConfig() {
             @Override
             public int getChainConsistencyWindow() {
                 return WINDOW;

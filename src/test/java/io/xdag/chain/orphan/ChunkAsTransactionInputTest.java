@@ -23,38 +23,22 @@
  */
 package io.xdag.chain.orphan;
 
-import static io.xdag.chain.ext.ChunkChainTest.payload;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_IN;
-import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUT;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUTPUT;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertTrue;
 
 import io.xdag.BlockBuilder;
-import io.xdag.Network;
-import io.xdag.chain.ext.ChunkChainBuilder;
-import io.xdag.chain.ingest.PreValidator;
-import io.xdag.chain.l1.ChainL1TestBase;
-import io.xdag.consensus.XdagPow;
 import io.xdag.core.Address;
 import io.xdag.core.Block;
-import io.xdag.core.BlockWrapper;
 import io.xdag.core.ImportResult;
 import io.xdag.core.XAmount;
 import io.xdag.core.XUnit;
-import io.xdag.core.XdagBlock;
-import io.xdag.net.Peer;
 import io.xdag.utils.BytesUtils;
-import java.math.BigInteger;
-import java.util.List;
-import org.apache.tuweni.bytes.Bytes32;
-import org.junit.Before;
 import org.junit.Test;
-import org.mockito.Mockito;
 
 /**
  * A transaction block whose {@code XDAG_FIELD_IN} input names a block this node holds only as a
@@ -90,26 +74,7 @@ import org.mockito.Mockito;
  * is still holding it. That difference is the only thing the deferred persist had any business
  * introducing, and consensus must not be able to see it.
  */
-public class ChunkAsTransactionInputTest extends ChainL1TestBase {
-
-    private static final String PEER_IP = "198.51.100.55";
-
-    /** Keeps a delivered block from out-weighing the mined chain top. */
-    private static final BigInteger MAX_DELIVERED_DIFFICULTY = BigInteger.ONE.shiftLeft(46);
-
-    /** Seed room per built block, so one block's redraws can never collide with the next one's. */
-    private static final int SEEDS_PER_BLOCK = 64;
-
-    /**
-     * {@code dealOrphan} pools nothing unless the node is configured to generate blocks and a PoW
-     * instance exists. Devnet supplies the first; the mock supplies the second. One real main block
-     * first, so the chain top weighs at least 2^46.
-     */
-    @Before
-    public void armTheOrphanPool() {
-        kernel.setPow(Mockito.mock(XdagPow.class));
-        mineMain(List.of());
-    }
+public class ChunkAsTransactionInputTest extends ChunkOrphanTestBase {
 
     /**
      * The block this subproject made reachable. One classified chunk, one transaction block
@@ -200,55 +165,5 @@ public class ChunkAsTransactionInputTest extends ChainL1TestBase {
                 XDAG_FIELD_OUTPUT, true);
         return BlockBuilder.generateOldTransactionBlock(config, poolKey, txTime() + 2, from, to,
                 XAmount.of(1, XUnit.XDAG));
-    }
-
-    /**
-     * Imports a block the way a block from a peer is imported: a private re-parse of its 512 bytes,
-     * the arriving wrapper's source peer, and the extension classification. Without the
-     * classification a chunk is an ordinary link block and goes straight to disk, which would test
-     * none of this.
-     */
-    private ImportResult deliver(Block block) {
-        BlockWrapper wrapper = new BlockWrapper(block, 0, peer(), false);
-        Block fresh = new Block(new XdagBlock(block.getXdagBlock().getData().toArray()));
-        return blockchain.tryToConnect(PreValidator.reimport(wrapper, fresh));
-    }
-
-    private void assertImported(ImportResult r) {
-        assertTrue("import failed: " + r + " " + r.getErrorInfo(),
-                r == ImportResult.IMPORTED_BEST || r == ImportResult.IMPORTED_NOT_BEST);
-        assertEquals("a delivered block hijacked the chain top; change the seed",
-                topRef, Bytes32.wrap(blockchain.getXdagTopStatus().getTop()));
-    }
-
-    private static Peer peer() {
-        return new Peer(Network.DEVNET, (short) 0, "peer-a", PEER_IP, 8001, "xdagj", new String[0],
-                0, false, "tag");
-    }
-
-    /**
-     * A one-chunk chain, drawn again until its raw-hash difficulty is below the window
-     * {@code mineMain} searches in, so a delivered chunk can never take the chain top.
-     */
-    private Block lightChunk(int seed) {
-        for (long s = (long) seed * SEEDS_PER_BLOCK; ; s++) {
-            Block chunk = ChunkChainBuilder.split(config, payload(32, s), txTime()).get(0);
-            if (blockchain.calculateCurrentBlockDiff(chunk).compareTo(MAX_DELIVERED_DIFFICULTY) < 0) {
-                return chunk;
-            }
-        }
-    }
-
-    /** A plain link block naming one other block, light enough not to take the top. */
-    private Block linkTo(Bytes32 target, int seed) {
-        for (long s = (long) seed * SEEDS_PER_BLOCK; ; s++) {
-            Block raw = new Block(config, txTime() + 1, null,
-                    List.of(new Address(target, XDAG_FIELD_OUT, false)), false, null, "s" + s, -1,
-                    XAmount.ZERO, null);
-            Block parsed = new Block(new XdagBlock(raw.toBytes()));
-            if (blockchain.calculateCurrentBlockDiff(parsed).compareTo(MAX_DELIVERED_DIFFICULTY) < 0) {
-                return parsed;
-            }
-        }
     }
 }

@@ -23,35 +23,20 @@
  */
 package io.xdag.chain.orphan;
 
-import static io.xdag.chain.ext.ChunkChainTest.payload;
 import static io.xdag.config.Constants.BI_APPLIED;
 import static io.xdag.config.Constants.BI_MAIN_CHAIN;
-import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUT;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
-import io.xdag.Network;
-import io.xdag.chain.ext.ChunkChainBuilder;
-import io.xdag.chain.ingest.PreValidator;
-import io.xdag.chain.l1.ChainL1TestBase;
+import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
-import io.xdag.consensus.XdagPow;
-import io.xdag.core.Address;
 import io.xdag.core.Block;
-import io.xdag.core.BlockWrapper;
-import io.xdag.core.ImportResult;
-import io.xdag.core.XAmount;
-import io.xdag.core.XdagBlock;
-import io.xdag.net.Peer;
-import java.math.BigInteger;
 import java.util.List;
 import org.apache.tuweni.bytes.Bytes32;
-import org.junit.Before;
 import org.junit.Test;
-import org.mockito.Mockito;
 
 /**
  * What happens past the edge of {@code persistReferencedChunkChains}' budget, which is where this
@@ -77,25 +62,16 @@ import org.mockito.Mockito;
  * chunk of the first chain the importing block names is written, and everything past it — the rest
  * of that chain, and every other chain the same block names — stays in memory.
  */
-public class ChunkPersistBudgetBoundaryTest extends ChainL1TestBase {
-
-    private static final String PEER_IP = "198.51.100.23";
-
-    /** Keeps a delivered block from out-weighing the mined chain top. */
-    private static final BigInteger MAX_DELIVERED_DIFFICULTY = BigInteger.ONE.shiftLeft(46);
-
-    /** Seed room per built block, so one block's redraws can never collide with the next one's. */
-    private static final int SEEDS_PER_BLOCK = 64;
+public class ChunkPersistBudgetBoundaryTest extends ChunkOrphanTestBase {
 
     /**
-     * One chunk of persist budget, in place of the production 4096. Installed here rather than
-     * through a {@code .conf} key because the chain settings are consensus values and deliberately
-     * have no setters; the fixture's {@code config} field is assigned by the superclass's field
-     * initialiser, which runs before this instance initialiser, which runs before any {@code @Before}
-     * — so the store built in {@code setUpChain} already sees the small budget.
+     * One chunk of persist budget, in place of the production 4096. The chain settings are
+     * consensus values and deliberately have no setters, so a whole {@code Config} is what a test
+     * supplies to change one.
      */
-    {
-        config = new OneChunkBudgetDevnetConfig();
+    @Override
+    protected Config newConfig() {
+        return new OneChunkBudgetDevnetConfig();
     }
 
     private static final class OneChunkBudgetDevnetConfig extends DevnetConfig {
@@ -103,17 +79,6 @@ public class ChunkPersistBudgetBoundaryTest extends ChainL1TestBase {
         public int getChainMaxChunksPerChain() {
             return 1;
         }
-    }
-
-    /**
-     * {@code dealOrphan} pools nothing unless the node is configured to generate blocks and a PoW
-     * instance exists. Devnet supplies the first; the mock supplies the second, and nothing in the
-     * import path calls into it. One real main block first, so the chain top weighs at least 2^46.
-     */
-    @Before
-    public void armTheOrphanPool() {
-        kernel.setPow(Mockito.mock(XdagPow.class));
-        mineMain(List.of());
     }
 
     /**
@@ -255,18 +220,6 @@ public class ChunkPersistBudgetBoundaryTest extends ChainL1TestBase {
         fail("the competing branch did not overtake within 40 blocks");
     }
 
-    /**
-     * Imports a block the way a block from a peer is imported: a private re-parse of its 512 bytes,
-     * the arriving wrapper's source peer, and the extension classification. Without the
-     * classification a chunk is an ordinary link block and goes straight to disk, which would test
-     * none of this.
-     */
-    private ImportResult deliver(Block block) {
-        BlockWrapper wrapper = new BlockWrapper(block, 0, peer(), false);
-        Block fresh = new Block(new XdagBlock(block.getXdagBlock().getData().toArray()));
-        return blockchain.tryToConnect(PreValidator.reimport(wrapper, fresh));
-    }
-
     /** Chunks are imported oldest first: a block may not reference one that came after it. */
     private void deliverChainTailFirst(List<Block> chain) {
         for (int i = chain.size() - 1; i >= 0; i--) {
@@ -274,59 +227,8 @@ public class ChunkPersistBudgetBoundaryTest extends ChainL1TestBase {
         }
     }
 
-    /**
-     * A three-chunk chain built straight from {@link ChunkChainBuilder}, head first.
-     *
-     * <p>Not through {@code ChainBlockBuilder}: that one refuses to build a chain longer than the
-     * configured {@code chain.chunk.maxPerChain}, which is exactly the boundary these tests need to
-     * be on the far side of. A peer is under no such restraint — the cap bounds what a node will
-     * walk, not what a sender can emit — so building the over-long chain directly is the honest
-     * reproduction, not a way around a check.
-     *
-     * <p>Redrawn through the payload seed until the whole chain weighs less than one mined main
-     * block. A chunk's chain weight folds in its successor's, so it is the sum that has to stay
-     * under the window {@code mineMain} searches in; otherwise a delivered chain takes the top and
-     * drags a reorg through the middle of the measurement.
-     */
+    /** The three-chunk chain every test here works from. */
     private List<Block> lightChain(int seed) {
-        for (long s = (long) seed * SEEDS_PER_BLOCK; ; s++) {
-            List<Block> chain = ChunkChainBuilder.split(config, payload(1000, s), txTime());
-            BigInteger total = BigInteger.ZERO;
-            for (Block chunk : chain) {
-                total = total.add(blockchain.calculateCurrentBlockDiff(chunk));
-            }
-            if (total.compareTo(MAX_DELIVERED_DIFFICULTY) < 0) {
-                return chain;
-            }
-        }
-    }
-
-    private void assertImported(ImportResult r) {
-        assertTrue("import failed: " + r + " " + r.getErrorInfo(),
-                r == ImportResult.IMPORTED_BEST || r == ImportResult.IMPORTED_NOT_BEST);
-        assertEquals("a delivered block hijacked the chain top; change the seed",
-                topRef, Bytes32.wrap(blockchain.getXdagTopStatus().getTop()));
-    }
-
-    private static Peer peer() {
-        return new Peer(Network.DEVNET, (short) 0, "peer-a", PEER_IP, 8001, "xdagj", new String[0],
-                0, false, "tag");
-    }
-
-    /**
-     * A plain link block naming one other block, redrawn through its remark until it is light
-     * enough not to take the top. No extension field, so it classifies as nothing at all — an
-     * ordinary block that happens to reference a chunk chain, which is what pays for one.
-     */
-    private Block linkTo(Bytes32 target, int seed) {
-        for (long s = (long) seed * SEEDS_PER_BLOCK; ; s++) {
-            Block raw = new Block(config, txTime() + 1, null,
-                    List.of(new Address(target, XDAG_FIELD_OUT, false)), false, null, "s" + s, -1,
-                    XAmount.ZERO, null);
-            Block parsed = new Block(new XdagBlock(raw.toBytes()));
-            if (blockchain.calculateCurrentBlockDiff(parsed).compareTo(MAX_DELIVERED_DIFFICULTY) < 0) {
-                return parsed;
-            }
-        }
+        return lightChain(seed, 1000);
     }
 }
