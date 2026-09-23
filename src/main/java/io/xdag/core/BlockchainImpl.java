@@ -929,21 +929,37 @@ public class BlockchainImpl implements Blockchain {
      *
      * <p>Answers {@link OrphanAdmission#ADMITTED} and nothing else, which is to say: did <em>this
      * call</em> put the block in the pool. {@link OrphanAdmission#DUPLICATE} is therefore false
-     * along with every refusal, and so is a node that pools nothing at all — no PoW, or block
-     * generation turned off — because nothing went in there either.
+     * along with every refusal, and so is a node that pools nothing at all — no PoW instance, or
+     * block generation turned off — because for every category but one nothing went in there
+     * either.
+     *
+     * <p><b>{@link OrphanCategory#CHUNK} is that one, and the mining gate does not apply to it.</b>
+     * Every other category is on disk by the time this runs — {@code tryToConnect} saved it — so
+     * for them the pool is only the queue of work a miner draws references from, and a node that
+     * does not mine buys nothing by filling it. A chunk has no disk copy at all: {@code
+     * tryToConnect} skips {@code saveBlock} for it, so the pool is the only home it has. Gating
+     * that on mining meant an explorer, a pure RPC node, or any node in the startup window before
+     * its PoW instance exists stored an arriving chunk in neither place, and every block paying for
+     * that chunk was {@code NO_PARENT} for ever.
      */
     public boolean dealOrphan(Block block, String peerKey, Classified classified) {
-        if (kernel.getConfig().getEnableGenerateBlock() && kernel.getPow() != null) {
-            UInt64 nonce = UInt64.ZERO;
-            XAmount fee = getTxFee(block);
-            byte[] address = orphanAddressOf(block);
-            if (address != null) {
-                nonce = block.getTxNonceField().getTransactionNonce();
-            }
-            return getOrphanBlockStore().addOrphan(block, isTxBlock(block), nonce, fee, address,
-                    peerKey, classified) == OrphanAdmission.ADMITTED;
+        // The address first because the category is computed from it, and then the pooling needs it
+        // again: one walk of the links rather than two (see orphanCategoryOf).
+        byte[] address = orphanAddressOf(block);
+        // A chunk's only home is this pool, so the mining gate below must not be what decides
+        // whether this node keeps it. See the javadoc for why the other three categories stay
+        // behind the gate.
+        boolean chunk = orphanCategoryOf(block, address, classified) == OrphanCategory.CHUNK;
+        if (!chunk && !(kernel.getConfig().getEnableGenerateBlock() && kernel.getPow() != null)) {
+            return false;
         }
-        return false;
+        UInt64 nonce = UInt64.ZERO;
+        XAmount fee = getTxFee(block);
+        if (address != null) {
+            nonce = block.getTxNonceField().getTransactionNonce();
+        }
+        return getOrphanBlockStore().addOrphan(block, isTxBlock(block), nonce, fee, address,
+                peerKey, classified) == OrphanAdmission.ADMITTED;
     }
 
     /**
@@ -1034,7 +1050,16 @@ public class BlockchainImpl implements Blockchain {
      * filed as a link block — consistently.
      */
     private OrphanCategory orphanCategoryOf(Block block, Classified classified) {
-        byte[] address = orphanAddressOf(block);
+        return orphanCategoryOf(block, orphanAddressOf(block), classified);
+    }
+
+    /**
+     * As {@link #orphanCategoryOf(Block, Classified)}, for a caller that has already asked
+     * {@link #orphanAddressOf} and needs the answer again afterwards — {@code dealOrphan} pools
+     * under that same address. Every category still comes out of this one expression, so the two
+     * forms cannot drift from each other or from what the store files the block under.
+     */
+    private OrphanCategory orphanCategoryOf(Block block, byte[] address, Classified classified) {
         return OrphanCategory.of(isTxBlock(block), address == null ? NO_ORPHAN_ADDRESS : address,
                 classified == null ? null : classified.kind());
     }
