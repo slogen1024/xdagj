@@ -1904,6 +1904,13 @@ public class BlockchainImpl implements Blockchain {
                     // not, and everything reachable through an unwritten chunk is unwritten too.
                     // unApplyBlock skips the same link for the same reason, which is what keeps the
                     // two halves the mirror image they are documented to be.
+                    //
+                    // The link skipped here is always an XDAG_FIELD_OUT reference, never an
+                    // XDAG_FIELD_IN one: verifySignature refuses any block whose IN names something
+                    // this node cannot load, so such a block never reaches the DAG to be applied.
+                    // That matters because the two loops below dereference an IN reference without
+                    // asking, and a skip here that left one of them live would move the crash
+                    // rather than close it.
                     continue;
                 }
                 if ((ref.getInfo().flags & BI_MAIN_REF) != 0) continue;
@@ -1974,6 +1981,14 @@ public class BlockchainImpl implements Blockchain {
                 sumIn = sumIn.add(link.getAmount());
 
             } else if (link.getType() == XDAG_FIELD_IN) {
+                // Unguarded on purpose, and the reason is a gate rather than luck. canUseInput
+                // walks getInputs(), which parse() fills with EVERY XDAG_FIELD_IN field, and
+                // getLinks() -- what this loop walks -- is exactly getInputs() plus getOutputs().
+                // So every IN link here was put through verifySignature at import, which refuses
+                // the block outright when this lookup would answer null. A block on disk never
+                // leaves the store, so a reference resolvable then is resolvable now. Before that
+                // check existed this site was unreachable only because verifySignature threw
+                // first, which is a bug standing in for a gate; it is a gate now.
                 Block ref = getBlockByHash(linkAddress, false);
                 if (compareAmountTo(ref.getInfo().getAmount(), link.getAmount()) < 0) {
                     log.info("ref balance is less than amount");
@@ -2011,6 +2026,10 @@ public class BlockchainImpl implements Blockchain {
             if (!link.isAddress) {
                 Block ref = getBlockByHash(linkAddress, false);
                 if (link.getType() == XDAG_FIELD_IN) {
+                    // Same gate as the loop above: an IN reference that reaches an applied block
+                    // was resolvable at import or the block was refused. An OUT reference may well
+                    // be null here -- a memory-only chunk -- and is never dereferenced, which is
+                    // why this branch and not the enclosing block is where the argument belongs.
                     subtractAndAccept(ref, link.getAmount());
                     XAmount allBalance = addressStore.getAllBalance();
                     allBalance = allBalance.add(link.getAmount().subtract(getTxFee(block)));
@@ -2089,6 +2108,11 @@ public class BlockchainImpl implements Blockchain {
                 if (!link.isAddress) {
                     Block ref = getBlockByHash(link.getAddress(), false);
                     if (link.getType() == XDAG_FIELD_IN) {
+                        // The mirror of applyBlock's two IN loops, and unguarded for the same
+                        // reason: a block being unapplied was applied, so it was imported, so
+                        // verifySignature resolved every one of its IN references. An OUT
+                        // reference can be null here and is not touched in this branch; the
+                        // trailing loop further down is where an OUT null had to be guarded.
                         // Only input references to the main block transaction block will go through this.
                         addAndAccept(ref, link.getAmount());
                         XAmount allBalance = addressStore.getAllBalance();
@@ -2954,6 +2978,34 @@ public class BlockchainImpl implements Blockchain {
     private boolean verifySignature(Address in, List<PublicKey> publicKeys) {
         // TODO: Check if block is in snapshot, get blockinfo with isRaw=false
         Block block = getBlockByHash(in.getAddress(), false);
+        if (block == null) {
+            // The input names a block this node holds ONLY as a pooled chunk body. The reference
+            // check upstream accepts a non-address reference resolved either from the block store
+            // or from that body store -- which is what lets a chunk chain be received at all, since
+            // chunk i names chunk i+1 and i+1 is memory-only until something pays for the chain --
+            // and the merged lookup then answers the non-raw form for such a block with null, on
+            // the argument that a BlockInfo parsed out of 512 bytes is a set of specific wrong
+            // claims rather than an unknown. So this shape needs no persist-budget overrun: one
+            // chunk is enough, and before this check it was a peer-triggerable NPE that
+            // tryToConnect's catch-all turned into ERROR.
+            //
+            // Refusing is NOT a new rule invented for the memory-only case. It is the verdict a
+            // node that has already persisted the very same chunk reaches, and for a reason that
+            // has nothing to do with persistence: a chunk block is built with no out-signature at
+            // all, so there is nothing for verifiedKeys() to match and canUseInput answers false.
+            // Measured both ways -- ChunkAsTransactionInputTest pins that the two node states now
+            // return the same INVALID_BLOCK, which is the whole point of the check: the divergence
+            // between "I have written this chunk down" and "I am still holding it" is what the
+            // deferred persist introduced, and consensus must not be able to see it.
+            //
+            // Keeping the spender out is right rather than merely convenient. A chunk carries
+            // XAmount.ZERO and no signature, so nothing can authorise a spend from it and
+            // applyBlock's XDAG_FIELD_IN branch would reject it on balance even if it did get in;
+            // the verdict is terminal on every node, so there is nothing to retry and no
+            // re-request loop to start. NO_PARENT would have been the dishonest alternative -- this
+            // node does have the block, just not in a form that can authorise anything.
+            return false;
+        }
         boolean isSnapshotBlock = block.getInfo().isSnapshot();
         if (isSnapshotBlock) {
             return verifySignatureFromSnapshot(in, publicKeys);

@@ -371,12 +371,24 @@ public class SyncManager extends AbstractXdagLifecycle {
             // Refused on this node's own policy, which is a statement about this node and not
             // about the block. It pops for the same reason EXIST does -- not because the block is
             // in the DAG (it is not), but because the children waiting on it have to be allowed to
-            // move. A released child re-imports, finds the parent genuinely missing, answers
-            // NO_PARENT and is pushed back under that hash, which re-sends the request for it; and
-            // a block this node requests is exempt from the policy that refused the broadcast, so
-            // the second copy is taken. Left in the default arm below -- where a new enum constant
-            // lands silently -- it would strand the subtree exactly as INVALID_BLOCK does, which is
-            // the cost this code exists to avoid.
+            // move: a released child re-imports, finds the parent genuinely missing, answers
+            // NO_PARENT and is parked again, which costs one re-import, while leaving it parked
+            // costs the whole subtree until eviction. Left in the default arm below -- where a new
+            // enum constant lands silently -- it would strand that subtree exactly as
+            // INVALID_BLOCK does, which is the cost this code exists to avoid.
+            //
+            // Two things Task 14 owes this arm, neither of which exists yet. Nothing returns this
+            // code today, so nothing below is live.
+            //
+            //   1. The re-parked child re-requests the very block that was just refused, and there
+            //      is nothing to stop the second copy being refused the same way. The design's
+            //      §5.2 exemption -- a block this node asked for is not subject to the policy that
+            //      turned away the unsolicited broadcast -- is what turns this into a loop that
+            //      closes rather than one that repeats.
+            //   2. syncPopBlock removes the queue BEFORE re-importing, so the child's re-park takes
+            //      syncPushBlock's fresh-insert path, which always returns true. The 64-second
+            //      dampener lives in the merge path and is bypassed, so once the policy is live
+            //      every refusal of P fires sendGetBlock(P) at every active channel.
             case CHAIN_FEE_POLICY -> syncPopBlock(blockWrapper);
             case INVALID_BLOCK -> {
 //                log.error("invalid block:{}", Hex.toHexString(blockWrapper.getBlock().getHashLow()));

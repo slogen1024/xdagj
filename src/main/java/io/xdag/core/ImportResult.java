@@ -66,9 +66,16 @@ public enum ImportResult {
      * subtree.
      *
      * <p>So a node that declines a block on policy returns this instead, and {@code releaseWaiters}
-     * releases the waiters: they retry, discover the parent is genuinely absent, and re-request it
-     * — which is the loop the design's §5.2 closes by exempting a block this node asked for from the
-     * policy that refused it the first time.
+     * releases the waiters rather than leaving them parked. Nothing returns this code yet, so what
+     * that buys today is only the better of two behaviours: a released child re-imports, finds the
+     * parent genuinely absent and is parked again — a re-import, against a stranded subtree.
+     *
+     * <p><b>It is not yet a loop that closes.</b> A released child re-requests the block that was
+     * refused, and there is nothing today that would stop the second copy being refused exactly as
+     * the first was. Closing it needs the exemption the design's §5.2 describes — a block this node
+     * asked for must not be refused by the policy that turned away the unsolicited broadcast — and
+     * that exemption does not exist. It is Task 14's to deliver, together with the gate that first
+     * returns this code; neither is here.
      *
      * <p>Declared last so that no existing constant's ordinal moves. Nothing persists an ordinal
      * today, and this keeps it that way by construction rather than by audit.
