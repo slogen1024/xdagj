@@ -82,20 +82,44 @@ public class ChunkWithoutMiningTest extends ChunkOrphanTestBase {
     private static final String FLOODER_IP = "198.51.100.42";
 
     /**
+     * The flood's seeds are {@code [FLOOD_SEED_BASE, FLOOD_SEED_BASE + CHUNKS_SENT)}, one block
+     * apiece: {@link ChunkOrphanTestBase#SEEDS_PER_BLOCK} gives every integer seed a draw range of
+     * its own, so distinct integers give distinct blocks however many redraws each one takes.
+     *
+     * <p>What that has to stay clear of is the other seeds <em>in the same test</em>, and nothing
+     * else. Two deliveries built from one integer are one block, and the second is a duplicate the
+     * pool folds away rather than a delivery — which is a flood of nine wearing a ten. Seeds used
+     * by <em>other</em> tests need no avoiding at all: {@code root} is a {@code @Rule} and {@code
+     * setUpChain} a {@code @Before}, so each test method builds its blocks into a fixture nothing
+     * else has touched.
+     */
+    private static final int FLOOD_SEED_BASE = 720;
+
+    /**
      * Quotas only. <b>The generation switch is deliberately untouched</b> — devnet leaves
      * {@code node.generate.block.enable = true} and this class's whole premise is that
      * {@code getPow() == null} is the only half holding the mining gate shut. An override here that
      * reached for {@code getEnableGenerateBlock} would close the other half too and quietly turn
      * every test in this class into a second spelling of {@link ChunkWithGenerationDisabledTest}.
      *
-     * <p>Shrinking both chunk budgets to {@link #BUDGET} is what lets a flood of ten reach one in a
-     * unit test; the production defaults are in the thousands.
+     * <p><b>One tier under test, the other moved out of the way.</b> Shrinking the per-peer budget
+     * to {@link #BUDGET} is what lets a flood reach a budget at all in a unit test — the production
+     * defaults are in the thousands. The per-chain budget is set past the whole flood instead of
+     * down beside it, so it cannot be the tier that refuses a chunk however the flood turns out to
+     * be grouped, and "the per-peer budget is what stopped this" then needs no assertion to
+     * establish: it is the only tier in range. Set both to {@link #BUDGET} and either could be
+     * refusing, which is an argument a reader has to reconstruct instead of one the configuration
+     * makes. {@link OrphanQuotaTest} is where the per-chain tier is driven to its own limit.
+     *
+     * <p>Every test in this class therefore runs with a three-chunk per-peer budget, the two that
+     * are not about budgets included; a test that needs to hold more than three chunks from one
+     * source has to say so here.
      */
     @Override
     protected Config newConfig() {
         AbstractConfig cfg = (AbstractConfig) super.newConfig();
         cfg.setChainOrphanChunkPerPeer(BUDGET);
-        cfg.setChainOrphanChunkPerChain(BUDGET);
+        cfg.setChainOrphanChunkPerChain(CHUNKS_SENT + 1);
         return cfg;
     }
 
@@ -109,11 +133,17 @@ public class ChunkWithoutMiningTest extends ChunkOrphanTestBase {
      * main block, so the chain top weighs at least 2^46 and a delivered block drawn below that
      * floor cannot hijack it. Mining it needs no PoW instance: {@code mineMain} searches a nonce
      * itself and imports the result through {@code tryToConnect}.
+     *
+     * <p>The closing assertion is where the premise is <em>created</em>, so it holds for a test
+     * written later that forgets to pin it for itself. Each test pins it too, in its own words —
+     * the specificity is worth the repetition — and this is the belt to those braces. {@code
+     * setUpChain} runs first, as a superclass {@code @Before}, so {@code kernel} exists by here.
      */
     @Override
     @Before
     public void armTheOrphanPool() {
         mineMain(List.of());
+        assertNull("this class's whole premise: nothing may arm this fixture", kernel.getPow());
     }
 
     @Test
@@ -141,24 +171,28 @@ public class ChunkWithoutMiningTest extends ChunkOrphanTestBase {
      * per-source budget is the first half of that: a non-mining node is not a node with no limits,
      * it is the same pool with the same bounds.
      *
-     * <p><b>Which tier stops this flood.</b> Both budgets are set to {@link #BUDGET}, so the count
-     * alone would not say. {@link #lightChunk} builds a one-chunk chain whose successor is null, so
-     * each delivery groups onto its own chain head and the per-chain tier holds one apiece — which
-     * the bucket count below states outright, making the per-peer tier the only one that can be
-     * refusing. That is the shape the two tiers are split for: per-chain bounds many chunks piling
-     * onto one chain, per-peer bounds one sender however it spreads them out.
+     * <p><b>Why each delivery is checked and not just the count.</b> A chunk the pool refuses is
+     * still imported — the refusal is the pool's, not the chain's — so a delivery that failed to
+     * import for some unrelated fixture reason does not surface as a failure here. It surfaces as
+     * one fewer candidate for the budget to refuse, and three imported out of ten with the other
+     * seven rejected by the chain satisfies the count below exactly as three admitted out of ten
+     * does, with no budget ever consulted. Both sibling flood tests guard the same way, and
+     * {@code ChunkFloodQuotaPipelineTest.drain} is where the hazard is written down.
+     *
+     * <p>Which tier does the refusing is settled by {@link #newConfig()} rather than argued here:
+     * the per-chain budget is out of the flood's reach, so per-peer is the only one in range.
      */
     @Test
     public void aNonMiningNodeStillChargesAFloodToItsSenderBudget() {
         assertNull("a bounded flood on a node that turns out to mine tests the wrong node",
                 kernel.getPow());
         for (int i = 0; i < CHUNKS_SENT; i++) {
-            deliver(lightChunk(720 + i), FLOODER_IP);
+            assertLanded("a flood block refused by the chain, not by the budget, would make the"
+                    + " count below pass for the wrong reason",
+                    deliver(lightChunk(FLOOD_SEED_BASE + i), FLOODER_IP));
         }
         assertEquals("the per-peer budget binds whether or not this node mines",
                 BUDGET, pool().size(OrphanCategory.CHUNK));
-        assertEquals("one chain head apiece, so the per-chain tier was never the one refusing",
-                BUDGET, pool().chainBucketCount());
     }
 
     /**
