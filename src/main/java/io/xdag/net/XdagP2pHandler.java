@@ -646,11 +646,21 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
         return msg.getRandom();
     }
 
-    public long sendGetBlock(MutableBytes32 hash, boolean isOld) {
+    /**
+     * Asks this peer for one block by hashlow: a {@code SyncBlockRequestMessage} while catching up,
+     * otherwise a {@code BlockRequestMessage} — which the peer answers with a
+     * {@code NewBlockMessage}, indistinguishable at the receiving end from unsolicited gossip.
+     *
+     * <p>Takes an immutable {@link Bytes32}: nothing here or in either request message mutates the
+     * hash, and the caller's own copy is a {@code hashLow} that the next failed import overwrites.
+     * The mutable view the message constructors still want is built here, from a copy.
+     */
+    public long sendGetBlock(Bytes32 hash, boolean isOld) {
+        MutableBytes32 owned = MutableBytes32.wrap(hash.toArray());
         XdagMessage msg;
         //        log.debug("sendGetBlock:[{}]", Hex.toHexString(hash));
-        msg = isOld ? new SyncBlockRequestMessage(hash, kernel.getBlockchain().getXdagStats())
-                : new BlockRequestMessage(hash, kernel.getBlockchain().getXdagStats());
+        msg = isOld ? new SyncBlockRequestMessage(owned, kernel.getBlockchain().getXdagStats())
+                : new BlockRequestMessage(owned, kernel.getBlockchain().getXdagStats());
         log.debug("Request block {} isold: {} from node {}", hash, isOld,channel.getRemoteAddress());
         sendMessage(msg);
         return msg.getRandom();

@@ -27,6 +27,7 @@ package io.xdag.rpc.api.impl;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import io.xdag.Kernel;
+import io.xdag.chain.ingest.ChunkFeePolicy;
 import io.xdag.Wallet;
 import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
@@ -998,11 +999,9 @@ public class XdagApiImpl extends AbstractXdagLifecycle implements XdagApi {
             } else if (result == ImportResult.INVALID_BLOCK) {
                 resInfo.add(result.getErrorInfo());
             } else if (result == ImportResult.CHAIN_FEE_POLICY) {
-                // This node declined the block under its own chunk fee policy (SP0b-3 §5): well
-                // formed, but its header fee does not cover the chunk chains it references. Reported
-                // rather than dropped, or the caller gets an empty result for a block never sent.
-                resInfo.add("Declined by this node's chunk fee policy (chain.ingest.feePolicy): "
-                        + hash2Address(blockWrapper.getBlock().getHashLow()));
+                // Reported rather than dropped, or the caller gets an empty result for a block that
+                // was never sent. Same wording as the CLI's, from the policy that decided it.
+                resInfo.add(ChunkFeePolicy.refusalMessage(blockWrapper.getBlock().getHashLow()));
             }
         }
 

@@ -53,7 +53,6 @@ import io.xdag.core.ImportResult;
 import io.xdag.core.XAmount;
 import io.xdag.core.XUnit;
 import io.xdag.core.XdagBlock;
-import io.xdag.db.rocksdb.DatabaseFactory;
 import io.xdag.db.rocksdb.DatabaseName;
 import io.xdag.db.rocksdb.KVSource;
 import io.xdag.net.Channel;
@@ -354,11 +353,11 @@ public class ChunkFeePolicyTest extends ChunkOrphanTestBase {
     public void theRequestRecordIsBounded() {
         ChunkFeePolicy policy = sync.getFeePolicy();
         Bytes32 first = hashOf(0);
-        policy.markRequested(first);
+        policy.tryMarkRequested(first);
         assertTrue("the record must hold what was just put in it", policy.wasRequested(first));
 
         for (int i = 1; i <= ChunkFeePolicy.MAX_REQUESTED; i++) {
-            policy.markRequested(hashOf(i));
+            policy.tryMarkRequested(hashOf(i));
         }
 
         assertFalse("the oldest request must be dropped once the bound is reached",
@@ -429,8 +428,7 @@ public class ChunkFeePolicyTest extends ChunkOrphanTestBase {
     }
 
     private TreeMap<Bytes, Bytes> dump(DatabaseName name) {
-        DatabaseFactory factory = dbFactory;
-        KVSource<byte[], byte[]> db = factory.getDB(name);
+        KVSource<byte[], byte[]> db = dbFactory.getDB(name);
         TreeMap<Bytes, Bytes> m = new TreeMap<>();
         for (byte[] k : db.keys()) {
             m.put(Bytes.wrap(k), Bytes.wrap(db.get(k)));
@@ -446,10 +444,9 @@ public class ChunkFeePolicyTest extends ChunkOrphanTestBase {
      * if the directory is still there.
      */
     private void freshFixture() throws Exception {
-        long fixtureStart = 1600616700000L;
         tearDownChain();
         FileUtils.deleteDirectory(new File(root.getRoot(), "node"));
-        generateTime = fixtureStart;
+        generateTime = FIXTURE_START;
         setUpChain();
         armTheOrphanPool();
         requested.clear();
@@ -464,8 +461,8 @@ public class ChunkFeePolicyTest extends ChunkOrphanTestBase {
      */
     private SyncManager syncManager() {
         XdagP2pHandler handler = mock(XdagP2pHandler.class);
-        when(handler.sendGetBlock(any(MutableBytes32.class), anyBoolean())).thenAnswer(call -> {
-            requested.add(Bytes32.wrap(((MutableBytes32) call.getArgument(0)).toArray()));
+        when(handler.sendGetBlock(any(Bytes32.class), anyBoolean())).thenAnswer(call -> {
+            requested.add(Bytes32.wrap(((Bytes32) call.getArgument(0)).toArray()));
             return 0L;
         });
         Channel channel = mock(Channel.class);
@@ -496,7 +493,7 @@ public class ChunkFeePolicyTest extends ChunkOrphanTestBase {
      * asked, which is what the {@code NO_PARENT} arm writes and what this reproduces.
      */
     private ImportResult submitAsRequested(Block block) {
-        sync.getFeePolicy().markRequested(block.getHashLow());
+        sync.getFeePolicy().tryMarkRequested(block.getHashLow());
         return sync.validateAndAddNewBlock(gossip(block));
     }
 

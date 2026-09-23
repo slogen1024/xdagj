@@ -253,7 +253,8 @@ public final class ChainL1Processor implements ChainL1Hooks {
                 if (target != null && target.chainId().equals(vaults.get(0))) {
                     vaultConsumed = true;
                     int chunks = chainCount(call.argsChainHead(), minEpoch);
-                    InputStatus status = feeCovers(block, chunks) ? InputStatus.OK : InputStatus.INVALID_FEE;
+                    InputStatus status = feeCovers(block, chunks, spec.getChainChunkFee())
+                            ? InputStatus.OK : InputStatus.INVALID_FEE;
                     record(batch, refs, counts, vaults.get(0), blockHash, ExtKind.CALL, status, call.contract());
                 }
             }
@@ -403,6 +404,12 @@ public final class ChainL1Processor implements ChainL1Hooks {
                     // countLenient == N for a chain assemble accepts (see chainCount's Javadoc), so
                     // this is not merely an optimization — it makes the fee basis depend on assemble
                     // having succeeded, not on the lenient walk alone.
+                    //
+                    // This ordering is also what the ingest-side gate diverges from. ChunkFeePolicy
+                    // counts before any assemble and so charges for chains this branch never
+                    // reaches; its class header documents that gap and argues it is tolerable.
+                    // Hoisting this line above the assemble branch would make the fee basis lenient
+                    // here too and silently invalidate that argument, so read it before you do.
                     chunks += chainCount(d.codeChainHead(), minEpoch);
                 }
             } else if (!store.hasCode(d.codeHash())) {
@@ -413,7 +420,7 @@ public final class ChainL1Processor implements ChainL1Hooks {
             if (d.argsByChain()) {
                 chunks += chainCount(d.argsChainHead(), minEpoch);
             }
-            if (!feeCovers(block, chunks)) {
+            if (!feeCovers(block, chunks, spec.getChainChunkFee())) {
                 status = InputStatus.INVALID_FEE;
             }
         }
@@ -541,12 +548,23 @@ public final class ChainL1Processor implements ChainL1Hooks {
         return head == null ? 0 : ChunkChain.countLenient(head, lookup, spec.getChainMaxChunksPerChain(), minEpoch);
     }
 
-    /** Consensus re-check of the chunk fee rule: header fee field &gt;= chunkFee x chunks. */
-    private boolean feeCovers(Block block, int chunks) {
+    /**
+     * The chunk fee rule itself: the block's declared header fee must be at least
+     * {@code chunkFee x chunks}. A block charged for no chunks is covered by definition.
+     *
+     * <p>Public and static because it has two callers who must never disagree: this class, at
+     * {@code setMain}, and {@code ChunkFeePolicy}, at ingest. Spelling the comparison out twice
+     * would survive exactly until someone added a floor, a rounding rule or a minimum to one of
+     * them. It carries no precondition of its own beyond {@link #headerFee}'s.
+     *
+     * @param chunkFee the per-chunk fee, {@link ChainSpec#getChainChunkFee()}; passed rather than
+     *                 read off a spec so the rule depends on nothing but its own inputs
+     */
+    public static boolean feeCovers(Block block, int chunks, XAmount chunkFee) {
         if (chunks == 0) {
             return true;
         }
-        return headerFee(block).compareTo(spec.getChainChunkFee().multiply(chunks)) >= 0;
+        return headerFee(block).compareTo(chunkFee.multiply(chunks)) >= 0;
     }
 
     /**

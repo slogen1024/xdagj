@@ -82,8 +82,10 @@ import org.mockito.Mockito;
  *       {@link io.xdag.chain.ingest.IngestPipeline}{@code .submit}, collecting the committer's
  *       verdicts, which is the path its subject (per-source attribution across pre-validation)
  *       actually lives on.</li>
- *   <li>{@code BlockLookupEquivalenceTest} — a different package, {@code io.xdag.core}: it is about
- *       {@code BlockchainImpl}'s merged lookup rather than about the pool.</li>
+ *   <li>{@code BlockLookupEquivalenceTest} — it is about {@code BlockchainImpl}'s merged lookup
+ *       rather than about the pool, so none of this scaffolding is what it needs. (Not because it
+ *       lives in another package: this base is public and its members protected, and
+ *       {@code ChunkFeePolicyTest} extends it from {@code io.xdag.chain.ingest}.)</li>
  *   <li>{@code ChunkDeferredPersistTest} — an earlier task's regression test, left on its own
  *       fixture so that a change to this base cannot quietly change what it pins. Its {@code
  *       deliver} body is byte for byte this one's, so "it delivers by a different mechanism" is

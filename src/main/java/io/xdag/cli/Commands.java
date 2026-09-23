@@ -28,6 +28,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import io.xdag.Kernel;
+import io.xdag.chain.ingest.ChunkFeePolicy;
 import io.xdag.core.*;
 import io.xdag.crypto.encoding.Base58;
 import io.xdag.crypto.exception.AddressFormatException;
@@ -324,19 +325,16 @@ public class Commands {
     }
 
     /**
-     * What this node prints for a block its own chunk fee policy declined (SP0b-3 §5).
+     * What this node prints for a block its own chunk fee policy declined (SP0b-3 §5). The wording
+     * is {@link ChunkFeePolicy#refusalMessage}'s, so the CLI and the RPC say the same thing; only
+     * the line ending is this caller's.
      *
-     * <p>The block is well formed and every other node may well take it, so this is not an error
-     * string: it is this node saying it will not store a chain block whose header fee does not cover
-     * the chunk blocks it references. An ordinary transfer references no chunk chain and can never
-     * reach this; a chain block built with too small a header fee can. Without it the caller sees
-     * neither a hash nor a reason, just the "several minutes" tail for a transaction that was never
-     * sent.
+     * <p>Without it the caller sees neither a hash nor a reason, just the "several minutes" tail for
+     * a transaction that was never sent. An ordinary transfer references no chunk chain and can
+     * never reach this; a chain block built with too small a header fee can.
      */
     private static String policyRefusal(BlockWrapper blockWrapper) {
-        return "Declined by this node's chunk fee policy (chain.ingest.feePolicy): the header fee does not"
-                + " cover the chunk chains this block references. Tx hash:"
-                + BasicUtils.hash2Address(blockWrapper.getBlock().getHashLow()) + "\n";
+        return ChunkFeePolicy.refusalMessage(blockWrapper.getBlock().getHashLow()) + "\n";
     }
 
     /**

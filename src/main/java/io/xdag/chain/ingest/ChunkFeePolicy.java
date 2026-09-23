@@ -33,6 +33,7 @@ import io.xdag.chain.ext.ExtKind;
 import io.xdag.chain.l1.ChainL1Processor;
 import io.xdag.config.spec.ChainSpec;
 import io.xdag.core.Block;
+import io.xdag.utils.BasicUtils;
 import io.xdag.utils.XdagTime;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -57,7 +58,7 @@ import org.apache.tuweni.bytes.Bytes32;
  *
  * <p>The safety argument for refusing at all is "the main block will arrive and we will pull it" —
  * and the pull goes through {@code tryToConnect} too, so refusing a requested block would leave the
- * node unable to ever admit it, stuck at that height for good. Hence {@link #markRequested}: the
+ * node unable to ever admit it, stuck at that height for good. Hence {@link #tryMarkRequested}: the
  * two places that ask a peer for a specific block record the hash here first, and a block whose
  * hash is on that record is let through whatever it pays.
  *
@@ -74,15 +75,15 @@ import org.apache.tuweni.bytes.Bytes32;
  *
  * <h2>What is counted, and against what age bound</h2>
  *
- * <p>The count and the comparison are the consensus rule, reached through the same helpers so the
- * two cannot drift: {@link ChunkChain#countLenient} over each chain head the block declares, summed
- * (a DEPLOY may carry a code chain and an args chain), against
- * {@link ChainL1Processor#headerFee(Block)} and {@link ChainSpec#getChainChunkFee()}, bounded by
- * {@link ChainSpec#getChainMaxChunksPerChain()}.
+ * <p>The count and the comparison are the consensus rule, reached through the same code so the two
+ * cannot drift: {@link ChunkChain#countLenient} over each chain head the block declares, summed (a
+ * DEPLOY may carry a code chain and an args chain) and bounded by
+ * {@link ChainSpec#getChainMaxChunksPerChain()}, then handed to
+ * {@link ChainL1Processor#feeCovers(Block, int, io.xdag.core.XAmount)} — the same method
+ * {@code setMain} calls, not a second spelling of it.
  *
  * <p>The age bound is the consensus one as well — {@code epoch(payingBlock) - 1}, read off the
- * paying block's own timestamp — and that is a decision, not an inherited default. The lenient
- * count only ever moves the verdict one way: more chunks counted means a larger fee required means
+ * paying block's own timestamp. The lenient count only ever moves the verdict one way: more chunks counted means a larger fee required means
  * a likelier refusal. The 3-argument overload (no age bound) would therefore count chunks the
  * consensus check will not, and could refuse a block consensus would have accepted — a false
  * refusal, and one the design's §5.4 does not cover, since §5.4 only argues about chunks that are
@@ -99,7 +100,7 @@ import org.apache.tuweni.bytes.Bytes32;
  * a violation of the rule the warning is about — the rule exists to stop a lenient count from
  * <em>replacing</em> an assemble verdict in a decision that binds consensus, and nothing here binds
  * consensus: the real verdict is still taken under the lock, from the real chain, later — but it
- * does leave a residual gap, and the gap is real rather than theoretical.
+ * does leave a residual gap.
  *
  * <p><b>Where the gate charges more than consensus.</b> {@code ChainL1Processor.applyDeploy} adds
  * the code chain's chunks to the fee basis only <em>after</em> {@code assemble} has accepted it,
@@ -139,7 +140,7 @@ import org.apache.tuweni.bytes.Bytes32;
  * count, so the required fee comes out small and the block is let through.
  *
  * <p><b>Thread-safe.</b> {@link #refuse} runs on netty I/O threads holding no lock, and
- * {@link #markRequested} on whichever thread is releasing waiters. Everything mutable is behind
+ * {@link #tryMarkRequested} on whichever thread is releasing waiters. Everything mutable is behind
  * {@link #requested}'s own monitor.
  */
 @Slf4j
@@ -147,7 +148,7 @@ public final class ChunkFeePolicy {
 
     /**
      * How many hashes this node remembers asking for. Peer-suppliable hashes reach
-     * {@link #markRequested} (the missing parent named by a block a peer sent), so this must be
+     * {@link #tryMarkRequested} (the missing parent named by a block a peer sent), so this must be
      * bounded; past the bound the oldest is dropped. A dropped record costs nothing permanent: the
      * refusal it would have prevented releases the waiters, which re-request and re-arm it.
      */
@@ -214,7 +215,7 @@ public final class ChunkFeePolicy {
      *
      * @return true when the request should be sent
      */
-    public boolean markRequested(Bytes32 hashLow) {
+    public boolean tryMarkRequested(Bytes32 hashLow) {
         if (hashLow == null) {
             return false;
         }
@@ -236,8 +237,15 @@ public final class ChunkFeePolicy {
         }
     }
 
-    /** Whether this node asked a peer for {@code hashLow} recently enough for the answer to count. */
-    public boolean wasRequested(Bytes32 hashLow) {
+    /**
+     * Whether this node asked a peer for {@code hashLow} recently enough for the answer to count.
+     *
+     * <p>Package-private: the exemption record is this class's own state, and {@code SyncManager}
+     * hands out a {@code ChunkFeePolicy} through a Lombok getter, so anything holding a
+     * {@code SyncManager} would otherwise be able to read and write what this node will admit.
+     * {@link #refuses} is the only production reader; the tests sit in this package.
+     */
+    boolean wasRequested(Bytes32 hashLow) {
         if (hashLow == null) {
             return false;
         }
@@ -262,22 +270,32 @@ public final class ChunkFeePolicy {
      * the classification, having allocated nothing — and the record of what this node asked for is
      * consulted last, only once a refusal is otherwise decided, so the common path never touches it.
      *
+     * <p><b>The block must already be parsed</b>, from its 512 bytes or in memory. An unparsed one
+     * has an empty {@code extFields}, classifies as {@link Classified#NONE}, charges zero chunks and
+     * is <em>admitted</em> — so a caller that gated a new entry point ahead of {@code parse()} would
+     * get a gate that silently does nothing, and no test would notice. Both ingest paths satisfy
+     * this today: a block off the wire is parsed by {@code new Block(XdagBlock)} before it ever
+     * reaches {@code SyncManager}, and a block this node built itself is parsed by construction.
+     *
      * <p>Reads the block, and does not write it: {@code getExtFields()} and {@code getBlockLinks()}
-     * are plain reads of lists a parse already filled, and {@code getHashLow()} is reached only for
-     * a block that is about to be refused. Both ingest paths call this <em>before</em> handing the
-     * block anywhere, so the calling thread is still its only owner.
+     * are plain reads of lists the parse already filled, and {@code getHashLow()} is a cached
+     * derivation reached only for a chain block that has already failed the fee test. Both ingest
+     * paths call this <em>before</em> handing the block anywhere, so the calling thread is still its
+     * only owner.
      */
-    public boolean refuse(Block payingBlock) {
+    public boolean refuses(Block payingBlock) {
         if (payingBlock == null || !spec.isChainIngestFeePolicy()) {
             return false;
         }
         try {
             int chunks = chunksCharged(payingBlock);
             if (chunks == 0) {
+                // The same answer feeCovers gives for a zero count, reached without calling it:
+                // headerFee re-encodes a locally built block's 512 bytes, and no block on the hot
+                // path should pay for that to be told it owes nothing.
                 return false;
             }
-            if (ChainL1Processor.headerFee(payingBlock)
-                    .greaterThanOrEqual(spec.getChainChunkFee().multiply(chunks))) {
+            if (ChainL1Processor.feeCovers(payingBlock, chunks, spec.getChainChunkFee())) {
                 return false;
             }
             // Last, and only here: see §5.2 and this class's header.
@@ -292,6 +310,20 @@ public final class ChunkFeePolicy {
             log.warn("chunk fee gate could not decide, admitting the block", e);
             return false;
         }
+    }
+
+    /**
+     * What a caller is told when this node declines a block it submitted itself — the CLI's transfer
+     * commands and the RPC's, which otherwise print a success tail for a block that was never sent.
+     *
+     * <p>Here rather than at either of them because it describes this class's decision, and two
+     * copies had already drifted into two wordings. Not an error string and not
+     * {@code ImportResult.CHAIN_FEE_POLICY.errorInfo}: the block is well formed, other nodes may
+     * well take it, and that field is a per-constant slot shared by every thread in the process.
+     */
+    public static String refusalMessage(Bytes32 hashLow) {
+        return "Declined by this node's chunk fee policy (chain.ingest.feePolicy): the header fee does not"
+                + " cover the chunk chains this block references. Tx hash:" + BasicUtils.hash2Address(hashLow);
     }
 
     /**

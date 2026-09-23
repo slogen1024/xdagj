@@ -104,7 +104,13 @@ public abstract class ChainL1TestBase {
     protected ChainL1Store chainStore;
     protected MockBlockchain blockchain;
     protected final ECKeyPair poolKey = ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY);
-    protected long generateTime = 1600616700000L;
+    /**
+     * Where the fixture's mining clock starts. A constant because a test that tears the fixture down
+     * and builds a second one on the same timeline — to compare two runs block for block — has to
+     * put the clock back exactly here, and two of them were spelling the literal out themselves.
+     */
+    protected static final long FIXTURE_START = 1600616700000L;
+    protected long generateTime = FIXTURE_START;
     protected Bytes32 topRef;
     private long nonce = 1;
     /** Mixed into every mined nonce; bumped by rewindTo() so a competing branch never reproduces an existing block byte for byte. */

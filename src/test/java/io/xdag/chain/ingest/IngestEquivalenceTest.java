@@ -186,23 +186,34 @@ public class IngestEquivalenceTest extends ChainL1TestBase {
      * IngestPipeline.commit} catches {@code Throwable}, so an {@code AssertionError} raised on the
      * commit thread would be logged and swallowed instead of failing the test.
      */
-    private SyncManager instrumentedSyncManager(List<ImportResult> results, AtomicInteger signedBlocks,
-                                                AtomicInteger missingKeys) {
+    private SyncManager instrumentedSyncManager(Instrumentation into) {
         wireKernel();
         return new SyncManager(kernel) {
             @Override
             public synchronized ImportResult importPreValidated(PreValidated pv) {
                 if (!pv.block().getInputs().isEmpty()) {
-                    signedBlocks.incrementAndGet();
+                    into.signedBlocks().incrementAndGet();
                     if (!pv.hasKeys()) {
-                        missingKeys.incrementAndGet();
+                        into.missingKeys().incrementAndGet();
                     }
                 }
                 ImportResult r = super.importPreValidated(pv);
-                results.add(r);
+                into.results().add(r);
                 return r;
             }
         };
+    }
+
+    /**
+     * What run A's commit step records as it goes: the verdict per block, and the two counts that
+     * say the pre-validation really did its work off the lock. {@code results} is written from the
+     * commit thread and read from the test thread once it has stopped.
+     */
+    private record Instrumentation(List<ImportResult> results, AtomicInteger signedBlocks,
+                                   AtomicInteger missingKeys) {
+        Instrumentation() {
+            this(Collections.synchronizedList(new ArrayList<>()), new AtomicInteger(), new AtomicInteger());
+        }
     }
 
     /** Everything {@code new SyncManager(kernel)} reads out of the kernel, set before it is built. */
@@ -236,25 +247,23 @@ public class IngestEquivalenceTest extends ChainL1TestBase {
                 Bytes.wrap(blockchain.getXdagTopStatus().getTop()));
     }
 
-    private void freshFixture(long fixtureStart) throws Exception {
+    /** A second fixture on the same mining timeline, so both runs build byte-identical blocks. */
+    private void freshFixture() throws Exception {
         tearDownChain();
         // setUpChain() calls root.newFolder("node"), which throws if the folder still exists.
         FileUtils.deleteDirectory(new File(root.getRoot(), "node"));
-        generateTime = fixtureStart;
+        generateTime = FIXTURE_START;
         setUpChain();
     }
 
     @Test
     public void pipelineAndSynchronousPathAgreeByteForByte() throws Exception {
-        long fixtureStart = generateTime;
         // Run A: pipeline (parallel pre-validation, in-order commit)
         Prepared p = prepareChain();
         BenchWorkload w = workload(p);
         List<Block> blocks = order(w);
-        List<ImportResult> resultsA = Collections.synchronizedList(new ArrayList<>());
-        AtomicInteger signedBlocks = new AtomicInteger();
-        AtomicInteger missingKeys = new AtomicInteger();
-        SyncManager sync = instrumentedSyncManager(resultsA, signedBlocks, missingKeys);
+        Instrumentation runA = new Instrumentation();
+        SyncManager sync = instrumentedSyncManager(runA);
         sync.start();
         try {
             assertNotNull("chain.ingest.threads must be > 0 for run A to have a pipeline at all",
@@ -265,7 +274,7 @@ public class IngestEquivalenceTest extends ChainL1TestBase {
                 // had diverged. This workload must not produce one -- every chain block pays
                 // minHeaderFee exactly -- and this says so instead of assuming it.
                 assertFalse("the chunk fee gate refused a workload block: run A cannot report that",
-                        sync.getFeePolicy().refuse(b));
+                        sync.getFeePolicy().refuses(b));
                 // Nothing reads b after this: the pool parses it, and Block.parse() is a lazy mutator.
                 sync.submitBlock(new BlockWrapper(b, 0));
             }
@@ -275,12 +284,13 @@ public class IngestEquivalenceTest extends ChainL1TestBase {
         }
         // The point of the pipeline: a block whose inputs need verifying must reach the lock with
         // its keys already computed, or the ECDSA quietly moved back under the monitor.
-        assertTrue("no block with inputs went through the pipeline", signedBlocks.get() > 0);
-        assertEquals("a block with inputs reached the lock without pre-validated keys", 0, missingKeys.get());
-        Outcome a = snapshot(resultsA);
+        assertTrue("no block with inputs went through the pipeline", runA.signedBlocks().get() > 0);
+        assertEquals("a block with inputs reached the lock without pre-validated keys",
+                0, runA.missingKeys().get());
+        Outcome a = snapshot(runA.results());
 
         // Run B: the synchronous path on a fresh fixture with the same bytes
-        freshFixture(fixtureStart);
+        freshFixture();
         Prepared p2 = prepareChain();
         assertEquals("same chain, same bytes", p.chainId(), p2.chainId());
         BenchWorkload w2 = workload(p2);

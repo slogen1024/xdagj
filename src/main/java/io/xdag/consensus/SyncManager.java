@@ -49,7 +49,6 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.concurrent.BasicThreadFactory;
 import org.apache.commons.lang3.time.FastDateFormat;
 import org.apache.tuweni.bytes.Bytes32;
-import org.apache.tuweni.bytes.MutableBytes32;
 
 import java.util.Date;
 import java.util.List;
@@ -64,6 +63,37 @@ import static io.xdag.core.XdagState.*;
 import static io.xdag.utils.BasicUtils.hash2byte;
 import static io.xdag.utils.XdagTime.msToXdagtimestamp;
 
+/**
+ * The node's ingest boundary: everything that arrives from a peer or is built locally reaches the
+ * chain through here, and everything that cannot connect yet waits here until its parent turns up.
+ *
+ * <h2>The monitor map</h2>
+ *
+ * <p>This object's own monitor serialises imports, and nothing else does; three different stances
+ * meet at the entry points, so they are worth having in one place.
+ *
+ * <ul>
+ *   <li><b>Must not be synchronized:</b> {@link #submitBlock}. {@code IngestPipeline.submit} parks
+ *       the caller at queue capacity and holds its permit until that block's commit returns, and
+ *       the committer needs this monitor — so a caller that parked there holding it would deadlock
+ *       the pipeline. {@link #validateAndAddNewBlock} is unsynchronized for a different reason: it
+ *       runs the chunk fee gate, whose reads must happen off the lock (SP0b-3 §5.1).</li>
+ *   <li><b>Takes the monitor:</b> {@link #addNewBlock} (the import {@code validateAndAddNewBlock}
+ *       wraps), {@link #importPreValidated} (the pipeline's commit step, on the single commit
+ *       thread) and {@link #refuseOnPolicy}. The last is the only one a netty I/O thread enters,
+ *       and it is safe because that branch never calls {@code IngestPipeline.submit}: the monitor
+ *       is never held across the park.</li>
+ *   <li><b>Public, unsynchronized, and only correct under the monitor:</b> {@link #importBlock},
+ *       {@link #syncPopBlock} and {@link #syncPushBlock}. They are reached from the three above and
+ *       from each other. {@code importBlock} drives {@code tryToConnect}, and all three move
+ *       {@code syncMap} and the plain {@code nwaitsync} counter beside it, so an outside caller on
+ *       another thread would be importing next to the committer and losing counts. Their visibility
+ *       is history, not an invitation.</li>
+ * </ul>
+ *
+ * <p>The other half of the argument lives on {@code IngestPipeline.submit}, which states the rule
+ * from the pipeline's side.
+ */
 @Slf4j
 @Getter
 @Setter
@@ -338,7 +368,7 @@ public class SyncManager extends AbstractXdagLifecycle {
             // SP0b-3 §5.3, half one of two: equally in front of the pipeline. The synchronous branch
             // below is gated inside validateAndAddNewBlock, which is where the CLI, the RPC and the
             // award manager come in as well, so each path is gated exactly once.
-            if (feePolicy.refuse(blockWrapper.getBlock())) {
+            if (feePolicy.refuses(blockWrapper.getBlock())) {
                 refuseOnPolicy(blockWrapper);
                 return;
             }
@@ -375,13 +405,12 @@ public class SyncManager extends AbstractXdagLifecycle {
      * The synchronous ingest path: this node's own blocks (the CLI, the RPC, the award manager), and
      * every arriving block on a node running with {@code chain.ingest.threads = 0}.
      *
-     * <p>No longer {@code synchronized} itself, and that is what lets the gate read off the lock as
-     * SP0b-3 §5.1 requires: the import proper is, in {@link #addNewBlock}, so everything that was
-     * under the monitor still is.
+     * <p>Unsynchronized, so that the chunk fee gate reads off the lock as SP0b-3 §5.1 requires. The
+     * import itself holds the monitor, in {@link #addNewBlock}; see this class's monitor map.
      */
     public ImportResult validateAndAddNewBlock(BlockWrapper blockWrapper) {
         // SP0b-3 §5.3, half two of two. See submitBlock for the other.
-        if (feePolicy.refuse(blockWrapper.getBlock())) {
+        if (feePolicy.refuses(blockWrapper.getBlock())) {
             return refuseOnPolicy(blockWrapper);
         }
         return addNewBlock(blockWrapper);
@@ -470,7 +499,7 @@ public class SyncManager extends AbstractXdagLifecycle {
      * broadcast goes to every active channel, so the cost is (waiters x channels) messages for one
      * block this node already has one outstanding request for.
      *
-     * <p>So the record doubles as the dampener: {@link ChunkFeePolicy#markRequested} answers false
+     * <p>So the record doubles as the dampener: {@link ChunkFeePolicy#tryMarkRequested} answers false
      * when this node asked for the same hash inside the same 64 seconds, and the broadcast is
      * skipped. It cannot stall anything — a suppressed request is one that is already outstanding,
      * and the next round past 64 seconds sends it again — and it cannot weaken §5.2, because a hash
@@ -481,21 +510,21 @@ public class SyncManager extends AbstractXdagLifecycle {
      * @param isOld   which request message to send; the sync-state flag off the waiting block, and
      *                nothing to do with whether this node asked for anything
      */
-    private void requestFromPeers(MutableBytes32 hashLow, boolean isOld) {
+    private void requestFromPeers(Bytes32 hashLow, boolean isOld) {
         // Both call sites used to carry the same commented-out idea, of asking only the peer that
         // sent the waiting block rather than all of them. It is recorded here, once, rather than
         // duplicated: a peer that forwarded a block need not be the one holding its parent, so
         // narrowing the ask would trade this traffic for stalls.
         List<Channel> channels = channelMgr.getActiveChannels();
         if (channels.isEmpty()) {
-            // Nothing to ask, so nothing to record. The order matters: markRequested stamps the
+            // Nothing to ask, so nothing to record. The order matters: tryMarkRequested stamps the
             // clock whether or not anything goes out, so recording first would have this node
             // suppress the next 64 seconds of real requests on the strength of a broadcast that
             // never happened — and an empty channel list is boot, a reconnect window or a
             // partition, exactly when the next waiter is the one that finally has somebody to ask.
             return;
         }
-        if (!feePolicy.markRequested(hashLow)) {
+        if (!feePolicy.tryMarkRequested(hashLow)) {
             // Already asked every channel for this very block moments ago; a second broadcast
             // fetches nothing the first one is not already fetching. See the method javadoc.
             return;
