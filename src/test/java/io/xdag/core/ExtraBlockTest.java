@@ -229,6 +229,18 @@ public class ExtraBlockTest {
         public void startCheckMain(long period) {
         }
 
+        /**
+         * Production {@code checkOrphan} without the {@code nblk % 61} sampling, so this test can
+         * predict how many link blocks a tick mints — it has diverged from the real one for as long
+         * as it has existed, and the {@code assertTrue} below is a second divergence.
+         *
+         * <p>It deliberately does not carry production's {@code linkBlock == null} check. That null
+         * arrives only when the orphan pool hands out no references, and the assertion below
+         * already forbids that state: a block with no references is refused by import, so this loop
+         * fails on the verdict before a null could ever be dereferenced. Reaching it needs {@code
+         * nnoref >= 11} with an empty selection, and {@code testExtraGenerate} ticks after every
+         * single import, so when {@code nblk} is 1 there are at least eleven selectable orphans.
+         */
         @Override
         public void checkOrphan() {
             long nblk = this.getXdagStats().nnoref / 11;

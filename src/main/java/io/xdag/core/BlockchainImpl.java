@@ -3219,8 +3219,20 @@ public class BlockchainImpl implements Blockchain {
                     kernel.getConfig().getNodeSpec().getNodeTag(), XAmount.ZERO, null);
             if (linkBlock == null) {
                 // Nothing to link: createLinkBlock declines when the orphan pool hands out no
-                // references. Stop the round rather than spin -- this loop is synchronous, so the
-                // pool cannot gain a selectable entry between iterations.
+                // references. End the round rather than continue, on cost rather than on
+                // impossibility -- this method is not synchronized while tryToConnect(PreValidated)
+                // is, so a net thread really can pool a selectable orphan between two iterations.
+                // Breaking defers at most one link block to the next checkState tick; continuing
+                // would spend a blockchain-monitor round trip per iteration (getOrphan takes it) on
+                // up to 61 futile selections for that chance.
+                //
+                // The regression witness for this guard lives in
+                // ChunkFloodAdversarialTest#aChunkFloodMintsLinkBlocksThatCanReferenceNothing, not
+                // beside the tests for createLinkBlock's own null. Reaching this line
+                // deterministically needs nblk > 0 with nblk % 61 == 0, the one point where the
+                // sampling draw above cannot change the answer, so nnoref must be at least 671 --
+                // which is that class's 670-block flood fixture. A closer test would have to run a
+                // second flood of the same size to get here.
                 break;
             }
             linkBlock.signOut(kernel.getWallet().getDefKey());

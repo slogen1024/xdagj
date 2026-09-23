@@ -467,8 +467,12 @@ mvn -o test -Dtest=IdleLinkMintingTest
             Block linkBlock = createNewBlock(null, null, false,
                     kernel.getConfig().getNodeSpec().getNodeTag(), XAmount.ZERO, null);
             if (linkBlock == null) {
-                // Nothing to link. Stop the round rather than spin: this loop is synchronous, so
-                // the pool cannot gain a selectable entry between iterations.
+                // Nothing to link. End the round rather than continue, on cost rather than on
+                // impossibility: checkOrphan is not synchronized while tryToConnect(PreValidated)
+                // is, so a net thread can pool a selectable orphan between two iterations.
+                // Breaking defers at most one link block to the next checkState tick; continuing
+                // would take the blockchain monitor once per iteration for up to 61 futile
+                // selections.
                 break;
             }
             linkBlock.signOut(kernel.getWallet().getDefKey());
