@@ -61,9 +61,18 @@ import org.junit.Test;
  *
  * <p>The two runs have to produce byte-identical blocks or the comparison is between two different
  * questions — {@code NO_PARENT} names the hash it could not find, so even the failure text would
- * differ for uninteresting reasons. {@link #freshFixture} rebuilds the fixture on the same mining
+ * differ for uninteresting reasons. {@code freshFixture} rebuilds the fixture on the same mining
  * timeline, which is what {@code IngestEquivalenceTest} and {@code ChunkFeePolicyTest} do for the
  * same reason.
+ *
+ * <h2>And one measurement, which is here for the same two reasons</h2>
+ *
+ * <p>{@link #aChunkFloodMintsLinkBlocksThatCanReferenceNothing} is not about losing chunks; it
+ * prices what holding them costs a mining node, which is the other half of the subproject's
+ * dealings with a chunk flood. It sits in this class because it needs exactly what the tests above
+ * need and nothing more: the armed pool that makes the node produce blocks at all, and the
+ * same-timeline {@code freshFixture} to put its two arms on identical nodes. It is a measurement
+ * rather than a regression, and it says so where it is defined.
  */
 public class ChunkFloodAdversarialTest extends ChunkOrphanTestBase {
 
@@ -243,6 +252,24 @@ public class ChunkFloodAdversarialTest extends ChunkOrphanTestBase {
      * and the cleaner gives the count back. The waste is bounded by the TTL, not by anything the
      * mining does.
      *
+     * <h2>Where the mismatch actually lives</h2>
+     *
+     * <p>{@code nnoref / 11} is what drives the mining, but it is not the only place a count that
+     * includes chunks meets a selection that cannot supply them, and it is not the narrowest. The
+     * budget a link block is built with comes from {@code OrphanBlockStoreImpl.getOrphanLocked},
+     * which for a link block asks for {@code Math.min(getOrphanSize(), num)};
+     * {@code getOrphanSize()} is {@code ChainOrphanPool.totalSize()}, which totals <b>all four
+     * categories, chunks included</b> (its own javadoc says so); and {@code selectBlocks} never
+     * offers a {@link OrphanCategory#CHUNK} entry to anybody. So the budget is computed from a
+     * total that counts blocks the selection is not allowed to hand over, and the gap between the
+     * two is exactly the pooled chunk count.
+     *
+     * <p>That is the defect's address, and it is where a fix would go: either the budget stops
+     * counting what selection will not serve, or the count that drives the mining does. Naming it
+     * here rather than only in the plan is deliberate — a line number in a plan goes stale, and a
+     * measurement that cannot say which expression it indicts leaves the next person to find it
+     * again.
+     *
      * <p><b>This is a measurement and not a fix.</b> Changing what {@code checkOrphan} counts would
      * change block-production cadence, which belongs to another change. The finding is recorded as
      * an open item in Task 16's document.
@@ -394,16 +421,6 @@ public class ChunkFloodAdversarialTest extends ChunkOrphanTestBase {
     }
 
     // ---- fixture -------------------------------------------------------------------------
-
-    /**
-     * Imported, without the chain-top assertion {@code assertImported} adds. For a delivery that is
-     * allowed to move the top — a block naming the mined main block inherits its weight — where the
-     * top is not what is being pinned.
-     */
-    private static void assertLanded(ImportResult r) {
-        assertTrue("import failed: " + r + " " + r.getErrorInfo(),
-                r == ImportResult.IMPORTED_BEST || r == ImportResult.IMPORTED_NOT_BEST);
-    }
 
     private OrphanBlockStoreImpl store() {
         return (OrphanBlockStoreImpl) blockchain.getOrphanBlockStore();

@@ -47,6 +47,7 @@ import io.xdag.utils.BytesUtils;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 import org.junit.After;
@@ -142,7 +143,7 @@ public class ChunkFloodQuotaPipelineTest extends ChunkOrphanTestBase {
      * the refusal a refusal rather than a quota that only counts.
      */
     @Test
-    public void aFloodFromOneSourceSpendsItsOwnBudgetAndNobodyElsesIntakeMoves() {
+    public void aFloodFromOneSourceSpendsItsOwnBudgetAndNobodyElsesIntakeMoves() throws Exception {
         List<Block> flood = new ArrayList<>();
         for (int i = 0; i < FLOOD; i++) {
             flood.add(lightChunk(80 + i));
@@ -195,7 +196,7 @@ public class ChunkFloodQuotaPipelineTest extends ChunkOrphanTestBase {
      * chain: a chain running out is not a reason to shut a source down.
      */
     @Test
-    public void aFloodOnOneChainSpendsThatChainsBudgetHoweverManySourcesSendIt() {
+    public void aFloodOnOneChainSpendsThatChainsBudgetHoweverManySourcesSendIt() throws Exception {
         Block target = lightChunk(60);
         submit(target, FLOODER_IP);
         drain();
@@ -266,28 +267,18 @@ public class ChunkFloodQuotaPipelineTest extends ChunkOrphanTestBase {
     }
 
     /**
-     * Waits for everything submitted so far to be committed, then insists every one of them really
-     * was imported. A chunk the pool refuses still imports — the refusal is the pool's, not the
+     * Waits for everything submitted so far to be committed — the pipeline's own idle wait, not a
+     * poll — then insists every one of them really was imported. A chunk the pool refuses still imports — the refusal is the pool's, not the
      * chain's — so anything here that did not import is a fixture problem, and without this check it
      * would look exactly like a quota doing its job.
      */
-    private void drain() {
-        for (int i = 0; i < 500; i++) {
-            if (pipeline.inFlight() == 0) {
-                for (String verdict : verdicts) {
-                    assertTrue("a delivered block was not imported: " + verdict,
-                            verdict.startsWith("IMPORTED_"));
-                }
-                return;
-            }
-            try {
-                Thread.sleep(10);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException(e);
-            }
+    private void drain() throws InterruptedException {
+        assertTrue("the ingest pipeline did not drain",
+                pipeline.awaitIdle(60, TimeUnit.SECONDS));
+        for (String verdict : verdicts) {
+            assertTrue("a delivered block was not imported: " + verdict,
+                    verdict.startsWith("IMPORTED_"));
         }
-        throw new IllegalStateException("the ingest pipeline did not drain");
     }
 
     /**

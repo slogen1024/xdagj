@@ -27,6 +27,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -44,13 +45,16 @@ import io.xdag.utils.BytesUtils;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.Locale;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.StampedLock;
+import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.MutableBytes32;
 import org.apache.tuweni.units.bigints.UInt64;
 import org.junit.Before;
@@ -98,7 +102,7 @@ public class OrphanLockOrderTest {
 
         blockchain = mock(Blockchain.class);
         AddressStore addressStore = mock(AddressStore.class);
-        when(addressStore.getExecutedNonceNum(org.mockito.ArgumentMatchers.any())).thenReturn(UInt64.ZERO);
+        when(addressStore.getExecutedNonceNum(any())).thenReturn(UInt64.ZERO);
         Kernel kernel = mock(Kernel.class);
         when(kernel.getBlockchain()).thenReturn(blockchain);
         when(kernel.getAddressStore()).thenReturn(addressStore);
@@ -114,8 +118,10 @@ public class OrphanLockOrderTest {
      * mid-rebalance.
      *
      * <p>The interleaving is deterministic rather than raced: the writer parks inside the monitor
-     * on a latch, the reader is started and given ten seconds to get anywhere, and the assertion is
-     * that it does not.
+     * on a latch, the reader is started and given half a second to get anywhere, and the assertion
+     * is that it does not. Half a second and not ten, because this is a negative assertion — the
+     * wait is pure cost when it passes, and an unlocked {@code getOrphan} returns in microseconds,
+     * so a longer one buys no confidence and taxes every run.
      *
      * <p><b>This is also the deadlock probe.</b> The writer takes blockchain &rarr; pool; the reader
      * takes pool-entry-point &rarr; blockchain (that is what {@code getOrphan} does, it synchronizes
@@ -133,8 +139,11 @@ public class OrphanLockOrderTest {
         CountDownLatch writerIsInside = new CountDownLatch(1);
         CountDownLatch writerMayFinish = new CountDownLatch(1);
         CountDownLatch readerFinished = new CountDownLatch(1);
+        // Both written by the worker threads and read by this one after they are joined, so both
+        // are concurrent collections; the file had one of each, which read as if the difference
+        // meant something.
         List<Address> selectedByReader = new CopyOnWriteArrayList<>();
-        List<Throwable> failures = new ArrayList<>();
+        List<Throwable> failures = new CopyOnWriteArrayList<>();
 
         Thread writer = new Thread(() -> {
             try {
@@ -150,9 +159,7 @@ public class OrphanLockOrderTest {
                     store.deleteFromQueue(linkBlock(2), false, UInt64.ZERO, XAmount.ZERO, null);
                 }
             } catch (Throwable t) {
-                synchronized (failures) {
-                    failures.add(t);
-                }
+                failures.add(t);
             }
         }, "orphan-writer");
 
@@ -160,9 +167,7 @@ public class OrphanLockOrderTest {
             try {
                 selectedByReader.addAll(store.getOrphan(1, new long[]{Long.MAX_VALUE, 0}, false));
             } catch (Throwable t) {
-                synchronized (failures) {
-                    failures.add(t);
-                }
+                failures.add(t);
             } finally {
                 readerFinished.countDown();
             }
@@ -181,9 +186,7 @@ public class OrphanLockOrderTest {
         writer.join();
         reader.join();
 
-        synchronized (failures) {
-            assertTrue("a thread failed: " + failures, failures.isEmpty());
-        }
+        assertTrue("a thread failed: " + failures, failures.isEmpty());
         // The writer added one entry and removed it again, so what the reader was finally let in to
         // see is the entry that was there before either of them started -- never the half-written
         // pool it was held out of, and never the entry the writer had already taken back out.
@@ -198,10 +201,16 @@ public class OrphanLockOrderTest {
      * The structural half: there is no second lock, so there is no order to get wrong.
      *
      * <p>Reflection reaches declared modifiers and declared fields, which is where a second lock
-     * would have to show up — a {@code synchronized} method, or a {@link Lock} somebody added to
-     * make the pool "thread-safe on its own". It cannot see a {@code synchronized} block inside a
-     * method body; that gap is what the interleaving test above is for, since a block that locked
-     * the pool and then waited for the monitor would deadlock there.
+     * would have to show up — a {@code synchronized} method, or something somebody added to make
+     * the pool "thread-safe on its own". The field check is by type <em>and</em> by name, because
+     * the obvious candidates do not share an interface: {@link java.util.concurrent.locks.Lock} and
+     * {@link ReadWriteLock} do, but {@link java.util.concurrent.locks.StampedLock} implements
+     * neither and {@link Semaphore} is not a lock by type at all. A plain {@code Object} used as a
+     * monitor is caught by the name rule, which is the convention it would be given.
+     *
+     * <p>What reflection cannot see is a {@code synchronized} block inside a method body; that gap
+     * is what the interleaving test above is for, since a block that locked the pool and then
+     * waited for the monitor would deadlock there.
      */
     @Test
     public void thePoolTakesNoLockOfItsOwnSoThereIsNoOrderToInvert() {
@@ -213,9 +222,15 @@ public class OrphanLockOrderTest {
                     Modifier.isSynchronized(method.getModifiers()));
         }
         for (Field field : ChainOrphanPool.class.getDeclaredFields()) {
-            assertFalse("ChainOrphanPool." + field.getName() + " is a lock: see above",
-                    Lock.class.isAssignableFrom(field.getType())
-                            || ReadWriteLock.class.isAssignableFrom(field.getType()));
+            Class<?> type = field.getType();
+            boolean lockLike = Lock.class.isAssignableFrom(type)
+                    || ReadWriteLock.class.isAssignableFrom(type)
+                    || StampedLock.class.isAssignableFrom(type)
+                    || Semaphore.class.isAssignableFrom(type)
+                    || type.getSimpleName().endsWith("Lock")
+                    || field.getName().toLowerCase(Locale.ROOT).endsWith("lock");
+            assertFalse("ChainOrphanPool." + field.getName() + " (" + type.getSimpleName()
+                    + ") is a lock: see above", lockLike);
         }
     }
 
@@ -254,7 +269,7 @@ public class OrphanLockOrderTest {
 
     private static MutableBytes32 hashLow(long id) {
         MutableBytes32 hash = MutableBytes32.create();
-        hash.set(24, org.apache.tuweni.bytes.Bytes.wrap(BytesUtils.longToBytes(id, false)));
+        hash.set(24, Bytes.wrap(BytesUtils.longToBytes(id, false)));
         return hash;
     }
 }

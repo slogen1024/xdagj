@@ -140,10 +140,19 @@ public abstract class ChunkOrphanTestBase extends ChainL1TestBase {
         return blockchain.tryToConnect(PreValidator.reimport(wrapper, fresh));
     }
 
-    /** Asserts a delivery landed and, just as importantly, that it did not take the chain top. */
-    protected void assertImported(ImportResult r) {
+    /**
+     * Asserts a delivery landed, and nothing else. For a block that is <em>allowed</em> to move the
+     * chain top — one naming the mined main block inherits its weight — where the top is not what
+     * is being pinned.
+     */
+    protected void assertLanded(ImportResult r) {
         assertTrue("import failed: " + r + " " + r.getErrorInfo(),
                 r == ImportResult.IMPORTED_BEST || r == ImportResult.IMPORTED_NOT_BEST);
+    }
+
+    /** Asserts a delivery landed and, just as importantly, that it did not take the chain top. */
+    protected void assertImported(ImportResult r) {
+        assertLanded(r);
         assertEquals("a delivered block hijacked the chain top; change the seed",
                 topRef, Bytes32.wrap(blockchain.getXdagTopStatus().getTop()));
     }
