@@ -785,8 +785,25 @@ public final class ChainOrphanPool {
         return counts[category.ordinal()];
     }
 
+    /**
+     * How many orphans this pool holds, every category together. For "how many of them the packing
+     * walk can hand out" — which is the question a budget is asking — see {@link #selectableSize}.
+     */
     public int totalSize() {
         return total;
+    }
+
+    /**
+     * How many pooled orphans the packing walk can actually hand out.
+     *
+     * <p>{@link #totalSize} counts all four categories, but {@code selectBlocks} never offers a
+     * {@link OrphanCategory#CHUNK} entry: a chunk is held for the block that will pay for it, not
+     * for this node to reference. A budget taken from the total therefore describes work the
+     * selection cannot do — which is how a node holding nothing but chunks came to build link
+     * blocks with no references in them.
+     */
+    public int selectableSize() {
+        return total - counts[OrphanCategory.CHUNK.ordinal()];
     }
 
     /**

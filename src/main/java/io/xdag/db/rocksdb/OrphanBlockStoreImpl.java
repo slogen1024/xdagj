@@ -615,9 +615,9 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
 
         long addNum;
         if (!isMain) {
-            addNum = Math.min(getOrphanSize(), num);
+            addNum = Math.min(pool.selectableSize(), num);
         } else {
-            addNum = Math.min(getOrphanSize() + pool.mainRefSize(), num);
+            addNum = Math.min(pool.selectableSize() + pool.mainRefSize(), num);
         }
         List<OrphanEntry> selected = selectBlocks(addNum, sendtime[0], isMain);
 
@@ -842,8 +842,14 @@ public class OrphanBlockStoreImpl implements OrphanBlockStore {
     }
 
     /**
-     * How many orphans this node holds — the same four queues this summed before they became the
-     * pool's four categories, {@code mainRef} excluded exactly as it always was.
+     * How many orphans this node holds — all four categories, the same four queues this summed
+     * before they became the pool's four categories, {@code mainRef} excluded exactly as it always
+     * was.
+     *
+     * <p><b>This is an observation contract, not a budget.</b> Since the packing budget moved to
+     * {@link ChainOrphanPool#selectableSize} it has no production reader left, but a large body of
+     * existing tests asserts exact values from it. Its meaning must not be narrowed to match the
+     * budget: doing so would silently change what those assertions assert.
      */
     public long getOrphanSize() {
         return pool.totalSize();
