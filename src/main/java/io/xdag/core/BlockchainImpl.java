@@ -2519,7 +2519,8 @@ public class BlockchainImpl implements Blockchain {
                 // Deliberately inside this branch and not shared with the roll branch above. That
                 // one packs from rollTxList, a different source with a different emptiness: whether
                 // a rollback with nothing to re-link should still emit a block is its own question,
-                // and no caller passes isRoll = true today (createNewBlock is the only caller and
+                // and no caller passes isRoll = true today (createNewBlock is the only production
+                // caller and
                 // it passes false), so answering it here would be an unreviewed change to a path
                 // nothing reaches.
                 return null;
@@ -3224,15 +3225,17 @@ public class BlockchainImpl implements Blockchain {
                 // is, so a net thread really can pool a selectable orphan between two iterations.
                 // Breaking defers at most one link block to the next checkState tick; continuing
                 // would spend a blockchain-monitor round trip per iteration (getOrphan takes it) on
-                // up to 61 futile selections for that chance.
+                // the rest of the round -- nnoref / 671 further selections, unbounded above, every
+                // one futile unless a net thread pools an orphan in between. Neither test below
+                // witnesses that cost: both run at nblk == 1, where break and continue are the same
+                // thing. What they pin is that reaching here does not throw.
                 //
-                // The regression witness for this guard lives in
-                // ChunkFloodAdversarialTest#aChunkFloodMintsLinkBlocksThatCanReferenceNothing, not
-                // beside the tests for createLinkBlock's own null. Reaching this line
-                // deterministically needs nblk > 0 with nblk % 61 == 0, the one point where the
-                // sampling draw above cannot change the answer, so nnoref must be at least 671 --
-                // which is that class's 670-block flood fixture. A closer test would have to run a
-                // second flood of the same size to get here.
+                // Two witnesses, both deliberate. IdleLinkMintingTest reaches this line cheaply by
+                // setting nnoref directly, which makes nblk 61 -- a non-zero multiple of 61, the one
+                // point where the sampling draw above cannot change the answer, so no flood is
+                // needed to get here. ChunkFloodAdversarialTest reaches it the long way round, from
+                // a real 670-block flood, which is what proves the arithmetic holds when nnoref is
+                // earned rather than assigned.
                 break;
             }
             linkBlock.signOut(kernel.getWallet().getDefKey());

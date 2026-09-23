@@ -68,7 +68,7 @@ import org.junit.Test;
  *
  * <h2>And one measurement, which is here for the same two reasons</h2>
  *
- * <p>{@link #aChunkFloodMintsLinkBlocksThatCanReferenceNothing} is not about losing chunks; it
+ * <p>{@link #aChunkFloodDrivesMiningRoundsThatBuildNothing} is not about losing chunks; it
  * prices what holding them costs a mining node, which is the other half of the subproject's
  * dealings with a chunk flood. It sits in this class because it needs exactly what the tests above
  * need and nothing more: the armed pool that makes the node produce blocks at all, and the
@@ -80,14 +80,14 @@ import org.junit.Test;
  * {@code docs/superpowers/specs/2026-09-23-sp0b3-chunk-pooling-without-mining-design.md}), and what
  * it holds in place now is the node's side of that fix: with nothing to reference it builds no
  * block at all. It is also the only place in the suite that reaches {@code checkOrphan}'s guard
- * against a null link block — see {@link #aChunkFloodMintsLinkBlocksThatCanReferenceNothing} for
+ * against a null link block — see {@link #aChunkFloodDrivesMiningRoundsThatBuildNothing} for
  * why no cheaper fixture gets there.
  */
 public class ChunkFloodAdversarialTest extends ChunkOrphanTestBase {
 
     /**
      * Orphans this node must be holding for {@code checkOrphan} to enter its minting round at a
-     * rate this test can predict. See {@link #aChunkFloodMintsLinkBlocksThatCanReferenceNothing} for the
+     * rate this test can predict. See {@link #aChunkFloodDrivesMiningRoundsThatBuildNothing} for the
      * arithmetic — the number is chosen so the sampling inside {@code checkOrphan} cannot fire.
      */
     private static final long NNOREF_TARGET = 671;
@@ -290,11 +290,12 @@ public class ChunkFloodAdversarialTest extends ChunkOrphanTestBase {
      * that declined to build from one that simply stopped mining.
      *
      * <p><b>The {@code checkOrphan} call in {@code floodThenTick} is load-bearing twice over.</b>
-     * Besides driving the measurement it is the only regression witness in the suite for that null
-     * guard: reaching it deterministically needs {@code nblk > 0} with {@code nblk % 61 == 0}, so
-     * {@code nnoref} must be at least 671, which is this class's 670-block flood and nothing
-     * cheaper. Take the guard away and the chunk arm dies on {@code signOut} of a null block. The
-     * same note is at the guard itself.
+     * Besides driving the measurement it reaches {@code checkOrphan}'s guard against a null link
+     * block: take the guard away and the chunk arm dies on {@code signOut} of a null. It is not the
+     * only witness — {@code IdleLinkMintingTest#checkOrphanSurvivesAPoolThatCanHandOutNothing}
+     * reaches the same line in a fifth of the time by assigning {@code nnoref} directly — but it is
+     * the one that earns the count instead of assigning it, which is what makes it worth the
+     * seven seconds. The canonical statement of all this is at the guard itself.
      *
      * <h2>Where the mismatch lived</h2>
      *
@@ -322,7 +323,7 @@ public class ChunkFloodAdversarialTest extends ChunkOrphanTestBase {
      * person to find it again.
      */
     @Test
-    public void aChunkFloodMintsLinkBlocksThatCanReferenceNothing() throws Exception {
+    public void aChunkFloodDrivesMiningRoundsThatBuildNothing() throws Exception {
         Tick chunks = floodThenTick(true);
         freshFixture();
         Tick links = floodThenTick(false);
@@ -473,9 +474,9 @@ public class ChunkFloodAdversarialTest extends ChunkOrphanTestBase {
         int attemptsBefore = counting().attempts;
         int builtBefore = counting().built;
         for (int i = 0; i < TICKS; i++) {
-            // Load-bearing twice over; see this class's measurement javadoc. Besides driving the
-            // arm, this is the only call in the suite that reaches checkOrphan's guard against a
-            // null link block, because reaching it needs nnoref >= 671.
+            // Load-bearing twice over; see this class's measurement javadoc and the guard itself.
+            // Besides driving the arm, this reaches checkOrphan's guard against a null link block
+            // with an nnoref this fixture earned rather than assigned.
             blockchain.checkOrphan();
         }
         int attempts = counting().attempts - attemptsBefore;
@@ -539,8 +540,8 @@ public class ChunkFloodAdversarialTest extends ChunkOrphanTestBase {
 
     /**
      * The counting node, which is the only kind this class builds. Read through a cast rather than
-     * kept in a field of its own: {@code freshFixture} replaces the instance between the two arms,
-     * and a second reference to it is a second thing that has to be kept in step.
+     * kept in a field of its own, so that the field {@code setUpChain} assigns stays the one
+     * definition of which instance is current across {@code freshFixture}.
      */
     private CountingBlockchain counting() {
         return (CountingBlockchain) blockchain;

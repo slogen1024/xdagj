@@ -234,12 +234,17 @@ public class ExtraBlockTest {
          * predict how many link blocks a tick mints — it has diverged from the real one for as long
          * as it has existed, and the {@code assertTrue} below is a second divergence.
          *
-         * <p>It deliberately does not carry production's {@code linkBlock == null} check. That null
-         * arrives only when the orphan pool hands out no references, and the assertion below
-         * already forbids that state: a block with no references is refused by import, so this loop
-         * fails on the verdict before a null could ever be dereferenced. Reaching it needs {@code
-         * nnoref >= 11} with an empty selection, and {@code testExtraGenerate} ticks after every
-         * single import, so when {@code nblk} is 1 there are at least eleven selectable orphans.
+         * <p>It deliberately does not carry production's {@code linkBlock == null} check, because
+         * this fixture cannot reach the state that null comes from. That state is {@code nnoref >=
+         * 11} with an empty selection, and {@code testExtraGenerate} ticks after every single
+         * import, so when {@code nblk} is 1 there are at least eleven selectable orphans;
+         * {@code testExtraBlockReUse} never ticks at all. The historical evidence agrees: before
+         * the null existed, such a state would have built a reference-less block and failed the
+         * {@code assertTrue} below on its verdict, and that never happened.
+         *
+         * <p>The {@code assertNotNull} is insurance rather than argument — if the premise above
+         * ever stops holding, this fails with a sentence instead of a {@code NullPointerException}
+         * one line further down.
          */
         @Override
         public void checkOrphan() {
@@ -247,6 +252,8 @@ public class ExtraBlockTest {
             while (nblk-- > 0) {
                 Block linkBlock = createNewBlock(null, null, false,
                         kernel.getConfig().getNodeSpec().getNodeTag(), XAmount.ZERO, null);
+                assertNotNull("this fixture never reaches the empty-selection state; see the javadoc",
+                        linkBlock);
                 linkBlock.signOut(kernel.getWallet().getDefKey());
                 ImportResult result = this.tryToConnect(linkBlock);
                 assertTrue(result == IMPORTED_BEST || result == IMPORTED_NOT_BEST);

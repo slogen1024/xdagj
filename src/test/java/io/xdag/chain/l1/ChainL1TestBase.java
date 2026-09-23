@@ -321,9 +321,8 @@ public abstract class ChainL1TestBase {
     /**
      * The blockchain this fixture runs on, built once {@link #beforeBlockchain} has had the kernel.
      *
-     * <p>A seam for the same reason {@link #newConfig()} is one, and it exists for the same kind of
-     * subclass: one that has to observe a decision the production code makes and neither a store nor
-     * a listener exposes — {@code createLinkBlock} declining to build, say, which leaves no trace
+     * <p>A seam for a subclass that has to observe a decision the production code makes and
+     * neither a store nor a listener exposes — {@code createLinkBlock} declining to build, say, which leaves no trace
      * anywhere because the block is never constructed. Overriding a method on the instance is the
      * only place such a thing can be seen, and the instance is created here.
      *

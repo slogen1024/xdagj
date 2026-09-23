@@ -27,15 +27,19 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-import io.xdag.core.Address;
-import io.xdag.utils.XdagTime;
+import java.util.ArrayList;
 import java.util.List;
+
+import io.xdag.core.Address;
+import io.xdag.listener.BlockMessage;
+import io.xdag.listener.Message;
+import io.xdag.utils.XdagTime;
 import org.junit.Test;
 
 /**
  * A node holding nothing but chunk blocks used to build link blocks with no references in them:
  * eight built and signed per flood in {@code ChunkFloodAdversarialTest
- * #aChunkFloodMintsLinkBlocksThatCanReferenceNothing}, none of them imported, each refused by this
+ * #aChunkFloodDrivesMiningRoundsThatBuildNothing}, none of them imported, each refused by this
  * node's own import as {@code Block's time is illegal}. This class is where that is taken apart,
  * and it now pins all three pieces of the answer.
  *
@@ -63,6 +67,12 @@ import org.junit.Test;
  * own import refuses, so nothing is lost.
  */
 public class IdleLinkMintingTest extends ChunkOrphanTestBase {
+
+    /**
+     * The smallest {@code nnoref} that makes {@code checkOrphan} run exactly one minting round with
+     * no sampling: {@code 671 / 11 == 61}, and {@code 61 % 61 == 0}, so the draw cannot change it.
+     */
+    private static final long NNOREF_FOR_ONE_ROUND = 671;
 
     /**
      * The budget a link block is built against must describe what the packing walk can actually
@@ -102,8 +112,10 @@ public class IdleLinkMintingTest extends ChunkOrphanTestBase {
      * The block this node used to build when the pool could hand it nothing: no references, and a
      * timestamp of 1, because the empty selection still ran the "newest reference plus one" line.
      * Its own import refused it as {@code Block's time is illegal} — eight built and signed per
-     * flood in {@code ChunkFloodAdversarialTest#aChunkFloodMintsLinkBlocksThatCanReferenceNothing},
+     * flood in {@code ChunkFloodAdversarialTest#aChunkFloodDrivesMiningRoundsThatBuildNothing},
      * none of them imported.
+     *
+     * <p>It returns null instead now, and that is what this pins.
      */
     @Test
     public void aPoolHoldingOnlyChunksBuildsNoLinkBlockAtAll() {
@@ -117,6 +129,49 @@ public class IdleLinkMintingTest extends ChunkOrphanTestBase {
 
         assertNull("with nothing to reference there is no link block to build",
                 blockchain.createLinkBlock(null, false));
+    }
+
+    /**
+     * The caller's half: {@code checkOrphan} must survive the null {@code createLinkBlock} now
+     * returns, rather than dereferencing it.
+     *
+     * <h2>Why this can be cheap, when the comment at the guard used to say it could not</h2>
+     *
+     * <p>Reaching the guard deterministically needs {@code nblk > 0} with {@code nblk % 61 == 0} —
+     * the one point where {@code checkOrphan}'s sampling draw cannot change the answer — and
+     * {@code nblk} is {@code nnoref / 11}, so {@code nnoref} has to be 671. That was read as "so it
+     * needs the 670-block flood fixture", and it does not: {@code nnoref} is a plain field on
+     * {@link io.xdag.core.XdagStats} with a setter, and {@code OrphanBlockStoreWiringTest} already
+     * assigns it by hand. Nothing resets it in between here, because {@code MockBlockchain
+     * .startCheckMain} is a no-op, so no scheduler is running.
+     *
+     * <p>Assigning it is not the same experiment as earning it, which is why
+     * {@code ChunkFloodAdversarialTest} keeps reaching the same line from a real flood. This one
+     * pins that the guard holds; that one pins that the arithmetic above it survives a pool filled
+     * the way production fills it.
+     */
+    @Test
+    public void checkOrphanSurvivesAPoolThatCanHandOutNothing() {
+        drainSelectableEntries();
+        for (int i = 0; i < 5; i++) {
+            assertImported(deliver(lightChunk(780 + i)));
+        }
+        assertEquals("the pool holds only chunks", 0, pool().selectableSize());
+
+        List<Message> minted = new ArrayList<>();
+        blockchain.registerListener(message -> {
+            if (message instanceof BlockMessage) {
+                minted.add(message);
+            }
+        });
+
+        // 671 / 11 = 61, and 61 % 61 == 0, so the draw cannot fire and this is exactly one round.
+        blockchain.getXdagStats().nnoref = NNOREF_FOR_ONE_ROUND;
+        blockchain.checkOrphan();
+
+        assertEquals("a round that can reference nothing must mint nothing", 0, minted.size());
+        assertEquals("and must leave the count that drove it alone",
+                NNOREF_FOR_ONE_ROUND, blockchain.getXdagStats().nnoref);
     }
 
     /** The latent half: an empty selection must not fabricate a timestamp for its caller. */
