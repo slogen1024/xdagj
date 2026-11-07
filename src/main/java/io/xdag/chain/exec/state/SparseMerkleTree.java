@@ -111,8 +111,13 @@ public final class SparseMerkleTree {
      * ({@code nonEmptySiblings}) reads this and nothing else about the tree.
      */
     public static int nonEmptySiblings(Bytes32 key, List<Kv> kvs) {
-        Bytes32[] siblings = proof(key, kvs).siblings();
+        return nonEmptySiblings(proof(key, kvs));
+    }
+
+    /** Sibling count of an already-built proof. Witness billing uses this, not a caller-supplied number. */
+    public static int nonEmptySiblings(Proof proof) {
         int n = 0;
+        Bytes32[] siblings = proof.siblings();
         for (int d = 0; d < DEPTH; d++) {
             if (!siblings[d].equals(EMPTY[d + 1])) {
                 n++;

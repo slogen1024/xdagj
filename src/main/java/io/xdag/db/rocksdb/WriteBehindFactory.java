@@ -31,7 +31,7 @@ import lombok.extern.slf4j.Slf4j;
 /**
  * Wraps a node's {@link DatabaseFactory} so that the four databases the import path writes —
  * INDEX, BLOCK, TIME, ORPHANIND — go through one {@link WriteBehindQueue}. Every other database
- * (SNAPSHOT, ADDRESS, TXHISTORY, CHAIN_L1) is handed out untouched: they are written only on the
+ * (SNAPSHOT, ADDRESS, TXHISTORY, CHAIN_L1, CHAIN_EXEC) is handed out untouched: they are written only on the
  * apply path, which runs in direct mode anyway, or by offline tools. {@code BlockStoreImpl.forNode}
  * and the orphan store need no change.
  *

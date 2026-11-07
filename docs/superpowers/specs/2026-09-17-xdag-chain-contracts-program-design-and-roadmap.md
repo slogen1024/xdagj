@@ -1,6 +1,6 @@
 # XDAG 原生智能合约（Chain 链）总体详细设计与实施规划
 
-> 状态：设计稿 v1（2026-09-17）。
+> 状态：设计稿 v1（2026-09-17）。实施进度见 §0，以 2026-11-07 的代码为准。
 > 定位：本文是 **SP0b 至 SP5（含 v2 展望）的实施级总体设计与路线图**。它以已建成的 SP0a 为基线，把总规格 `2026-09-13-xdag-chain-contracts-design.md`（架构与协议规则的真相源）展开到接口、数据结构、算法、测试与任务分解的粒度，并给出里程碑与门禁。
 > 真相源规则：协议规则以总规格为准；SP0a 已建成部分以 `2026-09-13-xdag-chain-sp0a-block-format-and-l1-hooks-design.md` 为准；本文与二者冲突时，本文让位并需修订。各子项目开工前仍要走 brainstorming → 子项目 spec → writing-plans 的流程，本文的设计是那一步的起点而非替代。
 > 术语：2026-09-17 起 lane/通道 统一改称 chain/链（应用链）；主链、分片链的用法不变。
@@ -19,6 +19,25 @@
 | 评审共识安全 | §3、§6.7、§8.4、§11.3、§14 |
 
 约定：`SPx-y` 表示子项目 x 的第 y 个可独立交付的切片；"handler" 指 `io.xdag.chain.l1.ChainKindHandler` 的实现；"执行者"指订阅了某链并计算其状态的节点进程内组件；"共识路径"指 `BlockchainImpl.setMain/applyBlock/unApplyBlock/unSetMain` 及其钩子；"节点本地"指不影响 `CHAIN_L1` 状态哈希与任何全网可见判定的逻辑。
+
+### 完成进度（2026-11-07）
+
+| 切片 | 状态 | 已落地 | 还没有 |
+|------|------|--------|--------|
+| SP0a | 完成 | 块格式、`CHAIN_L1`、钩子、快照三目录 | — |
+| SP0b-1 | 完成 | 基准、G1/G2/G9/G10、修复命令 | — |
+| SP0b-2 | 完成 | 锁外预验证与批量落盘。本切片中位 7157 块/s | 10k 门禁是 §5.2.1 关的，不是这一节 |
+| SP0b-2b | 完成 | 中位 19687 块/s，锁内均值 42–49 µs | — |
+| SP0b-3 | 完成 | 分队列孤块池、配额、TTL、导入期费率、不挖矿留分片 | `removeWorst.d125` 的约 1.5 µs 残差未拆 |
+| SP1-1 | 完成 | Chicory 1.7.5，`io.xdag.chain.exec.wasm` | — |
+| SP1-2 | 完成 | `StateTree` 的 get/put/remove；`OutboxMap`；`WitnessRecorder`（同 key 只计一次，`estimateFromGas` = gas/10 + 32KiB）；`ChainExecStore`（`CHAIN_EXEC`，快照页键多一个 `page u32`）。§8.3 不等式在 `StateAndWitnessTest` | 执行循环仍是 SP1-3。哈希函数仍是无状态的 `SparseMerkleTree` |
+| SP1-3 / 4 / 5 | 未开工 | — | 执行循环、回滚、快照落库、两模式吞吐 |
+| SP2 | 未开工 | — | 金库、CLAIM、系统划账 |
+| SP3 | 未开工 | — | 锚定、仲裁、罚没 |
+| SP4 | 部分 | 订阅集合；`0x1B–0x1F`；快照页与 SMT 根校验；四种证明体；`Delivery` 的 HOLD；未 `open` 的回复丢弃，每方向最多 64 条；拉取默认 8 MiB。进程内三节点见 `ThreeNodeDevnetTest` | 执行器只跑订阅链；docker 上的 D=0/D=W 与挑战罚没（没有 SP2/SP3 就没有锚定可罚）。**M5 未关** |
+| SP5 | 未开工 | — | RPC、SDK、CLI、DApp |
+
+里程碑：M1、M2 完成。M3 只关掉了导入门禁（19687 块/s），执行吞吐未测。M4、M5、M6、M7 未完成。
 
 ---
 
@@ -130,17 +149,18 @@ NEW_BLOCK ─► 导入流水线(SP0b) ─► tryToConnect ─► setMain/applyB
 io.xdag.chain
 ├── ext/            已建成：编解码、分片链、构建器、分类器
 ├── l1/             已建成：CHAIN_L1、处理器、钩子、快照门
-│   └── handlers/   SP2/SP3：BondHandler, AnchorHandler, ChallengeHandler, ClaimHandler, HeightTriggers
-├── ingest/         SP0b-2/3：PreValidator, IngestPipeline, ChainOrphanPool, ChunkFeePolicy
-├── repair/         SP0b-1：ChainConsistencyCheck, ChainRepairTool
-├── exec/           SP1：ChainExecutor, InputStreamBuilder, CallFrame, ChainLedger, ChangeLog, ChainExecStore
-│   ├── wasm/       SP1：WasmEngine(接口), ChicoryEngine, ModuleValidator, GasInstrumenter, HostAbi
-│   └── state/      SP1：SparseMerkleTree, Mmr, OutboxMap, WitnessRecorder
-├── anchor/         SP3：AnchorPublisher, CommitmentChain, CanonicalChainRules
-├── fraud/          SP3：WitnessCodec, Arbiter, WitnessBackedStore, VerdictCache
-├── asset/          SP2：VaultLedger, WithdrawOutbox, ClaimVerifier, SettlementJournal
-├── p2p/            SP4：ChainSubscriptions, ChainSnapshotSync, ChainProofService, 消息 0x1B–0x1F
-└── rpc/            SP5：ChainApi(chain_*), ChainApiImpl, 视图层 (pending/confirmed/anchored/final)
+│   └── handlers/   未建（SP2/SP3）：BondHandler, AnchorHandler, ChallengeHandler, ClaimHandler, HeightTriggers
+├── ingest/         已建成（SP0b-2/3）：PreValidator, IngestPipeline, ChunkFeePolicy
+├── orphan/         已建成（SP0b-3）：ChainOrphanPool
+├── repair/         已建成（SP0b-1）：ChainConsistencyCheck, ChainRepairTool
+├── exec/           已建成 ChainExecStore（SP1-2）。未建：ChainExecutor, InputStreamBuilder, CallFrame, ChainLedger, ChangeLog
+│   ├── wasm/       已建成（SP1-1）：WasmEngine, ChicoryEngine, ModuleValidator, GasInstrumenter, HostAbi
+│   └── state/      已建成（SP1-2）：SparseMerkleTree, StateTree, Mmr, OutboxMap, WitnessRecorder
+├── anchor/         未建（SP3）：AnchorPublisher, CommitmentChain, CanonicalChainRules
+├── fraud/          未建（SP3）：WitnessCodec, Arbiter, WitnessBackedStore, VerdictCache
+├── asset/          未建（SP2）：VaultLedger, WithdrawOutbox, ClaimVerifier, SettlementJournal
+├── p2p/            部分（SP4）：ChainSubscriptions, ChainExchange, SnapshotPages, SnapshotSync, ProofBodies, ChainRecords, Delivery。消息在 io.xdag.net.message.chain
+└── rpc/            未建（SP5）：ChainApi(chain_*), ChainApiImpl, 视图层 (pending/confirmed/anchored/final)
 ```
 
 ### 4.1 关键接口边界（草案，SP 开工时在子项目 spec 里定稿）
@@ -272,13 +292,13 @@ SP1 是最大的子项目，建议切为 **SP1-1 WASM 引擎与 ABI → SP1-2 �
 - `HostAbi`：实现总规格 §8.3 全部 `xdag.*` 导入，费用表来自 `GasSchedule`（协议常量类，激活后不可改）。
 - 测试：白名单每条一个反例；插桩输出对固定 wasm 向量的哈希钉死；gas 计数在解释器与编译模式一致；`-Xss` 无关性（深递归模块在两种模式下同一 trap 点）。
 
-### 6.2 SP1-2：状态、承诺与见证
+### 6.2 SP1-2：状态、承诺与见证（**已实施，2026-11-07**。可变映射是 `StateTree`，哈希函数仍是无状态的 `SparseMerkleTree`。`OutboxMap`、`WitnessRecorder`、`ChainExecStore` 已落地。快照页的存储键比下表多一个 `page u32`，因为一页装不下整个 seq。§8.3 不等式在 `StateAndWitnessTest`）
 
-- `SparseMerkleTree`：256 层、SHA-256、空子树预计算；`get/put/remove/root/proof/verify`；`nonEmptySiblings(key)` 作为一等 API（见证计费依赖）。
+- `SparseMerkleTree`：256 层、SHA-256、空子树预计算；纯函数 `root/proof/verify`。`get/put/remove` 在 `StateTree`。`nonEmptySiblings(key)` 与 `nonEmptySiblings(proof)` 都是一等 API（见证计费用证明上的那个）。
 - `Mmr`：append-only，`root/size/proof/verify`。
 - `OutboxMap`：小 SMT，key = dstChain，value = `mmrRoot ‖ size`。
 - `WitnessRecorder`：记录一次调用的读集（key, value|absent, 证明）、写集（key, 兄弟路径）、累计 `witnessBytes`；提供 `estimateFromGas(gasUsed)` 上界。
-- `ChainExecStore`（RocksDB 列 `CHAIN_EXEC`，节点本地）：前缀表——`0x01 chainId‖key → value`、`0x02 chainId → 最新 seq/根`、`0x03 chainId‖seq → 变更集`、`0x04 chainId‖seq → 快照页`、`0x05 chainId‖dst → MMR 节点`、`0x06 chainId‖seq‖k → C_k 开解`、`0x07 chainId‖blockHash → 回执`。
+- `ChainExecStore`（RocksDB 列 `CHAIN_EXEC`，节点本地）：前缀表——`0x01 chainId‖key → value`、`0x02 chainId → 最新 seq/根`、`0x03 chainId‖seq → 变更集`、`0x04 chainId‖seq‖page u32 → 快照页`、`0x05 chainId‖dst → MMR 节点`、`0x06 chainId‖seq‖k → C_k 开解`、`0x07 chainId‖blockHash → 回执`。
 - 属性测试：随机调用的实际 `witnessBytes ≤ estimateFromGas(gasUsed)`（§8.3 不等式）；SMT/MMR 证明正反例；同一 KV 序列在两种插入顺序下根相同。
 
 ### 6.3 SP1-3：输入流与执行循环
@@ -473,31 +493,31 @@ SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器�
 ### 13.1 依赖图
 
 ```
-SP0a ✅ ─┬─► SP0b-1 ─► SP0b-2 ─► SP0b-3
+SP0a ✅ ─┬─► SP0b-1 ✅ ─► SP0b-2 ✅ ─► SP0b-2b ✅ ─► SP0b-3 ✅
          │
-         └─► SP1-1 ─► SP1-2 ─► SP1-3 ─► SP1-4 ─► SP1-5
-                                   │
-                                   ├─► SP2 ─┐
-                                   └─► SP3-1 ─► SP3-2 ─► SP3-3 ─► SP3-4 ─┤
-                                                                         ├─► SP4 ─► SP5
-SP0b-3 ──────────────────────────────────────────────────────────────────┘
+         └─► SP1-1 ✅ ─► SP1-2 ✅ ─► SP1-3 ─► SP1-4 ─► SP1-5
+                                          │
+                                          ├─► SP2 ─┐
+                                          └─► SP3 ─┤
+                                                   ├─► SP4（线格式/页/证明）─► SP5
+SP0b-3 ✅ ─────────────────────────────────────────┘
 ```
 
-SP0b 与 SP1 并行（不同包、不同人/会话）；SP2 与 SP3 并行（都依赖 SP1-3）；SP4 需要 SP2+SP3+SP0b-3。
+SP0b 与 SP1 并行（不同包、不同人/会话）；SP2 与 SP3 并行（都依赖 SP1-3）。SP4 里不碰执行状态的那一层（订阅、消息、页、证明校验）已经做了，不依赖 SP2/SP3。M5 要的 docker 跨链和挑战罚没仍然依赖 SP2+SP3。
 
-**SP0b-2b（§5.2.1）插在 SP0b-2 与 SP0b-3 之间，并且已经做完**：SP0b-2 自己的验收（导入 ≥ 10k 块/s）当时未达成，缺口在锁内"其余"；SP0b-2b 把锁内均值压到 42–49 µs，中位 19687 块/s，门禁关闭。它与 SP0b-3 在孤块池上有重叠，顺序可换。SP0b-3 也已经做完；M5 还差 SP4。
+**SP0b-2b（§5.2.1）插在 SP0b-2 与 SP0b-3 之间，并且已经做完**：SP0b-2 自己的验收（导入 ≥ 10k 块/s）当时未达成，缺口在锁内"其余"；SP0b-2b 把锁内均值压到 42–49 µs，中位 19687 块/s，门禁关闭。它与 SP0b-3 在孤块池上有重叠，顺序可换。SP0b-3 也已经做完。M5 还差 SP4 里的 docker 演练，不是整段 SP4。
 
 ### 13.2 里程碑
 
-| 里程碑 | 内容 | 出口门禁 |
-|--------|------|---------|
-| **M1 基线** | SP0b-1 完成 | 基线文档；G1/G2/G9/G10 关闭；全量绿 |
-| **M2 引擎** | SP1-1/2 完成 | 白名单/插桩测试向量钉死；§8.3 不等式属性测试通过 |
-| **M3 执行** | SP1-3/4/5 + SP0b-2 完成 | 单链执行吞吐 ≥ 2k 调用/s；两模式一致；**导入 ≥ 10k 块/s —— SP0b-2b 达成**：20000 块负载 `pipeline` 中位 **19687 块/s**，锁内均值 42–49 µs。瓶颈是 `checkMineAndAdd` 对每个块做 secp256k1，不是 AddressStore。见 `docs/benchmarks/2026-11-07-sp0b2b-import.md`。SP1 的执行吞吐仍未测 |
-| **M4 经济与安全** | SP2 + SP3 完成 | I1–I3 属性；E1/E2/E3 对抗；仲裁 ≤ 2 s；N2 全场景 |
-| **M5 网络** | SP0b-3 + SP4 完成 | 3 节点 devnet 跨链 + 挑战演练脚本通过 |
-| **M6 开发者面** | SP5 完成 | RPC/SDK/CLI/DApp；文档 |
-| **M7 testnet 激活** | 治理定高度、快照、观察期 | §11.3 |
+| 里程碑 | 状态 | 内容 | 出口门禁 |
+|--------|------|------|---------|
+| **M1 基线** | 完成 | SP0b-1 完成 | 基线文档；G1/G2/G9/G10 关闭；全量绿 |
+| **M2 引擎** | 完成 | SP1-1/2 完成 | 白名单/插桩测试向量已钉死。§8.3 不等式：随机读写的 `witnessBytes` ≤ `estimateFromGas(gasUsed)`（`StateAndWitnessTest`） |
+| **M3 执行** | 未完成 | SP0b-2/2b 的导入门禁已关；SP1-3/4/5 未开工 | 单链执行吞吐 ≥ 2k 调用/s 未测；两模式一致未测。**导入 ≥ 10k 块/s 已达成**：20000 块负载 `pipeline` 中位 **19687 块/s**，锁内均值 42–49 µs。瓶颈是 `checkMineAndAdd` 对每个块做 secp256k1，不是 AddressStore。见 `docs/benchmarks/2026-11-07-sp0b2b-import.md` |
+| **M4 经济与安全** | 未开工 | SP2 + SP3 | I1–I3 属性；E1/E2/E3 对抗；仲裁 ≤ 2 s；N2 全场景 |
+| **M5 网络** | 未完成 | SP0b-3 完成；SP4 的线格式、页、证明完成 | 3 节点 devnet 跨链 + 挑战演练脚本仍未通过。进程内三节点只覆盖订阅分裂和拉页/拉证明 |
+| **M6 开发者面** | 未开工 | SP5 | RPC/SDK/CLI/DApp；文档 |
+| **M7 testnet 激活** | 未开工 | 治理定高度、快照、观察期 | §11.3 |
 
 ### 13.3 每个子项目的固定流程与门禁
 
@@ -536,7 +556,7 @@ brainstorming（子项目 spec，以本文对应章节为起点）→ writing-pl
 
 ### 15.1 消息码与 RPC 现状（已核实）
 
-- P2P 在用码点：0x00–0x05、0x10–0x1A；0x1B–0x1F 空闲，分配给 SP4。
+- P2P 在用码点：0x00–0x05、0x10–0x1F。`0x1B–0x1F` 已是链订阅、快照和证明（2026-11-07），不再空闲。
 - 原生 RPC `xdag_*`（`XdagApi`）保持不变；`chain_*` 作为独立接口 `ChainApi` 注册到同一 JSON-RPC 服务器。
 
 ### 15.2 `CHAIN_L1` 前缀总表（含预留）

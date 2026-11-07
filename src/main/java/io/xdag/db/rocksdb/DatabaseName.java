@@ -53,5 +53,11 @@ public enum DatabaseName {
     TXHISTORY,
 
     /** Chain contracts: global L1 state (registry, code store, input index, bonds, anchors). */
-    CHAIN_L1
+    CHAIN_L1,
+
+    /**
+     * Chain contracts: this node's execution state (KV, changesets, snapshot pages, proofs).
+     * Node-local. Not in the snapshot hash and not on the import write-behind path.
+     */
+    CHAIN_EXEC
 }

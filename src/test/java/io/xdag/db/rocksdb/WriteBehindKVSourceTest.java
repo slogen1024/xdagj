@@ -592,6 +592,7 @@ public class WriteBehindKVSourceTest {
             assertTrue(factory.getDB(DatabaseName.ORPHANIND) instanceof WriteBehindKVSource);
             assertFalse(factory.getDB(DatabaseName.ADDRESS) instanceof WriteBehindKVSource);
             assertFalse(factory.getDB(DatabaseName.CHAIN_L1) instanceof WriteBehindKVSource);
+            assertFalse(factory.getDB(DatabaseName.CHAIN_EXEC) instanceof WriteBehindKVSource);
             assertFalse(factory.getDB(DatabaseName.TXHISTORY) instanceof WriteBehindKVSource);
             assertTrue("same instance on repeated getDB", factory.getDB(DatabaseName.INDEX) == factory.getDB(DatabaseName.INDEX));
         } finally {

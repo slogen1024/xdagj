@@ -26,6 +26,7 @@ package io.xdag;
 
 import static io.xdag.crypto.keys.AddressUtils.toBytesAddress;
 
+import io.xdag.chain.exec.ChainExecStore;
 import io.xdag.chain.ext.ExtKind;
 import io.xdag.chain.p2p.ChainRecords;
 import io.xdag.chain.l1.ChainKindHandler;
@@ -90,6 +91,8 @@ public class Kernel {
     protected OrphanBlockStore orphanBlockStore;
     protected TransactionHistoryStore txHistoryStore;
     protected ChainL1Store chainL1Store;
+    /** Node-local execution store. Empty until an executor writes it. Not in the snapshot hash. */
+    protected ChainExecStore chainExecStore;
     /**
      * Snapshot pages and proof bodies this node can serve. Empty until an executor writes them,
      * in which case a request is answered ABSENT rather than with a made-up page.
@@ -235,6 +238,8 @@ public class Kernel {
             // Stopped in testStop() before the databases are closed, so isRunning() stays truthful.
             chainL1Store = new ChainL1Store(dbFactory.getDB(DatabaseName.CHAIN_L1));
             chainL1Store.start();
+            chainExecStore = new ChainExecStore(dbFactory.getDB(DatabaseName.CHAIN_EXEC));
+            chainExecStore.start();
 
             if (config.getEnableTxHistory()) {
                 long txPageSizeLimit = config.getTxPageSizeLimit();
@@ -362,6 +367,13 @@ public class Kernel {
                     e.addSuppressed(ex);
                 }
             }
+            if (chainExecStore != null) {
+                try {
+                    chainExecStore.stop();
+                } catch (RuntimeException ex) {
+                    e.addSuppressed(ex);
+                }
+            }
             if (dbFactory != null) {
                 try {
                     dbFactory.close();
@@ -471,6 +483,13 @@ public class Kernel {
                     chainL1Store.stop();
                 } catch (RuntimeException e) {
                     log.error("could not stop the chain store; closing the databases anyway", e);
+                }
+            }
+            if (chainExecStore != null) {
+                try {
+                    chainExecStore.stop();
+                } catch (RuntimeException e) {
+                    log.error("could not stop the execution store; closing the databases anyway", e);
                 }
             }
 
