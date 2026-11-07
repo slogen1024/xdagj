@@ -376,6 +376,8 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
         List<OrphanEntry> order = new ArrayList<>(flood);
         Collections.shuffle(order, new Random(seed));
         int[] pass = {0};
+        int[] seededOut = {0};
+        int[] vipOut = {0};
         long nanos = bestOf3(() -> {
             if (pass[0]++ > 0) {
                 assertEquals("a timed worst-case pass did not drain the pool", 0, (int) pool.getOrphanSize());
@@ -391,7 +393,9 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
             // business (a linkQueue draw plus whatever the VIP branch contributes) and SP0b-3 is
             // going to change that order, so pin mainRef against what getOrphan actually handed out
             // rather than against a number that encodes today's selection policy.
+            vipOut[0] = ((OrphanBlockStoreImpl) pool).getPool().laneSize(AccountLane.VIP);
             int seeded = pool.getOrphan(MAIN_REF_DEPTH, new long[]{Long.MAX_VALUE, 0}, true).size();
+            seededOut[0] = seeded;
             assertEquals("mainRef was not seeded with what getOrphan handed out", seeded, mainRef(pool).size());
             assertTrue("mainRef is too shallow for a worst case: " + seeded, seeded >= expectedMainRef);
             persist().flushSync();
@@ -402,6 +406,10 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
         });
         assertEquals("orphan.removeWorst must leave the pool empty", 0, (int) pool.getOrphanSize());
         assertTrue("orphan.removeWorst must drain mainRef too", mainRef(pool).isEmpty());
+        // A7.6: the assertion above only checks a lower bound. The actual seed is what §A7 is about.
+        System.out.println("orphan.removeWorst.seeded depth=" + (items / WORST_SENDERS)
+                + " seeded=" + seededOut[0] + " vip=" + vipOut[0] + " links=" + links
+                + " expectedMainRef=" + expectedMainRef + " flood=" + flood.size());
         emptyPool(pool, flood);
         return phaseRow("orphan.removeWorst.d" + (items / WORST_SENDERS), flood.size(), nanos);
     }

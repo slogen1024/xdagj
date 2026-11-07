@@ -218,7 +218,7 @@ SP0b 切成三个可独立交付的切片，顺序固定：**SP0b-1 基准 + 加
 
 **任务量估计**：8–10 个 TDD 任务。
 
-### 5.2 SP0b-2：锁外预验证流水线与批量落盘（**已实施，见 SP0b-2 规格与计划**——`2026-09-18-xdag-chain-sp0b2-ingest-pipeline-design.md` v2 是竣工版，本节保留原方案，与实现不一致处以该规格为准；**验收目标 ≥ 10,000 块/s 未达成，实测中位 7157 块/s**，原因与下一步见该规格 §4.3 与 `docs/benchmarks/2026-09-19-l1-import-pipeline.md`）
+### 5.2 SP0b-2：锁外预验证流水线与批量落盘（**已实施，见 SP0b-2 规格与计划**——`2026-09-18-xdag-chain-sp0b2-ingest-pipeline-design.md` v2 是竣工版，本节保留原方案，与实现不一致处以该规格为准；**本切片自己的实测中位 7157 块/s，当时未到 10,000**。门禁由 §5.2.1 在 2026-11-07 关闭，中位 19687 块/s。当时的原因见该规格 §4.3 与 `docs/benchmarks/2026-09-19-l1-import-pipeline.md`）
 
 目标：把 `tryToConnect` 锁内工作压缩到"存在性 + link 校验 + 难度 + DAG 插入 + 孤块池更新"，其余在锁外并行完成；`saveBlock` 的三次 RocksDB 写合成一个 `WriteBatch`。
 
@@ -246,7 +246,7 @@ SP0b-2 把验签与落盘都搬出了锁，导入吞吐从 SP0b-1 的基线抬�
 
 规格与实测：`docs/superpowers/specs/2026-09-18-xdag-chain-sp0b2-ingest-pipeline-design.md` §4.3、`docs/benchmarks/2026-09-19-l1-import-pipeline.md`。
 
-### 5.3 SP0b-3：孤块池分队列、配额、TTL 与导入期费率策略
+### 5.3 SP0b-3：孤块池分队列、配额、TTL 与导入期费率策略（**已实施**；设计 `2026-09-19-xdag-chain-sp0b3-orphan-pool-design.md`，不挖矿节点留分片块见 `2026-09-23-sp0b3-chunk-pooling-without-mining-design.md`，AFTER 见 `docs/benchmarks/2026-09-19-orphan-pool.md`。移除代价不再随池深线性上升。`removeWorst.d125` 变贵对得上 `mainRef` 播种变深：BEFORE 132、AFTER 256，d500 两边都是 256，见该文 §A7.6）
 
 1. `ChainOrphanPool` 替代 `memOrphanPool` 的单一 `LinkedHashMap`：按类别分队列——账户交易 / 分片块 / 其它 link 块；分片块再按来源 peer IP 与付费块目标 chainId 二级配额（`chain.orphan.chunkPerPeer` 默认 5,000、`chain.orphan.chunkPerChain` 默认 20,000）；全局 `orphanPoolLimit` 100,000 替代 `MAX_ORPHAN_SIZE = 3750`（账户交易队列保留原上限语义）。
 2. **TTL**：分片块进入池后 `chain.orphan.chunkTtlEpochs`（默认 2 个纪元 = 128 s）内未被付费块引用则淘汰；与年龄规则对齐（超过两个纪元的分片本来就不可能再被合法引用）。
@@ -485,7 +485,7 @@ SP0b-3 ────────────────────────�
 
 SP0b 与 SP1 并行（不同包、不同人/会话）；SP2 与 SP3 并行（都依赖 SP1-3）；SP4 需要 SP2+SP3+SP0b-3。
 
-**SP0b-2b（§5.2.1）插在 SP0b-2 与 SP0b-3 之间**：SP0b-2 的验收（导入 ≥ 10k 块/s）未达成，缺口在锁内"其余"；它与 SP0b-3 在孤块池上有重叠，顺序可换，但 M3 的导入门禁挂在它上面。
+**SP0b-2b（§5.2.1）插在 SP0b-2 与 SP0b-3 之间，并且已经做完**：SP0b-2 自己的验收（导入 ≥ 10k 块/s）当时未达成，缺口在锁内"其余"；SP0b-2b 把锁内均值压到 42–49 µs，中位 19687 块/s，门禁关闭。它与 SP0b-3 在孤块池上有重叠，顺序可换。SP0b-3 也已经做完；M5 还差 SP4。
 
 ### 13.2 里程碑
 
