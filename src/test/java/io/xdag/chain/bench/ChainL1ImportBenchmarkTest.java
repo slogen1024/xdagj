@@ -27,6 +27,7 @@ package io.xdag.chain.bench;
 import static io.xdag.chain.bench.BenchWorkload.payload;
 import static io.xdag.config.Constants.BI_APPLIED;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_INPUT;
+import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUTPUT;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -45,6 +46,8 @@ import io.xdag.config.DevnetConfig;
 import io.xdag.consensus.SyncManager;
 import io.xdag.core.Address;
 import io.xdag.core.Block;
+import io.xdag.BlockBuilder;
+import io.xdag.core.BlockchainImpl;
 import io.xdag.core.BlockWrapper;
 import io.xdag.core.ImportResult;
 import io.xdag.core.XAmount;
@@ -52,6 +55,7 @@ import io.xdag.core.XUnit;
 import io.xdag.core.XdagBlock;
 import io.xdag.crypto.hash.HashUtils;
 import io.xdag.crypto.keys.ECKeyPair;
+import io.xdag.crypto.keys.PublicKey;
 import io.xdag.db.BlockStore;
 import io.xdag.db.OrphanBlockStore;
 import io.xdag.db.PersistControl;
@@ -110,7 +114,10 @@ import org.junit.Test;
  * one is applied, so it includes fake PoW, {@code setMain} and {@code applyBlock}; its blocks/s
  * counts paying blocks and chunks only, not the main blocks. The {@code phase.*} rows replay single
  * phases of the direct path on the last workload for cost attribution only; they are not a
- * consensus path. The two {@code phase.orphan.*} rows are the exception: the fixture sets no pow, so
+ * consensus path. {@code phase.lock.*} is the exception that is not a replay: the probe inside
+ * {@code tryToConnect} is on for the untimed import that feeds the other phase rows, and those rows
+ * are the actual in-lock sections of that import. The two {@code phase.orphan.*} rows are the other
+ * exception: the fixture sets no pow, so
  * {@code dealOrphan} is a no-op and no other row in this file touches the orphan pool — they are an
  * estimate of what the pool would cost a node that does mine, not a replay of something the direct
  * path did. {@code calib.emptyMain} is the fixture's cost of an empty main block, so the
@@ -240,6 +247,16 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
         for (int i = 0; i < 4; i++) {
             mineMain(List.of());
         }
+        // MockBlockchain.addOurBlock is a no-op, so the stats hash stays null even when the check
+        // succeeds. The boolean is the production answer.
+        Block mined = blockchain.getBlockByHash(Bytes32.wrap(blockchain.getXdagTopStatus().getTop()), true);
+        assertTrue("mined main was not recognized as ours", blockchain.checkMineAndAdd(mined));
+        Address ownFrom = new Address(BytesUtils.arrayToByte32(poolKey.toAddress().toArray()), XDAG_FIELD_INPUT, true);
+        Address ownTo = new Address(BytesUtils.arrayToByte32(poolKey.toAddress().toArray()), XDAG_FIELD_OUTPUT, true);
+        Block ownTx = BlockBuilder.generateNewTransactionBlock(config, poolKey, txTime(), ownFrom, ownTo,
+                XAmount.of(1, XUnit.XDAG), UInt64.ONE);
+        assertTrue("own account tx was not recognized as ours",
+                blockchain.checkMineAndAdd(new Block(new XdagBlock(ownTx.toBytes()))));
         Bytes wasm = payload(600, 7);
         Bytes initArgs = payload(10, 8);
         int chunks = ChainBlockBuilder.deployNewChainChunks(wasm.size(), initArgs.size());
@@ -581,7 +598,8 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
             results.add(pipelineRows[round]);
         }
         int mainsPerRound = 0;
-        for (int round = 0; round < ROUNDS; round++) {
+        boolean skipConfirmed = Boolean.getBoolean("xdag.bench.skipConfirmed");
+        for (int round = 0; round < (skipConfirmed ? 0 : ROUNDS); round++) {
             freshFixture(fixtureStart);
             prepareChain();
             BenchWorkload w = workload();
@@ -623,20 +641,48 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
         prepareChain();
         // Calibration: the fixture's own cost of one EMPTY main block (nonce search + tryToConnect +
         // checkMain with nothing to apply). confirmed.total - mains * this - direct.total ~ setMain/apply.
-        long[] perEmpty = new long[CALIB_MAINS];
-        long c0 = System.nanoTime();
-        for (int i = 0; i < CALIB_MAINS; i++) {
-            perEmpty[i] = mineTimed(List.of());
+        if (!skipConfirmed) {
+            long[] perEmpty = new long[CALIB_MAINS];
+            long c0 = System.nanoTime();
+            for (int i = 0; i < CALIB_MAINS; i++) {
+                perEmpty[i] = mineTimed(List.of());
+            }
+            results.add(measure("calib.emptyMain", perEmpty, CALIB_MAINS, CALIB_MAINS, (System.nanoTime() - c0) / 1_000_000));
         }
-        results.add(measure("calib.emptyMain", perEmpty, CALIB_MAINS, CALIB_MAINS, (System.nanoTime() - c0) / 1_000_000));
         BenchWorkload w = workload();
         // Imported once, untimed, so the refLookup phase resolves chunk refs that exist, as the real
         // path does (a lookup that misses is answered by the bloom filter and would read too cheap).
+        // The probe is on for this pass only. pipeline/direct above ran with it null, so their
+        // numbers are not the instrumented path. lock.* is this pass, and only this pass.
+        BlockchainImpl.ImportPhase lockPhase = new BlockchainImpl.ImportPhase();
+        ((BlockchainImpl) blockchain).setImportPhase(lockPhase);
         for (BenchWorkload.Item item : w.items()) {
             for (int c = item.chunks().size() - 1; c >= 0; c--) {
                 expectImported(item.chunks().get(c));
             }
             expectImported(item.block());
+        }
+        ((BlockchainImpl) blockchain).setImportPhase(null);
+        assertEquals("lock probe missed a paying block (early return, or inputs empty)", w.items().size(), lockPhase.payingBlocks());
+        assertEquals("lock probe missed a chunk", w.chunkCount(), lockPhase.chunkBlocks());
+        long lockSum = 0;
+        for (int s = 0; s < BlockchainImpl.ImportPhase.SLOTS; s++) {
+            long nanos = lockPhase.payingNanos(s);
+            lockSum += nanos;
+            results.add(phaseRow("lock." + BlockchainImpl.ImportPhase.NAMES[s], lockPhase.payingBlocks(), nanos));
+        }
+        results.add(phaseRow("lock.sum", lockPhase.payingBlocks(), lockSum));
+        System.out.println("lock.diffLoads=" + lockPhase.diffLoads() + " lock.diffSteps=" + lockPhase.diffSteps()
+                + " perPayingLoad=" + (lockPhase.diffLoads() / (double) lockPhase.payingBlocks())
+                + " perPayingStep=" + (lockPhase.diffSteps() / (double) lockPhase.payingBlocks()));
+        if (lockPhase.chunkBlocks() > 0) {
+            long chunkSum = 0;
+            for (int s = 0; s < BlockchainImpl.ImportPhase.SLOTS; s++) {
+                long nanos = lockPhase.chunkNanos(s);
+                chunkSum += nanos;
+                results.add(phaseRow("lock.chunk." + BlockchainImpl.ImportPhase.NAMES[s], lockPhase.chunkBlocks(), nanos));
+            }
+            results.add(phaseRow("lock.chunk.sum", lockPhase.chunkBlocks(), chunkSum));
         }
         assertTop();
         // The paying blocks' raw bytes exactly as they arrived (not a re-encoding).
@@ -674,6 +720,52 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
                         kernel.getBlockStore().getBlockInfoByHash(a.getAddress());
                     }
                 }
+            }
+        })));
+        // The link check's AddressStore read, replayed on the keys the imported blocks actually
+        // asked about. One get per address-typed link. ADDRESS has no read cache; this row is the
+        // cost of that get, isolated from the rest of the link loop (phase.lock.links).
+        List<byte[]> addressKeys = new ArrayList<>();
+        for (Block b : parsed) {
+            for (Address a : b.getLinks()) {
+                if (a != null && a.getIsAddress()) {
+                    addressKeys.add(BytesUtils.byte32ToArray(a.getAddress()).toArray());
+                }
+            }
+        }
+        if (!addressKeys.isEmpty()) {
+            results.add(phaseRow("addressExist", addressKeys.size(), bestOf3(() -> {
+                for (byte[] key : addressKeys) {
+                    addressStore.addressIsExist(key);
+                }
+            })));
+        }
+        results.add(phaseRow("existHit", parsed.size(), bestOf3(() -> {
+            for (Block b : parsed) {
+                blockchain.isExist(b.getHashLow());
+            }
+        })));
+        Random missRng = new Random(seed);
+        List<Bytes32> misses = new ArrayList<>(parsed.size());
+        byte[] missBuf = new byte[32];
+        for (int i = 0; i < parsed.size(); i++) {
+            missRng.nextBytes(missBuf);
+            misses.add(Bytes32.wrap(Arrays.copyOf(missBuf, missBuf.length)));
+        }
+        results.add(phaseRow("existMiss", misses.size(), bestOf3(() -> {
+            for (Bytes32 h : misses) {
+                blockchain.isExist(h);
+            }
+        })));
+        // What the lock still does for signatures once the pipeline has verified the keys: a hash
+        // compare, not an ECDSA. Keys are computed here, outside the timed loop.
+        List<List<PublicKey>> preverified = new ArrayList<>(parsed.size());
+        for (Block b : parsed) {
+            preverified.add(b.getInputs().isEmpty() ? List.of() : b.verifiedKeys());
+        }
+        results.add(phaseRow("sigMatch", parsed.size(), bestOf3(() -> {
+            for (int i = 0; i < parsed.size(); i++) {
+                blockchain.canUseInput(parsed.get(i), preverified.get(i));
             }
         })));
         // Orphan-pool add and remove, the two halves SP0b-2b named as a prime suspect for the
@@ -721,6 +813,14 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
         // the way a plain bestOf3 would have run it — fails the build instead of quietly becoming
         // the reported minimum. addPass/removePass skip the entry check on the first pass only,
         // where there is no previous pass to have left the state behind.
+        int accountTxLimit = config.getChainSpec().getChainOrphanAccountTxLimit();
+        // SP0b-3 caps the account-tx lane at 3750. A 20000-block replay cannot fill the pool, and
+        // the assertion below is what used to kill the acceptance run before it could print.
+        // removeWorst stays: its deepest row is 500 * 4 senders, under the cap.
+        if (orphans.size() > accountTxLimit) {
+            System.out.println("phase.orphan.add/remove skipped: " + orphans.size()
+                    + " account txs exceed accountTxLimit " + accountTxLimit);
+        } else {
         int[] addPass = {0};
         results.add(phaseRow("orphan.add", orphans.size(), bestOf3(() -> {
             if (addPass[0]++ > 0) {
@@ -749,6 +849,7 @@ public class ChainL1ImportBenchmarkTest extends ChainL1TestBase {
         })));
         assertEquals("orphan.remove must leave the pool empty", 0, (int) pool.getOrphanSize());
         emptyPool.run();
+        }
 
         // orphan.removeWorst.d*: the same removal against the flood this subproject exists to
         // survive (spec §7.2 "垃圾分片洪泛" / §3 "移除复杂度"), because orphan.remove above is the BEST

@@ -133,6 +133,12 @@ public class BlockchainImpl implements Blockchain {
     private final PersistControl persist;
 
     /**
+     * SP0b-2b attribution only. Null on every production path; {@link #phaseStart()} is then a
+     * single field read. Not consensus, not persisted, not visible to any other node.
+     */
+    private ImportPhase importPhase;
+
+    /**
      * D2: written only under the blockchain monitor, but read with no synchronization at all by
      * {@link #getBlockByHash}, which is public and reached from netty I/O threads (the two P2P
      * serve paths), RPC, the CLI and the award thread. As a plain {@code LinkedHashMap} that was
@@ -414,6 +420,26 @@ public class BlockchainImpl implements Blockchain {
     }
 
     // Try to connect a new block to the chain
+
+    /** Benchmark hook. Pass null to turn attribution off. Ignored by consensus. */
+    public void setImportPhase(ImportPhase phase) {
+        this.importPhase = phase;
+    }
+
+    private long phaseStart() {
+        return importPhase == null ? 0L : System.nanoTime();
+    }
+
+    /** {@code start == 0} means the probe is off; the call is then a branch and nothing else. */
+    private long phaseLap(long start, boolean paying, int slot) {
+        if (start == 0L) {
+            return 0L;
+        }
+        long now = System.nanoTime();
+        importPhase.add(paying, slot, now - start);
+        return now;
+    }
+
     @Override
     public ImportResult tryToConnect(Block block) {
         // inline(): the ECDSA of verifiedKeys() moves off the monitor, and parse()/getHashLow() are
@@ -450,6 +476,8 @@ public class BlockchainImpl implements Blockchain {
         // than degraded -- see peerKeyOf and OrphanBlockStore.addOrphan.
         String peerKey = peerKeyOf(pv);
         Classified classified = pv.classified();
+        boolean phasePaying = block.getInputs() != null && !block.getInputs().isEmpty();
+        long phaseT = phaseStart();
         // Computed where the admission gate needs it and reused where the deferred persist does,
         // rather than worked out twice: the gate decides whether this block may occupy a chunk slot
         // and the commit below decides whether it is written to disk, and the two answering
@@ -509,6 +537,7 @@ public class BlockchainImpl implements Blockchain {
             if (orphanBlockStore.getChunkBody(block.getHashLow()) != null) {
                 return ImportResult.EXIST;
             }
+            phaseT = phaseLap(phaseT, phasePaying, ImportPhase.EXIST);
 
             // Check if extra block
             if (isExtraBlock(block)) {
@@ -684,6 +713,7 @@ public class BlockchainImpl implements Blockchain {
                     return result;
                 }
             }
+            phaseT = phaseLap(phaseT, phasePaying, ImportPhase.LINKS);
 
             // Reject before anything mutates. A block with no out-signature is malformed, and every
             // later step that reaches for it dereferences null: Block.verifiedKeys() does whenever
@@ -720,6 +750,7 @@ public class BlockchainImpl implements Blockchain {
                 log.debug("Block's input can't be used");
                 return ImportResult.INVALID_BLOCK;
             }
+            phaseT = phaseLap(phaseT, phasePaying, ImportPhase.SIG);
 
             if (category == null) {
                 category = orphanCategoryOf(block, classified);
@@ -727,6 +758,7 @@ public class BlockchainImpl implements Blockchain {
             // The chunk chains this block references stop being memory-only here, before anything
             // reads them back. See persistReferencedChunkChains for why this is the place.
             persistReferencedChunkChains(block, all, category);
+            phaseT = phaseLap(phaseT, phasePaying, ImportPhase.CHUNKS);
 
             int id = 0;
             // Remove links
@@ -755,19 +787,24 @@ public class BlockchainImpl implements Blockchain {
                 }
                 id++;
             }
+            phaseT = phaseLap(phaseT, phasePaying, ImportPhase.UNLINK);
 
             // Check current main chain
             checkNewMain();
+            phaseT = phaseLap(phaseT, phasePaying, ImportPhase.MAIN);
 
             // Check if block is ours
             if (checkMineAndAdd(block)) {
                 log.debug("A block hash:{} become mine", block.getHashLow().toHexString());
                 updateBlockFlag(block, BI_OURS, true);
             }
+            phaseT = phaseLap(phaseT, phasePaying, ImportPhase.MINE);
 
             // Calculate block difficulty
             BigInteger cuDiff = calculateCurrentBlockDiff(block);
+            phaseT = phaseLap(phaseT, phasePaying, ImportPhase.DIFF);
             calculateBlockDiff(block, cuDiff);
+            phaseT = phaseLap(phaseT, phasePaying, ImportPhase.DIFF_WALK);
 
             // Process extra blocks
             processExtraBlock();
@@ -813,6 +850,7 @@ public class BlockchainImpl implements Blockchain {
                 xdagStats.updateMaxDiff(xdagTopStatus.getTopDiff());
                 xdagStats.updateDiff(xdagTopStatus.getTopDiff());
             }
+            phaseT = phaseLap(phaseT, phasePaying, ImportPhase.TOP);
 
             // Update block stats
             xdagStats.nblocks++;
@@ -832,6 +870,7 @@ public class BlockchainImpl implements Blockchain {
                 }
             }
             blockStore.saveXdagStatus(xdagStats);
+            phaseT = phaseLap(phaseT, phasePaying, ImportPhase.SAVE);
 
             // Log transaction info
             if (!block.getInputs().isEmpty()) {
@@ -856,6 +895,7 @@ public class BlockchainImpl implements Blockchain {
                     && cuDiff.compareTo(xdagExtStats.getHashRateOurs()[i]) > 0) {
                 xdagExtStats.getHashRateOurs()[i] = cuDiff;
             }
+            phaseLap(phaseT, phasePaying, ImportPhase.RATE);
 
             return result;
         } catch (Throwable e) {
@@ -2654,6 +2694,9 @@ public class BlockchainImpl implements Blockchain {
              * Only Blocks have difficulty
              */
             if (!ref.isAddress) {
+                if (importPhase != null) {
+                    importPhase.noteDiffLoad();
+                }
                 Block refBlock = getBlockByHash(ref.getAddress(), false);
                 if (refBlock == null) {
                     break;
@@ -2678,6 +2721,9 @@ public class BlockchainImpl implements Blockchain {
                     BigInteger curDiff = refBlock.getInfo().getDifficulty();
                     while ((tmpBlock != null)
                             && XdagTime.getEpoch(tmpBlock.getTimestamp()) == XdagTime.getEpoch(block.getTimestamp())) {
+                        if (importPhase != null) {
+                            importPhase.noteDiffStep();
+                        }
                         tmpBlock = getMaxDiffLink(tmpBlock, false);
                     }
                     if (tmpBlock != null
@@ -3123,19 +3169,44 @@ public class BlockchainImpl implements Blockchain {
 
     public boolean checkMineAndAdd(Block block) {
         List<ECKeyPair> ourkeys = wallet.getAccounts();
-        // Only one output signature
+        if (ourkeys.isEmpty()) {
+            return false;
+        }
         Signature signature = block.getOutsig();
-        // Iterate through all keys
+        // Parser rewrites an all-zero signature field to (1,1). Chunks are built that way. It is
+        // not a signature any wallet key produces, and verifying it is a secp256k1 operation on
+        // every chunk.
+        if (signature == null
+                || (BigInteger.ONE.equals(signature.getR()) && BigInteger.ONE.equals(signature.getS()))) {
+            return false;
+        }
+        List<PublicKey> inBlock = block.getPubKeys();
+        // Account transactions carry the signer's public key, so a block whose keys are not ours
+        // cannot verify. Mains and links go through signOut(), which does not write that field, so
+        // an empty key list still has to be checked against the wallet. Point equality, not
+        // toBytes(): the wallet key and the key parsed from the field are not the same encoding.
+        boolean carried = inBlock != null && !inBlock.isEmpty();
         for (int i = 0; i < ourkeys.size(); i++) {
             ECKeyPair ecKey = ourkeys.get(i);
-            // TODO: Optimize
-            byte[] publicKeyBytes = ecKey.getPublicKey().toBytes().toArray();
+            PublicKey ours = ecKey.getPublicKey();
+            if (carried && !carriesKey(inBlock, ours)) {
+                continue;
+            }
+            byte[] publicKeyBytes = ours.toBytes().toArray();
             Bytes digest = Bytes.wrap(block.getSubRawData(block.getOutsigIndex() - 2), Bytes.wrap(publicKeyBytes));
             Bytes32 hash = HashUtils.doubleSha256(Bytes.wrap(digest));
-            // Use hyperledger besu crypto native secp256k1
-            if (Signer.verify(hash, signature, ecKey.getPublicKey())) {
+            if (Signer.verify(hash, signature, ours)) {
                 log.debug("verify block success hash={}.", hash.toHexString());
                 addOurBlock(i, block);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean carriesKey(List<PublicKey> inBlock, PublicKey ours) {
+        for (PublicKey candidate : inBlock) {
+            if (ours.getPoint().equals(candidate.getPoint())) {
                 return true;
             }
         }
@@ -3554,5 +3625,86 @@ public class BlockchainImpl implements Blockchain {
 
     enum OrphanRemoveActions {
         ORPHAN_REMOVE_NORMAL, ORPHAN_REMOVE_REUSE, ORPHAN_REMOVE_EXTRA
+    }
+
+    /**
+     * Per-section nanoseconds inside {@link #tryToConnect(PreValidated)}, split by whether the block
+     * has inputs (a paying block) or not (a chunk, on this workload). The last slot is what bumps
+     * the block counters, so a block that returned early is absent from both — the benchmark asserts
+     * the counts rather than trusting a partial lap.
+     *
+     * <p>Touched only on the blockchain monitor, by the thread that set it. Not safe to read
+     * concurrently with an import.
+     */
+    public static final class ImportPhase {
+        public static final int EXIST = 0;
+        public static final int LINKS = 1;
+        public static final int SIG = 2;
+        public static final int CHUNKS = 3;
+        public static final int UNLINK = 4;
+        public static final int MAIN = 5;
+        public static final int DIFF = 6;
+        public static final int DIFF_WALK = 7;
+        public static final int TOP = 8;
+        public static final int SAVE = 9;
+        public static final int RATE = 10;
+        public static final int MINE = 11;
+        public static final int SLOTS = 12;
+        public static final String[] NAMES = {
+                "exist", "links", "sig", "chunks", "unlink", "main", "diff", "diffWalk", "top", "save", "rate", "mine"
+        };
+
+        private final long[] paying = new long[SLOTS];
+        private final long[] chunk = new long[SLOTS];
+        private int payingBlocks;
+        private int chunkBlocks;
+        private long diffLoads;
+        private long diffSteps;
+
+        void add(boolean payingBlock, int slot, long nanos) {
+            if (payingBlock) {
+                paying[slot] += nanos;
+                if (slot == RATE) {
+                    payingBlocks++;
+                }
+            } else {
+                chunk[slot] += nanos;
+                if (slot == RATE) {
+                    chunkBlocks++;
+                }
+            }
+        }
+
+        public int payingBlocks() {
+            return payingBlocks;
+        }
+
+        public int chunkBlocks() {
+            return chunkBlocks;
+        }
+
+        public long payingNanos(int slot) {
+            return paying[slot];
+        }
+
+        public long chunkNanos(int slot) {
+            return chunk[slot];
+        }
+
+        public long diffLoads() {
+            return diffLoads;
+        }
+
+        public long diffSteps() {
+            return diffSteps;
+        }
+
+        void noteDiffLoad() {
+            diffLoads++;
+        }
+
+        void noteDiffStep() {
+            diffSteps++;
+        }
     }
 }
