@@ -45,6 +45,7 @@
         <gson.version>2.13.1</gson.version>
         <surefire.test.excludes>**/*RandomXSyncTest.java,**/*SyncTest.java,**/*SnapshotJTest.java</surefire.test.excludes>
         <byte-buddy-agent.version>1.15.11</byte-buddy-agent.version>
+        <chicory.version>1.7.5</chicory.version>
     </properties>
 
     <organization>
@@ -279,6 +280,19 @@
             <groupId>io.xdag</groupId>
             <artifactId>xdagj-crypto</artifactId>
             <version>${xdagj-crypto.version}</version>
+        </dependency>
+
+        <!-- SP1-1 WASM runtime. wasm is pulled transitively; pinned here so the
+             interpreter (runtime) and the JVM compiler stay on the same version. -->
+        <dependency>
+            <groupId>com.dylibso.chicory</groupId>
+            <artifactId>runtime</artifactId>
+            <version>${chicory.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.dylibso.chicory</groupId>
+            <artifactId>compiler</artifactId>
+            <version>${chicory.version}</version>
         </dependency>
 
         <dependency>
