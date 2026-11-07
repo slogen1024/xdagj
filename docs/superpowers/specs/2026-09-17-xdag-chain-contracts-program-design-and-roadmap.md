@@ -384,7 +384,7 @@ SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器�
 
 ---
 
-## 9. SP4：订阅与 P2P
+## 9. SP4：订阅与 P2P（2026-11-07 已开工：订阅集合与 0x1B–0x1F 线格式；快照页、证明和 3 节点 devnet 仍等 SP1-2 / SP2 / SP3）
 
 ### 9.1 订阅集合与过渡模式
 

@@ -249,4 +249,20 @@ public class ChainSpecTest {
         assertTrue(e.getMessage(), e.getMessage().contains("chain.persist.flushEntries"));
         assertTrue(e.getMessage(), e.getMessage().contains("chain.persist.maxPending"));
     }
+
+    @Test
+    public void subscriptionsDefaultToEveryChainOffMainnet() {
+        assertTrue(new DevnetConfig().getChainSubscriptions().subscribeAll());
+        assertTrue(new TestnetConfig().getChainSubscriptions().subscribeAll());
+        assertFalse(new MainnetConfig().getChainSubscriptions().subscribeAll());
+        assertFalse(withProperty("chain.subscribeAll", "false",
+                () -> new DevnetConfig().getChainSubscriptions().subscribeAll()));
+    }
+
+    @Test
+    public void anExplicitListOnTopOfSubscribeAllIsRefused() {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> withProperty("chain.subscribe.0", "ab".repeat(32), DevnetConfig::new));
+        assertTrue(e.getMessage(), e.getMessage().contains("chain.subscribe"));
+    }
 }

@@ -177,6 +177,10 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     protected int chainOrphanChunkPerChain = ChainSpec.DEFAULT_ORPHAN_CHUNK_PER_CHAIN;
     protected int chainOrphanChunkTtlEpochs = ChainSpec.DEFAULT_ORPHAN_CHUNK_TTL_EPOCHS;
     protected boolean chainIngestFeePolicy = ChainSpec.DEFAULT_INGEST_FEE_POLICY;
+    /** Resolved in the constructor: devnet and testnet start true, mainnet starts false. */
+    protected boolean chainSubscribeAll = false;
+    protected io.xdag.chain.p2p.ChainSubscriptions chainSubscriptions =
+            io.xdag.chain.p2p.ChainSubscriptions.none();
 
     // RandomX configuration
     protected boolean flag;
@@ -186,6 +190,11 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
         this.configName = configName;
         this.network = network;
         this.networkVersion = networkVersion;
+        // v1 transition (roadmap D6): a devnet or testnet node executes every chain unless the
+        // operator lists a subset. Mainnet does not. The conf keys, when present, override this.
+        if (network == io.xdag.Network.DEVNET || network == io.xdag.Network.TESTNET) {
+            chainSubscribeAll = true;
+        }
         getSetting();
         setDir();
     }
@@ -319,6 +328,11 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
     @Override
     public boolean isChainIngestFeePolicy() {
         return chainIngestFeePolicy;
+    }
+
+    @Override
+    public io.xdag.chain.p2p.ChainSubscriptions getChainSubscriptions() {
+        return chainSubscriptions;
     }
 
     @Override
@@ -538,6 +552,15 @@ public class AbstractConfig implements Config, AdminSpec, NodeSpec, WalletSpec, 
                 chainOrphanChunkTtlEpochs, ChainSpec.MIN_ORPHAN_CHUNK_TTL_EPOCHS);
         chainIngestFeePolicy = config.hasPath("chain.ingest.feePolicy")
                 ? config.getBoolean("chain.ingest.feePolicy") : chainIngestFeePolicy;
+
+        // Node-local (SP4). Not written into the shipped conf files. subscribeAll and an explicit
+        // list together are refused: one of them is the set, not both.
+        if (config.hasPath("chain.subscribeAll")) {
+            chainSubscribeAll = config.getBoolean("chain.subscribeAll");
+        }
+        java.util.List<String> subscribeIds = config.hasPath("chain.subscribe")
+                ? config.getStringList("chain.subscribe") : java.util.List.of();
+        chainSubscriptions = io.xdag.chain.p2p.ChainSubscriptions.parse(chainSubscribeAll, subscribeIds);
 
         // The four category limits are reservations: each category is promised its own share so a
         // flood in one cannot starve another. A pool limit below their sum breaks that promise —

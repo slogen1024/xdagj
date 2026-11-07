@@ -24,6 +24,11 @@
 
 package io.xdag.net.message;
 
+import io.xdag.net.message.chain.ChainProofReplyMessage;
+import io.xdag.net.message.chain.ChainProofRequestMessage;
+import io.xdag.net.message.chain.ChainSnapshotReplyMessage;
+import io.xdag.net.message.chain.ChainSnapshotRequestMessage;
+import io.xdag.net.message.chain.ChainSubscriptionsMessage;
 import io.xdag.net.message.consensus.*;
 import io.xdag.net.message.p2p.DisconnectMessage;
 import io.xdag.net.message.p2p.HelloMessage;
@@ -72,6 +77,11 @@ public class MessageFactory {
                 case NEW_BLOCK -> new NewBlockMessage(body);
                 case SYNC_BLOCK -> new SyncBlockMessage(body);
                 case SYNCBLOCK_REQUEST -> new SyncBlockRequestMessage(body);
+                case CHAIN_SUBSCRIPTIONS -> new ChainSubscriptionsMessage(body);
+                case CHAIN_SNAPSHOT_REQUEST -> new ChainSnapshotRequestMessage(body);
+                case CHAIN_SNAPSHOT_REPLY -> new ChainSnapshotReplyMessage(body);
+                case CHAIN_PROOF_REQUEST -> new ChainProofRequestMessage(body);
+                case CHAIN_PROOF_REPLY -> new ChainProofReplyMessage(body);
             };
         } catch (Exception e) {
             throw new MessageException("Failed to decode message", e);

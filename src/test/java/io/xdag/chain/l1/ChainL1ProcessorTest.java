@@ -99,6 +99,9 @@ public class ChainL1ProcessorTest {
         @Override public int getChainOrphanChunkPerChain() { return ChainSpec.DEFAULT_ORPHAN_CHUNK_PER_CHAIN; }
         @Override public int getChainOrphanChunkTtlEpochs() { return ChainSpec.DEFAULT_ORPHAN_CHUNK_TTL_EPOCHS; }
         @Override public boolean isChainIngestFeePolicy() { return ChainSpec.DEFAULT_INGEST_FEE_POLICY; }
+        @Override public io.xdag.chain.p2p.ChainSubscriptions getChainSubscriptions() {
+            return io.xdag.chain.p2p.ChainSubscriptions.none();
+        }
     }
 
     /** A handler that records nothing; used where only registration behaviour is under test. */

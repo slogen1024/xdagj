@@ -48,11 +48,18 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.xdag.Kernel;
 import io.xdag.chain.ingest.IngestPipeline;
+import io.xdag.chain.p2p.ChainDataSource;
+import io.xdag.chain.p2p.ChainExchange;
 import io.xdag.config.Config;
 import io.xdag.config.spec.NodeSpec;
 import io.xdag.consensus.SyncManager;
 import io.xdag.net.message.Message;
 import io.xdag.net.message.MessageQueue;
+import io.xdag.net.message.chain.ChainProofReplyMessage;
+import io.xdag.net.message.chain.ChainProofRequestMessage;
+import io.xdag.net.message.chain.ChainSnapshotReplyMessage;
+import io.xdag.net.message.chain.ChainSnapshotRequestMessage;
+import io.xdag.net.message.chain.ChainSubscriptionsMessage;
 import io.xdag.net.message.ReasonCode;
 import io.xdag.net.message.consensus.BlockExtRequestMessage;
 import io.xdag.net.message.consensus.BlockRequestMessage;
@@ -121,6 +128,7 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
 
     private final NetDBManager netdbMgr;
     private final MessageQueue msgQueue;
+    private final ChainExchange chainExchange;
 
     private final AtomicBoolean isHandshakeDone = new AtomicBoolean(false);
 
@@ -147,6 +155,9 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
         this.syncMgr = kernel.getSyncMgr();
         this.netdbMgr = kernel.getNetDBMgr();
         this.msgQueue = channel.getMessageQueue();
+        // Pages and proofs are not served until the execution store exists. Requests get ABSENT.
+        this.chainExchange = new ChainExchange(
+                config.getChainSpec().getChainSubscriptions(), ChainDataSource.NONE);
     }
 
     @Override
@@ -213,6 +224,8 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
             /* sync */
             case BLOCKS_REQUEST, BLOCKS_REPLY, SUMS_REQUEST, SUMS_REPLY, BLOCKEXT_REQUEST, BLOCKEXT_REPLY, BLOCK_REQUEST, NEW_BLOCK, SYNC_BLOCK, SYNCBLOCK_REQUEST ->
                     onXdag(msg);
+            case CHAIN_SUBSCRIPTIONS, CHAIN_SNAPSHOT_REQUEST, CHAIN_SNAPSHOT_REPLY, CHAIN_PROOF_REQUEST, CHAIN_PROOF_REPLY ->
+                    onChain(msg);
             default -> ctx.fireChannelRead(msg);
         }
     }
@@ -336,6 +349,26 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
     }
 
     /**
+     * Chain messages before the handshake are dropped, same as {@link #onXdag}. A request this
+     * node does not cover is answered ABSENT inside {@link ChainExchange}.
+     */
+    private void onChain(Message msg) {
+        if (!isHandshakeDone.get()) {
+            return;
+        }
+        switch (msg.getCode()) {
+            case CHAIN_SUBSCRIPTIONS -> chainExchange.onRemote((ChainSubscriptionsMessage) msg);
+            case CHAIN_SNAPSHOT_REQUEST ->
+                    msgQueue.sendMessage(chainExchange.reply((ChainSnapshotRequestMessage) msg));
+            case CHAIN_SNAPSHOT_REPLY -> chainExchange.onSnapshotReply((ChainSnapshotReplyMessage) msg);
+            case CHAIN_PROOF_REQUEST ->
+                    msgQueue.sendMessage(chainExchange.reply((ChainProofRequestMessage) msg));
+            case CHAIN_PROOF_REPLY -> chainExchange.onProofReply((ChainProofReplyMessage) msg);
+            default -> throw new UnreachableException();
+        }
+    }
+
+    /**
      * Check whether the peer is valid to connect.
      */
     private ReasonCode checkPeer(Peer peer, boolean newHandShake) {
@@ -360,6 +393,9 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
             // start ping pong
             pingPong = exec.scheduleAtFixedRate(() -> msgQueue.sendMessage(new PingMessage()),
                     channel.isInbound() ? 1 : 0, 1, TimeUnit.MINUTES);
+            // Both sides announce which chains they execute. A peer that has not finished its own
+            // handshake drops this the same way it drops a block.
+            msgQueue.sendMessage(chainExchange.announce());
         } else {
             msgQueue.disconnect(ReasonCode.HANDSHAKE_EXISTS);
         }

@@ -277,4 +277,10 @@ public interface ChainSpec {
 
     /** Whether the import-time chunk fee gate is applied ({@code chain.ingest.feePolicy}). Node-local. */
     boolean isChainIngestFeePolicy();
+
+    /**
+     * Chains this node executes ({@code chain.subscribeAll}, {@code chain.subscribe}). Node-local.
+     * Devnet and testnet default to every chain; mainnet defaults to none.
+     */
+    io.xdag.chain.p2p.ChainSubscriptions getChainSubscriptions();
 }

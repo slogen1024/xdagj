@@ -88,7 +88,7 @@
 | 锁 | `tryToConnect` 全局 `synchronized`，验签与递归结算都在锁内 | L1 导入流水线必须并行化（SP0） |
 | 孤块池 | `MAX_ORPHAN_SIZE = 3750`，满则拒绝账户交易块 | 需改为按链分队列/提高上限（SP0） |
 | 原生账本 | `AddressStore`：20B 地址 → 余额/nonce | 链金库、保证金库都是普通 20B 地址（无私钥）；用户在链内沿用同一地址 |
-| P2P | `MessageCode` 最大 `0x1A`；新块经 `NEW_BLOCK` gossip 与 sum 树同步 | 新消息码自 `0x1B` 起；不新增块传播协议 |
+| P2P | `0x1B–0x1F` 已占用（订阅/快照/证明，2026-11-07 线格式）；新块经 `NEW_BLOCK` gossip 与 sum 树同步 | 块传播协议不变。快照页和证明体还没接执行状态，请求回 ABSENT |
 | 存储 | 8 个 RocksDB 实例，1 字节前缀分区，只有 `batchWrite` 原子 | 新增 `CHAIN_L1`（全网小状态）与 `CHAIN_EXEC`（订阅链状态）两个实例 |
 
 ---

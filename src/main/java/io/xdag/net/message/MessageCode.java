@@ -85,7 +85,14 @@ public enum MessageCode {
 //    RECEIVE_BLOCK(0x17),
     NEW_BLOCK(0x18),
     SYNC_BLOCK(0x19),
-    SYNCBLOCK_REQUEST(0x1A);
+    SYNCBLOCK_REQUEST(0x1A),
+
+    // Chain subscription and proof fetch. Routing only; block gossip stays on NEW_BLOCK.
+    CHAIN_SUBSCRIPTIONS(0x1B),
+    CHAIN_SNAPSHOT_REQUEST(0x1C),
+    CHAIN_SNAPSHOT_REPLY(0x1D),
+    CHAIN_PROOF_REQUEST(0x1E),
+    CHAIN_PROOF_REPLY(0x1F);
 
 
     private static final MessageCode[] map = new MessageCode[256];
