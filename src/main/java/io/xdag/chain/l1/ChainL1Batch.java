@@ -141,4 +141,28 @@ public final class ChainL1Batch {
     public void deleteReverse(Bytes32 blockHash) {
         delete(ChainL1Keys.reverse(blockHash));
     }
+
+    public void putAnchor(Bytes chainId, long seq, byte[] record) {
+        put(ChainL1Keys.anchor(chainId, seq), record);
+    }
+
+    public void deleteAnchor(Bytes chainId, long seq) {
+        delete(ChainL1Keys.anchor(chainId, seq));
+    }
+
+    public void putClaimed(Bytes src, Bytes dst, long index, Bytes32 blockHash) {
+        put(ChainL1Keys.claimed(src, dst, index), blockHash.toArray());
+    }
+
+    public void deleteClaimed(Bytes src, Bytes dst, long index) {
+        delete(ChainL1Keys.claimed(src, dst, index));
+    }
+
+    public void putJournal(Bytes32 blockHash, byte[] record) {
+        put(ChainL1Keys.journal(blockHash), record);
+    }
+
+    public void deleteJournal(Bytes32 blockHash) {
+        delete(ChainL1Keys.journal(blockHash));
+    }
 }

@@ -25,6 +25,7 @@
 package io.xdag.chain.l1;
 
 import com.google.common.primitives.UnsignedBytes;
+import io.xdag.chain.asset.AnchorRecord;
 import io.xdag.chain.ext.ExtCodec;
 import io.xdag.core.XdagLifecycle;
 import io.xdag.db.rocksdb.KVSource;
@@ -197,6 +198,22 @@ public final class ChainL1Store implements XdagLifecycle {
     public List<InputRef> getReverse(Bytes32 blockHash) {
         byte[] v = source.get(ChainL1Keys.reverse(blockHash));
         return v == null ? List.of() : InputRef.decodeList(v);
+    }
+
+    /** The 0x06 record, or null when it is missing or not the SP2 layout. A claim then fails closed. */
+    public AnchorRecord getAnchor(Bytes chainId, long seq) {
+        byte[] v = source.get(ChainL1Keys.anchor(chainId, seq));
+        return v == null ? null : AnchorRecord.decode(v);
+    }
+
+    /** The claim block hash stored at 0x08, or null when that (src, dst, index) is unclaimed. */
+    public byte[] getClaimed(Bytes src, Bytes dst, long index) {
+        return source.get(ChainL1Keys.claimed(src, dst, index));
+    }
+
+    /** The raw 0x10 journal, or null when this block did not settle a claim. */
+    public byte[] getJournal(Bytes32 blockHash) {
+        return source.get(ChainL1Keys.journal(blockHash));
     }
 
     // ---- batched writes ----

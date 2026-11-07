@@ -33,12 +33,12 @@
 | SP1-2 | 完成 | `StateTree` 的 get/put/remove；`OutboxMap`；`WitnessRecorder`（同 key 只计一次，`estimateFromGas` = gas/10 + 32KiB）；`ChainExecStore`（`CHAIN_EXEC`，快照页键多一个 `page u32`）。§8.3 不等式在 `StateAndWitnessTest` | 哈希函数仍是无状态的 `SparseMerkleTree` |
 | SP1-3 | 完成 | `InputStreamBuilder`（system/delivered 仍空）；`ChainExecutor.step/apply`（预扣、回滚帧、退款、`C_k`）；`CallFrame` 在 `ExecWorld.Layer`，深度 16，`xdag.reentrant` 放行；`ChainLedger`；`ChainExecDriver` 跟 `onSetMainEnd`。根与承诺钉在 `ChainExecutorTest` | 变更集、回滚、快照间隔、软预执行是 SP1-4。unwind 之后执行停住，不回滚 |
 | SP1-4 / 5 | 未开工 | — | 回滚、快照落库、两模式吞吐 |
-| SP2 | 未开工 | — | 金库、CLAIM、系统划账 |
+| SP2 | 完成 | `ClaimHandler`（`l1/handlers`）；`ClaimVerifier` / `ClaimProof` / `OutboxEntry` / `WithdrawOutbox` / `AnchorRecord` / `SettlementJournal` / `VaultLedger`（`asset/`）；`BlockchainImpl.chainTransfer`。0x06 只读（`FINAL` 才放行），0x08 `src‖dst‖index`，0x10 journal 进状态哈希。证明体版本 1。`ClaimFlowTest` | 生产侧没有锚定写入（SP3）。`maxWithdrawPerWindow` 不在这里。**M4 未关** |
 | SP3 | 未开工 | — | 锚定、仲裁、罚没 |
 | SP4 | 部分 | 订阅集合；`0x1B–0x1F`；快照页与 SMT 根校验；四种证明体；`Delivery` 的 HOLD；未 `open` 的回复丢弃，每方向最多 64 条；拉取默认 8 MiB。进程内三节点见 `ThreeNodeDevnetTest` | 执行器只跑订阅链；docker 上的 D=0/D=W 与挑战罚没（没有 SP2/SP3 就没有锚定可罚）。**M5 未关** |
 | SP5 | 未开工 | — | RPC、SDK、CLI、DApp |
 
-里程碑：M1、M2 完成。M3 只关掉了导入门禁（19687 块/s），执行吞吐未测。M4、M5、M6、M7 未完成。
+里程碑：M1、M2 完成。M3 只关掉了导入门禁（19687 块/s），执行吞吐未测。M4 里 SP2 已落地，SP3 未开工，M4 未完成。M5、M6、M7 未完成。
 
 ---
 
@@ -150,7 +150,7 @@ NEW_BLOCK ─► 导入流水线(SP0b) ─► tryToConnect ─► setMain/applyB
 io.xdag.chain
 ├── ext/            已建成：编解码、分片链、构建器、分类器
 ├── l1/             已建成：CHAIN_L1、处理器、钩子、快照门
-│   └── handlers/   未建（SP2/SP3）：BondHandler, AnchorHandler, ChallengeHandler, ClaimHandler, HeightTriggers
+│   └── handlers/   已建成 ClaimHandler（SP2）。未建（SP3）：BondHandler, AnchorHandler, ChallengeHandler, HeightTriggers
 ├── ingest/         已建成（SP0b-2/3）：PreValidator, IngestPipeline, ChunkFeePolicy
 ├── orphan/         已建成（SP0b-3）：ChainOrphanPool
 ├── repair/         已建成（SP0b-1）：ChainConsistencyCheck, ChainRepairTool
@@ -159,7 +159,7 @@ io.xdag.chain
 │   └── state/      已建成（SP1-2）：SparseMerkleTree, StateTree, Mmr, OutboxMap, WitnessRecorder
 ├── anchor/         未建（SP3）：AnchorPublisher, CommitmentChain, CanonicalChainRules
 ├── fraud/          未建（SP3）：WitnessCodec, Arbiter, WitnessBackedStore, VerdictCache
-├── asset/          未建（SP2）：VaultLedger, WithdrawOutbox, ClaimVerifier, SettlementJournal
+├── asset/          已建成（SP2）：VaultLedger, WithdrawOutbox, OutboxEntry, ClaimVerifier, ClaimProof, AnchorRecord, Settlement, SettlementJournal
 ├── p2p/            部分（SP4）：ChainSubscriptions, ChainExchange, SnapshotPages, SnapshotSync, ProofBodies, ChainRecords, Delivery。消息在 io.xdag.net.message.chain
 └── rpc/            未建（SP5）：ChainApi(chain_*), ChainApiImpl, 视图层 (pending/confirmed/anchored/final)
 ```
@@ -336,9 +336,21 @@ SP1 本身不写共识，但 **仲裁（SP3）要复用 SP1 的解释器执行�
 
 ---
 
-## 7. SP2：资产流与守恒
+## 7. SP2：资产流与守恒（2026-11-07 完成。M4 仍未关：没有 SP3 的锚定写入、挑战和罚没）
 
-SP2 在 SP1-3 之后开工，与 SP3 并行。它引入第一批 **共识 handler**（`ClaimHandler`）与第一处 **系统划账**（硬分叉点 (a)）。
+SP2 引入第一批 **共识 handler**（`ClaimHandler`）与第一处 **系统划账**（硬分叉点 (a)）。激活前处理器不派发 handler（`ctx == null` 直接返回），CLAIM 块仍是普通自转。
+
+落盘的类：`io.xdag.chain.l1.handlers.ClaimHandler`；`io.xdag.chain.asset` 下 `VaultLedger`、`WithdrawOutbox`、`OutboxEntry`、`ClaimVerifier`、`ClaimProof`、`AnchorRecord`、`Settlement`、`SettlementJournal`。`ChainExecutor` 的出箱体改走 `WithdrawOutbox.send`，字节布局与 SP1-3 相同（`ChainExecutorTest` 的根和承诺没变）。
+
+0x06 值（SP3 写，SP2 只读）：`status u8 ‖ anchorHash 32 ‖ outboxMapRoot 32`。status：`CANONICAL 1`、`FINAL 2`、`VOIDED 3`、`IGNORED 4`。CLAIM 只认 `FINAL`，且 `anchorHash` 必须等于 `ClaimExt.anchor`（link[0] 经 `Address.parse` 后的 32 字节，前 8 字节为 0）。键：`0x06 ‖ chainId(20) ‖ seq u64 LE`。
+
+0x08 键：`src(20) ‖ dst(20) ‖ index u64 LE`，值是认领块的 `block.getHash()`。L1 提现的 dst 是 20 个 0。跨链（flag bit0）的 dst 是目标链。两条 MMR 不会撞键。
+
+0x10 键：`blockHash(32)`，值 `from20 ‖ to20 ‖ amount u64 LE ‖ src20 ‖ dst20 ‖ index u64 LE`。进状态哈希。
+
+证明链载荷版本 1（`ClaimProof`）：`version u8 ‖ dst 20 ‖ present u8 ‖ valueLen u32 LE ‖ value(40) ‖ sibling[256] ‖ Mmr.Proof ‖ entryLen u32 LE ‖ entry`。value 是 outbox 叶：`mmrRoot ‖ size u64 BE`。校验失败、金库不够、锚定缺失或未终局都不写 0x08 / 0x10，index 留着下次再认。金额高位为 1（≥ 2^63 nano）直接拒绝，`XAmount` 是有符号 nano，总供应量放得下。
+
+`chainTransfer` 只在链钩子栈上划账。余额搬动发生在 CHAIN_L1 批次提交之前，崩溃窗口与 `applyBlock` 其余部分相同。`onUnapplied` 只反向 journal 里记过的那一笔；没应用过的块是空操作。
 
 ### 7.1 组件
 
@@ -352,7 +364,7 @@ SP2 在 SP1-3 之后开工，与 SP3 并行。它引入第一批 **共识 handle
 
 ### 7.2 系统划账与 `AddressStore`
 
-- 划账通过 `BlockchainImpl` 暴露的受控入口（新方法 `chainTransfer(from20, to20, amount, journalKey)`），内部走现有 `addAmount/subtractAmount`；金库余额不足 → CLAIM 记 `INVALID_CLAIM`，不划账（金库不足只可能在 I2 被破坏时发生，属于 fail-safe）。
+- 划账通过 `BlockchainImpl.chainTransfer(from20, to20, amount, journalKey)`。它不走 `subtractAmount`：那个方法把余额不足吞掉仍然返回，配对贷记会凭空造币。`Settlement.move` 先检查再写两侧。金库不足或金额高位为 1 → 不写 0x08、不划账（fail-safe，不把 index 烧掉）。
 - 反向：`onUnapplied` 读 journal 做逆向划账，然后删 journal 与 0x08。
 - 硬分叉：激活前 CLAIM 块只是普通自转块；激活后才有划账。
 
@@ -498,7 +510,7 @@ SP0a ✅ ─┬─► SP0b-1 ✅ ─► SP0b-2 ✅ ─► SP0b-2b ✅ ─► SP0
          │
          └─► SP1-1 ✅ ─► SP1-2 ✅ ─► SP1-3 ✅ ─► SP1-4 ─► SP1-5
                                           │
-                                          ├─► SP2 ─┐
+                                          ├─► SP2 ✅ ─┐
                                           └─► SP3 ─┤
                                                    ├─► SP4（线格式/页/证明）─► SP5
 SP0b-3 ✅ ─────────────────────────────────────────┘
@@ -515,7 +527,7 @@ SP0b 与 SP1 并行（不同包、不同人/会话）；SP2 与 SP3 并行（都
 | **M1 基线** | 完成 | SP0b-1 完成 | 基线文档；G1/G2/G9/G10 关闭；全量绿 |
 | **M2 引擎** | 完成 | SP1-1/2 完成 | 白名单/插桩测试向量已钉死。§8.3 不等式：随机读写的 `witnessBytes` ≤ `estimateFromGas(gasUsed)`（`StateAndWitnessTest`） |
 | **M3 执行** | 未完成 | SP0b-2/2b 的导入门禁已关；SP1-3 完成；SP1-4/5 未开工 | 单链执行吞吐 ≥ 2k 调用/s 未测；两模式一致未测。**导入 ≥ 10k 块/s 已达成**：20000 块负载 `pipeline` 中位 **19687 块/s**，锁内均值 42–49 µs。瓶颈是 `checkMineAndAdd` 对每个块做 secp256k1，不是 AddressStore。见 `docs/benchmarks/2026-11-07-sp0b2b-import.md` |
-| **M4 经济与安全** | 未开工 | SP2 + SP3 | I1–I3 属性；E1/E2/E3 对抗；仲裁 ≤ 2 s；N2 全场景 |
+| **M4 经济与安全** | 未完成 | SP2 完成；SP3 未开工 | SP2 覆盖 I1/I2 与「非 final 拒绝」（`ClaimFlowTest`）。I3 的 W 窗口挑战、E1/E2/E3、仲裁、罚没仍是 SP3 |
 | **M5 网络** | 未完成 | SP0b-3 完成；SP4 的线格式、页、证明完成 | 3 节点 devnet 跨链 + 挑战演练脚本仍未通过。进程内三节点只覆盖订阅分裂和拉页/拉证明 |
 | **M6 开发者面** | 未开工 | SP5 | RPC/SDK/CLI/DApp；文档 |
 | **M7 testnet 激活** | 未开工 | 治理定高度、快照、观察期 | §11.3 |

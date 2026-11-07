@@ -75,7 +75,7 @@ public final class ChainLedger {
         return key;
     }
 
-    static byte[] address20(byte[] raw) {
+    public static byte[] address20(byte[] raw) {
         byte[] out = new byte[20];
         if (raw != null) {
             System.arraycopy(raw, 0, out, 0, Math.min(20, raw.length));

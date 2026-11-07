@@ -30,14 +30,17 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import io.xdag.Kernel;
 import io.xdag.Wallet;
+import io.xdag.chain.asset.Settlement;
 import io.xdag.chain.exec.ChainExecDriver;
 import io.xdag.chain.exec.ChainExecutor;
 import io.xdag.chain.exec.wasm.ChicoryEngine;
+import io.xdag.chain.ext.ExtKind;
 import io.xdag.chain.ext.Classified;
 import io.xdag.chain.ingest.PreValidated;
 import io.xdag.chain.ingest.PreValidator;
 import io.xdag.chain.l1.ChainL1Hooks;
 import io.xdag.chain.l1.ChainL1Processor;
+import io.xdag.chain.l1.handlers.ClaimHandler;
 import io.xdag.chain.l1.ChainL1SnapshotGate;
 import io.xdag.chain.l1.ChainL1Store;
 import io.xdag.chain.orphan.OrphanAdmission;
@@ -83,6 +86,7 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.xdag.config.Constants.*;
 import static io.xdag.config.Constants.MessageType.NEW_LINK;
@@ -208,6 +212,8 @@ public class BlockchainImpl implements Blockchain {
      * that build a blockchain without one).
      */
     private volatile ChainL1Hooks chainHooks = ChainL1Hooks.NOOP;
+    /** Non-zero only inside a chain hook. {@link #chainTransfer} refuses to move coins otherwise. */
+    private final AtomicInteger chainSettlementDepth = new AtomicInteger();
 
     // Constructor initializes all components and starts main chain checking
     public BlockchainImpl(Kernel kernel) {
@@ -341,6 +347,25 @@ public class BlockchainImpl implements Blockchain {
         if (chainStore != null) {
             ChainL1Processor processor = new ChainL1Processor(chainStore, spec,
                     hash -> getBlockByHash(hash, true));
+            // CLAIM is installed here, still before any hook, unless the kernel map already has one.
+            // The processor never dispatches it before activation (ctx == null returns first).
+            if (!kernel.getChainKindHandlers().containsKey(ExtKind.CLAIM)) {
+                kernel.getChainKindHandlers().put(ExtKind.CLAIM, new ClaimHandler(chainStore,
+                        hash -> getBlockByHash(hash, true), spec.getChainMaxChunksPerChain(),
+                        new ClaimHandler.Settlement() {
+                            @Override
+                            public boolean transfer(byte[] from, byte[] to, long amount, Bytes32 journalKey) {
+                                return chainTransfer(from, to, amount, journalKey);
+                            }
+
+                            @Override
+                            public void reverse(byte[] from, byte[] to, long amount, Bytes32 journalKey) {
+                                if (!chainTransfer(to, from, amount, journalKey)) {
+                                    throw new IllegalStateException("claim unwind short: " + journalKey);
+                                }
+                            }
+                        }));
+            }
             kernel.getChainKindHandlers().forEach(processor::registerHandler);
             this.chainHooks = processor;
             if (kernel.getChainExecStore() != null) {
@@ -1940,7 +1965,7 @@ public class BlockchainImpl implements Blockchain {
         List<Address> links = block.getLinks();
         if (links == null || links.isEmpty()) {
             updateBlockFlag(block, BI_APPLIED, true);
-            chainHooks.onBlockApplied(block);
+            chainApplied(block);
             return XAmount.ZERO;
         }
 
@@ -2124,7 +2149,7 @@ public class BlockchainImpl implements Blockchain {
 
 
         updateBlockFlag(block, BI_APPLIED, true);
-        chainHooks.onBlockApplied(block);
+        chainApplied(block);
 
 //        XAmount totalFee = gasCollected.add(blockGas);
 //        block.getInfo().setFee(totalFee);
@@ -2220,7 +2245,7 @@ public class BlockchainImpl implements Blockchain {
             // Unapply visits blocks in the exact reverse of the apply DFS order (this block first,
             // then its links in reversed order), which the chain processor's per-(chain,height) index
             // bookkeeping relies on.
-            chainHooks.onBlockUnapplied(block);
+            chainUnapplied(block);
             updateBlockFlag(block, BI_APPLIED, false);
         } else {
             //When rolling back, the unaccepted transactions in the main block need to be processed, which is the number of confirmed transactions sent corresponding to their account addresses, nonce, needs to be reduced by one
@@ -3477,6 +3502,44 @@ public class BlockchainImpl implements Blockchain {
                 finalAmount.toDecimal(9, XUnit.XDAG).toPlainString());
         if ((block.getInfo().flags & BI_OURS) != 0) {
             xdagStats.setBalance(xdagStats.getBalance().subtract(amount));
+        }
+    }
+
+    /**
+     * System transfer used by {@link ClaimHandler}. Runs only while a chain hook is on the stack.
+     * The journal itself is written by the handler into the processor's CHAIN_L1 batch; this method
+     * only moves AddressStore balances, and it does so before that batch commits. A crash in between
+     * is the same window as the rest of {@code applyBlock} (the block is already {@code BI_APPLIED}).
+     * Returns false, having written nothing, when the debit does not fit.
+     */
+    public boolean chainTransfer(byte[] from20, byte[] to20, long amount, Bytes32 journalKey) {
+        if (chainSettlementDepth.get() == 0 || journalKey == null) {
+            return false;
+        }
+        boolean moved = Settlement.move(addressStore, from20, to20, amount);
+        if (moved) {
+            log.debug("chain transfer {} -> {} amount {} journal {}",
+                    from20 == null ? null : Hex.toHexString(from20),
+                    to20 == null ? null : Hex.toHexString(to20), amount, journalKey);
+        }
+        return moved;
+    }
+
+    private void chainApplied(Block block) {
+        chainSettlementDepth.incrementAndGet();
+        try {
+            chainHooks.onBlockApplied(block);
+        } finally {
+            chainSettlementDepth.decrementAndGet();
+        }
+    }
+
+    private void chainUnapplied(Block block) {
+        chainSettlementDepth.incrementAndGet();
+        try {
+            chainHooks.onBlockUnapplied(block);
+        } finally {
+            chainSettlementDepth.decrementAndGet();
         }
     }
 

@@ -40,6 +40,7 @@ import org.apache.tuweni.bytes.Bytes32;
 
 import com.dylibso.chicory.runtime.TrapException;
 
+import io.xdag.chain.asset.WithdrawOutbox;
 import io.xdag.chain.exec.state.Mmr;
 import io.xdag.chain.exec.state.OutboxMap;
 import io.xdag.chain.exec.state.WitnessRecorder;
@@ -339,8 +340,8 @@ public final class ChainExecutor implements ExecHost.Calls {
     private void append(Runtime rt, Bytes chain, ExecHost.Sent sent) {
         Bytes32 dst = chain32(sent.dst());
         List<byte[]> list = rt.entries.computeIfAbsent(dst, k -> new ArrayList<>());
-        byte[] body = outboxEntry(chain, sent.dst(), sent.sender(), sent.contract(), sent.selector(), sent.args(),
-                sent.value(), sent.height(), list.size());
+        byte[] body = WithdrawOutbox.send(chain, sent.dst(), sent.sender(), sent.contract(), sent.selector(),
+                sent.args(), sent.value(), sent.height(), list.size());
         list.add(body);
         Mmr mmr = new Mmr();
         for (byte[] entry : list) {
@@ -348,26 +349,6 @@ public final class ChainExecutor implements ExecHost.Calls {
         }
         rt.outbox.put(dst, mmr.root(), mmr.size());
         rt.dirtyDst.add(dst);
-    }
-
-    static byte[] outboxEntry(Bytes src, byte[] dst, byte[] sender, byte[] contract, int selector, byte[] args,
-            long value, long height, long index) {
-        byte[] d = ChainLedger.address20(dst);
-        byte[] s = ChainLedger.address20(sender);
-        byte[] c = ChainLedger.address20(contract);
-        byte[] a = args == null ? new byte[0] : args;
-        ByteBuffer buf = ByteBuffer.allocate(20 + 20 + Long.BYTES + 20 + 20 + Integer.BYTES + Long.BYTES + Long.BYTES
-                + a.length);
-        buf.put(ChainLedger.address20(src.toArray()));
-        buf.put(d);
-        buf.putLong(index);
-        buf.put(s);
-        buf.put(c);
-        buf.putInt(selector);
-        buf.putLong(value);
-        buf.putLong(height);
-        buf.put(a);
-        return buf.array();
     }
 
     private static Bytes32 eventsRoot(List<byte[]> events) {

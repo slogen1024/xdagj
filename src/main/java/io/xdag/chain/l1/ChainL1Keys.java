@@ -38,27 +38,27 @@ import org.apache.tuweni.bytes.Bytes32;
  * 0x01 CHAIN           -&gt; chainId 20                       -&gt; {@link ChainRecord}
  * 0x02 CONTRACT       -&gt; contract address 20              -&gt; {@link ContractRecord}
  * 0x03 CODE           -&gt; codeHash 32                       -&gt; raw code bytes (blob only)
- * 0x04 BOND           -&gt; reserved for SP2/SP3
- * 0x05 ANCHOR_HEAD    -&gt; reserved for SP2/SP3
- * 0x06 ANCHOR         -&gt; reserved for SP2/SP3
+ * 0x04 BOND           -&gt; reserved for SP3
+ * 0x05 ANCHOR_HEAD    -&gt; reserved for SP3
+ * 0x06 ANCHOR         -&gt; chainId 20 | seq u64               -&gt; status u8 | anchorHash 32 | outboxMapRoot 32
  * 0x07 CALL_COUNT     -&gt; chainId 20 | height u64            -&gt; count u32
- * 0x08 CLAIMED        -&gt; reserved for SP2/SP3
- * 0x09 HEIGHT_TRIGGER -&gt; reserved for SP2/SP3
- * 0x0A CHALLENGE      -&gt; reserved for SP2/SP3
- * 0x0B SEGMENT_CURSOR -&gt; reserved for SP2/SP3
+ * 0x08 CLAIMED        -&gt; src 20 | dst 20 | index u64         -&gt; claim block hash 32
+ * 0x09 HEIGHT_TRIGGER -&gt; reserved for SP3
+ * 0x0A CHALLENGE      -&gt; reserved for SP3
+ * 0x0B SEGMENT_CURSOR -&gt; reserved for SP3
  * 0x0C INPUT          -&gt; chainId 20 | height u64 | index u32 -&gt; {@link InputRecord}
  * 0x0D CODE_REF       -&gt; codeHash 32                       -&gt; refCount u32
  * 0x0E REVERSE        -&gt; block hash 32                     -&gt; {@link InputRef} list
+ * 0x10 JOURNAL        -&gt; block hash 32                     -&gt; settlement record (in the state hash)
  * 0xFF SNAPSHOT_HASH  -&gt; state hash 32                      (snapshot database / import marker)
  * </pre>
  *
  * <p>{@code CODE} and {@code CODE_REF} are split so that bumping a shared contract's reference
  * count only ever rewrites four bytes, never the (possibly large) code blob itself.
  *
- * <p>Prefixes {@code 0x04}..{@code 0x0B} are reserved for SP2/SP3 chain features (bonds, anchors,
- * claims, height triggers, challenges, segment cursors) so this task does not allocate them; SP0a
- * only writes {@code META}, {@code CHAIN}, {@code CONTRACT}, {@code CODE}, {@code CODE_REF},
- * {@code CALL_COUNT}, {@code INPUT} and {@code REVERSE}. {@code SNAPSHOT_HASH} is written by
+ * <p>{@code ANCHOR} (0x06), {@code CLAIMED} (0x08) and {@code JOURNAL} (0x10) are the SP2 claim
+ * records. SP3 writes 0x06; SP2 only reads it. 0x04, 0x05, 0x09, 0x0A and 0x0B stay reserved for
+ * SP3. {@code JOURNAL} is covered by the state hash. {@code SNAPSHOT_HASH} is written by
  * {@link ChainL1Store#exportSnapshot} into a standalone snapshot {@link io.xdag.db.rocksdb.KVSource}
  * and copied by {@link ChainL1Store#importSnapshot} into the live CHAIN_L1 database as the one-shot
  * import marker read back by {@link ChainL1Store#importedSnapshotHash()}; it is the one key the
@@ -82,6 +82,8 @@ public final class ChainL1Keys {
     public static final byte INPUT = 0x0C;
     public static final byte CODE_REF = 0x0D;
     public static final byte REVERSE = 0x0E;
+    /** Settlement journal. Covered by the state hash, unlike {@link #SNAPSHOT_HASH}. */
+    public static final byte JOURNAL = 0x10;
     /** The state hash of everything else: recorded in a snapshot, then kept as the import marker. */
     public static final byte SNAPSHOT_HASH = (byte) 0xFF;
 
@@ -126,6 +128,26 @@ public final class ChainL1Keys {
 
     public static byte[] reverse(Bytes32 blockHash) {
         return BytesUtils.merge(REVERSE, blockHash.toArray());
+    }
+
+    public static byte[] anchor(Bytes chainId, long seq) {
+        require20(chainId);
+        byte[] tail = new byte[8];
+        ExtCodec.putU64(tail, 0, seq);
+        return BytesUtils.merge(new byte[]{ANCHOR}, chainId.toArray(), tail);
+    }
+
+    /** {@code dst} is the outbox destination: 20 zero bytes for an L1 withdraw, otherwise the other chain. */
+    public static byte[] claimed(Bytes src, Bytes dst, long index) {
+        require20(src);
+        require20(dst);
+        byte[] tail = new byte[8];
+        ExtCodec.putU64(tail, 0, index);
+        return BytesUtils.merge(new byte[]{CLAIMED}, src.toArray(), dst.toArray(), tail);
+    }
+
+    public static byte[] journal(Bytes32 blockHash) {
+        return BytesUtils.merge(JOURNAL, blockHash.toArray());
     }
 
     private static void require20(Bytes id) {

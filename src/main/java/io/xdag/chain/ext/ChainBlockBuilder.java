@@ -301,6 +301,40 @@ public final class ChainBlockBuilder {
                 chunks, chainLinks, totalChunks);
     }
 
+    /**
+     * A CLAIM block: self-transfer of {@link #requiredValue(XAmount, int)} for two OUT links (the
+     * anchor hash and the proof chain), plus the claim header. {@code anchor} is stored as link[0];
+     * after the block is re-parsed, {@code ClaimExt.anchor} keeps bytes 8..31 of that hash and zeros
+     * the first 8. {@code proof} is the {@link io.xdag.chain.asset.ClaimProof} payload.
+     */
+    public static ExtResult<Built> claim(Config config, long timestamp, ECKeyPair sender, UInt64 nonce,
+            XAmount headerFee, boolean toChainVault, Bytes srcChain, long seq, long index, long amount,
+            Bytes recipient, Bytes32 anchor, Bytes proof) {
+        Objects.requireNonNull(config, "config");
+        Objects.requireNonNull(sender, "sender");
+        Objects.requireNonNull(nonce, "nonce");
+        Objects.requireNonNull(headerFee, "headerFee");
+        Objects.requireNonNull(anchor, "anchor");
+        Objects.requireNonNull(proof, "proof");
+        requireAddress(srcChain, "srcChain");
+        requireAddress(recipient, "recipient");
+        ExtResult<List<Block>> split = splitChain(config, proof, timestamp);
+        if (!split.isOk()) {
+            return ExtResult.fail(split.error());
+        }
+        List<Block> chunks = split.value();
+        Bytes32 proofHead = headOf(chunks);
+        ClaimExt ext = new ClaimExt(toChainVault, srcChain, seq, index, amount, recipient, anchor, proofHead);
+        XAmount self = requiredValue(headerFee, 2);
+        List<Address> refs = new ArrayList<>();
+        refs.add(input(sender, self));
+        refs.add(new Address(BytesUtils.arrayToByte32(sender.toAddress().toArray()), XDAG_FIELD_OUTPUT, self, true));
+        refs.add(new Address(anchor, XDAG_FIELD_OUT, false));
+        refs.add(new Address(proofHead, XDAG_FIELD_OUT, false));
+        return finish(config, timestamp, sender, nonce, headerFee, refs, ext.encodeHeader(), ext.encodePayload(),
+                chunks, 2, chunks.size());
+    }
+
     private static Address input(ECKeyPair sender, XAmount amount) {
         return new Address(BytesUtils.arrayToByte32(sender.toAddress().toArray()), XDAG_FIELD_INPUT, amount, true);
     }

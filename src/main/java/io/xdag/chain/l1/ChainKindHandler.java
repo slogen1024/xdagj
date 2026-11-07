@@ -27,8 +27,9 @@ import io.xdag.chain.ext.Classified;
 import io.xdag.core.Block;
 
 /**
- * Per-kind L1 semantics for {@code ANCHOR} / {@code BOND} / {@code CHALLENGE} / {@code CLAIM}. SP0a
- * ships no implementations; SP2/SP3 supply theirs.
+ * Per-kind L1 semantics for {@code ANCHOR} / {@code BOND} / {@code CHALLENGE} / {@code CLAIM}.
+ * SP2 registers {@code ClaimHandler} from {@code BlockchainImpl} when the kernel map has no CLAIM
+ * entry. SP3 supplies the bond, anchor and challenge handlers.
  *
  * <p><b>Where to register.</b> The one registration point is {@code Kernel.getChainKindHandlers()}:
  * put the handler into that map <em>before</em> {@code new BlockchainImpl(kernel)}. That

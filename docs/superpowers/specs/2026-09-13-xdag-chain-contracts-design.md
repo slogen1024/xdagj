@@ -251,6 +251,8 @@ link[0] = 被挑战锚定；link[1] = 见证分片链首片（§10.2）。值结
 
 payload[0] = `index u64 ‖ amount u64 ‖ 保留 16B`；payload[1] = `recipient 20B ‖ 保留 12B`。link[0] = 终局锚定；link[1] = 证明分片链首片（对 outboxMapRoot 的 SMT 证明 + 对目标 MMR 的成员证明，§7.6）。值结算：自转 MIN_GAS 付费。字段：header + nonce + INPUT + OUTPUT + pubkey + sig×2 + 扩展头 + 2 载荷 + 2 link = 12。系统动作：金库(srcChain) → recipient 划账 `amount`。
 
+SP2 落盘的记录与证明（SP3 的锚定写入必须沿用，细节在路线图 §7）：0x06 值 `status u8 ‖ anchorHash 32 ‖ outboxMapRoot 32`，CLAIM 只认 status `FINAL`(2)，`anchorHash` 等于本块 link[0] 经 `Address.parse` 后的 32 字节。0x08 键带 dst，避免两条 MMR 的同一 index 撞车。证明链载荷是 `ClaimProof` 版本 1。校验失败不写 0x08。
+
 ### 5.3 分片链的引用与 DA
 
 - 付费块 link 首片，首片 link 次片，……链尾无 link。`tryToConnect` 的 `NO_PARENT` 规则保证：付费块可导入 ⇔ 整条链已在本地。
@@ -735,7 +737,7 @@ verify(challenge):
 
 顺序：SP0a → SP1 → SP2 / SP3（SP1 后可并行）→ SP4 → SP5；SP0b 与 SP1 并行。
 
-**进度（2026-11-07，细节在路线图 §0）**：SP0a、SP0b（含 2b 的 10k 导入门禁）、SP1-1、SP1-2、SP1-3 完成。SP4 的订阅、`0x1B–0x1F`、快照页、四种证明体完成；docker 上的挑战罚没还没有。SP1-4 起、SP2、SP3、SP5 未开工。M1、M2 完成；M3–M7 未完成。
+**进度（2026-11-07，细节在路线图 §0）**：SP0a、SP0b（含 2b 的 10k 导入门禁）、SP1-1、SP1-2、SP1-3、SP2 完成。SP4 的订阅、`0x1B–0x1F`、快照页、四种证明体完成；docker 上的挑战罚没还没有。SP1-4 起、SP3、SP5 未开工。M1、M2 完成；M3–M7 未完成。SP2 没有把 M4 关上：锚定写入、挑战和罚没是 SP3。
 
 **实施级总体设计与路线图**（各子项目的接口、数据结构、算法、测试、切片与里程碑）见 `2026-09-17-xdag-chain-contracts-program-design-and-roadmap.md`；SP0b 拆为 SP0b-1（基准 + 加固工单）→ SP0b-2（锁外预验证流水线）→ SP0b-3（孤块池分队列/配额/TTL + 导入期费率策略）。
 
