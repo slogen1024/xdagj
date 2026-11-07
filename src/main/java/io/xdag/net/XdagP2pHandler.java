@@ -48,7 +48,6 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.xdag.Kernel;
 import io.xdag.chain.ingest.IngestPipeline;
-import io.xdag.chain.p2p.ChainDataSource;
 import io.xdag.chain.p2p.ChainExchange;
 import io.xdag.config.Config;
 import io.xdag.config.spec.NodeSpec;
@@ -155,9 +154,8 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
         this.syncMgr = kernel.getSyncMgr();
         this.netdbMgr = kernel.getNetDBMgr();
         this.msgQueue = channel.getMessageQueue();
-        // Pages and proofs are not served until the execution store exists. Requests get ABSENT.
         this.chainExchange = new ChainExchange(
-                config.getChainSpec().getChainSubscriptions(), ChainDataSource.NONE);
+                config.getChainSpec().getChainSubscriptions(), kernel.getChainRecords());
     }
 
     @Override

@@ -27,6 +27,7 @@ package io.xdag;
 import static io.xdag.crypto.keys.AddressUtils.toBytesAddress;
 
 import io.xdag.chain.ext.ExtKind;
+import io.xdag.chain.p2p.ChainRecords;
 import io.xdag.chain.l1.ChainKindHandler;
 import io.xdag.chain.l1.ChainL1Store;
 import io.xdag.chain.repair.ChainConsistencyCheck;
@@ -89,6 +90,11 @@ public class Kernel {
     protected OrphanBlockStore orphanBlockStore;
     protected TransactionHistoryStore txHistoryStore;
     protected ChainL1Store chainL1Store;
+    /**
+     * Snapshot pages and proof bodies this node can serve. Empty until an executor writes them,
+     * in which case a request is answered ABSENT rather than with a made-up page.
+     */
+    protected final ChainRecords chainRecords = new ChainRecords();
     /**
      * Chain extension-kind semantics, keyed by kind. Handlers SP2/SP3 register BEFORE the kernel
      * constructs {@code BlockchainImpl}; consulted once in the {@code BlockchainImpl} constructor,

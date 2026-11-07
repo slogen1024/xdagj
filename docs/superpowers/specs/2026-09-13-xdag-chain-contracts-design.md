@@ -88,7 +88,7 @@
 | 锁 | `tryToConnect` 全局 `synchronized`，验签与递归结算都在锁内 | L1 导入流水线必须并行化（SP0） |
 | 孤块池 | `MAX_ORPHAN_SIZE = 3750`，满则拒绝账户交易块 | 需改为按链分队列/提高上限（SP0） |
 | 原生账本 | `AddressStore`：20B 地址 → 余额/nonce | 链金库、保证金库都是普通 20B 地址（无私钥）；用户在链内沿用同一地址 |
-| P2P | `0x1B–0x1F` 已占用（订阅/快照/证明，2026-11-07 线格式）；新块经 `NEW_BLOCK` gossip 与 sum 树同步 | 块传播协议不变。快照页和证明体还没接执行状态，请求回 ABSENT |
+| P2P | `0x1B–0x1F` 已占用。快照页是排序 KV，根是 256 层 SHA-256 SMT；证明体四种（段+MMR、outboxMap SMT、C_k 开解、事件 MMR）。块传播仍走 `NEW_BLOCK` | 请求方拿自己的锚定根来验，不信对端报的根。执行器还没往 `ChainRecords` 写，空库回 ABSENT。docker 挑战罚没未做 |
 | 存储 | 8 个 RocksDB 实例，1 字节前缀分区，只有 `batchWrite` 原子 | 新增 `CHAIN_L1`（全网小状态）与 `CHAIN_EXEC`（订阅链状态）两个实例 |
 
 ---

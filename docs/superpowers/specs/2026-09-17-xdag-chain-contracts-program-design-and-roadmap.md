@@ -384,7 +384,7 @@ SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器�
 
 ---
 
-## 9. SP4：订阅与 P2P（2026-11-07 已开工：订阅集合与 0x1B–0x1F 线格式；快照页、证明和 3 节点 devnet 仍等 SP1-2 / SP2 / SP3）
+## 9. SP4：订阅与 P2P（2026-11-07：线格式、快照页、四种证明体已实施。三节点交换见 `ThreeNodeDevnetTest`。docker 上的挑战罚没仍等 SP2/SP3，没有锚定可罚）
 
 ### 9.1 订阅集合与过渡模式
 
@@ -404,7 +404,7 @@ SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器�
 
 ### 9.3 多节点 devnet
 
-- 3 节点 docker-compose（复用现有 devnet 配置），2 条链，节点订阅不同链；跨链消息 D=0 与 D=W 对照；一次人为错误锚定的完整挑战-罚没流程脚本化。
+- 3 节点 docker-compose（复用现有 devnet 配置），2 条链，节点订阅不同链；跨链消息 D=0 与 D=W 对照；一次人为错误锚定的完整挑战-罚没流程脚本化。锚定和仲裁还没有，这一条没做。现在能跑的是进程内三节点：A 只订 S、B 只订 X、C 全订；C 向 A 拉快照并核对 SMT 根，段证明核对 MMR 根，未订阅或没有该段则 HOLD（`ThreeNodeDevnetTest`）。
 
 **任务量估计**：15–18 个任务。
 

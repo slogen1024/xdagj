@@ -29,8 +29,8 @@ import org.apache.tuweni.bytes.Bytes32;
  * What this node can hand a peer who asked. {@code null} means the node does not have it.
  * Returning bytes does not check them against an anchor; that check is the requester's.
  *
- * <p>{@link #NONE} is the production source until the execution store and the proof builders
- * exist. It answers every request with absence rather than an invented page.
+ * <p>The kernel serves its {@code ChainRecords}. {@link #NONE} is the source that has nothing,
+ * used where a node should answer every request ABSENT.
  */
 public interface ChainDataSource {
 
