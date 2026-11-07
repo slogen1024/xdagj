@@ -25,6 +25,8 @@ package io.xdag.chain.p2p;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -150,8 +152,29 @@ public class ChainExchangeTest {
         assertEquals(remote.chainIds(), ex.remote().chainIds());
 
         ChainProofReplyMessage proof = ChainProofReplyMessage.ok(42, new byte[] {7});
+        assertTrue(ex.openProof(42));
         ex.onProofReply((ChainProofReplyMessage) FACTORY.create(proof.getCode().toByte(), proof.getBody()));
-        assertArrayEquals(new byte[] {7}, ex.proofReply(42).proof());
+        assertArrayEquals(new byte[] {7}, ex.takeProof(42).proof());
+        assertNull(ex.proofReply(42));
+    }
+
+    @Test
+    public void unsolicitedRepliesAreDroppedAndInflightIsCapped() {
+        ChainExchange ex = new ChainExchange(ChainSubscriptions.none(), ChainDataSource.NONE);
+        ex.onSnapshotReply(ChainSnapshotReplyMessage.ok(1, new byte[] {1}));
+        ex.onProofReply(ChainProofReplyMessage.ok(1, new byte[] {1}));
+        assertNull(ex.snapshotReply(1));
+        assertNull(ex.proofReply(1));
+
+        for (int i = 0; i < ChainExchange.MAX_INFLIGHT; i++) {
+            assertTrue(ex.openSnapshot(i));
+        }
+        assertFalse(ex.openSnapshot(ChainExchange.MAX_INFLIGHT));
+        assertFalse(ex.openSnapshot(0));
+        ex.onSnapshotReply(ChainSnapshotReplyMessage.absent(0));
+        assertFalse(ex.openSnapshot(ChainExchange.MAX_INFLIGHT));
+        assertTrue(ex.takeSnapshot(0).absent());
+        assertTrue(ex.openSnapshot(ChainExchange.MAX_INFLIGHT));
     }
 
     @Test

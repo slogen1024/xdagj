@@ -119,6 +119,17 @@ public class SnapshotAndProofTest {
     }
 
     @Test
+    public void pullStopsAtTheByteCapBeforeBuildingTheRoot() {
+        ChainRecords records = new ChainRecords();
+        records.putSnapshot(id(7), 64, List.of(new Kv(id(1), new byte[] {1, 2, 3, 4})));
+        ChainExchange host = new ChainExchange(ChainSubscriptions.all(), records);
+        IllegalArgumentException cap = assertThrows(IllegalArgumentException.class,
+                () -> SnapshotSync.pull(records.snapshotRoot(id(7), 64),
+                        page -> reply(host, id(7), 64, page), 8));
+        assertTrue(cap.getMessage().contains("snapshot byte cap"));
+    }
+
+    @Test
     public void oneEntryLargerThanAPageIsRefused() {
         byte[] huge = new byte[ChainCodec.MAX_PAYLOAD];
         assertThrows(IllegalArgumentException.class,

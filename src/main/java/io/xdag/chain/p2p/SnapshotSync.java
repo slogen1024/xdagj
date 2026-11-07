@@ -36,18 +36,33 @@ import io.xdag.net.message.chain.ChainSnapshotReplyMessage;
  * Pull every page of one snapshot and accept it only when the rebuilt SMT root is the anchor's
  * {@code stateRoot}. Page 0 ABSENT means this peer has no snapshot. A later ABSENT ends the
  * snapshot. OVERSIZE cannot be reassembled from one frame, so it fails the pull.
+ *
+ * <p>Pages are retained only up to {@link #DEFAULT_MAX_BYTES}. A peer that never sends ABSENT
+ * stops there, before the SMT root is built. The root still needs every retained pair, so the
+ * cap is what bounds the memory; raise it at the call for a chain whose state is known to be
+ * larger.
  */
 public final class SnapshotSync {
 
     static final int MAX_PAGES = 65_536;
+    /** Node-local. Not a consensus limit. */
+    public static final int DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
 
     private SnapshotSync() {
     }
 
     public static List<Kv> pull(Bytes32 expectedRoot, IntFunction<ChainSnapshotReplyMessage> fetch) {
+        return pull(expectedRoot, fetch, DEFAULT_MAX_BYTES);
+    }
+
+    public static List<Kv> pull(Bytes32 expectedRoot, IntFunction<ChainSnapshotReplyMessage> fetch, int maxBytes) {
+        if (maxBytes < 0) {
+            throw new IllegalArgumentException("snapshot byte cap");
+        }
         List<Kv> all = new ArrayList<>();
         Bytes32 prev = null;
         boolean ended = false;
+        long used = 0;
         for (int page = 0; page < MAX_PAGES; page++) {
             ChainSnapshotReplyMessage reply = fetch.apply(page);
             if (reply.absent()) {
@@ -60,7 +75,12 @@ public final class SnapshotSync {
             if (reply.oversize() || !reply.ok()) {
                 throw new IllegalArgumentException("snapshot page oversize");
             }
-            List<Kv> kvs = SnapshotPages.decode(reply.page());
+            byte[] raw = reply.page();
+            used += raw.length;
+            if (used > maxBytes) {
+                throw new IllegalArgumentException("snapshot byte cap");
+            }
+            List<Kv> kvs = SnapshotPages.decode(raw);
             for (Kv kv : kvs) {
                 if (prev != null && prev.compareTo(kv.key()) >= 0) {
                     throw new IllegalArgumentException("snapshot pages out of order");
