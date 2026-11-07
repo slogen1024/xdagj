@@ -26,6 +26,7 @@ package io.xdag;
 
 import static io.xdag.crypto.keys.AddressUtils.toBytesAddress;
 
+import io.xdag.chain.exec.ChainExecDriver;
 import io.xdag.chain.exec.ChainExecStore;
 import io.xdag.chain.ext.ExtKind;
 import io.xdag.chain.p2p.ChainRecords;
@@ -93,6 +94,8 @@ public class Kernel {
     protected ChainL1Store chainL1Store;
     /** Node-local execution store. Empty until an executor writes it. Not in the snapshot hash. */
     protected ChainExecStore chainExecStore;
+    /** Set by {@code BlockchainImpl} once the block lookup exists. Null until then. */
+    protected ChainExecDriver chainExecDriver;
     /**
      * Snapshot pages and proof bodies this node can serve. Empty until an executor writes them,
      * in which case a request is answered ABSENT rather than with a made-up page.

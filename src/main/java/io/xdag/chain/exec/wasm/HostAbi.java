@@ -53,8 +53,10 @@ import io.xdag.crypto.keys.Signer;
  * §8.3 host functions. Pointers are {@code i32}. Lengths below zero trap. {@code secp256k1_verify}
  * reads a 32-byte hash, a 65-byte {@link Signature#decode} blob and a 33-byte compressed public key.
  * {@code secp256k1_recover} reads a 32-byte hash, 64-byte {@code r || s}, a recovery id and writes
- * 33 bytes. Both return 0 on a bad input instead of trapping. {@code call} charges only the flat
- * 500; the callee does not run until SP1-3. {@code send}'s chain and contract pointers are 20 bytes,
+ * 33 bytes. Both return 0 on a bad input instead of trapping. {@code call} charges the flat 500,
+ * runs the callee, then charges {@link HostContext#lastCallGas()} and copies
+ * {@link HostContext#lastCallReturn()} into {@code rptr} up to {@code rcap}. {@code send}'s chain
+ * and contract pointers are 20 bytes,
  * and the per-32-byte term is the argument payload. A repeated {@code storage_get} of a key already
  * read in this call skips the witness term; {@code storage_set} skips it only when that read already
  * happened. {@code storage_scan} writes {@code i32 count} then, for each hit, {@code i32 keyLen},
@@ -268,7 +270,14 @@ public final class HostAbi {
                 }
                 meter.charge(GasSchedule.CALL);
                 requireWrite(writes);
-                return i32(ctx.call(contract, sel, callArgs, value));
+                int code = ctx.call(contract, sel, callArgs, value);
+                meter.charge(ctx.lastCallGas());
+                byte[] ret = ctx.lastCallReturn();
+                int n = Math.min(ret.length, rcap);
+                if (n > 0) {
+                    write(mem, i32(args, 5), java.util.Arrays.copyOf(ret, n));
+                }
+                return i32(code);
             }
             case "send" -> {
                 byte[] dst = read(mem, i32(args, 0), GasSchedule.ADDRESS_BYTES);

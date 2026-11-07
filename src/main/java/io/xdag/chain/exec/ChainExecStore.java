@@ -92,6 +92,36 @@ public final class ChainExecStore implements XdagLifecycle {
         return source.get(stateKey(chain, key));
     }
 
+    /** Every state value of one chain. The key is the SMT key; the value is whatever {@code putState} stored. */
+    public List<Pair<Bytes32, byte[]>> readState(Bytes32 chain) {
+        return readTail(STATE, chain);
+    }
+
+    /** Every persisted MMR blob of one chain, keyed by the destination chain id. */
+    public List<Pair<Bytes32, byte[]>> readMmr(Bytes32 chain) {
+        return readTail(MMR, chain);
+    }
+
+    private List<Pair<Bytes32, byte[]>> readTail(byte prefixByte, Bytes32 chain) {
+        byte[] prefix = new byte[1 + Bytes32.SIZE];
+        prefix[0] = prefixByte;
+        System.arraycopy(chain.toArray(), 0, prefix, 1, Bytes32.SIZE);
+        List<Pair<Bytes32, byte[]>> out = new ArrayList<>();
+        for (byte[] key : source.prefixKeyLookup(prefix)) {
+            if (key.length != 1 + Bytes32.SIZE + Bytes32.SIZE) {
+                continue;
+            }
+            byte[] value = source.get(key);
+            if (value == null) {
+                continue;
+            }
+            byte[] tail = new byte[Bytes32.SIZE];
+            System.arraycopy(key, 1 + Bytes32.SIZE, tail, 0, Bytes32.SIZE);
+            out.add(Pair.of(Bytes32.wrap(tail), value.clone()));
+        }
+        return out;
+    }
+
     public void deleteState(Bytes32 chain, Bytes32 key) {
         source.delete(stateKey(chain, key));
     }

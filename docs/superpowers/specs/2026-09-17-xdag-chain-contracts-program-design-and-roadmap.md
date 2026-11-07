@@ -30,8 +30,9 @@
 | SP0b-2b | 完成 | 中位 19687 块/s，锁内均值 42–49 µs | — |
 | SP0b-3 | 完成 | 分队列孤块池、配额、TTL、导入期费率、不挖矿留分片 | `removeWorst.d125` 的约 1.5 µs 残差未拆 |
 | SP1-1 | 完成 | Chicory 1.7.5，`io.xdag.chain.exec.wasm` | — |
-| SP1-2 | 完成 | `StateTree` 的 get/put/remove；`OutboxMap`；`WitnessRecorder`（同 key 只计一次，`estimateFromGas` = gas/10 + 32KiB）；`ChainExecStore`（`CHAIN_EXEC`，快照页键多一个 `page u32`）。§8.3 不等式在 `StateAndWitnessTest` | 执行循环仍是 SP1-3。哈希函数仍是无状态的 `SparseMerkleTree` |
-| SP1-3 / 4 / 5 | 未开工 | — | 执行循环、回滚、快照落库、两模式吞吐 |
+| SP1-2 | 完成 | `StateTree` 的 get/put/remove；`OutboxMap`；`WitnessRecorder`（同 key 只计一次，`estimateFromGas` = gas/10 + 32KiB）；`ChainExecStore`（`CHAIN_EXEC`，快照页键多一个 `page u32`）。§8.3 不等式在 `StateAndWitnessTest` | 哈希函数仍是无状态的 `SparseMerkleTree` |
+| SP1-3 | 完成 | `InputStreamBuilder`（system/delivered 仍空）；`ChainExecutor.step/apply`（预扣、回滚帧、退款、`C_k`）；`CallFrame` 在 `ExecWorld.Layer`，深度 16，`xdag.reentrant` 放行；`ChainLedger`；`ChainExecDriver` 跟 `onSetMainEnd`。根与承诺钉在 `ChainExecutorTest` | 变更集、回滚、快照间隔、软预执行是 SP1-4。unwind 之后执行停住，不回滚 |
+| SP1-4 / 5 | 未开工 | — | 回滚、快照落库、两模式吞吐 |
 | SP2 | 未开工 | — | 金库、CLAIM、系统划账 |
 | SP3 | 未开工 | — | 锚定、仲裁、罚没 |
 | SP4 | 部分 | 订阅集合；`0x1B–0x1F`；快照页与 SMT 根校验；四种证明体；`Delivery` 的 HOLD；未 `open` 的回复丢弃，每方向最多 64 条；拉取默认 8 MiB。进程内三节点见 `ThreeNodeDevnetTest` | 执行器只跑订阅链；docker 上的 D=0/D=W 与挑战罚没（没有 SP2/SP3 就没有锚定可罚）。**M5 未关** |
@@ -153,7 +154,7 @@ io.xdag.chain
 ├── ingest/         已建成（SP0b-2/3）：PreValidator, IngestPipeline, ChunkFeePolicy
 ├── orphan/         已建成（SP0b-3）：ChainOrphanPool
 ├── repair/         已建成（SP0b-1）：ChainConsistencyCheck, ChainRepairTool
-├── exec/           已建成 ChainExecStore（SP1-2）。未建：ChainExecutor, InputStreamBuilder, CallFrame, ChainLedger, ChangeLog
+├── exec/           已建成 ChainExecStore（SP1-2），ChainExecutor, InputStreamBuilder, ChainLedger, ChainExecDriver（SP1-3）。未建：ChangeLog
 │   ├── wasm/       已建成（SP1-1）：WasmEngine, ChicoryEngine, ModuleValidator, GasInstrumenter, HostAbi
 │   └── state/      已建成（SP1-2）：SparseMerkleTree, StateTree, Mmr, OutboxMap, WitnessRecorder
 ├── anchor/         未建（SP3）：AnchorPublisher, CommitmentChain, CanonicalChainRules
@@ -301,7 +302,7 @@ SP1 是最大的子项目，建议切为 **SP1-1 WASM 引擎与 ABI → SP1-2 �
 - `ChainExecStore`（RocksDB 列 `CHAIN_EXEC`，节点本地）：前缀表——`0x01 chainId‖key → value`、`0x02 chainId → 最新 seq/根`、`0x03 chainId‖seq → 变更集`、`0x04 chainId‖seq‖page u32 → 快照页`、`0x05 chainId‖dst → MMR 节点`、`0x06 chainId‖seq‖k → C_k 开解`、`0x07 chainId‖blockHash → 回执`。
 - 属性测试：随机调用的实际 `witnessBytes ≤ estimateFromGas(gasUsed)`（§8.3 不等式）；SMT/MMR 证明正反例；同一 KV 序列在两种插入顺序下根相同。
 
-### 6.3 SP1-3：输入流与执行循环
+### 6.3 SP1-3：输入流与执行循环（**已实施，2026-11-07**。嵌套帧是 `ExecWorld.Layer`，不另有 `CallFrame` 类。重入标记是原始 wasm 的 custom section `xdag.reentrant`（选择子 u32 小端），插桩会丢掉 custom section。`onUnsetMain` 只把驱动标成停住，状态回滚留给 SP1-4）
 
 - `InputStreamBuilder.inputs(chain, h)`：`systemInputs`（本高度成为规范的锚定 → 奖励输入；SP3 之前为空）++ `deliveredMessages`（本高度可交付的段展开；SP4 之前为空）++ `confirmedBlocks`（`CHAIN_L1` 0x0C 按 `0..callCount−1` 枚举，只取 `status == OK` 的 CALL/DEPLOY，`INVALID_*` 输入仍占位并产生 `status` 回执）。
 - `ChainExecutor.step(chain, h)`：逐输入执行总规格 §7.2 的事务语义（预扣 gas、执行、提交/回滚、退还、承诺 `C_k`）；DEPLOY 输入执行 `init`；`INSUFFICIENT_GAS/FAILED/INVALID_*` 都产生承诺与回执。
@@ -495,7 +496,7 @@ SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器�
 ```
 SP0a ✅ ─┬─► SP0b-1 ✅ ─► SP0b-2 ✅ ─► SP0b-2b ✅ ─► SP0b-3 ✅
          │
-         └─► SP1-1 ✅ ─► SP1-2 ✅ ─► SP1-3 ─► SP1-4 ─► SP1-5
+         └─► SP1-1 ✅ ─► SP1-2 ✅ ─► SP1-3 ✅ ─► SP1-4 ─► SP1-5
                                           │
                                           ├─► SP2 ─┐
                                           └─► SP3 ─┤
@@ -513,7 +514,7 @@ SP0b 与 SP1 并行（不同包、不同人/会话）；SP2 与 SP3 并行（都
 |--------|------|------|---------|
 | **M1 基线** | 完成 | SP0b-1 完成 | 基线文档；G1/G2/G9/G10 关闭；全量绿 |
 | **M2 引擎** | 完成 | SP1-1/2 完成 | 白名单/插桩测试向量已钉死。§8.3 不等式：随机读写的 `witnessBytes` ≤ `estimateFromGas(gasUsed)`（`StateAndWitnessTest`） |
-| **M3 执行** | 未完成 | SP0b-2/2b 的导入门禁已关；SP1-3/4/5 未开工 | 单链执行吞吐 ≥ 2k 调用/s 未测；两模式一致未测。**导入 ≥ 10k 块/s 已达成**：20000 块负载 `pipeline` 中位 **19687 块/s**，锁内均值 42–49 µs。瓶颈是 `checkMineAndAdd` 对每个块做 secp256k1，不是 AddressStore。见 `docs/benchmarks/2026-11-07-sp0b2b-import.md` |
+| **M3 执行** | 未完成 | SP0b-2/2b 的导入门禁已关；SP1-3 完成；SP1-4/5 未开工 | 单链执行吞吐 ≥ 2k 调用/s 未测；两模式一致未测。**导入 ≥ 10k 块/s 已达成**：20000 块负载 `pipeline` 中位 **19687 块/s**，锁内均值 42–49 µs。瓶颈是 `checkMineAndAdd` 对每个块做 secp256k1，不是 AddressStore。见 `docs/benchmarks/2026-11-07-sp0b2b-import.md` |
 | **M4 经济与安全** | 未开工 | SP2 + SP3 | I1–I3 属性；E1/E2/E3 对抗；仲裁 ≤ 2 s；N2 全场景 |
 | **M5 网络** | 未完成 | SP0b-3 完成；SP4 的线格式、页、证明完成 | 3 节点 devnet 跨链 + 挑战演练脚本仍未通过。进程内三节点只覆盖订阅分裂和拉页/拉证明 |
 | **M6 开发者面** | 未开工 | SP5 | RPC/SDK/CLI/DApp；文档 |

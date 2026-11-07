@@ -127,6 +127,7 @@ public final class ChicoryEngine implements WasmEngine {
             builder.withMachineFactory(module.machineFactory);
         }
         Instance instance = null;
+        ctx.bindGasLeft(meter::left);
         try {
             instance = builder.build();
             ExportFunction fn = instance.export(export);
@@ -136,6 +137,8 @@ public final class ChicoryEngine implements WasmEngine {
             return finish(true, e.getMessage(), meter, ctx, instance);
         } catch (StackOverflowError e) {
             return finish(true, "call stack exhausted", meter, ctx, instance);
+        } finally {
+            ctx.bindGasLeft(null);
         }
     }
 

@@ -78,6 +78,23 @@ public interface HostContext {
 
     int call(byte[] contract, int selector, byte[] args, long value);
 
+    /** Bytes the last {@link #call} left for the caller to copy into {@code rptr}. Empty when it did not run. */
+    default byte[] lastCallReturn() {
+        return new byte[0];
+    }
+
+    /** Gas the last {@link #call} consumed on its own meter. The caller charges this on top of the flat 500. */
+    default long lastCallGas() {
+        return 0;
+    }
+
+    /**
+     * The engine binds this to the meter of the instance that is running. A nested call spends
+     * {@code left} at the moment {@link #call} is entered, which is after the flat 500.
+     */
+    default void bindGasLeft(java.util.function.LongSupplier left) {
+    }
+
     int send(byte[] dstChain, byte[] contract, int selector, byte[] args, long value);
 
     void emit(byte[] topic, byte[] data);

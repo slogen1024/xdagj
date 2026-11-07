@@ -36,7 +36,8 @@ import com.dylibso.chicory.runtime.TrapException;
 
 /**
  * In-memory {@link HostContext}. Scan order is unsigned byte order of the key. {@code call}
- * returns 1 and does not run a callee; the executor lands in SP1-3.
+ * returns 1 and does not run a callee. {@link io.xdag.chain.exec.ChainExecutor} is the context
+ * that does.
  */
 public final class MemoryHostContext implements HostContext {
 

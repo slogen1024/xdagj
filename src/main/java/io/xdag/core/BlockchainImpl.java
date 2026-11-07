@@ -30,6 +30,9 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import io.xdag.Kernel;
 import io.xdag.Wallet;
+import io.xdag.chain.exec.ChainExecDriver;
+import io.xdag.chain.exec.ChainExecutor;
+import io.xdag.chain.exec.wasm.ChicoryEngine;
 import io.xdag.chain.ext.Classified;
 import io.xdag.chain.ingest.PreValidated;
 import io.xdag.chain.ingest.PreValidator;
@@ -340,6 +343,12 @@ public class BlockchainImpl implements Blockchain {
                     hash -> getBlockByHash(hash, true));
             kernel.getChainKindHandlers().forEach(processor::registerHandler);
             this.chainHooks = processor;
+            if (kernel.getChainExecStore() != null) {
+                ChainExecutor executor = new ChainExecutor(ChicoryEngine.interpreter(), chainStore,
+                        kernel.getChainExecStore(), hash -> getBlockByHash(hash, true),
+                        spec.getChainMaxChunksPerChain());
+                kernel.setChainExecDriver(new ChainExecDriver(executor, spec.getChainSubscriptions(), chainStore));
+            }
         }
 
         // Start main chain checking
@@ -2294,6 +2303,7 @@ public class BlockchainImpl implements Blockchain {
             updateBlockFlag(block, BI_MAIN, true);
             chainHooks.onSetMainBegin(mainNumber, block);
 
+            boolean confirmed = false;
             try {
                 // Main block REF points to itself.
                 // G1 root fix (SP0b-1): point the main block at itself BEFORE the DFS. A throw out of
@@ -2320,6 +2330,7 @@ public class BlockchainImpl implements Blockchain {
                     blockStore.saveXdagStatus(xdagStats);
                     blockStore.saveLastCompletedMain(mainNumber);
                     blockStore.clearMainInFlight();
+                    confirmed = true;
                     return;
                 } else {
                     acceptAmount(block, mainBlockFee); //add the fee
@@ -2342,13 +2353,47 @@ public class BlockchainImpl implements Blockchain {
                 blockStore.saveXdagStatus(xdagStats);
                 blockStore.saveLastCompletedMain(mainNumber);
                 blockStore.clearMainInFlight();
+                confirmed = true;
             } finally {
                 // Closes the apply context on every exit: the early return above, a normal finish,
                 // and a throw out of the applyBlock DFS.
                 chainHooks.onSetMainEnd(mainNumber, block);
+                if (confirmed) {
+                    followMain(mainNumber, block.getTimestamp());
+                }
             }
         }
 
+    }
+
+    /** Node-local. A failure here does not fail {@code setMain} and does not touch {@code CHAIN_L1}. */
+    private void followMain(long height, long timestamp) {
+        ChainExecDriver driver = kernel.getChainExecDriver();
+        if (driver == null) {
+            return;
+        }
+        try {
+            driver.onSetMainEnd(height, seq -> seq == height ? timestamp : timestampOf(seq));
+        } catch (RuntimeException e) {
+            log.error("chain execution did not follow main {}", height, e);
+        }
+    }
+
+    private void followUnwind(long height) {
+        ChainExecDriver driver = kernel.getChainExecDriver();
+        if (driver == null) {
+            return;
+        }
+        try {
+            driver.onUnsetMain(height);
+        } catch (RuntimeException e) {
+            log.error("chain execution did not notice the unwind of {}", height, e);
+        }
+    }
+
+    private long timestampOf(long height) {
+        Block main = getBlockByHeight(height);
+        return main == null ? 0L : main.getTimestamp();
     }
 
     /**
@@ -2391,6 +2436,7 @@ public class BlockchainImpl implements Blockchain {
             long lastCompleted = blockStore.getLastCompletedMain();
             boolean forkTimeWasSet = lastCompleted < 0 || lastCompleted >= height;
             chainHooks.onUnsetMain(height, block);
+            followUnwind(height);
 
             XAmount reward = getReward(height);
             updateBlockFlag(block, BI_MAIN, false);
