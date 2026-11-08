@@ -24,9 +24,9 @@
 package io.xdag.chain.rpc;
 
 /**
- * The four read views. {@code pending} and {@code confirmed} are the executed head: soft pre-exec
- * of unconfirmed calls is not built, so they are the same state. {@code anchored} is the latest
- * non-void anchor at that head. {@code final} is the latest FINAL anchor at that head.
+ * The four read views. {@code pending} is the executed head plus unconfirmed calls on a copy.
+ * {@code confirmed} is the executed head. {@code anchored} is the latest non-void anchor at that
+ * head. {@code final} is the latest FINAL anchor at that head.
  */
 public enum ChainView {
     PENDING,

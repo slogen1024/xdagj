@@ -46,10 +46,9 @@ import io.xdag.chain.p2p.ChainSubscriptions;
  * does not write {@code CHAIN_L1}. A subscribed chain is advanced from its head (or its creation
  * height) through {@code height}, waiting when a deliverable outbox is not in the exec store yet
  * so the source chain can step first. {@link #onSourceVoided} rolls a consumer back to the seq
- * before that segment was delivered. {@code onUnsetMain} does not roll the state back — that is
- * SP1-4 — and once a chain has executed a height that is being removed, further steps stop.
- * {@code D == W} does not rewind: those segments are only consumed after finality, and a final
- * anchor is not voided.
+ * before that segment was delivered. {@code onUnsetMain} rolls every subscribed chain back to the
+ * seq before the height leaving main. A missing change-set stops the driver. {@code D == W} does
+ * not rewind: those segments are only consumed after finality, and a final anchor is not voided.
  */
 public final class ChainExecDriver {
 
@@ -164,8 +163,14 @@ public final class ChainExecDriver {
     }
 
     public void onUnsetMain(long height) {
+        long target = height == 0L ? -1L : height - 1L;
         for (Bytes chain : chains()) {
-            if (executor.appliedSeq(chain) >= height) {
+            if (executor.appliedSeq(chain) < height) {
+                continue;
+            }
+            try {
+                executor.rewindTo(chain, target);
+            } catch (RuntimeException e) {
                 blocked = true;
                 return;
             }

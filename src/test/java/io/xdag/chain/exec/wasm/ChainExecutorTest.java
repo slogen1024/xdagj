@@ -25,6 +25,7 @@ package io.xdag.chain.exec.wasm;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -168,7 +169,7 @@ public class ChainExecutorTest {
     }
 
     @Test
-    public void theDriverCatchesUpAndStopsAfterAnUnwind() {
+    public void theDriverRewindsAnUnsetHeightAndReplaysIt() {
         ChainL1Store l1 = l1();
         ChainL1Batch batch = new ChainL1Batch();
         batch.putChain(CHAIN, new ChainRecord(1L, Bytes32.ZERO, 1L, 0L, GasSchedule.MAX_CALL_GAS, 0L));
@@ -183,9 +184,10 @@ public class ChainExecutorTest {
         driver.onSetMainEnd(3L, h -> 100L + h);
         assertEquals(3L, exec.appliedSeq(CHAIN));
         driver.onUnsetMain(3L);
-        assertTrue(driver.isBlocked());
+        assertFalse(driver.isBlocked());
+        assertEquals(2L, exec.appliedSeq(CHAIN));
         driver.onSetMainEnd(4L, h -> 100L + h);
-        assertEquals(3L, exec.appliedSeq(CHAIN));
+        assertEquals(4L, exec.appliedSeq(CHAIN));
     }
 
     private static ChainExecutor.Outcome runStore(ChainExecutor exec, byte[] code) {

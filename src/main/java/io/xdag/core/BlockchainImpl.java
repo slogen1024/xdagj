@@ -36,6 +36,8 @@ import io.xdag.chain.asset.Settlement;
 import io.xdag.chain.exec.ChainExecDriver;
 import io.xdag.chain.fraud.VerdictCache;
 import io.xdag.chain.exec.ChainExecutor;
+import io.xdag.chain.exec.ChainInput;
+import io.xdag.chain.exec.PendingCalls;
 import io.xdag.chain.exec.wasm.ChicoryEngine;
 import io.xdag.chain.ext.ExtKind;
 import io.xdag.chain.ext.Classified;
@@ -405,6 +407,18 @@ public class BlockchainImpl implements Blockchain {
                 chainTriggers.setSourceVoided(driver::onSourceVoided);
                 driver.setNetwork(kernel.getChainPull(), kernel.getChainRecords());
                 kernel.setChainExecDriver(driver);
+                executor.setPending(chain -> {
+                    byte[] top = xdagTopStatus.getTop();
+                    Block tip = top == null ? null : getBlockByHash(Bytes32.wrap(top), true);
+                    List<Block> order = PendingCalls.dfs(tip, hash -> getBlockByHash(hash, true));
+                    List<ChainExecutor.Tx> txs = new ArrayList<>();
+                    for (ChainInput input : PendingCalls.calls(chain, order, chainStore,
+                            hash -> getBlockByHash(hash, true), spec.getChainMaxChunksPerChain(),
+                            spec.getChainChunkFee())) {
+                        txs.add(executor.txFor(chain, input));
+                    }
+                    return txs;
+                });
             }
         }
 

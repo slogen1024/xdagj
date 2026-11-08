@@ -33,8 +33,7 @@ import org.apache.tuweni.bytes.Bytes32;
 /**
  * One seq of {@code CHAIN_EXEC}, enough to put that seq back. State values are the pre-images
  * ({@code null} when the key was created). Outbox rows are the entry count before the seq appended.
- * {@code prevSeq} is {@code -1} when the chain had no head. Retention is not capped here; the K=128
- * window is still SP1-4.
+ * {@code prevSeq} is {@code -1} when the chain had no head. The executor keeps the last 128.
  */
 final class ExecChangeSet {
 

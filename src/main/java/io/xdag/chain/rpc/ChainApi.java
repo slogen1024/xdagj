@@ -51,10 +51,11 @@ import io.xdag.core.Block;
 import io.xdag.core.XdagBlock;
 
 /**
- * {@code chain_*} over the executed head and the 0x06 index. {@code pending} is that head: soft
- * pre-exec of unconfirmed calls is still SP1-4. {@code anchored} and {@code final} read the state
- * at the anchor seq, undoing change-sets on a copy. A receipt written by the executor carries its
- * seq and events. {@code chain_subscribe} pushes on the {@code /chain} websocket.
+ * {@code chain_*} over the executed head and the 0x06 index. {@code pending} runs unconfirmed calls
+ * on a copy and does not move the head. {@code anchored} and {@code final} read the state at the
+ * anchor seq, undoing change-sets on a copy, or the snapshot page when that seq has fallen out of
+ * the change-set window. A receipt written by the executor carries its seq and events.
+ * {@code chain_subscribe} pushes on the {@code /chain} websocket.
  */
 public final class ChainApi {
 
@@ -85,17 +86,34 @@ public final class ChainApi {
     }
 
     public Balance getBalance(Bytes chain, byte[] address, ChainView view) {
+        if (view == ChainView.PENDING) {
+            gate();
+            long seq = requireHead(chain);
+            return new Balance(view.wire(), seq, Long.toString(ex().pendingBalance(chain, address)));
+        }
         long seq = viewSeq(chain, view);
         return new Balance(view.wire(), seq, Long.toString(ex().balanceAt(chain, seq, address)));
     }
 
     public State getState(Bytes chain, Bytes contract, byte[] key, ChainView view) {
+        if (view == ChainView.PENDING) {
+            gate();
+            long seq = requireHead(chain);
+            byte[] value = ex().pendingStorage(chain, contract, key);
+            return new State(view.wire(), seq, value == null ? null : Bytes.wrap(value).toHexString());
+        }
         long seq = viewSeq(chain, view);
         byte[] value = ex().storageAt(chain, seq, contract, key);
         return new State(view.wire(), seq, value == null ? null : Bytes.wrap(value).toHexString());
     }
 
     public Query query(Bytes chain, Bytes contract, int selector, byte[] args, ChainView view) {
+        if (view == ChainView.PENDING) {
+            gate();
+            long seq = requireHead(chain);
+            byte[] data = ex().pendingQuery(chain, contract, selector, args);
+            return new Query(view.wire(), seq, data == null ? null : Bytes.wrap(data).toHexString());
+        }
         long seq = viewSeq(chain, view);
         byte[] data = ex().queryAt(chain, seq, contract, selector, args);
         return new Query(view.wire(), seq, data == null ? null : Bytes.wrap(data).toHexString());
@@ -104,12 +122,20 @@ public final class ChainApi {
     public long estimateGas(Bytes chain, Bytes contract, int selector, byte[] args) {
         gate();
         requireHead(chain);
-        return ex().estimate(chain, contract, selector, args);
+        return ex().pendingEstimate(chain, contract, selector, args);
     }
 
     public Proof getProof(Bytes chain, Bytes contract, byte[] key, ChainView view) {
+        if (view == ChainView.PENDING) {
+            gate();
+            long seq = requireHead(chain);
+            return proof(view, seq, ex().pendingProof(chain, contract, key));
+        }
         long seq = viewSeq(chain, view);
-        SparseMerkleTree.Proof proof = ex().proofAt(chain, seq, contract, key);
+        return proof(view, seq, ex().proofAt(chain, seq, contract, key));
+    }
+
+    private static Proof proof(ChainView view, long seq, SparseMerkleTree.Proof proof) {
         List<String> siblings = new ArrayList<>(proof.siblings().length);
         for (Bytes32 sibling : proof.siblings()) {
             siblings.add(sibling.toHexString());

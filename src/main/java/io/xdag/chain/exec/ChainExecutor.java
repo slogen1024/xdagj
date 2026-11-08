@@ -33,6 +33,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.function.IntFunction;
 
 import org.apache.commons.lang3.tuple.Pair;
@@ -68,6 +69,7 @@ import io.xdag.chain.exec.state.SparseMerkleTree;
 import io.xdag.chain.p2p.ChainRecords;
 import io.xdag.chain.p2p.ProofBodies;
 import io.xdag.chain.p2p.ProofKind;
+import io.xdag.chain.p2p.SnapshotPages;
 import io.xdag.chain.p2p.SnapshotSync;
 import io.xdag.net.message.chain.ChainSnapshotReplyMessage;
 import io.xdag.core.Address;
@@ -81,13 +83,17 @@ import io.xdag.utils.XdagTime;
  * inputs credit the value and do not run. Nested frames commit only when they return. Re-entering
  * a contract traps unless that selector is in the {@code xdag.reentrant} section.
  *
- * <p>Each applied seq stores a change-set so {@link #rewindTo} can put a chain back. That is what
- * {@code onSourceVoided} uses. Capping the log at K=128, snapshot pages and soft pre-exec stay
- * SP1-4. A seq is applied once; {@link #apply} rejects a seq that is not the successor of the head.
+ * <p>Each applied seq stores a change-set so {@link #rewindTo} can put a chain back. Only the last
+ * {@link #CHANGESET_WINDOW} change-sets are kept. Every {@link #SNAPSHOT_INTERVAL} seqs the full KV
+ * is written as snapshot pages, which is how a read older than the window is answered.
+ * {@link #setPending} runs unconfirmed calls on a copy and never writes {@code CHAIN_EXEC}. A seq
+ * is applied once; {@link #apply} rejects a seq that is not the successor of the head.
  */
 public final class ChainExecutor implements ExecHost.Calls {
 
     public static final int MAX_CALL_DEPTH = 16;
+    public static final int CHANGESET_WINDOW = 128;
+    public static final int SNAPSHOT_INTERVAL = 64;
 
     public record Tx(Bytes32 inputHash, ChainInput.Kind kind, ExecStatus forced, Bytes sender, Bytes contract,
             long value, long gasLimit, int selector, byte[] args, byte[] code) {
@@ -108,6 +114,8 @@ public final class ChainExecutor implements ExecHost.Calls {
     private final InputStreamBuilder inputs;
     private final Map<Bytes, Runtime> chains = new HashMap<>();
     private Runtime current;
+    /** Unconfirmed calls, already in apply order. Null means the pending view is the executed head. */
+    private Function<Bytes, List<Tx>> pending;
 
     public ChainExecutor(WasmEngine engine, ChainL1Store l1, ChainExecStore store, ChunkChain.RawBlockLookup blocks,
             int maxChunks) {
@@ -121,6 +129,17 @@ public final class ChainExecutor implements ExecHost.Calls {
 
     ChainExecStore store() {
         return store;
+    }
+
+    /** Replaces the pending-call source. The function is invoked on each pending read. */
+    public void setPending(Function<Bytes, List<Tx>> pending) {
+        this.pending = pending;
+    }
+
+    /** The tx {@link #step} would run for one confirmed input. Pending collection uses the same path. */
+    public Tx txFor(Bytes chain, ChainInput input) {
+        ChainRecord record = l1.getChain(chain);
+        return resolve(chain, input, record == null ? GasSchedule.MAX_CALL_GAS : record.maxCallGas());
     }
 
     /** False while a deliverable source outbox is not in the exec store yet. */
@@ -346,6 +365,57 @@ public final class ChainExecutor implements ExecHost.Calls {
 
     public long balance(Bytes chain, byte[] address) {
         return runtime(chain).world.root().balance(address);
+    }
+
+    /** Balance after unconfirmed calls. The executed head is unchanged. */
+    public long pendingBalance(Bytes chain, byte[] address) {
+        return pendingRuntime(chain).world.root().balance(address);
+    }
+
+    public byte[] pendingStorage(Bytes chain, Bytes contract, byte[] userKey) {
+        return pendingRuntime(chain).world.get(contract, userKey);
+    }
+
+    public SparseMerkleTree.Proof pendingProof(Bytes chain, Bytes contract, byte[] userKey) {
+        return pendingRuntime(chain).world
+                .proof(ChainLedger.smtKey(contract, userKey == null ? new byte[0] : userKey));
+    }
+
+    public byte[] pendingQuery(Bytes chain, Bytes contract, int selector, byte[] args) {
+        Runtime live = runtime(chain);
+        ContractRecord record = l1.getContract(contract);
+        if (record != null && live.seq >= 0 && Long.compareUnsigned(record.deployHeight(), live.seq) > 0) {
+            return null;
+        }
+        Runtime rt = pendingRuntime(chain);
+        if (!rt.modules.containsKey(contract)) {
+            return null;
+        }
+        current = rt;
+        try {
+            ExecHost host = host(rt, rt.world.root().child(), contract.toArray(), ChainLedger.address20(null), selector,
+                    args == null ? new byte[0] : args, 0L, 0L, 0L, 1, false);
+            ExecHost.Result result = run(rt, host, "query", GasSchedule.MAX_CALL_GAS);
+            return result.code() == 0 ? result.returnData() : null;
+        } finally {
+            current = null;
+        }
+    }
+
+    /** Gas of one discarded call on the pending copy. No pending calls means {@link #estimate}. */
+    public long pendingEstimate(Bytes chain, Bytes contract, int selector, byte[] args) {
+        Runtime rt = pendingRuntime(chain);
+        if (!rt.modules.containsKey(contract)) {
+            return 0L;
+        }
+        current = rt;
+        try {
+            ExecHost host = host(rt, rt.world.root().child(), contract.toArray(), ChainLedger.address20(null), selector,
+                    args == null ? new byte[0] : args, 0L, 0L, 0L, 1, true);
+            return run(rt, host, "call", GasSchedule.MAX_CALL_GAS).gas();
+        } finally {
+            current = null;
+        }
     }
 
     public long feePool(Bytes chain) {
@@ -782,6 +852,23 @@ public final class ChainExecutor implements ExecHost.Calls {
                 events.onReceipt(chain, seq, outcome.inputHash(), outcome.events());
             }
         }
+        if (seq % SNAPSHOT_INTERVAL == 0) {
+            writeSnapshot(id, seq);
+        }
+        if (seq >= CHANGESET_WINDOW) {
+            store.deleteChangeSet(id, seq - CHANGESET_WINDOW);
+        }
+    }
+
+    private void writeSnapshot(Bytes32 id, long seq) {
+        List<SparseMerkleTree.Kv> kvs = new ArrayList<>();
+        for (Pair<Bytes32, byte[]> row : store.readState(id)) {
+            kvs.add(new SparseMerkleTree.Kv(row.getKey(), row.getValue()));
+        }
+        List<byte[]> pages = SnapshotPages.split(kvs, SnapshotSync.DEFAULT_MAX_BYTES);
+        for (int page = 0; page < pages.size(); page++) {
+            store.putSnapshotPage(id, seq, page, pages.get(page));
+        }
     }
 
     public void setEvents(ChainEvents events) {
@@ -862,8 +949,15 @@ public final class ChainExecutor implements ExecHost.Calls {
         if (seq < 0 || seq > rt.seq) {
             throw new IllegalArgumentException("seq");
         }
-        ExecWorld copy = new ExecWorld();
         Bytes32 id = chain32(chain);
+        if (!changesCover(id, rt.seq, seq)) {
+            ExecWorld snap = snapshotWorld(id, seq);
+            if (snap == null) {
+                throw new IllegalStateException("changeset " + seq);
+            }
+            return snap;
+        }
+        ExecWorld copy = new ExecWorld();
         copy.load(store.readState(id));
         long cursor = rt.seq;
         while (cursor > seq) {
@@ -886,6 +980,88 @@ public final class ChainExecutor implements ExecHost.Calls {
             throw new IllegalStateException("view");
         }
         return copy;
+    }
+
+    private boolean changesCover(Bytes32 id, long head, long seq) {
+        for (long cursor = head; cursor > seq; cursor--) {
+            if (store.getChangeSet(id, cursor) == null) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** The snapshot written at {@code seq}, or null when this seq has no page. */
+    private ExecWorld snapshotWorld(Bytes32 id, long seq) {
+        byte[] first = store.getSnapshotPage(id, seq, 0);
+        if (first == null) {
+            return null;
+        }
+        List<Pair<Bytes32, byte[]>> rows = new ArrayList<>();
+        for (int page = 0;; page++) {
+            byte[] raw = page == 0 ? first : store.getSnapshotPage(id, seq, page);
+            if (raw == null) {
+                break;
+            }
+            for (SparseMerkleTree.Kv kv : SnapshotPages.decode(raw)) {
+                rows.add(Pair.of(kv.key(), kv.value()));
+            }
+        }
+        ExecWorld copy = new ExecWorld();
+        copy.load(rows);
+        return copy;
+    }
+
+    private List<Tx> pendingCalls(Bytes chain) {
+        if (pending == null) {
+            return List.of();
+        }
+        List<Tx> got = pending.apply(chain);
+        return got == null ? List.of() : got;
+    }
+
+    /**
+     * Executed head, or a copy with {@link #pending} applied. The copy is discarded by the caller.
+     * An empty pending list returns the live runtime and must only be read.
+     */
+    private Runtime pendingRuntime(Bytes chain) {
+        Runtime live = runtime(chain);
+        List<Tx> extra = pendingCalls(chain);
+        if (extra.isEmpty()) {
+            return live;
+        }
+        Runtime rt = fork(live);
+        ChainRecord record = l1.getChain(chain);
+        long price = record == null ? 0L : record.gasPriceNano();
+        long cap = record == null ? GasSchedule.MAX_CALL_GAS : record.maxCallGas();
+        long seq = live.seq < 0 ? 0L : live.seq;
+        current = rt;
+        try {
+            for (int k = 0; k < extra.size(); k++) {
+                one(rt, chain, seq, price, cap, 0L, k, extra.get(k));
+            }
+            return rt;
+        } finally {
+            current = null;
+        }
+    }
+
+    private Runtime fork(Runtime live) {
+        Runtime rt = new Runtime(live.chain);
+        rt.seq = live.seq;
+        rt.world.load(store.readState(chain32(live.chain)));
+        rt.modules.putAll(live.modules);
+        rt.marks.putAll(live.marks);
+        for (java.util.Map.Entry<Bytes32, List<byte[]>> entry : live.entries.entrySet()) {
+            List<byte[]> copy = new ArrayList<>(entry.getValue());
+            rt.entries.put(entry.getKey(), copy);
+            Mmr mmr = new Mmr();
+            for (byte[] row : copy) {
+                mmr.append(HashUtils.sha256(Bytes.wrap(row)));
+            }
+            rt.outbox.put(entry.getKey(), mmr.root(), mmr.size());
+        }
+        return rt;
     }
 
     private Bytes32 onlyDest(Bytes32 chain, long seq, int index) {
