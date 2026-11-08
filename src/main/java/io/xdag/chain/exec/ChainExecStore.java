@@ -25,6 +25,7 @@ package io.xdag.chain.exec;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import org.apache.commons.lang3.tuple.Pair;
@@ -215,6 +216,20 @@ public final class ChainExecStore implements XdagLifecycle {
 
     public byte[] getReceipt(Bytes32 chain, Bytes32 blockHash) {
         return source.get(dstKey(RECEIPT, chain, blockHash));
+    }
+
+    /** Receipt body for {@code blockHash} on any chain, or null. The key tail is the hash. */
+    public byte[] findReceipt(Bytes32 blockHash) {
+        byte[] want = blockHash.toArray();
+        for (Pair<byte[], byte[]> row : source.prefixKeyAndValueLookup(new byte[] {RECEIPT})) {
+            byte[] key = row.getKey();
+            if (key.length == 1 + Bytes32.SIZE + Bytes32.SIZE
+                    && Arrays.equals(key, 1 + Bytes32.SIZE, key.length, want, 0, Bytes32.SIZE)) {
+                byte[] value = row.getValue();
+                return value == null ? null : value.clone();
+            }
+        }
+        return null;
     }
 
     public void deleteReceipt(Bytes32 chain, Bytes32 blockHash) {

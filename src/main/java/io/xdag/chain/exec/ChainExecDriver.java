@@ -78,6 +78,10 @@ public final class ChainExecDriver {
         this.proofs = proofs;
     }
 
+    public ChainExecutor executor() {
+        return executor;
+    }
+
     /** Peers to ask with {@code 0x1C} and {@code 0x1E}, and the records this node serves after a step. */
     public void setNetwork(ChainPull pull, ChainRecords records) {
         this.pull = pull;

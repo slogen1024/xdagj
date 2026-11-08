@@ -379,6 +379,37 @@ public final class ChainExecutor implements ExecHost.Calls {
         }
     }
 
+    /**
+     * Gas of one discarded {@code call} on the executed head. The layer is not committed. {@code 0}
+     * when the contract has no code loaded.
+     */
+    public long estimate(Bytes chain, Bytes contract, int selector, byte[] args) {
+        Runtime rt = runtime(chain);
+        if (!rt.modules.containsKey(contract)) {
+            return 0L;
+        }
+        current = rt;
+        try {
+            ExecHost host = host(rt, rt.world.root().child(), contract.toArray(), ChainLedger.address20(null), selector,
+                    args == null ? new byte[0] : args, 0L, 0L, 0L, 1, true);
+            return run(rt, host, "call", GasSchedule.MAX_CALL_GAS).gas();
+        } finally {
+            current = null;
+        }
+    }
+
+    public SparseMerkleTree.Proof proof(Bytes chain, Bytes contract, byte[] userKey) {
+        return runtime(chain).world.proof(ChainLedger.smtKey(contract, userKey == null ? new byte[0] : userKey));
+    }
+
+    public byte[] opening(Bytes chain, long seq, long index) {
+        return store.getOpening(chain32(chain), seq, index);
+    }
+
+    public byte[] receiptByHash(Bytes32 blockHash) {
+        return store.findReceipt(blockHash);
+    }
+
     @Override
     public ExecHost.Result call(ExecHost caller, byte[] contract, int selector, byte[] args, long value) {
         if (caller.depth >= MAX_CALL_DEPTH) {

@@ -37,8 +37,10 @@ import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.logging.LogLevel;
 import io.netty.handler.logging.LoggingHandler;
+import io.xdag.chain.rpc.ChainApi;
 import io.xdag.config.spec.RPCSpec;
 import io.xdag.rpc.api.XdagApi;
+import io.xdag.rpc.server.handler.ChainRequestHandler;
 import io.xdag.rpc.server.handler.CorsHandler;
 import io.xdag.rpc.server.handler.JsonRequestHandler;
 import io.xdag.rpc.server.handler.JsonRpcHandler;
@@ -53,14 +55,20 @@ import java.util.List;
 public class JsonRpcServer {
     private final RPCSpec rpcSpec;
     private final XdagApi xdagApi;
+    private final ChainApi chainApi;
     private Channel channel;
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
 
 
     public JsonRpcServer(final RPCSpec rpcSpec, final XdagApi xdagApi) {
+        this(rpcSpec, xdagApi, null);
+    }
+
+    public JsonRpcServer(final RPCSpec rpcSpec, final XdagApi xdagApi, final ChainApi chainApi) {
         this.rpcSpec = rpcSpec;
         this.xdagApi = xdagApi;
+        this.chainApi = chainApi;
     }
 
     public void start() {
@@ -68,6 +76,9 @@ public class JsonRpcServer {
             // Create request handlers
             List<JsonRpcRequestHandler> handlers = new ArrayList<>();
             handlers.add(new JsonRequestHandler(xdagApi));
+            if (chainApi != null) {
+                handlers.add(new ChainRequestHandler(chainApi));
+            }
 
             // Create SSL context (if HTTPS is enabled)
 //            final SslContext sslCtx;

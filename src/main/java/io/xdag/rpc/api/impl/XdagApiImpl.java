@@ -28,6 +28,8 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import io.xdag.Kernel;
 import io.xdag.chain.ingest.ChunkFeePolicy;
+import io.xdag.chain.rpc.ChainApi;
+import io.xdag.config.spec.ChainSpec;
 import io.xdag.Wallet;
 import io.xdag.config.Config;
 import io.xdag.config.DevnetConfig;
@@ -89,7 +91,16 @@ public class XdagApiImpl extends AbstractXdagLifecycle implements XdagApi {
         this.kernel = kernel;
         this.blockchain = kernel.getBlockchain();
         this.rpcSpec = kernel.getConfig().getRPCSpec();
-        this.server = new JsonRpcServer(rpcSpec, this);
+        long activation = kernel.getConfig() instanceof ChainSpec spec ? spec.getChainActivationHeight()
+                : Long.MAX_VALUE;
+        ChainApi chainApi = kernel.getChainL1Store() == null ? null : new ChainApi(
+                () -> blockchain == null || blockchain.getXdagStats() == null ? -1L : blockchain.getXdagStats().nmain,
+                activation,
+                kernel.getChainL1Store(),
+                () -> kernel.getChainExecDriver() == null ? null : kernel.getChainExecDriver().executor(),
+                block -> kernel.getSyncMgr().submitBlock(
+                        new BlockWrapper(block, kernel.getConfig().getNodeSpec().getTTL())));
+        this.server = new JsonRpcServer(rpcSpec, this, chainApi);
 
         validateConfiguration();
     }
