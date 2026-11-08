@@ -318,7 +318,9 @@ public class SyncManager extends AbstractXdagLifecycle {
         // bare entry point fabricates a peerless wrapper and would throw that away, which on the
         // NO_PARENT retry -- routine traffic while a node catches up, not an edge case -- would
         // hand a flooder an unattributed, unclassified chunk for nothing.
-        return relayImported(blockWrapper, blockchain.tryToConnect(PreValidator.reimport(blockWrapper, fresh)));
+        PreValidated pv = PreValidator.reimport(blockWrapper, fresh);
+        blockchain.precomputeChallenge(pv);
+        return relayImported(blockWrapper, blockchain.tryToConnect(pv));
     }
 
     /** Gossips a block this node has just accepted onward, unless it is old, ours, or out of ttl. */
@@ -395,6 +397,7 @@ public class SyncManager extends AbstractXdagLifecycle {
             releaseWaiters(blockWrapper, fallback);
             return fallback;
         }
+        blockchain.precomputeChallenge(pv);
         ImportResult result = relayImported(blockWrapper, blockchain.tryToConnect(pv));
         log.debug("importPreValidated:{}, {}", pv.hashLow(), result);
         releaseWaiters(blockWrapper, result);

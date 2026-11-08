@@ -30,13 +30,14 @@ import io.xdag.chain.l1.InputStatus;
 
 /**
  * One element of {@code inputs(chain, h)}. {@link #index()} is the position in that concatenation,
- * which is {@code k} in {@code C_k}. System and delivered prefixes are empty until SP3 and SP4, so
- * today this index equals the L1 input index.
+ * which is {@code k} in {@code C_k}. {@link Kind#SYSTEM} is an anchor reward and sits in front of
+ * the confirmed calls at that height. Delivered message bodies are not expanded; the deliverable
+ * mark is a {@code 0x09} item, not an input.
  */
 public record ChainInput(int index, Kind kind, Bytes32 inputHash, InputStatus l1Status, Bytes contract) {
 
     public enum Kind {
-        CALL, DEPLOY, OTHER
+        CALL, DEPLOY, OTHER, SYSTEM
     }
 
     public ChainInput {

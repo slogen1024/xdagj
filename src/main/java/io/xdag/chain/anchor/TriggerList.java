@@ -40,6 +40,8 @@ public final class TriggerList {
     public static final int FINALITY = 1;
     public static final int UNBOND = 2;
     public static final int CHALLENGE = 3;
+    /** Source anchor {@code attester} became deliverable to {@code chain} at {@code fromHeight}. */
+    public static final int DELIVER = 4;
     public static final int ITEM = 134;
 
     public record Item(int kind, byte[] chain, long seq, byte[] attester, long amount, long paid, byte[] other,

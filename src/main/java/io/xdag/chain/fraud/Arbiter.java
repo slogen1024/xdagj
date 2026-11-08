@@ -30,7 +30,9 @@ import org.apache.tuweni.bytes.Bytes32;
 
 import io.xdag.chain.anchor.AnchorBody;
 import io.xdag.chain.anchor.CommitmentChain;
+import io.xdag.chain.anchor.RewardInputs;
 import io.xdag.chain.exec.ChainExecutor;
+import io.xdag.chain.ext.ChunkChain;
 import io.xdag.chain.exec.state.OutboxMap;
 import io.xdag.chain.exec.state.SparseMerkleTree;
 import io.xdag.chain.l1.ChainL1Store;
@@ -38,10 +40,9 @@ import io.xdag.chain.l1.InputRecord;
 import io.xdag.crypto.hash.HashUtils;
 
 /**
- * E1 and E3. E2 returns {@link Verdict#INVALID}: the interpreter re-execution is not in this slice,
- * so the deposit is returned and the attester is not slashed. A call input's expected hash is the
- * 0x0C block hash. A message slot (the first {@code Σ (to-from)} inputs) has no L1 input hash, so
- * an E1 against it is also invalid rather than a slash.
+ * E1 compares the opened input hash with the 0x0C block hash. E2 re-executes that call on the
+ * interpreter. E3 checks one outbox size. A message slot or a reward slot has no call hash, so an
+ * E1 or E2 against it is {@link Verdict#INVALID}. A malformed E2 witness is {@link Verdict#FAIL}.
  */
 public final class Arbiter {
 
@@ -53,13 +54,13 @@ public final class Arbiter {
     }
 
     public static Verdict judge(ChainL1Store store, byte[] chain, long seq, AnchorBody anchor,
-            CommitmentChain.Body commitment, long k, byte[] witness) {
+            CommitmentChain.Body commitment, long k, byte[] witness, ChunkChain.RawBlockLookup lookup, int maxChunks) {
         if (anchor == null || commitment == null || k < 0 || k >= commitment.commitments().size()) {
             return Verdict.INVALID;
         }
         int type = Witness.type(witness);
         if (type == Witness.E2) {
-            return Verdict.INVALID;
+            return E2Replay.replay(store, chain, seq, anchor, commitment, k, witness, lookup, maxChunks);
         }
         if (type == Witness.E1) {
             return e1(store, chain, seq, anchor, commitment, k, witness);
@@ -141,6 +142,11 @@ public final class Arbiter {
                 return null;
             }
             h++;
+            int rewards = RewardInputs.at(store, chain, h).size();
+            if (Long.compareUnsigned(left, rewards) < 0) {
+                return null;
+            }
+            left -= rewards;
             long n = store.getCallCount(id, h);
             if (Long.compareUnsigned(left, n) < 0) {
                 InputRecord input = store.getInput(id, h, left);

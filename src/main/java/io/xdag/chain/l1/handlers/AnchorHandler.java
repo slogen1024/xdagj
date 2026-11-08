@@ -34,6 +34,8 @@ import org.apache.tuweni.bytes.Bytes32;
 
 import io.xdag.chain.anchor.AnchorBody;
 import io.xdag.chain.anchor.AnchorHead;
+import io.xdag.chain.anchor.DueSegments;
+import io.xdag.chain.anchor.RewardInputs;
 import io.xdag.chain.anchor.BondAccount;
 import io.xdag.chain.anchor.BondVault;
 import io.xdag.chain.anchor.CommitmentChain;
@@ -56,8 +58,10 @@ import io.xdag.utils.XdagTime;
 /**
  * ANCHOR. The canonical record stays on the short {@code 0x06 ‖ chain ‖ seq} key. A same-seq loser
  * is written at {@code 0x06 ‖ chain ‖ seq ‖ anchorHash} so {@code getAnchor} still returns the
- * winner. Finality is queued at {@code confirmHeight + W}. Reward system inputs and the
- * segment-deliverable flag are not written by this slice.
+ * winner. Finality is queued at {@code confirmHeight + W}. {@code inputCount} is calls plus
+ * declared message spans plus one reward for every canonical anchor whose confirm height sits in
+ * {@code (prevSeq, seq]}, including this anchor when its own confirm height does. Deliverable
+ * marks are written by {@link io.xdag.chain.anchor.HeightTriggers}, not here.
  */
 public final class AnchorHandler implements ChainKindHandler {
 
@@ -147,7 +151,7 @@ public final class AnchorHandler implements ChainKindHandler {
             return false;
         }
         CommitmentChain.Body body = commitmentOf(ext, commitment);
-        if (body == null || !inputsMatch(ext, body)) {
+        if (body == null || !inputsMatch(ext, body, confirmHeight)) {
             return false;
         }
         long due = confirmHeight + window;
@@ -240,7 +244,7 @@ public final class AnchorHandler implements ChainKindHandler {
         return CommitmentChain.decode(commitment, ext.segmentCount(), ext.inputCount());
     }
 
-    private boolean inputsMatch(AnchorExt ext, CommitmentChain.Body body) {
+    private boolean inputsMatch(AnchorExt ext, CommitmentChain.Body body, long confirmHeight) {
         long calls = 0L;
         long h = ext.prevSeq();
         while (Long.compareUnsigned(h, ext.seq()) < 0) {
@@ -265,8 +269,13 @@ public final class AnchorHandler implements ChainKindHandler {
                 return false;
             }
         }
+        long rewards;
         try {
-            return Math.addExact(calls, messages) == ext.inputCount();
+            rewards = RewardInputs.count(store, ext.chainId().toArray(), ext.prevSeq(), ext.seq());
+            if (RewardInputs.in(confirmHeight, ext.prevSeq(), ext.seq())) {
+                rewards = Math.addExact(rewards, 1);
+            }
+            return Math.addExact(Math.addExact(calls, messages), rewards) == ext.inputCount();
         } catch (ArithmeticException e) {
             return false;
         }
@@ -278,15 +287,15 @@ public final class AnchorHandler implements ChainKindHandler {
      * {@code write} advances the cursors; the check-only path used while validating a loser does not.
      */
     private boolean segmentsMatch(AnchorExt ext, CommitmentChain.Body body, ChainL1Batch batch) {
-        List<Due> due = due(ext.chainId(), ext.seq());
+        List<DueSegments.Due> due = due(ext.chainId(), ext.seq());
         if (body.segments().size() != due.size()) {
             return false;
         }
         Map<Bytes, SegmentCursor> running = new HashMap<>();
         for (int i = 0; i < due.size(); i++) {
             CommitmentChain.Segment segment = body.segments().get(i);
-            Due expected = due.get(i);
-            if (!Arrays.equals(segment.src(), expected.src) || segment.srcSeq() != expected.seq) {
+            DueSegments.Due expected = due.get(i);
+            if (!Arrays.equals(segment.src(), expected.src()) || segment.srcSeq() != expected.seq()) {
                 return false;
             }
             if (Long.compareUnsigned(segment.to(), segment.from()) < 0) {
@@ -350,44 +359,7 @@ public final class AnchorHandler implements ChainKindHandler {
         return best;
     }
 
-    private List<Due> due(Bytes chain, long seq) {
-        ChainRecord self = store.getChain(chain);
-        long delay = self == null ? Long.MAX_VALUE : self.deliveryDelayD();
-        List<Due> out = new ArrayList<>();
-        for (byte[] key : store.sortedKeys()) {
-            if (key.length != 29 || key[0] != ChainL1Keys.ANCHOR) {
-                continue;
-            }
-            byte[] src = Arrays.copyOfRange(key, 1, 21);
-            if (Arrays.equals(src, chain.toArray())) {
-                continue;
-            }
-            long srcSeq = io.xdag.chain.ext.ExtCodec.u64(key, 21);
-            AnchorBody body = AnchorBody.decode(store.getAnchorRaw(Bytes.wrap(src), srcSeq));
-            if (body == null || (body.status() != AnchorRecord.Status.CANONICAL && body.status() != AnchorRecord.Status.FINAL)) {
-                continue;
-            }
-            long ready = body.confirmHeight() + delay;
-            if (Long.compareUnsigned(ready, body.confirmHeight()) < 0 || Long.compareUnsigned(ready, seq) > 0) {
-                continue;
-            }
-            SegmentCursor cursor = SegmentCursor.decode(store.getCursor(chain, Bytes.wrap(src)));
-            if (cursor != null && Long.compareUnsigned(srcSeq, cursor.srcSeq()) <= 0) {
-                continue;
-            }
-            out.add(new Due(src, srcSeq, body.confirmHeight()));
-        }
-        out.sort((a, b) -> {
-            int c = Long.compareUnsigned(a.confirm, b.confirm);
-            if (c != 0) {
-                return c;
-            }
-            c = Arrays.compareUnsigned(a.src, b.src);
-            return c != 0 ? c : Long.compareUnsigned(a.seq, b.seq);
-        });
-        return out;
-    }
-
-    private record Due(byte[] src, long seq, long confirm) {
+    private List<DueSegments.Due> due(Bytes chain, long seq) {
+        return DueSegments.due(store, chain, seq, window);
     }
 }

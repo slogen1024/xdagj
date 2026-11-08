@@ -218,6 +218,7 @@ public class BlockchainImpl implements Blockchain {
      * that build a blockchain without one).
      */
     private volatile ChainL1Hooks chainHooks = ChainL1Hooks.NOOP;
+    private HeightTriggers chainTriggers;
     /** Non-zero only inside a chain hook. {@link #chainTransfer} refuses to move coins otherwise. */
     private final AtomicInteger chainSettlementDepth = new AtomicInteger();
 
@@ -390,9 +391,10 @@ public class BlockchainImpl implements Blockchain {
                         spec.getChainMaxWitnessBytes(), spec.getChainMaxChunksPerChain()));
             }
             kernel.getChainKindHandlers().forEach(processor::registerHandler);
-            processor.setTriggers(new HeightTriggers(chainStore, hash -> getBlockByHash(hash, true), settlement,
+            this.chainTriggers = new HeightTriggers(chainStore, hash -> getBlockByHash(hash, true), settlement,
                     spec.getChainFinalityWindow(), spec.getChainMaxChallengesPerHeight(),
-                    spec.getChainMaxWitnessBytes(), spec.getChainMaxChunksPerChain(), new VerdictCache()));
+                    spec.getChainMaxWitnessBytes(), spec.getChainMaxChunksPerChain(), new VerdictCache());
+            processor.setTriggers(chainTriggers);
             this.chainHooks = processor;
             if (kernel.getChainExecStore() != null) {
                 ChainExecutor executor = new ChainExecutor(ChicoryEngine.interpreter(), chainStore,
@@ -507,8 +509,18 @@ public class BlockchainImpl implements Blockchain {
         // runs on the caller's thread and on the caller's own block -- inline() does not copy, so
         // the chain still imports this very instance, which is what every bare-Block caller (local
         // mining, the repair tools, syncPopBlock's re-import, the tests) expects: each of them owns
-        // its block and no other thread is looking at it.
-        return tryToConnect(PreValidator.inline(block));
+        // its block and no other thread is looking at it. The challenge verdict is filled here too,
+        // still outside the monitor.
+        PreValidated pv = PreValidator.inline(block);
+        precomputeChallenge(pv);
+        return tryToConnect(pv);
+    }
+
+    @Override
+    public void precomputeChallenge(PreValidated pv) {
+        if (chainTriggers != null && pv != null && pv.block() != null && pv.error() == null) {
+            chainTriggers.preview(pv.block(), pv.classified());
+        }
     }
 
     /**

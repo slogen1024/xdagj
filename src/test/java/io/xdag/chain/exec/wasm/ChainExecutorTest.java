@@ -29,6 +29,9 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import io.xdag.chain.InMemoryKVSource;
+import io.xdag.chain.anchor.AnchorBody;
+import io.xdag.chain.anchor.RewardInputs;
+import io.xdag.chain.asset.AnchorRecord;
 import io.xdag.chain.exec.ChainExecDriver;
 import io.xdag.chain.exec.ChainExecStore;
 import io.xdag.chain.exec.ChainExecutor;
@@ -72,6 +75,35 @@ public class ChainExecutorTest {
         assertEquals(InputStatus.INVALID_FEE, inputs.get(1).l1Status());
         assertTrue(new InputStreamBuilder(l1).systemInputs(CHAIN, 4L).isEmpty());
         assertTrue(new InputStreamBuilder(l1).deliveredMessages(CHAIN, 4L).isEmpty());
+    }
+
+    @Test
+    public void rewardPrecedesTheCallAndSweepsTheFeePool() {
+        ChainL1Store l1 = l1();
+        ChainL1Batch batch = new ChainL1Batch();
+        batch.putAnchor(CHAIN, 2L, new AnchorBody(AnchorRecord.Status.CANONICAL, id(3), Bytes32.ZERO, Bytes32.ZERO, 1L,
+                0L, 0L, 4L, Bytes32.ZERO, SENDER.toArray(), Bytes32.ZERO).encode());
+        batch.putInput(CHAIN, 4L, 0L, new InputRecord(id(8), ExtKind.CALL, InputStatus.OK, CONTRACT));
+        batch.putCallCount(CHAIN, 4L, 1L);
+        l1.commit(batch);
+        List<ChainInput> inputs = new InputStreamBuilder(l1).inputs(CHAIN, 4L);
+        assertEquals(2, inputs.size());
+        assertEquals(ChainInput.Kind.SYSTEM, inputs.get(0).kind());
+        assertEquals(RewardInputs.hash(id(3)), inputs.get(0).inputHash());
+        assertEquals(ChainInput.Kind.CALL, inputs.get(1).kind());
+        assertEquals(1, inputs.get(1).index());
+
+        ChainExecutor exec = executor();
+        exec.apply(CHAIN, 1L, 1L, GasSchedule.MAX_CALL_GAS, 9L, List.of(new ChainExecutor.Tx(id(4), ChainInput.Kind.CALL,
+                null, SENDER, CONTRACT, 1_000L, 1_000L, 1, new byte[0], store()))).get(0);
+        long fees = exec.feePool(CHAIN);
+        assertTrue(fees > 0L);
+        ChainExecutor.Outcome reward = exec.apply(CHAIN, 2L, 1L, GasSchedule.MAX_CALL_GAS, 9L,
+                List.of(new ChainExecutor.Tx(RewardInputs.hash(id(3)), ChainInput.Kind.SYSTEM, null, SENDER, SENDER, 0L,
+                        0L, 0, new byte[0], null))).get(0);
+        assertEquals(ExecStatus.OK, reward.status());
+        assertEquals(0L, exec.feePool(CHAIN));
+        assertEquals(fees, exec.balance(CHAIN, SENDER.toArray()));
     }
 
     @Test

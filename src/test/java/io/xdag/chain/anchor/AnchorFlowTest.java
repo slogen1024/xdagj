@@ -35,7 +35,9 @@ import io.xdag.chain.asset.AnchorRecord;
 import io.xdag.chain.asset.ClaimProof;
 import io.xdag.chain.asset.Settlement;
 import io.xdag.chain.asset.WithdrawOutbox;
+import io.xdag.chain.exec.ChainExecStore;
 import io.xdag.chain.exec.ChainExecutor;
+import io.xdag.chain.exec.InputStreamBuilder;
 import io.xdag.chain.exec.state.Mmr;
 import io.xdag.chain.exec.state.OutboxMap;
 import io.xdag.chain.ext.AnchorExt;
@@ -46,6 +48,7 @@ import io.xdag.chain.ext.ChallengeExt;
 import io.xdag.chain.ext.ClaimExt;
 import io.xdag.chain.ext.ExtKind;
 import io.xdag.chain.fraud.Arbiter;
+import io.xdag.chain.fraud.Challenger;
 import io.xdag.chain.fraud.VerdictCache;
 import io.xdag.chain.fraud.Witness;
 import io.xdag.chain.l1.ApplyContext;
@@ -238,11 +241,11 @@ public class AnchorFlowTest {
         byte[] dst = w.chain.toArray();
         CommitmentChain.Segment segment = new CommitmentChain.Segment(w.source.toArray(), 2L, 0L, 9L);
         List<Bytes32> commitments = new ArrayList<>();
-        for (int i = 0; i < 9; i++) {
+        for (int i = 0; i < 10; i++) {
             commitments.add(Bytes32.repeat((byte) i));
         }
         byte[] payload = CommitmentChain.encode(List.of(segment), commitments);
-        OpenedAnchor opened = w.openAnchorWith(payload, 9L, 1L, 1L);
+        OpenedAnchor opened = w.openAnchorWith(payload, 10L, 1L, 1L);
         var proof = w.lastMap.proof(ChainExecutor.chain32(dst));
         byte[] witness = Witness.e3(w.source.toArray(), 2L, dst, 9L, true, proof.value(), proof.siblings());
         w.fund(BondVault.ADDRESS, MIN_BOND + 100L);
@@ -281,17 +284,95 @@ public class AnchorFlowTest {
     }
 
     @Test
-    public void e2RefundsAndDoesNotSlash() {
+    public void malformedE2PaysTheAttester() {
         World w = new World();
         OpenedAnchor opened = w.openAnchor(w.hashLow("e2"), true);
         w.fund(BondVault.ADDRESS, 100L);
         w.fileChallenge(opened, Witness.e2(), 100L, 4L);
         w.triggers.fire(4L);
-        assertEquals(ChallengeRecord.INVALID, w.challenge(opened.challenge).status());
+        assertEquals(ChallengeRecord.FAIL, w.challenge(opened.challenge).status());
         assertEquals(MIN_BOND, w.account(w.attester, w.chain).amount());
-        assertEquals(100L, w.balance(w.challenger));
+        assertEquals(100L, w.balance(w.attester));
+        assertEquals(0L, w.balance(w.challenger));
         assertEquals(AnchorRecord.Status.CANONICAL, w.body(w.chain, opened.ext.seq()).status());
         assertEquals(0L, w.balance(BondVault.BURN));
+    }
+
+    @Test
+    public void deliverableMarkAppearsAndUnwinds() {
+        World w = new World();
+        w.plantChain(w.chain, 1L);
+        w.plantSourceOutbox(1L);
+        w.triggers.fire(1L);
+        List<TriggerList.Item> marks = new InputStreamBuilder(w.store).deliverableMarks(w.chain, 1L);
+        assertEquals(1, marks.size());
+        assertEquals(TriggerList.DELIVER, marks.get(0).kind());
+        assertArrayEquals(w.source.toArray(), marks.get(0).attester());
+        assertEquals(2L, marks.get(0).seq());
+        w.triggers.unwind(1L);
+        assertTrue(new InputStreamBuilder(w.store).deliverableMarks(w.chain, 1L).isEmpty());
+    }
+
+    @Test
+    public void previewCachesTheVerdictOffTheFirePath() {
+        World w = new World();
+        OpenedAnchor opened = w.openAnchor(w.hashLow("cached"), true);
+        var missing = ChainBlockBuilder.challenge(w.config, TS, w.challengerKey, UInt64.valueOf(40), XAmount.ZERO, 0L,
+                100L, w.hashLow("no-anchor"), Bytes.wrap(Witness.e2()));
+        assertTrue(missing.isOk());
+        w.keep(missing.value());
+        w.triggers.preview(missing.value().block(), null);
+        assertEquals(0, w.cache.misses());
+        var built = ChainBlockBuilder.challenge(w.config, TS, w.challengerKey, UInt64.valueOf(41), XAmount.ZERO, 0L,
+                100L, opened.anchorHash, Bytes.wrap(Witness.e2()));
+        assertTrue(built.isOk());
+        w.keep(built.value());
+        w.triggers.preview(built.value().block(), null);
+        w.triggers.preview(built.value().block(), null);
+        assertEquals(1, w.cache.misses());
+        w.fund(BondVault.ADDRESS, 100L);
+        ChainL1Batch batch = new ChainL1Batch();
+        w.challenges.onApplied(built.value().block(), ChainBlockClassifier.classify(built.value().block()),
+                new ApplyContext(4L, Bytes32.ZERO), batch);
+        w.store.commit(batch);
+        w.triggers.fire(4L);
+        assertEquals(1, w.cache.misses());
+        assertEquals(ChallengeRecord.FAIL, w.challenge(AnchorBody.hashLow(built.value().block().getHash())).status());
+    }
+
+    @Test
+    public void publisherBuildsTheRewardSlot() {
+        World w = new World();
+        w.plantChain(w.chain, 1L);
+        assertTrue(w.bond(w.chain, MIN_BOND, 1L));
+        Bytes32 main = w.hashLow("pub-main");
+        w.mains.put(3L, main);
+        ChainExecStore exec = new ChainExecStore(new InMemoryKVSource());
+        exec.start();
+        var built = new AnchorPublisher(w.store, exec, WINDOW).publish(w.config, TS, w.attesterKey, UInt64.valueOf(7),
+                XAmount.ZERO, w.chain, 3L, 3L, main, Bytes32.ZERO, Bytes32.ZERO, List.of(Bytes32.ZERO));
+        assertTrue(built.isOk());
+        AnchorExt ext = ChainBlockClassifier.classify(built.value().block()).as(AnchorExt.class);
+        assertEquals(1L, ext.inputCount());
+        assertEquals(0L, ext.segmentCount());
+        assertTrue(w.anchor(ext, AnchorBody.hashLow(built.value().block().getHash()), Bytes32.ZERO.toArray(), 3L));
+        assertEquals(3L, w.head(w.chain).seq());
+    }
+
+    @Test
+    public void challengerFilesTheFirstDivergence() {
+        World w = new World();
+        List<Bytes32> local = List.of(Bytes32.ZERO, Bytes32.repeat((byte) 1));
+        List<Bytes32> claimed = List.of(Bytes32.ZERO, Bytes32.repeat((byte) 2));
+        assertEquals(1, Challenger.diverge(local, claimed));
+        assertEquals(-1, Challenger.diverge(local, local));
+        Bytes32 anchor = w.hashLow("div");
+        var built = Challenger.file(w.config, TS, w.challengerKey, UInt64.valueOf(8), XAmount.ZERO, 1L, 100L, anchor,
+                Witness.e2());
+        assertTrue(built.isOk());
+        ChallengeExt ext = ChainBlockClassifier.classify(built.value().block()).as(ChallengeExt.class);
+        assertEquals(1L, ext.inputIndex());
+        assertEquals(anchor, ext.anchor());
     }
 
     @Test
@@ -461,12 +542,13 @@ public class AnchorFlowTest {
             Bytes32 openedHash = match ? inputHash : hashLow("opened");
             byte[] opening = ProofBodies.encodeCommitment(new ProofBodies.Opened(openedHash, Bytes32.ZERO, Bytes32.ZERO,
                     Bytes32.ZERO, 1, 0L));
-            byte[] payload = HashUtils.sha256(Bytes.wrap(opening)).toArray();
+            byte[] payload = new byte[64];
+            System.arraycopy(HashUtils.sha256(Bytes.wrap(opening)).toArray(), 0, payload, 0, 32);
             ChainL1Batch batch = new ChainL1Batch();
             batch.putCallCount(chain, 2L, 1L);
             batch.putInput(chain, 2L, 0L, new InputRecord(inputHash, ExtKind.CALL, InputStatus.OK, Bytes.wrap(new byte[20])));
             store.commit(batch);
-            return openAnchorWith(payload, 1L, 0L, 1L, opening);
+            return openAnchorWith(payload, 2L, 0L, 1L, opening);
         }
 
         OpenedAnchor openAnchorWith(byte[] payload, long inputs, long segments, long segmentCount) {

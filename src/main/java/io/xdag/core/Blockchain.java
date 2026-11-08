@@ -55,6 +55,13 @@ public interface Blockchain {
     }
 
     /**
+     * Fill the challenge verdict cache before {@link #tryToConnect(PreValidated)} takes the lock.
+     * A miss inside setMain recomputes. The default does nothing.
+     */
+    default void precomputeChallenge(PreValidated pv) {
+    }
+
+    /**
      * Create a new block with given parameters.
      *
      * <p>May return {@code null}: when the fields the caller asked for do not fit in sixteen, and —

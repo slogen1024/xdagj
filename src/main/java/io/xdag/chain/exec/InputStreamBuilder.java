@@ -24,17 +24,23 @@
 package io.xdag.chain.exec;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import org.apache.tuweni.bytes.Bytes;
 
+import io.xdag.chain.anchor.RewardInputs;
+import io.xdag.chain.anchor.TriggerList;
+import io.xdag.chain.anchor.TriggerOps;
 import io.xdag.chain.ext.ExtKind;
 import io.xdag.chain.l1.ChainL1Store;
 import io.xdag.chain.l1.InputRecord;
+import io.xdag.chain.l1.InputStatus;
 
 /**
- * {@code systemInputs ++ deliveredMessages ++ confirmedBlocks}. The first list stays empty until
- * an anchor reward exists (SP3). The second stays empty until a segment is deliverable (SP4).
+ * {@code systemInputs ++ deliveredMessages ++ confirmedBlocks}. System inputs are the anchor
+ * rewards confirmed at {@code height}. Delivered message bodies are not expanded: a segment is
+ * marked deliverable by a {@link TriggerList#DELIVER} item, readable from {@link #deliverableMarks}.
  * Confirmed blocks are the {@code 0x0C} records {@code 0 .. callCount-1}, including {@code INVALID_*}
  * ones: they occupy an index and the executor writes a status receipt instead of running them.
  */
@@ -66,13 +72,33 @@ public final class InputStreamBuilder {
         return out;
     }
 
-    /** Anchor rewards. Empty until SP3 writes them into the input index. */
+    /** Anchor rewards confirmed at {@code height}, ordered by seq then anchor hash. */
     public List<ChainInput> systemInputs(Bytes chain, long height) {
+        List<ChainInput> out = new ArrayList<>();
+        for (RewardInputs.Reward reward : RewardInputs.at(l1, chain.toArray(), height)) {
+            out.add(new ChainInput(out.size(), ChainInput.Kind.SYSTEM, RewardInputs.hash(reward.body().anchorHash()),
+                    InputStatus.OK, Bytes.wrap(reward.body().attester())));
+        }
+        return out;
+    }
+
+    /**
+     * Message bodies are not on L1, so this stays empty. {@link #deliverableMarks} is the flag that
+     * a source anchor may be consumed at {@code height}.
+     */
+    public List<ChainInput> deliveredMessages(Bytes chain, long height) {
         return List.of();
     }
 
-    /** Segments whose delivery height is {@code height}. Empty until SP4. */
-    public List<ChainInput> deliveredMessages(Bytes chain, long height) {
-        return List.of();
+    /** {@link TriggerList#DELIVER} items written for {@code chain} at {@code height}. */
+    public List<TriggerList.Item> deliverableMarks(Bytes chain, long height) {
+        List<TriggerList.Item> out = new ArrayList<>();
+        byte[] want = chain.toArray();
+        for (TriggerList.Item item : TriggerOps.read(l1, height)) {
+            if (item.kind() == TriggerList.DELIVER && Arrays.equals(item.chain(), want)) {
+                out.add(item);
+            }
+        }
+        return out;
     }
 }

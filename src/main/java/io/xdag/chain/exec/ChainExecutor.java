@@ -215,6 +215,9 @@ public final class ChainExecutor implements ExecHost.Calls {
     private Outcome one(Runtime rt, Bytes chain, long seq, long gasPrice, long maxCallGas, long timestamp, int index,
             Tx tx) {
         ExecWorld.Layer input = rt.world.root();
+        if (tx.kind() == ChainInput.Kind.SYSTEM) {
+            return reward(rt, chain, input, index, tx);
+        }
         if (!credit(input, tx.sender().toArray(), tx.value())) {
             return finish(rt, chain, input, index, tx, ExecStatus.FAILED, 0L, List.of(), new byte[0]);
         }
@@ -362,7 +365,24 @@ public final class ChainExecutor implements ExecHost.Calls {
         return mmr.root();
     }
 
+    private Outcome reward(Runtime rt, Bytes chain, ExecWorld.Layer input, int index, Tx tx) {
+        long fees = input.feePool();
+        if (fees != 0L) {
+            try {
+                input.setBalance(tx.sender().toArray(), Math.addExact(input.balance(tx.sender().toArray()), fees));
+            } catch (ArithmeticException e) {
+                return finish(rt, chain, input, index, tx, ExecStatus.FAILED, 0L, List.of(), new byte[0]);
+            }
+            input.setFee(0L);
+        }
+        return finish(rt, chain, input, index, tx, ExecStatus.OK, 0L, List.of(), new byte[0]);
+    }
+
     private Tx resolve(Bytes chain, ChainInput input) {
+        if (input.kind() == ChainInput.Kind.SYSTEM) {
+            return new Tx(input.inputHash(), ChainInput.Kind.SYSTEM, null, input.contract(), input.contract(), 0L, 0L,
+                    0, new byte[0], null);
+        }
         Block block = blocks == null ? null : blocks.get(input.inputHash());
         byte[] sender = new byte[20];
         long value = 0L;

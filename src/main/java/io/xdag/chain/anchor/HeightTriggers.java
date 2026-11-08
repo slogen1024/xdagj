@@ -35,6 +35,8 @@ import org.apache.tuweni.bytes.Bytes32;
 import io.xdag.chain.asset.AnchorRecord;
 import io.xdag.chain.ext.ChainBlockClassifier;
 import io.xdag.chain.ext.ChallengeExt;
+import io.xdag.chain.ext.ExtKind;
+import io.xdag.chain.l1.ChainRecord;
 import io.xdag.chain.ext.ChunkChain;
 import io.xdag.chain.ext.Classified;
 import io.xdag.chain.ext.ExtCodec;
@@ -50,10 +52,11 @@ import io.xdag.utils.XdagTime;
 
 /**
  * Runs at {@code onSetMainEnd}, after every block of the height has committed. Order: challenges
- * (at most {@code maxPerHeight}; the rest move to the next height), then finality, then unbond.
- * Segment-deliverable marks and reward system inputs are not produced. E2 is an
- * {@link Arbiter.Verdict#INVALID} refund. {@link #unwind} reverses one height and must run before
- * that height's blocks are unapplied, and before a lower height is unwound.
+ * (at most {@code maxPerHeight}; the rest move to the next height), then finality, then unbond,
+ * then a {@link TriggerList#DELIVER} mark for every source anchor whose {@code confirmHeight + D}
+ * is this height. Reward inputs are not written here; they are read off the canonical anchors.
+ * {@link #preview} fills the verdict cache off the import lock. {@link #unwind} reverses one
+ * height and must run before that height's blocks are unapplied.
  */
 public final class HeightTriggers {
 
@@ -78,12 +81,61 @@ public final class HeightTriggers {
         this.cache = cache;
     }
 
-    public void fire(long height) {
-        List<TriggerList.Item> items = new ArrayList<>(TriggerOps.read(store, height));
-        if (items.isEmpty()) {
+    /**
+     * Cache a verdict for a challenge that is already against a canonical anchor and whose witness
+     * assembles. Anything else is left uncached so {@link #fire} recomputes it.
+     */
+    public void preview(Block block, Classified classified) {
+        try {
+            if (block == null) {
+                return;
+            }
+            if (classified == null || !classified.isOk()) {
+                if (block.getExtFields() == null || block.getExtFields().isEmpty()) {
+                    return;
+                }
+                classified = ChainBlockClassifier.classify(block);
+            }
+            if (!classified.isOk() || classified.kind() != ExtKind.CHALLENGE
+                    || !(classified.value() instanceof ChallengeExt ext)) {
+                return;
+            }
+            Found found = find(ext.anchor());
+            if (found == null || found.body.status() != AnchorRecord.Status.CANONICAL) {
+                return;
+            }
+            byte[] witness = assemble(ext.witnessHead(), block);
+            if (witness == null || witness.length > maxWitness) {
+                return;
+            }
+            Block anchorBlock = lookup.get(found.body.anchorHash());
+            if (anchorBlock == null) {
+                return;
+            }
+            CommitmentChain.Body commitment = commitmentOf(found.body, anchorBlock);
+            if (commitment == null) {
+                return;
+            }
+            Bytes32 hash = AnchorBody.hashLow(block.getHash());
+            cache.get(hash, () -> Arbiter.judge(store, found.chain, found.seq, found.body, commitment,
+                    ext.inputIndex(), witness, lookup, maxChunks));
+        } catch (RuntimeException e) {
             return;
         }
+    }
+
+    public void fire(long height) {
+        List<TriggerList.Item> items = new ArrayList<>(TriggerOps.read(store, height));
         View view = new View();
+        if (items.isEmpty()) {
+            List<TriggerList.Item> marks = deliverable(height, view);
+            if (marks.isEmpty()) {
+                return;
+            }
+            TriggerOps.write(view.batch, height, marks);
+            store.commit(view.batch);
+            return;
+        }
         List<TriggerList.Item> stay = new ArrayList<>();
         List<TriggerList.Item> defer = new ArrayList<>();
         int seen = 0;
@@ -111,6 +163,7 @@ public final class HeightTriggers {
                 stay.set(i, pay(item, height, view));
             }
         }
+        stay.addAll(deliverable(height, view));
         TriggerOps.write(view.batch, height, stay);
         if (!defer.isEmpty()) {
             List<TriggerList.Item> next = new ArrayList<>(TriggerOps.read(store, height + 1));
@@ -129,6 +182,12 @@ public final class HeightTriggers {
         }
         for (int i = items.size() - 1; i >= 0; i--) {
             TriggerList.Item item = items.get(i);
+            if (item.kind() == TriggerList.DELIVER) {
+                if (item.fromHeight() == height) {
+                    items.remove(i);
+                }
+                continue;
+            }
             if (!item.done()) {
                 continue;
             }
@@ -199,7 +258,8 @@ public final class HeightTriggers {
         CommitmentChain.Body commitment = anchor.inputCount() == 0 && anchor.segmentCount() == 0
                 ? new CommitmentChain.Body(List.of(), List.of())
                 : CommitmentChain.decode(commitmentBytes, anchor.segmentCount(), anchor.inputCount());
-        return Arbiter.judge(store, item.chain(), item.seq(), anchor, commitment, record.index(), witness);
+        return Arbiter.judge(store, item.chain(), item.seq(), anchor, commitment, record.index(), witness, lookup,
+                maxChunks);
     }
 
     private long slash(ChallengeRecord record, View view) {
@@ -370,6 +430,83 @@ public final class HeightTriggers {
             TriggerOps.write(view.batch, height + 1, stay);
         }
         return back;
+    }
+
+    private CommitmentChain.Body commitmentOf(AnchorBody anchor, Block anchorBlock) {
+        byte[] commitmentBytes = anchor.inputCount() == 0 && anchor.segmentCount() == 0 ? new byte[0]
+                : assemble(anchor.commitmentHead(), anchorBlock);
+        if (commitmentBytes == null) {
+            return null;
+        }
+        if (anchor.inputCount() == 0 && anchor.segmentCount() == 0) {
+            return new CommitmentChain.Body(List.of(), List.of());
+        }
+        return CommitmentChain.decode(commitmentBytes, anchor.segmentCount(), anchor.inputCount());
+    }
+
+    private Found find(Bytes32 anchorHash) {
+        for (byte[] key : store.sortedKeys()) {
+            if (key.length != 29 || key[0] != ChainL1Keys.ANCHOR) {
+                continue;
+            }
+            byte[] chain = Arrays.copyOfRange(key, 1, 21);
+            long seq = ExtCodec.u64(key, 21);
+            AnchorBody body = AnchorBody.decode(store.getAnchorRaw(Bytes.wrap(chain), seq));
+            if (body != null && anchorHash.equals(body.anchorHash())) {
+                return new Found(chain, seq, body);
+            }
+        }
+        return null;
+    }
+
+    private List<TriggerList.Item> deliverable(long height, View view) {
+        List<byte[]> chains = new ArrayList<>();
+        List<byte[]> anchors = new ArrayList<>();
+        for (byte[] key : store.sortedKeys()) {
+            if (key.length == 21 && key[0] == ChainL1Keys.CHAIN) {
+                chains.add(Arrays.copyOfRange(key, 1, 21));
+            } else if (key.length == 29 && key[0] == ChainL1Keys.ANCHOR) {
+                anchors.add(key);
+            }
+        }
+        List<TriggerList.Item> out = new ArrayList<>();
+        for (byte[] key : anchors) {
+            byte[] src = Arrays.copyOfRange(key, 1, 21);
+            long srcSeq = ExtCodec.u64(key, 21);
+            AnchorBody body = view.anchor(src, srcSeq);
+            if (body == null) {
+                continue;
+            }
+            for (byte[] dst : chains) {
+                if (Arrays.equals(dst, src)) {
+                    continue;
+                }
+                ChainRecord record = store.getChain(Bytes.wrap(dst));
+                if (record == null) {
+                    continue;
+                }
+                long delay = record.deliveryDelayD();
+                boolean finalOnly = delay == window;
+                if (finalOnly) {
+                    if (body.status() != AnchorRecord.Status.FINAL) {
+                        continue;
+                    }
+                } else if (body.status() != AnchorRecord.Status.CANONICAL
+                        && body.status() != AnchorRecord.Status.FINAL) {
+                    continue;
+                }
+                long ready = body.confirmHeight() + delay;
+                if (Long.compareUnsigned(ready, body.confirmHeight()) < 0 || ready != height) {
+                    continue;
+                }
+                out.add(new TriggerList.Item(TriggerList.DELIVER, dst, srcSeq, src, body.confirmHeight(), 0L,
+                        new byte[20], srcSeq, body.anchorHash(), height, true));
+            }
+        }
+        return out;
+    }
+
+    private record Found(byte[] chain, long seq, AnchorBody body) {
     }
 
     private byte[] assemble(Bytes32 head, Block paying) {

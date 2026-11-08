@@ -25,29 +25,41 @@ package io.xdag.chain.fraud;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 import org.apache.tuweni.bytes.Bytes32;
 
 /**
- * Memoises a challenge verdict by the challenge block hash. Not consulted from {@code tryToConnect};
- * {@link io.xdag.chain.anchor.HeightTriggers} is the only caller.
+ * One verdict per challenge hash. {@link io.xdag.chain.anchor.HeightTriggers#preview} fills it
+ * off the blockchain lock; {@code fire} reads it and recomputes on a miss.
  */
 public final class VerdictCache {
 
     private final Map<Bytes32, Arbiter.Verdict> seen = new LinkedHashMap<>();
+    private final AtomicInteger misses = new AtomicInteger();
 
     public Arbiter.Verdict get(Bytes32 challenge, Supplier<Arbiter.Verdict> compute) {
-        Arbiter.Verdict have = seen.get(challenge);
-        if (have != null) {
-            return have;
+        synchronized (seen) {
+            Arbiter.Verdict have = seen.get(challenge);
+            if (have != null) {
+                return have;
+            }
+            misses.incrementAndGet();
+            Arbiter.Verdict verdict = compute.get();
+            seen.put(challenge, verdict);
+            return verdict;
         }
-        Arbiter.Verdict verdict = compute.get();
-        seen.put(challenge, verdict);
-        return verdict;
     }
 
     public int size() {
-        return seen.size();
+        synchronized (seen) {
+            return seen.size();
+        }
+    }
+
+    /** How many times the supplier ran. A second {@link #get} of the same hash does not move it. */
+    public int misses() {
+        return misses.get();
     }
 }
