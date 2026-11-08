@@ -30,14 +30,27 @@ import io.xdag.chain.l1.InputStatus;
 
 /**
  * One element of {@code inputs(chain, h)}. {@link #index()} is the position in that concatenation,
- * which is {@code k} in {@code C_k}. {@link Kind#SYSTEM} is an anchor reward and sits in front of
- * the confirmed calls at that height. Delivered message bodies are not expanded; the deliverable
- * mark is a {@code 0x09} item, not an input.
+ * which is {@code k} in {@code C_k}. At one height the order is rewards, then delivered messages,
+ * then confirmed calls. {@link Kind#MESSAGE} carries the outbox entry; its {@link #inputHash()} is
+ * {@code sha256} of that entry.
  */
-public record ChainInput(int index, Kind kind, Bytes32 inputHash, InputStatus l1Status, Bytes contract) {
+public record ChainInput(int index, Kind kind, Bytes32 inputHash, InputStatus l1Status, Bytes contract,
+        Message message) {
 
     public enum Kind {
-        CALL, DEPLOY, OTHER, SYSTEM
+        CALL, DEPLOY, OTHER, SYSTEM, MESSAGE
+    }
+
+    /** Body of a delivered outbox entry. {@code sender} is credited, then {@code recv} runs. */
+    public record Message(byte[] sender, long value, int selector, byte[] args) {
+        public Message {
+            sender = sender == null ? new byte[20] : sender.clone();
+            args = args == null ? new byte[0] : args.clone();
+        }
+    }
+
+    public ChainInput(int index, Kind kind, Bytes32 inputHash, InputStatus l1Status, Bytes contract) {
+        this(index, kind, inputHash, l1Status, contract, null);
     }
 
     public ChainInput {
@@ -46,5 +59,7 @@ public record ChainInput(int index, Kind kind, Bytes32 inputHash, InputStatus l1
         }
         inputHash = Bytes32.wrap(inputHash.toArray());
         contract = Bytes.wrap(contract.toArray());
+        message = message == null ? null
+                : new Message(message.sender(), message.value(), message.selector(), message.args());
     }
 }

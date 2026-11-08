@@ -40,7 +40,10 @@ import io.xdag.db.rocksdb.KVSource;
  * <p>Prefixes: {@code 0x01} state, {@code 0x02} head ({@code seq u64 ‖ stateRoot}), {@code 0x03}
  * changeset, {@code 0x04} snapshot page ({@code chain ‖ seq ‖ page u32} — a seq has more than one
  * page, which the one-line table did not spell out), {@code 0x05} MMR blob, {@code 0x06} commitment
- * opening, {@code 0x07} receipt. Changeset, MMR, opening and receipt bytes are opaque here.
+ * opening, {@code 0x07} receipt, {@code 0x08} outbox size at one seq
+ * ({@code chain ‖ dst ‖ seq} → {@code size u32}). Changeset, MMR, opening and receipt bytes are
+ * opaque here. The size row is what message delivery slices; a missing row at a seq the chain has
+ * already executed means that destination had no entries.
  */
 public final class ChainExecStore implements XdagLifecycle {
 
@@ -51,6 +54,7 @@ public final class ChainExecStore implements XdagLifecycle {
     public static final byte MMR = 0x05;
     public static final byte OPENING = 0x06;
     public static final byte RECEIPT = 0x07;
+    public static final byte OUTBOX_SIZE = 0x08;
 
     public record Head(long seq, Bytes32 stateRoot) {
     }
@@ -213,6 +217,55 @@ public final class ChainExecStore implements XdagLifecycle {
         return source.get(dstKey(RECEIPT, chain, blockHash));
     }
 
+    public void deleteReceipt(Bytes32 chain, Bytes32 blockHash) {
+        source.delete(dstKey(RECEIPT, chain, blockHash));
+    }
+
+    public void deleteChangeSet(Bytes32 chain, long seq) {
+        checkSeq(seq);
+        source.delete(keyed(CHANGESET, chain, seq));
+    }
+
+    public void deleteOpening(Bytes32 chain, long seq, long k) {
+        checkSeq(seq);
+        source.delete(openingKey(chain, seq, k));
+    }
+
+    public void deleteHead(Bytes32 chain) {
+        source.delete(headKey(chain));
+    }
+
+    /** Entry count of {@code dst}'s outbox at {@code seq}. {@code -1} when this chain has not executed {@code seq}. */
+    public int outboxSize(Bytes32 chain, Bytes32 dst, long seq) {
+        if (seq < 0) {
+            return 0;
+        }
+        Head head = getHead(chain);
+        if (head == null || Long.compareUnsigned(head.seq(), seq) < 0) {
+            return -1;
+        }
+        byte[] raw = source.get(sizeKey(chain, dst, seq));
+        if (raw == null || raw.length != Integer.BYTES) {
+            return 0;
+        }
+        return ByteBuffer.wrap(raw).getInt();
+    }
+
+    public void putOutboxSize(Bytes32 chain, Bytes32 dst, long seq, int size) {
+        checkSeq(seq);
+        if (size < 0) {
+            throw new IllegalArgumentException("outbox size");
+        }
+        ByteBuffer buf = ByteBuffer.allocate(Integer.BYTES);
+        buf.putInt(size);
+        source.put(sizeKey(chain, dst, seq), buf.array());
+    }
+
+    public void deleteOutboxSize(Bytes32 chain, Bytes32 dst, long seq) {
+        checkSeq(seq);
+        source.delete(sizeKey(chain, dst, seq));
+    }
+
     static byte[] stateKey(Bytes32 chain, Bytes32 key) {
         byte[] raw = new byte[1 + Bytes32.SIZE + Bytes32.SIZE];
         raw[0] = STATE;
@@ -251,6 +304,15 @@ public final class ChainExecStore implements XdagLifecycle {
         System.arraycopy(chain.toArray(), 0, raw, 1, Bytes32.SIZE);
         System.arraycopy(dst.toArray(), 0, raw, 1 + Bytes32.SIZE, Bytes32.SIZE);
         return raw;
+    }
+
+    static byte[] sizeKey(Bytes32 chain, Bytes32 dst, long seq) {
+        ByteBuffer buf = ByteBuffer.allocate(1 + Bytes32.SIZE + Bytes32.SIZE + Long.BYTES);
+        buf.put(OUTBOX_SIZE);
+        buf.put(chain.toArray());
+        buf.put(dst.toArray());
+        buf.putLong(seq);
+        return buf.array();
     }
 
     static byte[] openingKey(Bytes32 chain, long seq, long k) {

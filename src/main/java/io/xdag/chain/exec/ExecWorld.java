@@ -25,6 +25,7 @@ package io.xdag.chain.exec;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -47,10 +48,14 @@ import io.xdag.chain.exec.state.StateTree;
  */
 final class ExecWorld {
 
+    private static final byte[] ABSENT = new byte[0];
+
     private final StateTree tree = new StateTree();
     private final TreeMap<Bytes, byte[]> slots = new TreeMap<>();
     private final Set<Bytes32> dirty = new HashSet<>();
     private final Set<Bytes32> removed = new HashSet<>();
+    /** First pre-image of each key touched since {@link #clean()}. An empty array means the key was absent. */
+    private final Map<Bytes32, byte[]> before = new HashMap<>();
 
     Layer root() {
         return new Layer(null);
@@ -79,6 +84,27 @@ final class ExecWorld {
         }
         dirty.clear();
         removed.clear();
+        before.clear();
+    }
+
+    Map<Bytes32, byte[]> preimages() {
+        return before;
+    }
+
+    /** Put the pre-images back. An empty or null value deletes the key. Does not track a new change. */
+    void undo(Map<Bytes32, byte[]> preimages) {
+        for (Map.Entry<Bytes32, byte[]> entry : preimages.entrySet()) {
+            byte[] encoded = entry.getValue();
+            if (encoded == null || encoded.length == 0) {
+                drop(entry.getKey());
+            } else {
+                Stored stored = decode(encoded);
+                put(stored.contract(), stored.userKey(), stored.value(), false);
+            }
+        }
+        dirty.clear();
+        removed.clear();
+        before.clear();
     }
 
     List<Pair<Bytes32, byte[]>> dirtyPuts() {
@@ -99,11 +125,15 @@ final class ExecWorld {
     void clean() {
         dirty.clear();
         removed.clear();
+        before.clear();
     }
 
     private void put(Bytes contract, byte[] userKey, byte[] value, boolean track) {
         Bytes id = ChainLedger.slot(contract, userKey);
         Bytes32 smt = ChainLedger.smtKey(contract, userKey);
+        if (track) {
+            note(smt, id);
+        }
         slots.put(id, value.clone());
         tree.put(smt, value);
         if (track) {
@@ -115,12 +145,36 @@ final class ExecWorld {
     private void delete(Bytes contract, byte[] userKey) {
         Bytes id = ChainLedger.slot(contract, userKey);
         Bytes32 smt = ChainLedger.smtKey(contract, userKey);
-        if (slots.remove(id) == null && !tree.contains(smt)) {
+        if (!slots.containsKey(id) && !tree.contains(smt)) {
             return;
         }
+        note(smt, id);
+        slots.remove(id);
         tree.remove(smt);
         dirty.remove(smt);
         removed.add(smt);
+    }
+
+    private void note(Bytes32 smt, Bytes id) {
+        if (before.containsKey(smt)) {
+            return;
+        }
+        byte[] existing = slots.get(id);
+        before.put(smt, existing == null ? ABSENT : encode(id, existing));
+    }
+
+    private void drop(Bytes32 smt) {
+        Bytes found = null;
+        for (Bytes id : slots.keySet()) {
+            if (smt.equals(ChainLedger.smtKey(Bytes.wrap(id.slice(0, 20)), id.slice(20).toArray()))) {
+                found = id;
+                break;
+            }
+        }
+        if (found != null) {
+            slots.remove(found);
+        }
+        tree.remove(smt);
     }
 
     private static byte[] encode(Bytes id, byte[] value) {

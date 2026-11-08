@@ -31,14 +31,14 @@
 | SP0b-3 | 完成 | 分队列孤块池、配额、TTL、导入期费率、不挖矿留分片 | `removeWorst.d125` 的约 1.5 µs 残差未拆 |
 | SP1-1 | 完成 | Chicory 1.7.5，`io.xdag.chain.exec.wasm` | — |
 | SP1-2 | 完成 | `StateTree` 的 get/put/remove；`OutboxMap`；`WitnessRecorder`（同 key 只计一次，`estimateFromGas` = gas/10 + 32KiB）；`ChainExecStore`（`CHAIN_EXEC`，快照页键多一个 `page u32`）。§8.3 不等式在 `StateAndWitnessTest` | 哈希函数仍是无状态的 `SparseMerkleTree` |
-| SP1-3 | 完成 | `InputStreamBuilder`（奖励输入已接，消息体仍不展开）；`ChainExecutor.step/apply`（预扣、回滚帧、退款、`C_k`，奖励把费用池划给认证者）；`CallFrame` 在 `ExecWorld.Layer`，深度 16，`xdag.reentrant` 放行；`ChainLedger`；`ChainExecDriver` 跟 `onSetMainEnd`。根与承诺钉在 `ChainExecutorTest` | 变更集、回滚、快照间隔、软预执行是 SP1-4。unwind 之后执行停住，不回滚 |
+| SP1-3 | 完成 | `InputStreamBuilder`（奖励在前，高度上可交付的出箱条目展开成 `recv`，再是调用）；`ChainExecutor.step/apply`（预扣、回滚帧、退款、`C_k`，奖励把费用池划给认证者）；`ExecChangeSet` 记每个 seq 的前像；`ChainExecDriver` 跟 `onSetMainEnd`，源出箱还没执行就等。根与承诺钉在 `ChainExecutorTest`。`MessageFlowTest` | K=128 淘汰、快照间隔、软预执行仍是 SP1-4。`onUnsetMain` 之后执行停住，不回滚 |
 | SP1-4 / 5 | 未开工 | — | 回滚、快照落库、两模式吞吐 |
-| SP2 | 完成 | `ClaimHandler`（`l1/handlers`）；`ClaimVerifier` / `ClaimProof` / `OutboxEntry` / `WithdrawOutbox` / `AnchorRecord` / `SettlementJournal` / `VaultLedger`（`asset/`）；`BlockchainImpl.chainTransfer`。0x06 只读（`FINAL` 才放行），0x08 `src‖dst‖index`，0x10 journal 进状态哈希。证明体版本 1。`ClaimFlowTest` | 锚定写入和提现窗在 SP3。四参 `ClaimHandler` 不限额。**M4 未关** |
-| SP3 | 部分 | `BondHandler` / `AnchorHandler` / `ChallengeHandler`；`HeightTriggers`、`AnchorPublisher`、`DueSegments`、`RewardInputs`（`anchor/`）；`Witness`、`Arbiter`、`E2Replay`、`WitnessBackedStore`、`VerdictCache`、`Challenger`（`fraud/`）。E1/E2/E3 都实判。E2 用解释器重执行，前态对不上或畸形见证判失败（押金给认证者，不罚没）。`tryToConnect` 和 `SyncManager` 在进锁前 `preview`。奖励输入从规范锚定读出，不另写 0x0C。可交付标记是 0x09 的 `DELIVER`。`AnchorFlowTest`、`E2FlowTest` | 消息体不展开。没有 `onSourceVoided` 的执行回滚，没有 2 秒 E2 基准。**M4 未关** |
+| SP2 | 完成 | `ClaimHandler`（`l1/handlers`）；`ClaimVerifier` / `ClaimProof` / `OutboxEntry` / `WithdrawOutbox` / `AnchorRecord` / `SettlementJournal` / `VaultLedger`（`asset/`）；`BlockchainImpl.chainTransfer`。0x06 只读（`FINAL` 才放行），0x08 `src‖dst‖index`，0x10 journal 进状态哈希。证明体版本 1。`ClaimFlowTest` | 四参 `ClaimHandler` 不限额。提现窗在 SP3 的 `WithdrawWindow` |
+| SP3 | 完成 | `BondHandler` / `AnchorHandler` / `ChallengeHandler`；`HeightTriggers`、`AnchorPublisher`、`DueSegments`、`RewardInputs`（`anchor/`）；`Witness`、`Arbiter`、`E2Replay`、`WitnessBackedStore`、`VerdictCache`、`Challenger`、`InputIndex`（`fraud/`）。E1/E2/E3 都实判。可交付高度上的出箱条目跑 `recv`。源锚定否决后 `onSourceVoided` 把消费链滚回交付前，并把 0x0B 游标退回。`E2ArbitrationBenchTest` 在 `maxCallGas` 下单次仲裁 < 2 s。`AnchorFlowTest`、`E2FlowTest`、`MessageFlowTest` | 源链没在本地执行时，目的链停在该高度，不编造消息体。`D == W` 不回滚。变更集不按 K=128 淘汰。docker 上的挑战罚没是 M5 |
 | SP4 | 部分 | 订阅集合；`0x1B–0x1F`；快照页与 SMT 根校验；四种证明体；`Delivery` 的 HOLD；未 `open` 的回复丢弃，每方向最多 64 条；拉取默认 8 MiB。进程内三节点见 `ThreeNodeDevnetTest` | 执行器只跑订阅链；docker 上的 D=0/D=W 与挑战罚没还没有。**M5 未关** |
 | SP5 | 未开工 | — | RPC、SDK、CLI、DApp |
 
-里程碑：M1、M2 完成。M3 只关掉了导入门禁（19687 块/s），执行吞吐未测。M4 里 SP2 已落地，SP3 的 E2 重执行、缓存、奖励、可交付标记、认证者和挑战者已落地；2 秒基准和执行侧级联回滚还没有，M4 未完成。M5、M6、M7 未完成。
+里程碑：M1、M2、M4 完成。M3 只关掉了导入门禁（19687 块/s），执行吞吐未测。M5、M6、M7 未完成。M5 还差 docker 上的跨链和挑战罚没。
 
 ---
 
@@ -154,11 +154,11 @@ io.xdag.chain
 ├── ingest/         已建成（SP0b-2/3）：PreValidator, IngestPipeline, ChunkFeePolicy
 ├── orphan/         已建成（SP0b-3）：ChainOrphanPool
 ├── repair/         已建成（SP0b-1）：ChainConsistencyCheck, ChainRepairTool
-├── exec/           已建成 ChainExecStore（SP1-2），ChainExecutor, InputStreamBuilder, ChainLedger, ChainExecDriver（SP1-3）。未建：ChangeLog
+├── exec/           已建成 ChainExecStore（SP1-2），ChainExecutor, InputStreamBuilder, ChainLedger, ChainExecDriver（SP1-3），ExecChangeSet（源锚定否决回滚）。未建：K=128 淘汰、快照间隔、软预执行
 │   ├── wasm/       已建成（SP1-1）：WasmEngine, ChicoryEngine, ModuleValidator, GasInstrumenter, HostAbi
 │   └── state/      已建成（SP1-2）：SparseMerkleTree, StateTree, Mmr, OutboxMap, WitnessRecorder
-├── anchor/         部分（SP3）：BondVault, BondAccount, AnchorHead, AnchorBody, CommitmentChain, SegmentCursor, ChallengeRecord, TriggerList, TriggerOps, WithdrawWindow, HeightTriggers, DueSegments, RewardInputs, AnchorPublisher
-├── fraud/          部分（SP3）：Witness, Arbiter, E2Replay, WitnessBackedStore, VerdictCache, Challenger。缓存由 `BlockchainImpl.precomputeChallenge` 在进锁前填
+├── anchor/         已建成（SP3）：BondVault, BondAccount, AnchorHead, AnchorBody, CommitmentChain, SegmentCursor, ChallengeRecord, TriggerList, TriggerOps, WithdrawWindow, HeightTriggers, DueSegments, RewardInputs, AnchorPublisher
+├── fraud/          已建成（SP3）：Witness, Arbiter, E2Replay, WitnessBackedStore, VerdictCache, Challenger, InputIndex。缓存由 `BlockchainImpl.precomputeChallenge` 在进锁前填
 ├── asset/          已建成（SP2）：VaultLedger, WithdrawOutbox, OutboxEntry, ClaimVerifier, ClaimProof, AnchorRecord, Settlement, SettlementJournal
 ├── p2p/            部分（SP4）：ChainSubscriptions, ChainExchange, SnapshotPages, SnapshotSync, ProofBodies, ChainRecords, Delivery。消息在 io.xdag.net.message.chain
 └── rpc/            未建（SP5）：ChainApi(chain_*), ChainApiImpl, 视图层 (pending/confirmed/anchored/final)
@@ -376,9 +376,9 @@ SP2 引入第一批 **共识 handler**（`ClaimHandler`）与第一处 **系统�
 
 ---
 
-## 8. SP3：认证者、锚定、终局与欺诈证明（2026-11-08 部分。M4 未关）
+## 8. SP3：认证者、锚定、终局与欺诈证明（2026-11-08 完成。M4 关上）
 
-保证金、规范链、终局、E1/E2/E3、罚没、提现窗、奖励输入、可交付标记、`AnchorPublisher` 和 `Challenger` 已落地（`AnchorFlowTest`、`E2FlowTest`）。切片计划仍是 **SP3-1 → SP3-4**，下面四节是原计划；和代码不一致的地方以本节为准。
+保证金、规范链、终局、E1/E2/E3、罚没、提现窗、奖励输入、可交付标记、消息体、`onSourceVoided`、`AnchorPublisher` 和 `Challenger` 已落地（`AnchorFlowTest`、`E2FlowTest`、`MessageFlowTest`、`E2ArbitrationBenchTest`）。切片计划仍是 **SP3-1 → SP3-4**，下面四节是原计划；和代码不一致的地方以本节为准。
 
 - 0x06 值是 205 字节：前 65 字节是 SP2 的 `AnchorRecord`，CLAIM 只读这段。尾是 `stateRoot ‖ prevSeq ‖ inputCount ‖ segmentCount ‖ confirmHeight ‖ parent ‖ attester ‖ commitmentHead`。
 - 同 seq 的败者不写短键。长键是 `0x06 ‖ chain ‖ seq ‖ anchorHash`，撤销只删这一条。
@@ -389,7 +389,9 @@ SP2 引入第一批 **共识 handler**（`ClaimHandler`）与第一处 **系统�
 - `AnchorPublisher.publish` 用调用方给的承诺列表和 `DueSegments` 组 ANCHOR，不负责导入。`Challenger.diverge` 找第一处分歧，`Challenger.file` 组 CHALLENGE。
 - 罚没打的是该链保证金，这条为 0 才打全局保证金。一半给挑战者，余数进 `sha256("xdag-chain-burn")[0..20]`，奇数 nano 归销毁。挑战押金另退。否决从链头往回把被挑战锚定和它的规范后代改成 `VOIDED`，链头回到父锚定。
 - 提现窗在 `WithdrawWindow`，不在 `ClaimVerifier.verify`。`f` 是本链全部保证金加上全部全局保证金。窗口按 CLAIM 的确认高度向下对齐到 W。没有链头就拒绝。SP2 的四参 `ClaimHandler` 不限额。
-- 消息体仍然不展开。没有 `onSourceVoided` 的执行回滚，没有 2 秒 E2 基准。
+- 高度 `h` 的输入是奖励、然后 `confirmHeight + D == h` 的出箱条目、然后调用。条目在源链 `CHAIN_EXEC` 的 MMR 里，叶子是 `sha256(entry)`。交付先把 `value` 记给原发送者，再跑 `recv`；`recv` 失败只回滚帧，钱留在发送者。源链还没执行到该 seq 时 `ready` 为假，驱动先跑源链。没有条目就不编造。
+- 每个 seq 写一条 `ExecChangeSet`（状态前像、出箱旧长度、opening 和回执）。`HeightTriggers` 在否决提交之后调 `ChainExecDriver.onSourceVoided`：消费链的 `appliedSeq` 已经到达 `confirmHeight + D` 就滚回到该高度之前。本链自己的执行不滚。`D == W` 不滚。L1 把 `srcSeq` 不小于被否决 seq 的 0x0B 游标退到仍活着的段的 `from`，没有这样的段就删掉游标。`onUnsetMain` 仍然只停住。
+- `E2ArbitrationBenchTest` 用解释器重执行一笔 `gasLimit = maxCallGas`（10_000_000）的 `loop/br`，gas 打满上限。断言的是 `E2Replay.replay` 本身 < 2 s。整段测试 0.985 s，含未计时的第一次执行。承诺一致时裁决是失败（押金给认证者）。
 
 SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器，是共识复杂度最高的子项目。切片：**SP3-1 保证金与锚定规范链 → SP3-2 承诺链与终局/触发器 → SP3-3 见证与仲裁 → SP3-4 罚没、级联回滚与认证者/挑战者进程**。
 
@@ -414,6 +416,8 @@ SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器�
 
 ### 8.4 SP3-4：罚没、级联回滚与进程
 
+已落地的回滚是上面那条：`onSourceVoided` 用 `ExecChangeSet`，不是 K=128 的完整变更日志。下面是原计划。
+
 - 罚没：50% → 挑战者、50% 销毁（`CHAIN_BOND_VAULT` → 挑战者地址 + 销毁地址；journal 记录）。
 - 级联：被否决锚定的段被谁消费过（0x0B 游标历史）→ 那些链的执行者收到 `onSourceVoided(srcChain, seq)` 事件回滚到消费前（执行侧）；L1 侧只改锚定状态与游标。
 - `Challenger`（执行侧进程）：对本地订阅链的每个新规范锚定比对本地承诺，发现分歧即构造见证并签发 CHALLENGE。
@@ -422,7 +426,7 @@ SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器�
 ### 8.5 测试
 
 - 对抗：E1/E2/E3 各类错误锚定必被挑战成功；正确锚定的挑战必失败且押金没收；见证超长/未证明读/篡改承诺开解全部判失败；`maxChallengesPerHeight` 顺延确定性。
-- 有界性：`maxCallGas` 上限的 E2 仲裁耗时基准 ≤ 2 s。
+- 有界性：`maxCallGas` 上限的 E2 仲裁耗时基准 ≤ 2 s。`E2ArbitrationBenchTest` 已过，见本节开头。
 - N2：BOND/ANCHOR/CHALLENGE/CLAIM 混合序列的随机 reorg 属性。
 - 两类节点等价：快照节点对同一 CHALLENGE 裁决一致（代码库随快照）。
 
@@ -430,7 +434,7 @@ SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器�
 
 ---
 
-## 9. SP4：订阅与 P2P（2026-11-07：线格式、快照页、四种证明体已实施。三节点交换见 `ThreeNodeDevnetTest`。docker 上的挑战罚没仍等 SP2/SP3，没有锚定可罚）
+## 9. SP4：订阅与 P2P（2026-11-07：线格式、快照页、四种证明体已实施。三节点交换见 `ThreeNodeDevnetTest`。docker 上的 D=0/D=W 与挑战罚没还没有）
 
 ### 9.1 订阅集合与过渡模式
 
@@ -524,7 +528,7 @@ SP0a ✅ ─┬─► SP0b-1 ✅ ─► SP0b-2 ✅ ─► SP0b-2b ✅ ─► SP0
          └─► SP1-1 ✅ ─► SP1-2 ✅ ─► SP1-3 ✅ ─► SP1-4 ─► SP1-5
                                           │
                                           ├─► SP2 ✅ ─┐
-                                          └─► SP3（部分）─┤
+                                          └─► SP3 ✅ ─┤
                                                    ├─► SP4（线格式/页/证明）─► SP5
 SP0b-3 ✅ ─────────────────────────────────────────┘
 ```
@@ -540,7 +544,7 @@ SP0b 与 SP1 并行（不同包、不同人/会话）；SP2 与 SP3 并行（都
 | **M1 基线** | 完成 | SP0b-1 完成 | 基线文档；G1/G2/G9/G10 关闭；全量绿 |
 | **M2 引擎** | 完成 | SP1-1/2 完成 | 白名单/插桩测试向量已钉死。§8.3 不等式：随机读写的 `witnessBytes` ≤ `estimateFromGas(gasUsed)`（`StateAndWitnessTest`） |
 | **M3 执行** | 未完成 | SP0b-2/2b 的导入门禁已关；SP1-3 完成；SP1-4/5 未开工 | 单链执行吞吐 ≥ 2k 调用/s 未测；两模式一致未测。**导入 ≥ 10k 块/s 已达成**：20000 块负载 `pipeline` 中位 **19687 块/s**，锁内均值 42–49 µs。瓶颈是 `checkMineAndAdd` 对每个块做 secp256k1，不是 AddressStore。见 `docs/benchmarks/2026-11-07-sp0b2b-import.md` |
-| **M4 经济与安全** | 未完成 | SP2 完成；SP3 部分 | `ClaimFlowTest` 覆盖 I1/I2。`AnchorFlowTest` 覆盖保证金、终局、E1、E3、顺延、畸形 E2、可交付标记、缓存、发布和挑战组块。`E2FlowTest` 覆盖解释器重执行：诚实承诺失败、坏前态失败、假承诺罚没。没有 2 秒基准，没有执行侧级联回滚。**M4 未关** |
+| **M4 经济与安全** | 完成 | SP2、SP3 | `ClaimFlowTest` 覆盖 I1/I2。`AnchorFlowTest` 覆盖保证金、终局、E1、E3、顺延、畸形 E2、可交付标记、缓存、发布、挑战组块和否决后退游标。`E2FlowTest` 覆盖解释器重执行。`MessageFlowTest` 覆盖 `recv` 和 `onSourceVoided`。`E2ArbitrationBenchTest` 覆盖 2 秒上限。docker 罚没不在本里程碑 |
 | **M5 网络** | 未完成 | SP0b-3 完成；SP4 的线格式、页、证明完成 | 3 节点 devnet 跨链 + 挑战演练脚本仍未通过。进程内三节点只覆盖订阅分裂和拉页/拉证明 |
 | **M6 开发者面** | 未开工 | SP5 | RPC/SDK/CLI/DApp；文档 |
 | **M7 testnet 激活** | 未开工 | 治理定高度、快照、观察期 | §11.3 |

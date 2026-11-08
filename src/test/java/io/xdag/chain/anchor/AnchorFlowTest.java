@@ -250,7 +250,17 @@ public class AnchorFlowTest {
         byte[] witness = Witness.e3(w.source.toArray(), 2L, dst, 9L, true, proof.value(), proof.siblings());
         w.fund(BondVault.ADDRESS, MIN_BOND + 100L);
         w.fileChallenge(opened, witness, 100L, 4L);
+        byte[] kept = new byte[20];
+        kept[0] = 1;
+        byte[] dropped = new byte[20];
+        dropped[0] = 2;
+        ChainL1Batch cursors = new ChainL1Batch();
+        cursors.putCursor(Bytes.wrap(kept), w.chain, new SegmentCursor(1L, 1L).encode());
+        cursors.putCursor(Bytes.wrap(dropped), w.chain, new SegmentCursor(9L, opened.ext.seq()).encode());
+        w.store.commit(cursors);
         w.triggers.fire(4L);
+        assertNull(w.store.getCursor(Bytes.wrap(dropped), w.chain));
+        assertEquals(1L, SegmentCursor.decode(w.store.getCursor(Bytes.wrap(kept), w.chain)).srcSeq());
         assertEquals(ChallengeRecord.SUCCESS, w.challenge(opened.challenge).status());
         assertEquals(AnchorRecord.Status.VOIDED, w.body(w.chain, opened.ext.seq()).status());
         assertEquals(0L, w.account(w.attester, w.chain).amount());

@@ -124,36 +124,7 @@ public final class Arbiter {
 
     static Bytes32 expectedCall(ChainL1Store store, byte[] chain, long prevSeq, long seq,
             CommitmentChain.Body commitment, long k) {
-        long messages = 0L;
-        for (CommitmentChain.Segment s : commitment.segments()) {
-            if (Long.compareUnsigned(s.to(), s.from()) < 0) {
-                return null;
-            }
-            messages += s.to() - s.from();
-        }
-        if (Long.compareUnsigned(k, messages) < 0) {
-            return null;
-        }
-        long left = k - messages;
-        long h = prevSeq;
-        Bytes id = Bytes.wrap(chain);
-        while (Long.compareUnsigned(h, seq) < 0) {
-            if (h == Long.MAX_VALUE) {
-                return null;
-            }
-            h++;
-            int rewards = RewardInputs.at(store, chain, h).size();
-            if (Long.compareUnsigned(left, rewards) < 0) {
-                return null;
-            }
-            left -= rewards;
-            long n = store.getCallCount(id, h);
-            if (Long.compareUnsigned(left, n) < 0) {
-                InputRecord input = store.getInput(id, h, left);
-                return input == null ? null : input.blockHash();
-            }
-            left -= n;
-        }
-        return null;
+        InputIndex.Call call = InputIndex.locate(store, chain, prevSeq, seq, commitment, k);
+        return call == null || call.hash() == null ? null : call.hash();
     }
 }

@@ -24,6 +24,7 @@
 package io.xdag.chain.exec;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.function.LongUnaryOperator;
 
@@ -32,25 +33,36 @@ import org.apache.tuweni.bytes.Bytes32;
 
 import io.xdag.chain.l1.ChainL1Keys;
 import io.xdag.chain.l1.ChainL1Store;
+import io.xdag.chain.l1.ChainRecord;
 import io.xdag.chain.p2p.ChainSubscriptions;
 
 /**
  * Node-local follower of {@code onSetMainEnd}. It does not implement {@code ChainL1Hooks} and it
  * does not write {@code CHAIN_L1}. A subscribed chain is advanced from its head (or its creation
- * height) through {@code height}. {@code onUnsetMain} does not roll the state back — that is
+ * height) through {@code height}, waiting when a deliverable outbox is not in the exec store yet
+ * so the source chain can step first. {@link #onSourceVoided} rolls a consumer back to the seq
+ * before that segment was delivered. {@code onUnsetMain} does not roll the state back — that is
  * SP1-4 — and once a chain has executed a height that is being removed, further steps stop.
+ * {@code D == W} does not rewind: those segments are only consumed after finality, and a final
+ * anchor is not voided.
  */
 public final class ChainExecDriver {
 
     private final ChainExecutor executor;
     private final ChainSubscriptions subscriptions;
     private final ChainL1Store l1;
+    private final long window;
     private boolean blocked;
 
     public ChainExecDriver(ChainExecutor executor, ChainSubscriptions subscriptions, ChainL1Store l1) {
+        this(executor, subscriptions, l1, -1L);
+    }
+
+    public ChainExecDriver(ChainExecutor executor, ChainSubscriptions subscriptions, ChainL1Store l1, long window) {
         this.executor = executor;
         this.subscriptions = subscriptions;
         this.l1 = l1;
+        this.window = window;
     }
 
     public boolean isBlocked() {
@@ -61,12 +73,59 @@ public final class ChainExecDriver {
         if (blocked) {
             return;
         }
-        for (Bytes chain : chains()) {
-            long created = l1.getChain(chain).createdHeight();
-            long head = executor.appliedSeq(chain);
-            long from = head < 0 ? created : head + 1;
-            for (long seq = from; seq <= height; seq++) {
+        boolean progress = true;
+        while (progress) {
+            progress = false;
+            for (Bytes chain : chains()) {
+                ChainRecord record = l1.getChain(chain);
+                if (record == null) {
+                    continue;
+                }
+                long head = executor.appliedSeq(chain);
+                long seq = head < 0 ? record.createdHeight() : head + 1;
+                if (seq > height || !executor.ready(chain, seq)) {
+                    continue;
+                }
                 executor.step(chain, seq, timestamp.applyAsLong(seq));
+                progress = true;
+            }
+        }
+    }
+
+    /**
+     * A source anchor was voided. Every subscribed destination that already executed
+     * {@code confirmHeight + D} goes back to the seq before that delivery. The chain's own
+     * execution is left alone. {@code D == window} is a no-op.
+     */
+    public void onSourceVoided(byte[] src, long srcSeq, long confirmHeight) {
+        if (blocked || src == null) {
+            return;
+        }
+        for (Bytes dest : chains()) {
+            if (Arrays.equals(dest.toArray(), src)) {
+                continue;
+            }
+            ChainRecord record = l1.getChain(dest);
+            if (record == null) {
+                continue;
+            }
+            long delay = record.deliveryDelayD();
+            if (window >= 0L && delay == window) {
+                continue;
+            }
+            long ready = confirmHeight + delay;
+            if (Long.compareUnsigned(ready, confirmHeight) < 0) {
+                continue;
+            }
+            long applied = executor.appliedSeq(dest);
+            if (applied < 0L || Long.compareUnsigned(applied, ready) < 0) {
+                continue;
+            }
+            try {
+                executor.rewindTo(dest, ready == 0L ? -1L : ready - 1L);
+            } catch (RuntimeException e) {
+                blocked = true;
+                return;
             }
         }
     }

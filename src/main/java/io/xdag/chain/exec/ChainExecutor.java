@@ -70,8 +70,9 @@ import io.xdag.utils.XdagTime;
  * inputs credit the value and do not run. Nested frames commit only when they return. Re-entering
  * a contract traps unless that selector is in the {@code xdag.reentrant} section.
  *
- * <p>Change-set retention and rewind are SP1-4. A seq is applied once; {@link #apply} rejects a
- * seq that is not the successor of the stored head.
+ * <p>Each applied seq stores a change-set so {@link #rewindTo} can put a chain back. That is what
+ * {@code onSourceVoided} uses. Capping the log at K=128, snapshot pages and soft pre-exec stay
+ * SP1-4. A seq is applied once; {@link #apply} rejects a seq that is not the successor of the head.
  */
 public final class ChainExecutor implements ExecHost.Calls {
 
@@ -101,7 +102,12 @@ public final class ChainExecutor implements ExecHost.Calls {
         this.store = store;
         this.blocks = blocks;
         this.maxChunks = maxChunks;
-        this.inputs = new InputStreamBuilder(l1);
+        this.inputs = new InputStreamBuilder(l1, store);
+    }
+
+    /** False while a deliverable source outbox is not in the exec store yet. */
+    public boolean ready(Bytes chain, long seq) {
+        return inputs.ready(chain, seq);
     }
 
     public List<Outcome> step(Bytes chain, long seq, long timestamp) {
@@ -109,9 +115,12 @@ public final class ChainExecutor implements ExecHost.Calls {
         if (record == null) {
             throw new IllegalArgumentException("chain");
         }
+        if (!inputs.ready(chain, seq)) {
+            throw new IllegalStateException("outbox");
+        }
         List<Tx> txs = new ArrayList<>();
         for (ChainInput input : inputs.inputs(chain, seq)) {
-            txs.add(resolve(chain, input));
+            txs.add(resolve(chain, input, record.maxCallGas()));
         }
         return apply(chain, seq, record.gasPriceNano(), record.maxCallGas(), timestamp, txs);
     }
@@ -124,6 +133,8 @@ public final class ChainExecutor implements ExecHost.Calls {
         if (rt.seq >= 0 && seq != rt.seq + 1) {
             throw new IllegalStateException("seq " + seq + " after " + rt.seq);
         }
+        long prevSeq = rt.seq;
+        Bytes32 prevRoot = rt.world.rootHash();
         current = rt;
         List<Outcome> out = new ArrayList<>(txs.size());
         try {
@@ -131,10 +142,66 @@ public final class ChainExecutor implements ExecHost.Calls {
                 out.add(one(rt, chain, seq, gasPrice, maxCallGas, timestamp, k, txs.get(k)));
             }
             rt.seq = seq;
-            flush(rt, chain, seq, out);
+            flush(rt, chain, seq, out, prevSeq, prevRoot);
             return out;
         } finally {
             current = null;
+        }
+    }
+
+    /**
+     * Drop every seq above {@code seq}. {@code -1} clears the chain. The change-set of each dropped
+     * seq must still be in the exec store.
+     */
+    public void rewindTo(Bytes chain, long seq) {
+        if (seq < -1L) {
+            throw new IllegalArgumentException("seq");
+        }
+        Runtime rt = runtime(chain);
+        Bytes32 id = chain32(chain);
+        while (rt.seq > seq) {
+            ExecChangeSet change = ExecChangeSet.decode(store.getChangeSet(id, rt.seq));
+            if (change == null) {
+                throw new IllegalStateException("changeset " + rt.seq);
+            }
+            List<Pair<Bytes32, byte[]>> writes = new ArrayList<>(change.state.size());
+            java.util.Map<Bytes32, byte[]> preimages = new java.util.HashMap<>();
+            for (Pair<Bytes32, byte[]> row : change.state) {
+                byte[] value = row.getValue();
+                writes.add(Pair.of(row.getKey(), value));
+                preimages.put(row.getKey(), value == null ? new byte[0] : value);
+            }
+            if (!writes.isEmpty()) {
+                store.applyState(id, writes);
+            }
+            rt.world.undo(preimages);
+            for (ExecChangeSet.MmrCut cut : change.mmr) {
+                List<byte[]> list = rt.entries.computeIfAbsent(cut.dst(), k -> new ArrayList<>());
+                while (list.size() > cut.oldSize()) {
+                    list.remove(list.size() - 1);
+                }
+                rebuild(rt, id, cut.dst(), list);
+            }
+            for (Bytes32 dst : change.sized) {
+                store.deleteOutboxSize(id, dst, rt.seq);
+            }
+            for (int k = 0; k < change.openings; k++) {
+                store.deleteOpening(id, rt.seq, k);
+            }
+            for (Bytes32 hash : change.receipts) {
+                store.deleteReceipt(id, hash);
+            }
+            store.deleteChangeSet(id, rt.seq);
+            if (!rt.world.rootHash().equals(change.prevRoot)) {
+                throw new IllegalStateException("rewind root");
+            }
+            if (change.prevSeq < 0L) {
+                store.deleteHead(id);
+                rt.seq = -1L;
+            } else {
+                store.putHead(id, change.prevSeq, change.prevRoot);
+                rt.seq = change.prevSeq;
+            }
         }
     }
 
@@ -243,7 +310,8 @@ public final class ChainExecutor implements ExecHost.Calls {
             ExecStatus status = tx.kind() == ChainInput.Kind.DEPLOY ? ExecStatus.INVALID_CODE : ExecStatus.FAILED;
             return finish(rt, chain, input, index, tx, status, 0L, List.of(), new byte[0]);
         }
-        String export = tx.kind() == ChainInput.Kind.DEPLOY ? "init" : "call";
+        String export = tx.kind() == ChainInput.Kind.DEPLOY ? "init"
+                : tx.kind() == ChainInput.Kind.MESSAGE ? "recv" : "call";
         WitnessRecorder witness = new WitnessRecorder();
         ExecHost host = new ExecHost(rt.world, input.child(), this, witness, chain, tx.contract().toArray(),
                 tx.sender().toArray(), tx.selector(), tx.args(), tx.value(), seq, timestamp, 1, true);
@@ -343,6 +411,7 @@ public final class ChainExecutor implements ExecHost.Calls {
     private void append(Runtime rt, Bytes chain, ExecHost.Sent sent) {
         Bytes32 dst = chain32(sent.dst());
         List<byte[]> list = rt.entries.computeIfAbsent(dst, k -> new ArrayList<>());
+        rt.mmrBefore.putIfAbsent(dst, list.size());
         byte[] body = WithdrawOutbox.send(chain, sent.dst(), sent.sender(), sent.contract(), sent.selector(),
                 sent.args(), sent.value(), sent.height(), list.size());
         list.add(body);
@@ -378,10 +447,22 @@ public final class ChainExecutor implements ExecHost.Calls {
         return finish(rt, chain, input, index, tx, ExecStatus.OK, 0L, List.of(), new byte[0]);
     }
 
-    private Tx resolve(Bytes chain, ChainInput input) {
+    private Tx resolve(Bytes chain, ChainInput input, long maxCallGas) {
         if (input.kind() == ChainInput.Kind.SYSTEM) {
             return new Tx(input.inputHash(), ChainInput.Kind.SYSTEM, null, input.contract(), input.contract(), 0L, 0L,
                     0, new byte[0], null);
+        }
+        if (input.kind() == ChainInput.Kind.MESSAGE) {
+            ChainInput.Message message = input.message();
+            if (message == null) {
+                return new Tx(input.inputHash(), ChainInput.Kind.MESSAGE, ExecStatus.INVALID_FORMAT, Bytes.wrap(new byte[20]),
+                        input.contract(), 0L, 0L, 0, new byte[0], null);
+            }
+            ContractRecord recorded = l1.getContract(input.contract());
+            byte[] code = recorded == null ? null : bytes(l1.getCode(recorded.codeHash()));
+            ExecStatus forced = code == null ? ExecStatus.FAILED : forced(input.l1Status());
+            return new Tx(input.inputHash(), ChainInput.Kind.MESSAGE, forced, Bytes.wrap(message.sender()),
+                    input.contract(), message.value(), maxCallGas, message.selector(), message.args(), code);
         }
         Block block = blocks == null ? null : blocks.get(input.inputHash());
         byte[] sender = new byte[20];
@@ -476,7 +557,7 @@ public final class ChainExecutor implements ExecHost.Calls {
             rt.seq = head.seq();
         }
         for (Pair<Bytes32, byte[]> row : store.readMmr(id)) {
-            List<byte[]> entries = decodeEntries(row.getValue());
+            List<byte[]> entries = decodeMmr(row.getValue());
             rt.entries.put(row.getKey(), entries);
             Mmr mmr = new Mmr();
             for (byte[] entry : entries) {
@@ -487,8 +568,23 @@ public final class ChainExecutor implements ExecHost.Calls {
         return rt;
     }
 
-    private void flush(Runtime rt, Bytes chain, long seq, List<Outcome> outcomes) {
+    private void flush(Runtime rt, Bytes chain, long seq, List<Outcome> outcomes, long prevSeq, Bytes32 prevRoot) {
         Bytes32 id = chain32(chain);
+        List<Pair<Bytes32, byte[]>> preimage = new ArrayList<>();
+        for (java.util.Map.Entry<Bytes32, byte[]> entry : rt.world.preimages().entrySet()) {
+            byte[] value = entry.getValue();
+            preimage.add(Pair.of(entry.getKey(), value == null || value.length == 0 ? null : value));
+        }
+        List<ExecChangeSet.MmrCut> cuts = new ArrayList<>();
+        for (java.util.Map.Entry<Bytes32, Integer> entry : rt.mmrBefore.entrySet()) {
+            cuts.add(new ExecChangeSet.MmrCut(entry.getKey(), entry.getValue()));
+        }
+        List<Bytes32> sized = new ArrayList<>(rt.entries.keySet());
+        List<Bytes32> receipts = new ArrayList<>(outcomes.size());
+        for (Outcome outcome : outcomes) {
+            receipts.add(outcome.inputHash());
+        }
+        byte[] change = new ExecChangeSet(prevSeq, prevRoot, preimage, cuts, sized, outcomes.size(), receipts).encode();
         List<Pair<Bytes32, byte[]>> writes = new ArrayList<>(rt.world.dirtyPuts());
         for (Bytes32 key : rt.world.dirtyDeletes()) {
             writes.add(Pair.of(key, null));
@@ -497,17 +593,31 @@ public final class ChainExecutor implements ExecHost.Calls {
             store.applyState(id, writes);
         }
         rt.world.clean();
+        rt.mmrBefore.clear();
         store.putHead(id, seq, rt.world.rootHash());
         for (Bytes32 dst : rt.dirtyDst) {
-            store.putMmr(id, dst, encodeEntries(rt.entries.get(dst)));
+            store.putMmr(id, dst, encodeMmr(rt.entries.get(dst)));
         }
         rt.dirtyDst.clear();
+        for (java.util.Map.Entry<Bytes32, List<byte[]>> entry : rt.entries.entrySet()) {
+            store.putOutboxSize(id, entry.getKey(), seq, entry.getValue().size());
+        }
+        store.putChangeSet(id, seq, change);
         for (Outcome outcome : outcomes) {
             store.putOpening(id, seq, outcome.index(), ProofBodies.encodeCommitment(new ProofBodies.Opened(
                     outcome.inputHash(), outcome.stateRoot(), outcome.outboxRoot(), outcome.eventsRoot(),
                     outcome.status().code(), outcome.gasUsed())));
             store.putReceipt(id, outcome.inputHash(), receipt(outcome));
         }
+    }
+
+    private void rebuild(Runtime rt, Bytes32 chain, Bytes32 dst, List<byte[]> list) {
+        Mmr mmr = new Mmr();
+        for (byte[] entry : list) {
+            mmr.append(HashUtils.sha256(Bytes.wrap(entry)));
+        }
+        rt.outbox.put(dst, mmr.root(), mmr.size());
+        store.putMmr(chain, dst, encodeMmr(list));
     }
 
     private static byte[] receipt(Outcome outcome) {
@@ -521,7 +631,7 @@ public final class ChainExecutor implements ExecHost.Calls {
         return buf.array();
     }
 
-    private static byte[] encodeEntries(List<byte[]> entries) {
+    public static byte[] encodeMmr(List<byte[]> entries) {
         int size = Integer.BYTES;
         for (byte[] entry : entries) {
             size += Integer.BYTES + entry.length;
@@ -535,7 +645,15 @@ public final class ChainExecutor implements ExecHost.Calls {
         return buf.array();
     }
 
-    private static List<byte[]> decodeEntries(byte[] blob) {
+    public static int mmrCount(byte[] blob) {
+        if (blob == null || blob.length < Integer.BYTES) {
+            return 0;
+        }
+        int n = ByteBuffer.wrap(blob).getInt();
+        return n < 0 ? 0 : n;
+    }
+
+    public static List<byte[]> decodeMmr(byte[] blob) {
         ByteBuffer buf = ByteBuffer.wrap(blob);
         if (buf.remaining() < Integer.BYTES) {
             throw new IllegalStateException("mmr");
@@ -588,6 +706,7 @@ public final class ChainExecutor implements ExecHost.Calls {
         final ExecWorld world = new ExecWorld();
         final OutboxMap outbox = new OutboxMap();
         final Map<Bytes32, List<byte[]>> entries = new HashMap<>();
+        final Map<Bytes32, Integer> mmrBefore = new HashMap<>();
         final Set<Bytes32> dirtyDst = new java.util.HashSet<>();
         final Map<Bytes, PreparedModule> modules = new HashMap<>();
         final Map<Bytes, Set<Integer>> marks = new HashMap<>();

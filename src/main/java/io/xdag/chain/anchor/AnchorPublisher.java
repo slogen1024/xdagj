@@ -44,8 +44,9 @@ import io.xdag.crypto.keys.ECKeyPair;
 
 /**
  * Builds an ANCHOR from the caller's commitment list and the due segments on L1.
- * The list is in anchor order: the declared message slots, then for each height in
- * {@code (prevSeq, seq]} the reward inputs and the call inputs. {@code confirmHeight}
+ * The list is in anchor order: segments delivered outside {@code (prevSeq, seq]} first, then for
+ * each height in that range the reward inputs, the messages whose {@code confirmHeight + D} is
+ * that height, and the call inputs. {@code confirmHeight}
  * is the height the attester expects the block to be confirmed at; when that height
  * sits in the range the anchor's own reward is one of the commitments. Does not import
  * the block.

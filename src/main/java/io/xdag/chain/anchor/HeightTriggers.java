@@ -68,6 +68,19 @@ public final class HeightTriggers {
     private final int maxWitness;
     private final int maxChunks;
     private final VerdictCache cache;
+    private SourceVoided sourceVoided = (chain, seq, confirm) -> {
+    };
+    private final List<SourceNote> voids = new ArrayList<>();
+
+    /** Execution-side hook. L1 has already committed the void. */
+    public interface SourceVoided {
+        void onSourceVoided(byte[] srcChain, long srcSeq, long confirmHeight);
+    }
+
+    public void setSourceVoided(SourceVoided listener) {
+        this.sourceVoided = listener == null ? (chain, seq, confirm) -> {
+        } : listener;
+    }
 
     public HeightTriggers(ChainL1Store store, ChunkChain.RawBlockLookup lookup, ClaimHandler.Settlement settlement,
             long window, int maxPerHeight, int maxWitness, int maxChunks, VerdictCache cache) {
@@ -125,6 +138,7 @@ public final class HeightTriggers {
     }
 
     public void fire(long height) {
+        voids.clear();
         List<TriggerList.Item> items = new ArrayList<>(TriggerOps.read(store, height));
         View view = new View();
         if (items.isEmpty()) {
@@ -134,6 +148,7 @@ public final class HeightTriggers {
             }
             TriggerOps.write(view.batch, height, marks);
             store.commit(view.batch);
+            flushVoids();
             return;
         }
         List<TriggerList.Item> stay = new ArrayList<>();
@@ -171,6 +186,7 @@ public final class HeightTriggers {
             view.batch.putTrigger(height + 1, TriggerList.encode(next));
         }
         store.commit(view.batch);
+        flushVoids();
     }
 
     public void unwind(long height) {
@@ -311,10 +327,121 @@ public final class HeightTriggers {
             AnchorBody body = view.anchor(chain, candidate);
             if (body != null && body.status() == AnchorRecord.Status.CANONICAL) {
                 view.putAnchor(chain, candidate, body.withStatus(AnchorRecord.Status.VOIDED));
+                voids.add(new SourceNote(chain.clone(), candidate, body.confirmHeight()));
             }
         }
         view.putHead(chain, new AnchorHead(challenged.prevSeq(), challenged.parent(), head.windowBase(), head.withdrawn()));
+        rewindConsumers(chain, seq, view);
         return old;
+    }
+
+    /**
+     * A cursor whose source seq is the voided anchor or a later one moves back to the earliest
+     * declared {@code from} still claimed by a live destination anchor. No such segment deletes it.
+     */
+    private void rewindConsumers(byte[] src, long voidedSeq, View view) {
+        for (byte[] key : store.sortedKeys()) {
+            if (key.length != 41 || key[0] != ChainL1Keys.SEGMENT_CURSOR) {
+                continue;
+            }
+            if (!Arrays.equals(Arrays.copyOfRange(key, 21, 41), src)) {
+                continue;
+            }
+            byte[] dst = Arrays.copyOfRange(key, 1, 21);
+            SegmentCursor cursor = SegmentCursor.decode(store.getCursor(Bytes.wrap(dst), Bytes.wrap(src)));
+            if (cursor == null || Long.compareUnsigned(cursor.srcSeq(), voidedSeq) < 0) {
+                continue;
+            }
+            Long from = consumedFrom(dst, src, voidedSeq);
+            if (from == null) {
+                continue;
+            }
+            Long prev = previousLive(src, voidedSeq, view);
+            if (from == 0L || prev == null) {
+                view.batch.deleteCursor(Bytes.wrap(dst), Bytes.wrap(src));
+            } else {
+                view.batch.putCursor(Bytes.wrap(dst), Bytes.wrap(src), new SegmentCursor(from, prev).encode());
+            }
+        }
+    }
+
+    /** Smallest {@code from} of a live segment at or after {@code voidedSeq}, or 0 when none is declared. {@code null} when a commitment will not decode. */
+    private Long consumedFrom(byte[] dst, byte[] src, long voidedSeq) {
+        Long from = null;
+        boolean undecodable = false;
+        for (byte[] key : store.sortedKeys()) {
+            if (key.length != 29 || key[0] != ChainL1Keys.ANCHOR) {
+                continue;
+            }
+            if (!Arrays.equals(Arrays.copyOfRange(key, 1, 21), dst)) {
+                continue;
+            }
+            long seq = ExtCodec.u64(key, 21);
+            AnchorBody body = AnchorBody.decode(store.getAnchorRaw(Bytes.wrap(dst), seq));
+            if (body == null || body.segmentCount() == 0L) {
+                continue;
+            }
+            if (body.status() != AnchorRecord.Status.CANONICAL && body.status() != AnchorRecord.Status.FINAL) {
+                continue;
+            }
+            Block block = lookup.get(body.anchorHash());
+            CommitmentChain.Body commitment = block == null ? null : commitmentOf(body, block);
+            if (commitment == null) {
+                undecodable = true;
+                continue;
+            }
+            for (CommitmentChain.Segment segment : commitment.segments()) {
+                if (!Arrays.equals(segment.src(), src) || Long.compareUnsigned(segment.srcSeq(), voidedSeq) < 0) {
+                    continue;
+                }
+                if (from == null || Long.compareUnsigned(segment.from(), from) < 0) {
+                    from = segment.from();
+                }
+            }
+        }
+        if (from != null) {
+            return from;
+        }
+        return undecodable ? null : 0L;
+    }
+
+    private Long previousLive(byte[] src, long seq, View view) {
+        Long best = null;
+        for (byte[] key : store.sortedKeys()) {
+            if (key.length != 29 || key[0] != ChainL1Keys.ANCHOR) {
+                continue;
+            }
+            if (!Arrays.equals(Arrays.copyOfRange(key, 1, 21), src)) {
+                continue;
+            }
+            long candidate = ExtCodec.u64(key, 21);
+            if (Long.compareUnsigned(candidate, seq) >= 0) {
+                continue;
+            }
+            AnchorBody body = view.anchor(src, candidate);
+            if (body == null || (body.status() != AnchorRecord.Status.CANONICAL
+                    && body.status() != AnchorRecord.Status.FINAL)) {
+                continue;
+            }
+            if (best == null || Long.compareUnsigned(candidate, best) > 0) {
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    private void flushVoids() {
+        if (voids.isEmpty()) {
+            return;
+        }
+        List<SourceNote> notes = List.copyOf(voids);
+        voids.clear();
+        for (SourceNote note : notes) {
+            sourceVoided.onSourceVoided(note.chain(), note.seq(), note.confirm());
+        }
+    }
+
+    private record SourceNote(byte[] chain, long seq, long confirm) {
     }
 
     private TriggerList.Item finalize(TriggerList.Item item, View view) {

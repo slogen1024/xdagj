@@ -190,36 +190,8 @@ public final class E2Replay {
 
     private static long callHeight(ChainL1Store store, byte[] chain, long prevSeq, long seq,
             CommitmentChain.Body commitment, long k) {
-        long messages = 0L;
-        for (CommitmentChain.Segment segment : commitment.segments()) {
-            if (Long.compareUnsigned(segment.to(), segment.from()) < 0) {
-                return -1L;
-            }
-            messages += segment.to() - segment.from();
-        }
-        if (Long.compareUnsigned(k, messages) < 0) {
-            return -1L;
-        }
-        long left = k - messages;
-        long h = prevSeq;
-        Bytes id = Bytes.wrap(chain);
-        while (Long.compareUnsigned(h, seq) < 0) {
-            if (h == Long.MAX_VALUE) {
-                return -1L;
-            }
-            h++;
-            int rewards = RewardInputs.at(store, chain, h).size();
-            if (Long.compareUnsigned(left, rewards) < 0) {
-                return -1L;
-            }
-            left -= rewards;
-            long n = store.getCallCount(id, h);
-            if (Long.compareUnsigned(left, n) < 0) {
-                return h;
-            }
-            left -= n;
-        }
-        return -1L;
+        InputIndex.Call call = InputIndex.locate(store, chain, prevSeq, seq, commitment, k);
+        return call == null ? -1L : call.height();
     }
 
     private static byte[] argsOf(CallExt ext, io.xdag.core.Block call, ChunkChain.RawBlockLookup lookup, int maxChunks) {
