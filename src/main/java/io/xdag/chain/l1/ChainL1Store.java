@@ -216,6 +216,30 @@ public final class ChainL1Store implements XdagLifecycle {
         return source.get(ChainL1Keys.journal(blockHash));
     }
 
+    public byte[] getAnchorRaw(Bytes chainId, long seq) {
+        return source.get(ChainL1Keys.anchor(chainId, seq));
+    }
+
+    public byte[] getBond(Bytes attester, Bytes chainId) {
+        return source.get(ChainL1Keys.bond(attester, chainId));
+    }
+
+    public byte[] getAnchorHead(Bytes chainId) {
+        return source.get(ChainL1Keys.anchorHead(chainId));
+    }
+
+    public byte[] getTrigger(long height) {
+        return source.get(ChainL1Keys.trigger(height));
+    }
+
+    public byte[] getChallenge(Bytes32 blockHash) {
+        return source.get(ChainL1Keys.challenge(blockHash));
+    }
+
+    public byte[] getCursor(Bytes dst, Bytes src) {
+        return source.get(ChainL1Keys.cursor(dst, src));
+    }
+
     // ---- batched writes ----
 
     /** Applies every put and delete in {@code batch} as one atomic write; a no-op for an empty batch. */

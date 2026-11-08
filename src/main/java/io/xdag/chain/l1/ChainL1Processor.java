@@ -26,6 +26,7 @@ package io.xdag.chain.l1;
 import static io.xdag.core.XdagField.FieldType.XDAG_FIELD_OUTPUT;
 
 import io.xdag.chain.ChainActivation;
+import io.xdag.chain.anchor.HeightTriggers;
 import io.xdag.chain.ext.CallExt;
 import io.xdag.chain.ext.ChainBlockClassifier;
 import io.xdag.chain.ext.ChunkChain;
@@ -131,6 +132,7 @@ public final class ChainL1Processor implements ChainL1Hooks {
     private final ChunkChain.RawBlockLookup lookup;
     private final Map<ExtKind, ChainKindHandler> handlers = new EnumMap<>(ExtKind.class);
     private ApplyContext ctx;
+    private HeightTriggers triggers;
     /**
      * Set on entry of every hook method; once true, {@link #registerHandler} is rejected. The
      * dispatch table must be stable before consensus processing begins — registering a handler
@@ -173,6 +175,14 @@ public final class ChainL1Processor implements ChainL1Hooks {
         handlers.put(kind, handler);
     }
 
+    /** Installed before the first hook. {@code onSetMainEnd} fires it; {@code onUnsetMain} unwinds it. */
+    public void setTriggers(HeightTriggers triggers) {
+        if (started) {
+            throw new IllegalStateException("cannot install triggers after the first hook has run");
+        }
+        this.triggers = triggers;
+    }
+
     @Override
     public void onSetMainBegin(long height, Block mainBlock) {
         started = true;
@@ -196,6 +206,9 @@ public final class ChainL1Processor implements ChainL1Hooks {
             log.warn("chain apply context height mismatch at onSetMainEnd: open context height {}, closing height {}",
                     ctx.height(), height);
         }
+        if (ctx != null && triggers != null) {
+            triggers.fire(height);
+        }
         ctx = null;
     }
 
@@ -208,6 +221,9 @@ public final class ChainL1Processor implements ChainL1Hooks {
     @Override
     public void onUnsetMain(long height, Block mainBlock) {
         started = true;
+        if (triggers != null) {
+            triggers.unwind(height);
+        }
         ctx = null;
     }
 

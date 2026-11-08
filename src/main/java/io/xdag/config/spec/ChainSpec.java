@@ -283,4 +283,32 @@ public interface ChainSpec {
      * Devnet and testnet default to every chain; mainnet defaults to none.
      */
     io.xdag.chain.p2p.ChainSubscriptions getChainSubscriptions();
+
+    /** Main blocks between an anchor's confirmation and its finality. Consensus. Initial 32. */
+    long DEFAULT_FINALITY_WINDOW = 32;
+
+    /** 10_000 XDAG, in nano. An attester needs this much chain bond plus global bond. Consensus. */
+    long DEFAULT_MIN_BOND = 10_000_000_000_000L;
+
+    /** Challenges judged inside one {@code onSetMainEnd}. The rest wait for the next height. */
+    int DEFAULT_MAX_CHALLENGES_PER_HEIGHT = 4;
+
+    /** Witness chain payload cap. Initial 1 MiB. */
+    int DEFAULT_MAX_WITNESS_BYTES = 1 << 20;
+
+    default long getChainFinalityWindow() {
+        return DEFAULT_FINALITY_WINDOW;
+    }
+
+    default long getChainMinBond() {
+        return DEFAULT_MIN_BOND;
+    }
+
+    default int getChainMaxChallengesPerHeight() {
+        return DEFAULT_MAX_CHALLENGES_PER_HEIGHT;
+    }
+
+    default int getChainMaxWitnessBytes() {
+        return DEFAULT_MAX_WITNESS_BYTES;
+    }
 }

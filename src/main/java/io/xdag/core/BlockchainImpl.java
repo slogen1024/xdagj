@@ -30,8 +30,11 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import io.xdag.Kernel;
 import io.xdag.Wallet;
+import io.xdag.chain.anchor.HeightTriggers;
+import io.xdag.chain.anchor.WithdrawWindow;
 import io.xdag.chain.asset.Settlement;
 import io.xdag.chain.exec.ChainExecDriver;
+import io.xdag.chain.fraud.VerdictCache;
 import io.xdag.chain.exec.ChainExecutor;
 import io.xdag.chain.exec.wasm.ChicoryEngine;
 import io.xdag.chain.ext.ExtKind;
@@ -40,6 +43,9 @@ import io.xdag.chain.ingest.PreValidated;
 import io.xdag.chain.ingest.PreValidator;
 import io.xdag.chain.l1.ChainL1Hooks;
 import io.xdag.chain.l1.ChainL1Processor;
+import io.xdag.chain.l1.handlers.AnchorHandler;
+import io.xdag.chain.l1.handlers.BondHandler;
+import io.xdag.chain.l1.handlers.ChallengeHandler;
 import io.xdag.chain.l1.handlers.ClaimHandler;
 import io.xdag.chain.l1.ChainL1SnapshotGate;
 import io.xdag.chain.l1.ChainL1Store;
@@ -349,24 +355,44 @@ public class BlockchainImpl implements Blockchain {
                     hash -> getBlockByHash(hash, true));
             // CLAIM is installed here, still before any hook, unless the kernel map already has one.
             // The processor never dispatches it before activation (ctx == null returns first).
+            ClaimHandler.Settlement settlement = new ClaimHandler.Settlement() {
+                @Override
+                public boolean transfer(byte[] from, byte[] to, long amount, Bytes32 journalKey) {
+                    return chainTransfer(from, to, amount, journalKey);
+                }
+
+                @Override
+                public void reverse(byte[] from, byte[] to, long amount, Bytes32 journalKey) {
+                    if (!chainTransfer(to, from, amount, journalKey)) {
+                        throw new IllegalStateException("claim unwind short: " + journalKey);
+                    }
+                }
+            };
             if (!kernel.getChainKindHandlers().containsKey(ExtKind.CLAIM)) {
                 kernel.getChainKindHandlers().put(ExtKind.CLAIM, new ClaimHandler(chainStore,
-                        hash -> getBlockByHash(hash, true), spec.getChainMaxChunksPerChain(),
-                        new ClaimHandler.Settlement() {
-                            @Override
-                            public boolean transfer(byte[] from, byte[] to, long amount, Bytes32 journalKey) {
-                                return chainTransfer(from, to, amount, journalKey);
-                            }
-
-                            @Override
-                            public void reverse(byte[] from, byte[] to, long amount, Bytes32 journalKey) {
-                                if (!chainTransfer(to, from, amount, journalKey)) {
-                                    throw new IllegalStateException("claim unwind short: " + journalKey);
-                                }
-                            }
-                        }));
+                        hash -> getBlockByHash(hash, true), spec.getChainMaxChunksPerChain(), settlement,
+                        WithdrawWindow.of(chainStore, spec.getChainFinalityWindow())));
+            }
+            if (!kernel.getChainKindHandlers().containsKey(ExtKind.BOND)) {
+                kernel.getChainKindHandlers().put(ExtKind.BOND,
+                        new BondHandler(chainStore, spec.getChainFinalityWindow()));
+            }
+            if (!kernel.getChainKindHandlers().containsKey(ExtKind.ANCHOR)) {
+                kernel.getChainKindHandlers().put(ExtKind.ANCHOR, new AnchorHandler(chainStore,
+                        hash -> getBlockByHash(hash, true), height -> {
+                            Block main = getBlockByHeight(height);
+                            return main == null ? null : main.getHashLow();
+                        }, spec.getChainMinBond(), spec.getChainFinalityWindow(), spec.getChainMaxChunksPerChain()));
+            }
+            if (!kernel.getChainKindHandlers().containsKey(ExtKind.CHALLENGE)) {
+                kernel.getChainKindHandlers().put(ExtKind.CHALLENGE, new ChallengeHandler(chainStore,
+                        hash -> getBlockByHash(hash, true), settlement, spec.getChainMinBond(),
+                        spec.getChainMaxWitnessBytes(), spec.getChainMaxChunksPerChain()));
             }
             kernel.getChainKindHandlers().forEach(processor::registerHandler);
+            processor.setTriggers(new HeightTriggers(chainStore, hash -> getBlockByHash(hash, true), settlement,
+                    spec.getChainFinalityWindow(), spec.getChainMaxChallengesPerHeight(),
+                    spec.getChainMaxWitnessBytes(), spec.getChainMaxChunksPerChain(), new VerdictCache()));
             this.chainHooks = processor;
             if (kernel.getChainExecStore() != null) {
                 ChainExecutor executor = new ChainExecutor(ChicoryEngine.interpreter(), chainStore,
@@ -2382,7 +2408,12 @@ public class BlockchainImpl implements Blockchain {
             } finally {
                 // Closes the apply context on every exit: the early return above, a normal finish,
                 // and a throw out of the applyBlock DFS.
-                chainHooks.onSetMainEnd(mainNumber, block);
+                chainSettlementDepth.incrementAndGet();
+                try {
+                    chainHooks.onSetMainEnd(mainNumber, block);
+                } finally {
+                    chainSettlementDepth.decrementAndGet();
+                }
                 if (confirmed) {
                     followMain(mainNumber, block.getTimestamp());
                 }
@@ -2460,7 +2491,12 @@ public class BlockchainImpl implements Blockchain {
             // rather than silently skipping an unset that a pre-upgrade setMain really did perform.
             long lastCompleted = blockStore.getLastCompletedMain();
             boolean forkTimeWasSet = lastCompleted < 0 || lastCompleted >= height;
-            chainHooks.onUnsetMain(height, block);
+            chainSettlementDepth.incrementAndGet();
+            try {
+                chainHooks.onUnsetMain(height, block);
+            } finally {
+                chainSettlementDepth.decrementAndGet();
+            }
             followUnwind(height);
 
             XAmount reward = getReward(height);

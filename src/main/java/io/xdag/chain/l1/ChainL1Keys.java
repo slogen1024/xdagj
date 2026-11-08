@@ -150,6 +150,40 @@ public final class ChainL1Keys {
         return BytesUtils.merge(JOURNAL, blockHash.toArray());
     }
 
+    public static byte[] bond(Bytes attester, Bytes chainId) {
+        require20(attester);
+        require20(chainId);
+        return BytesUtils.merge(new byte[]{BOND}, attester.toArray(), chainId.toArray());
+    }
+
+    public static byte[] anchorHead(Bytes chainId) {
+        require20(chainId);
+        return BytesUtils.merge(ANCHOR_HEAD, chainId.toArray());
+    }
+
+    /** A losing anchor at a seq that already has a winner. The short {@link #anchor} key stays the winner. */
+    public static byte[] ignoredAnchor(Bytes chainId, long seq, Bytes32 anchorHash) {
+        byte[] tail = new byte[8];
+        ExtCodec.putU64(tail, 0, seq);
+        return BytesUtils.merge(new byte[]{ANCHOR}, chainId.toArray(), tail, anchorHash.toArray());
+    }
+
+    public static byte[] trigger(long height) {
+        byte[] tail = new byte[8];
+        ExtCodec.putU64(tail, 0, height);
+        return BytesUtils.merge(HEIGHT_TRIGGER, tail);
+    }
+
+    public static byte[] challenge(Bytes32 blockHash) {
+        return BytesUtils.merge(CHALLENGE, blockHash.toArray());
+    }
+
+    public static byte[] cursor(Bytes dst, Bytes src) {
+        require20(dst);
+        require20(src);
+        return BytesUtils.merge(new byte[]{SEGMENT_CURSOR}, dst.toArray(), src.toArray());
+    }
+
     private static void require20(Bytes id) {
         if (id == null || id.size() != 20) {
             throw new IllegalArgumentException(

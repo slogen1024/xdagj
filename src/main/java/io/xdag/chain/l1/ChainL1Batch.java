@@ -165,4 +165,52 @@ public final class ChainL1Batch {
     public void deleteJournal(Bytes32 blockHash) {
         delete(ChainL1Keys.journal(blockHash));
     }
+
+    public void putBond(Bytes attester, Bytes chainId, byte[] record) {
+        put(ChainL1Keys.bond(attester, chainId), record);
+    }
+
+    public void deleteBond(Bytes attester, Bytes chainId) {
+        delete(ChainL1Keys.bond(attester, chainId));
+    }
+
+    public void putAnchorHead(Bytes chainId, byte[] record) {
+        put(ChainL1Keys.anchorHead(chainId), record);
+    }
+
+    public void deleteAnchorHead(Bytes chainId) {
+        delete(ChainL1Keys.anchorHead(chainId));
+    }
+
+    public void putIgnoredAnchor(Bytes chainId, long seq, Bytes32 anchorHash, byte[] record) {
+        put(ChainL1Keys.ignoredAnchor(chainId, seq, anchorHash), record);
+    }
+
+    public void deleteIgnoredAnchor(Bytes chainId, long seq, Bytes32 anchorHash) {
+        delete(ChainL1Keys.ignoredAnchor(chainId, seq, anchorHash));
+    }
+
+    public void putTrigger(long height, byte[] record) {
+        put(ChainL1Keys.trigger(height), record);
+    }
+
+    public void deleteTrigger(long height) {
+        delete(ChainL1Keys.trigger(height));
+    }
+
+    public void putChallenge(Bytes32 blockHash, byte[] record) {
+        put(ChainL1Keys.challenge(blockHash), record);
+    }
+
+    public void deleteChallenge(Bytes32 blockHash) {
+        delete(ChainL1Keys.challenge(blockHash));
+    }
+
+    public void putCursor(Bytes dst, Bytes src, byte[] record) {
+        put(ChainL1Keys.cursor(dst, src), record);
+    }
+
+    public void deleteCursor(Bytes dst, Bytes src) {
+        delete(ChainL1Keys.cursor(dst, src));
+    }
 }

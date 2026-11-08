@@ -79,7 +79,8 @@ public record AnchorRecord(Status status, Bytes32 anchorHash, Bytes32 outboxMapR
     }
 
     public static AnchorRecord decode(byte[] raw) {
-        if (raw == null || raw.length != BYTES) {
+        // SP3 appends the anchor body after these 65 bytes. A claim only reads the prefix.
+        if (raw == null || raw.length < BYTES) {
             return null;
         }
         Status status = Status.from(raw[0] & 0xff);

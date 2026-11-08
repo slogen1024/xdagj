@@ -26,6 +26,7 @@ package io.xdag.chain.l1.handlers;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 
+import io.xdag.chain.anchor.WithdrawWindow;
 import io.xdag.chain.asset.AnchorRecord;
 import io.xdag.chain.asset.ClaimVerifier;
 import io.xdag.chain.asset.SettlementJournal;
@@ -63,12 +64,19 @@ public final class ClaimHandler implements ChainKindHandler {
     private final ChunkChain.RawBlockLookup lookup;
     private final int maxChunks;
     private final Settlement settlement;
+    private final WithdrawWindow window;
 
     public ClaimHandler(ChainL1Store store, ChunkChain.RawBlockLookup lookup, int maxChunks, Settlement settlement) {
+        this(store, lookup, maxChunks, settlement, WithdrawWindow.unlimited());
+    }
+
+    public ClaimHandler(ChainL1Store store, ChunkChain.RawBlockLookup lookup, int maxChunks, Settlement settlement,
+            WithdrawWindow window) {
         this.store = store;
         this.lookup = lookup;
         this.maxChunks = maxChunks;
         this.settlement = settlement;
+        this.window = window;
     }
 
     @Override
@@ -78,7 +86,7 @@ public final class ClaimHandler implements ChainKindHandler {
         if (proof == null) {
             return;
         }
-        settle(claim, proof, block.getHash(), batch);
+        settle(claim, proof, block.getHash(), ctx.height(), batch);
     }
 
     @Override
@@ -87,10 +95,17 @@ public final class ClaimHandler implements ChainKindHandler {
     }
 
     public boolean settle(ClaimExt claim, byte[] proof, Bytes32 blockHash, ChainL1Batch batch) {
+        return settle(claim, proof, blockHash, 0L, batch);
+    }
+
+    public boolean settle(ClaimExt claim, byte[] proof, Bytes32 blockHash, long height, ChainL1Batch batch) {
         AnchorRecord anchor = store.getAnchor(claim.srcChain(), claim.seq());
         ClaimVerifier.Verdict verdict = ClaimVerifier.verify(claim, proof, anchor,
                 (dst, index) -> store.getClaimed(claim.srcChain(), Bytes.wrap(dst), index) != null);
         if (!verdict.ok()) {
+            return false;
+        }
+        if (!window.allows(claim.srcChain(), claim.amount(), height)) {
             return false;
         }
         byte[] from = claim.srcChain().toArray();
@@ -98,6 +113,7 @@ public final class ClaimHandler implements ChainKindHandler {
         if (!settlement.transfer(from, to, claim.amount(), blockHash)) {
             return false;
         }
+        window.note(claim.srcChain(), claim.amount(), height, batch);
         batch.putJournal(blockHash, SettlementJournal.encode(from, to, claim.amount(), from, verdict.dst(),
                 claim.index()));
         batch.putClaimed(claim.srcChain(), Bytes.wrap(verdict.dst()), claim.index(), blockHash);
@@ -114,6 +130,7 @@ public final class ClaimHandler implements ChainKindHandler {
             throw new IllegalStateException("claim journal corrupt: " + blockHash);
         }
         settlement.reverse(rec.from(), rec.to(), rec.amount(), blockHash);
+        window.undo(Bytes.wrap(rec.src()), rec.amount(), batch);
         batch.deleteJournal(blockHash);
         batch.deleteClaimed(Bytes.wrap(rec.src()), Bytes.wrap(rec.dst()), rec.index());
     }

@@ -335,6 +335,81 @@ public final class ChainBlockBuilder {
                 chunks, 2, chunks.size());
     }
 
+    /**
+     * ANCHOR. Three OUT links: previous anchor, the main block at {@code seq}, commitment head.
+     * An empty commitment still emits a zero head and no chunks. The block's INPUT pays
+     * {@link #requiredValue(XAmount, int)} back to the sender; the bond is a separate BOND block.
+     */
+    public static ExtResult<Built> anchor(Config config, long timestamp, ECKeyPair sender, UInt64 nonce,
+            XAmount headerFee, Bytes chainId, long seq, Bytes32 stateRoot, Bytes32 outboxMapRoot, long prevSeq,
+            long inputCount, long segmentCount, Bytes32 prevAnchor, Bytes32 mainBlock, Bytes commitment) {
+        Objects.requireNonNull(commitment, "commitment");
+        List<Block> chunks = List.of();
+        Bytes32 head = Bytes32.ZERO;
+        if (!commitment.isEmpty()) {
+            ExtResult<List<Block>> split = splitChain(config, commitment, timestamp);
+            if (!split.isOk()) {
+                return ExtResult.fail(split.error());
+            }
+            chunks = split.value();
+            head = headOf(chunks);
+        }
+        AnchorExt ext = new AnchorExt(chainId, seq, stateRoot, outboxMapRoot, prevSeq, inputCount, segmentCount,
+                prevAnchor, mainBlock, head);
+        XAmount self = requiredValue(headerFee, 3);
+        List<Address> refs = new ArrayList<>();
+        refs.add(input(sender, self));
+        refs.add(new Address(BytesUtils.arrayToByte32(sender.toAddress().toArray()), XDAG_FIELD_OUTPUT, self, true));
+        refs.add(new Address(prevAnchor, XDAG_FIELD_OUT, false));
+        refs.add(new Address(mainBlock, XDAG_FIELD_OUT, false));
+        refs.add(new Address(head, XDAG_FIELD_OUT, false));
+        return finish(config, timestamp, sender, nonce, headerFee, refs, ext.encodeHeader(), ext.encodePayload(),
+                chunks, 3, chunks.size());
+    }
+
+    /** BOND. A stake's OUTPUT is {@code amount} to the bond vault. An unbond outputs only the fee to the sender. */
+    public static ExtResult<Built> bond(Config config, long timestamp, ECKeyPair sender, UInt64 nonce,
+            XAmount headerFee, boolean unbond, Bytes chainId, long amount) {
+        BondExt ext = new BondExt(unbond, chainId, unbond ? amount : 0L);
+        XAmount self = requiredValue(headerFee, 0);
+        XAmount paid = unbond ? self : self.add(XAmount.of(amount));
+        List<Address> refs = new ArrayList<>();
+        refs.add(input(sender, paid));
+        if (unbond) {
+            refs.add(new Address(BytesUtils.arrayToByte32(sender.toAddress().toArray()), XDAG_FIELD_OUTPUT, self, true));
+        } else {
+            refs.add(new Address(BytesUtils.arrayToByte32(io.xdag.chain.anchor.BondVault.ADDRESS.toArray()),
+                    XDAG_FIELD_OUTPUT, XAmount.of(amount), true));
+            refs.add(new Address(BytesUtils.arrayToByte32(sender.toAddress().toArray()), XDAG_FIELD_OUTPUT, self, true));
+        }
+        return finish(config, timestamp, sender, nonce, headerFee, refs, ext.encodeHeader(), List.of(),
+                List.of(), 0, 0);
+    }
+
+    /** CHALLENGE. The deposit is an OUTPUT to the bond vault. {@code witness} is the witness-chain payload. */
+    public static ExtResult<Built> challenge(Config config, long timestamp, ECKeyPair sender, UInt64 nonce,
+            XAmount headerFee, long inputIndex, long deposit, Bytes32 anchor, Bytes witness) {
+        Objects.requireNonNull(witness, "witness");
+        ExtResult<List<Block>> split = splitChain(config, witness, timestamp);
+        if (!split.isOk()) {
+            return ExtResult.fail(split.error());
+        }
+        List<Block> chunks = split.value();
+        Bytes32 head = headOf(chunks);
+        ChallengeExt ext = new ChallengeExt(inputIndex, deposit, anchor, head);
+        XAmount self = requiredValue(headerFee, 2);
+        XAmount paid = self.add(XAmount.of(deposit));
+        List<Address> refs = new ArrayList<>();
+        refs.add(input(sender, paid));
+        refs.add(new Address(BytesUtils.arrayToByte32(io.xdag.chain.anchor.BondVault.ADDRESS.toArray()),
+                XDAG_FIELD_OUTPUT, XAmount.of(deposit), true));
+        refs.add(new Address(BytesUtils.arrayToByte32(sender.toAddress().toArray()), XDAG_FIELD_OUTPUT, self, true));
+        refs.add(new Address(anchor, XDAG_FIELD_OUT, false));
+        refs.add(new Address(head, XDAG_FIELD_OUT, false));
+        return finish(config, timestamp, sender, nonce, headerFee, refs, ext.encodeHeader(), List.of(), chunks, 2,
+                chunks.size());
+    }
+
     private static Address input(ECKeyPair sender, XAmount amount) {
         return new Address(BytesUtils.arrayToByte32(sender.toAddress().toArray()), XDAG_FIELD_INPUT, amount, true);
     }
