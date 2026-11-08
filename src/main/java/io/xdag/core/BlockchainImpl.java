@@ -399,7 +399,7 @@ public class BlockchainImpl implements Blockchain {
             processor.setTriggers(chainTriggers);
             this.chainHooks = processor;
             if (kernel.getChainExecStore() != null) {
-                ChainExecutor executor = new ChainExecutor(ChicoryEngine.interpreter(), chainStore,
+                ChainExecutor executor = new ChainExecutor(ChicoryEngine.compiler(), chainStore,
                         kernel.getChainExecStore(), hash -> getBlockByHash(hash, true),
                         spec.getChainMaxChunksPerChain());
                 ChainExecDriver driver = new ChainExecDriver(executor, spec.getChainSubscriptions(), chainStore,

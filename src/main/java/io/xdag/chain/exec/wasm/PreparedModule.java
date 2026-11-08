@@ -37,17 +37,29 @@ public final class PreparedModule {
 
     final WasmModule module;
     final Function<Instance, Machine> machineFactory;
+    private final boolean fellBack;
     private final Bytes32 codeHash;
     private final Bytes32 instrumentedHash;
     private final byte[] instrumented;
 
-    PreparedModule(WasmModule module, Function<Instance, Machine> machineFactory, Bytes32 codeHash,
+    PreparedModule(WasmModule module, Function<Instance, Machine> machineFactory, boolean fellBack, Bytes32 codeHash,
             Bytes32 instrumentedHash, byte[] instrumented) {
         this.module = module;
         this.machineFactory = machineFactory;
+        this.fellBack = fellBack;
         this.codeHash = codeHash;
         this.instrumentedHash = instrumentedHash;
         this.instrumented = instrumented.clone();
+    }
+
+    /** True when this call is running a compiled machine, not the interpreter. */
+    public boolean compiled() {
+        return machineFactory != null;
+    }
+
+    /** True when a compiler was asked and refused, so the interpreter runs the same bytes. */
+    public boolean fellBack() {
+        return fellBack;
     }
 
     public Bytes32 codeHash() {

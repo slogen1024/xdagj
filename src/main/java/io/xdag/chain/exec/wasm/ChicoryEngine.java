@@ -26,6 +26,7 @@ package io.xdag.chain.exec.wasm;
 
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
@@ -44,7 +45,9 @@ import io.xdag.crypto.hash.HashUtils;
 /**
  * Chicory 1.7.5. {@link #interpreter()} is the consensus reference. {@link #compiler()} compiles
  * the instrumented module once and builds a fresh {@link Instance} per call, so memory starts at
- * zero every time. A start section is not run; contracts enter through {@code init}/{@code call}/
+ * zero every time. A module the compiler refuses (the JVM method cap, or any other
+ * {@link RuntimeException}) is executed by the interpreter; {@link PreparedModule#fellBack()}
+ * records that. A start section is not run; contracts enter through {@code init}/{@code call}/
  * {@code recv}/{@code query}.
  */
 public final class ChicoryEngine implements WasmEngine {
@@ -52,15 +55,23 @@ public final class ChicoryEngine implements WasmEngine {
     private final boolean compiler;
     private final GasSchedule schedule;
     private final int maxWasmBytes;
+    private final Function<WasmModule, Function<Instance, Machine>> machines;
     private final ConcurrentHashMap<Bytes32, PreparedModule> cache = new ConcurrentHashMap<>();
 
     public ChicoryEngine(boolean compiler, GasSchedule schedule, int maxWasmBytes) {
+        this(compiler, schedule, maxWasmBytes, MachineFactoryCompiler::compile);
+    }
+
+    /** {@code machines} is only called when {@code compiler} is true. A throw falls back. */
+    ChicoryEngine(boolean compiler, GasSchedule schedule, int maxWasmBytes,
+            Function<WasmModule, Function<Instance, Machine>> machines) {
         if (maxWasmBytes <= 0) {
             throw new IllegalArgumentException("maxWasmBytes");
         }
         this.compiler = compiler;
         this.schedule = Objects.requireNonNull(schedule);
         this.maxWasmBytes = maxWasmBytes;
+        this.machines = Objects.requireNonNull(machines);
     }
 
     public static ChicoryEngine interpreter() {
@@ -100,14 +111,16 @@ public final class ChicoryEngine implements WasmEngine {
             throw new InvalidModuleException("instrument", e.getMessage());
         }
         java.util.function.Function<Instance, Machine> factory = null;
+        boolean fellBack = false;
         if (compiler) {
             try {
-                factory = MachineFactoryCompiler.compile(module);
-            } catch (ChicoryException e) {
-                throw new InvalidModuleException("instrument", e.getMessage());
+                factory = machines.apply(module);
+                fellBack = factory == null;
+            } catch (RuntimeException e) {
+                fellBack = true;
             }
         }
-        PreparedModule prepared = new PreparedModule(module, factory, codeHash,
+        PreparedModule prepared = new PreparedModule(module, factory, fellBack, codeHash,
                 HashUtils.sha256(Bytes.wrap(instrumented)), instrumented);
         cache.put(codeHash, prepared);
         return prepared;

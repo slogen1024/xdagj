@@ -31,15 +31,15 @@
 | SP0b-3 | 完成 | 分队列孤块池、配额、TTL、导入期费率、不挖矿留分片 | `removeWorst.d125` 的约 1.5 µs 残差未拆 |
 | SP1-1 | 完成 | Chicory 1.7.5，`io.xdag.chain.exec.wasm` | — |
 | SP1-2 | 完成 | `StateTree` 的 get/put/remove；`OutboxMap`；`WitnessRecorder`（同 key 只计一次，`estimateFromGas` = gas/10 + 32KiB）；`ChainExecStore`（`CHAIN_EXEC`，快照页键多一个 `page u32`）。§8.3 不等式在 `StateAndWitnessTest` | 哈希函数仍是无状态的 `SparseMerkleTree` |
-| SP1-3 | 完成 | `InputStreamBuilder`（奖励在前，高度上可交付的出箱条目展开成 `recv`，再是调用）；`ChainExecutor.step/apply`（预扣、回滚帧、退款、`C_k`，奖励把费用池划给认证者）；`ExecChangeSet` 记每个 seq 的前像；`ChainExecDriver` 跟 `onSetMainEnd`，源出箱还没执行就等。根与承诺钉在 `ChainExecutorTest`。`MessageFlowTest` | 两模式吞吐是 SP1-5 |
-| SP1-4 | 完成 | 变更集只留最近 `K=128`（`CHANGESET_WINDOW`）。`seq % 64 == 0` 把全量 KV 写成 `0x04` 快照页。窗口外的 seq 从快照页装回，根与当时的状态根一致。`onUnsetMain(h)` 把已执行到该高度的订阅链滚到 `h-1`，缺变更集才停住。`setPending` 在副本上跑未确认调用，不写 `CHAIN_EXEC`；`pending` 视图和 `estimateGas` 读这份副本。节点从当前 top 按 `applyBlock` 的后序收集 CALL（`PendingCalls`）。`RetentionTest` | 不在候选主链上的孤块不进 pending。两模式吞吐是 SP1-5 |
-| SP1-5 | 未开工 | — | 解释器与编译模式同根同承诺；单链 ≥ 2k 调用/s |
+| SP1-3 | 完成 | `InputStreamBuilder`（奖励在前，高度上可交付的出箱条目展开成 `recv`，再是调用）；`ChainExecutor.step/apply`（预扣、回滚帧、退款、`C_k`，奖励把费用池划给认证者）；`ExecChangeSet` 记每个 seq 的前像；`ChainExecDriver` 跟 `onSetMainEnd`，源出箱还没执行就等。根与承诺钉在 `ChainExecutorTest`。`MessageFlowTest` | — |
+| SP1-4 | 完成 | 变更集只留最近 `K=128`（`CHANGESET_WINDOW`）。`seq % 64 == 0` 把全量 KV 写成 `0x04` 快照页。窗口外的 seq 从快照页装回，根与当时的状态根一致。`onUnsetMain(h)` 把已执行到该高度的订阅链滚到 `h-1`，缺变更集才停住。`setPending` 在副本上跑未确认调用，不写 `CHAIN_EXEC`；`pending` 视图和 `estimateGas` 读这份副本。节点从当前 top 按 `applyBlock` 的后序收集 CALL（`PendingCalls`）。`RetentionTest` | 不在候选主链上的孤块不进 pending |
+| SP1-5 | 完成 | 同一笔 `storage_set` 在解释器和编译模式上根与承诺都是 `ChainExecutorTest` 的钉。编译器抛异常时 `PreparedModule.fellBack()`，解释器接着跑，根不变。节点执行用 `ChicoryEngine.compiler()`，仲裁仍是解释器。`transfer_from_caller` 三轮中位：解释器 14814 调用/s，编译 15376 调用/s。SHA-256 一次 161 ns，256 次 9208 ns，约占一笔转账的 14%。E10 定死继续用 SHA-256。`GasSchedule.V1` 不改。`TwoModeTest`、`ExecBenchTest`。见 `docs/benchmarks/2026-11-08-sp1-5-exec.md` | — |
 | SP2 | 完成 | `ClaimHandler`（`l1/handlers`）；`ClaimVerifier` / `ClaimProof` / `OutboxEntry` / `WithdrawOutbox` / `AnchorRecord` / `SettlementJournal` / `VaultLedger`（`asset/`）；`BlockchainImpl.chainTransfer`。0x06 只读（`FINAL` 才放行），0x08 `src‖dst‖index`，0x10 journal 进状态哈希。证明体版本 1。`ClaimFlowTest` | 四参 `ClaimHandler` 不限额。提现窗在 SP3 的 `WithdrawWindow` |
 | SP3 | 完成 | `BondHandler` / `AnchorHandler` / `ChallengeHandler`；`HeightTriggers`、`AnchorPublisher`、`DueSegments`、`RewardInputs`（`anchor/`）；`Witness`、`Arbiter`、`E2Replay`、`WitnessBackedStore`、`VerdictCache`、`Challenger`、`InputIndex`（`fraud/`）。E1/E2/E3 都实判。可交付高度上的出箱条目跑 `recv`。源锚定否决后 `onSourceVoided` 把消费链滚回交付前，并把 0x0B 游标退回。`E2ArbitrationBenchTest` 在 `maxCallGas` 下单次仲裁 < 2 s。`AnchorFlowTest`、`E2FlowTest`、`MessageFlowTest` | `D == W` 不回滚。没装上段证明时目的链停住，见 SP4。docker 上的挑战罚没是 M5 |
 | SP4 | 部分 | 订阅集合已经进 `ChainExecDriver`，执行器只跑订阅链。`0x1B–0x1F`；快照页与 SMT 根校验；四种证明体；`Delivery` 的 HOLD；未 `open` 的回复丢弃，每方向最多 64 条；拉取默认 8 MiB。`SegmentIntake` 验过段证明后写入出箱。握手完成后 `ChainPull.wire` 自己发 `0x1E`，同一 request id 等 `0x1F`。有 FINAL 锚定时 `SnapshotSync.gather` 把页装进执行器，根对上才从该 seq 之后接着跑；拉不到就从创建高度重放。`ThreeNodeDrillTest`：D=0 发 `0x1E` 后跑 `recv`，D=W 在 FINAL 之前余额为 0，之后入账；`AnchorFlowTest.slashBadCall` 把坏锚定罚没。`ChainPullTest`、`DeliveryFetchTest` | docker daemon 没在跑，三个矿池容器没启动。**M5 未关** |
 | SP5 | 部分 | `ChainApi` 挂在现有 JSON-RPC 上。激活前 `inactive`。`pending` 是已执行的头加上未确认调用的副本，不写主状态。`anchored` / `final` 在锚定 seq 上读余额、状态和证明，变更集只在副本上撤销；窗口外的 seq 用快照页。`query` 在 `ContractRecord.deployHeight > seq` 时返回 null。回执带 seq 和事件；确认级按锚定覆盖面写成 `confirmed` / `anchored` / `final`。`chain_buildClaim` 拼版本 1 的 `ClaimProof`。`/chain` WebSocket 推 `receipts` / `events` / `anchors`。`AbiCodec` 是小端紧凑编码。telnet `chain` 能读，也能用钱包账户签名 `call|create|deploy|bond|unbond|challenge` 以及长参数的 `anchor`/`claim`（`ChainCli.Signer`），块交给 `submitBlock`。`ChainApiTest`、`AbiCodecTest`、`ChainCliSignTest`、`HistoricalQueryTest` | 合约行只记下一次 `deployHeight`，更早的代码不再可读，`query` 直接拒绝。Rust SDK、TS/Rust 客户端、三个参考 DApp 没有。**M6 未关** |
 
-里程碑：M1、M2、M4 完成。M3 只关掉了导入门禁（19687 块/s），执行吞吐未测。M5、M6、M7 未完成。M5 还差 docker 里真正拉起的三个矿池。M6 有 `chain_*`、`/chain` 推送、ABI 编码，以及能读、能签名的 `chain` 命令。SDK、DApp 没有。进程内三节点演练（D=0、D=W、罚没）已经过。
+里程碑：M1、M2、M3、M4 完成。M3 的执行中位是解释器 14814 调用/s、编译 15376 调用/s，导入门禁仍是 19687 块/s。M5、M6、M7 未完成。M5 还差 docker 里真正拉起的三个矿池。M6 有 `chain_*`、`/chain` 推送、ABI 编码，以及能读、能签名的 `chain` 命令。SDK、DApp 没有。进程内三节点演练（D=0、D=W、罚没）已经过。
 
 ---
 
@@ -155,7 +155,7 @@ io.xdag.chain
 ├── ingest/         已建成（SP0b-2/3）：PreValidator, IngestPipeline, ChunkFeePolicy
 ├── orphan/         已建成（SP0b-3）：ChainOrphanPool
 ├── repair/         已建成（SP0b-1）：ChainConsistencyCheck, ChainRepairTool
-├── exec/           已建成 ChainExecStore（SP1-2），ChainExecutor, InputStreamBuilder, ChainLedger, ChainExecDriver（SP1-3），ExecChangeSet（K=128，SP1-4），PendingCalls（软预执行），SegmentProofs、SegmentIntake、WireProofs（SP4）。未建：SP1-5 两模式吞吐
+├── exec/           已建成 ChainExecStore（SP1-2），ChainExecutor, InputStreamBuilder, ChainLedger, ChainExecDriver（SP1-3），ExecChangeSet（K=128，SP1-4），PendingCalls（软预执行），SegmentProofs、SegmentIntake、WireProofs（SP4）
 │   ├── wasm/       已建成（SP1-1）：WasmEngine, ChicoryEngine, ModuleValidator, GasInstrumenter, HostAbi
 │   └── state/      已建成（SP1-2）：SparseMerkleTree, StateTree, Mmr, OutboxMap, WitnessRecorder
 ├── anchor/         已建成（SP3）：BondVault, BondAccount, AnchorHead, AnchorBody, CommitmentChain, SegmentCursor, ChallengeRecord, TriggerList, TriggerOps, WithdrawWindow, HeightTriggers, DueSegments, RewardInputs, AnchorPublisher
@@ -322,7 +322,11 @@ SP1 是最大的子项目，建议切为 **SP1-1 WASM 引擎与 ABI → SP1-2 �
 - 软预执行：对未确认 CALL 按临时 DFS 序在影子 updater 上执行，只服务 `pending` 视图；永不写 `CHAIN_EXEC` 主状态。
 - 测试：随机 apply/unwind/replay 的 N2 属性；快照页重建根一致。
 
-### 6.5 SP1-5：确定性与基准
+### 6.5 SP1-5：确定性与基准（**已实施，2026-11-08**）
+
+同一输入在解释器和编译模式上得到同一个状态根和承诺（`TwoModeTest`，钉仍是 gas 3754 / `0x781f0ce1…` / `0xbbfc95f2…`）。编译器抛 `RuntimeException`（含 JVM 方法上限）时模块退回解释器，`PreparedModule.fellBack()` 为真，根不变。节点的 `ChainExecutor` 用 `ChicoryEngine.compiler()`。`E2Replay` 仍强制解释器。
+
+`ExecBenchTest`：4000 笔 `transfer_from_caller(1)`，三轮中位解释器 14814 调用/s、编译 15376 调用/s，都过 2000。SHA-256 一次 32 字节 161 ns，256 次 9208 ns，大约是一笔编译转账的 14%。E10 定死继续用 SHA-256。`GasSchedule.V1` 不改，操作码费用不是这 65 µs 的大头。数字在 `docs/benchmarks/2026-11-08-sp1-5-exec.md`。
 
 - 两模式一致性：同一输入流在解释器与编译模式得到相同根与承诺（若 Chicory 编译模式对某模块退回解释器，需在结果中可观测但根不变）。
 - gas 微基准校准费用表，写入 `docs/benchmarks`；决定 blake3 是否替换 SHA-256（E10，激活前定死）。
@@ -533,7 +537,7 @@ SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器�
 ```
 SP0a ✅ ─┬─► SP0b-1 ✅ ─► SP0b-2 ✅ ─► SP0b-2b ✅ ─► SP0b-3 ✅
          │
-         └─► SP1-1 ✅ ─► SP1-2 ✅ ─► SP1-3 ✅ ─► SP1-4 ✅ ─► SP1-5
+         └─► SP1-1 ✅ ─► SP1-2 ✅ ─► SP1-3 ✅ ─► SP1-4 ✅ ─► SP1-5 ✅
                                           │
                                           ├─► SP2 ✅ ─┐
                                           └─► SP3 ✅ ─┤
@@ -551,7 +555,7 @@ SP0b 与 SP1 并行（不同包、不同人/会话）；SP2 与 SP3 并行（都
 |--------|------|------|---------|
 | **M1 基线** | 完成 | SP0b-1 完成 | 基线文档；G1/G2/G9/G10 关闭；全量绿 |
 | **M2 引擎** | 完成 | SP1-1/2 完成 | 白名单/插桩测试向量已钉死。§8.3 不等式：随机读写的 `witnessBytes` ≤ `estimateFromGas(gasUsed)`（`StateAndWitnessTest`） |
-| **M3 执行** | 未完成 | SP0b-2/2b 的导入门禁已关；SP1-3、SP1-4 完成；SP1-5 未开工 | 单链执行吞吐 ≥ 2k 调用/s 未测；两模式一致未测。**导入 ≥ 10k 块/s 已达成**：20000 块负载 `pipeline` 中位 **19687 块/s**，锁内均值 42–49 µs。瓶颈是 `checkMineAndAdd` 对每个块做 secp256k1，不是 AddressStore。见 `docs/benchmarks/2026-11-07-sp0b2b-import.md` |
+| **M3 执行** | 完成 | SP0b-2/2b 导入门禁；SP1-3、SP1-4、SP1-5 | 单链执行：解释器中位 **14814** 调用/s，编译中位 **15376** 调用/s（4000 笔转账，三轮）。两模式同根同承诺。**导入 ≥ 10k 块/s 已达成**：20000 块负载 `pipeline` 中位 **19687 块/s**。见 `docs/benchmarks/2026-11-08-sp1-5-exec.md` 与 `docs/benchmarks/2026-11-07-sp0b2b-import.md` |
 | **M4 经济与安全** | 完成 | SP2、SP3 | `ClaimFlowTest` 覆盖 I1/I2。`AnchorFlowTest` 覆盖保证金、终局、E1、E3、顺延、畸形 E2、可交付标记、缓存、发布、挑战组块和否决后退游标。`E2FlowTest` 覆盖解释器重执行。`MessageFlowTest` 覆盖 `recv` 和 `onSourceVoided`。`E2ArbitrationBenchTest` 覆盖 2 秒上限。docker 罚没不在本里程碑 |
 | **M5 网络** | 未完成 | SP0b-3 完成；SP4 的线格式、页、证明、段装入、快照引导、自发 `0x1E` 完成 | 3 个矿池容器没启动（docker daemon 未运行）。进程内 `ThreeNodeDrillTest` 覆盖 D=0、D=W、快照引导和罚没 |
 | **M6 开发者面** | 部分 | `chain_*`、`/chain`、`AbiCodec`、能读能签名的 `chain` 命令 | SDK、三个 DApp 没有 |
