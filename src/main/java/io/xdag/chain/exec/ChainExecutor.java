@@ -805,6 +805,10 @@ public final class ChainExecutor implements ExecHost.Calls {
     }
 
     public byte[] queryAt(Bytes chain, long seq, Bytes contract, int selector, byte[] args) {
+        ContractRecord record = l1.getContract(contract);
+        if (record != null && Long.compareUnsigned(record.deployHeight(), seq) > 0) {
+            return null;
+        }
         Runtime rt = runtime(chain);
         if (seq == rt.seq) {
             return query(chain, contract, selector, args);

@@ -23,27 +23,60 @@
  */
 package io.xdag.chain.rpc;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
+import org.apache.tuweni.units.bigints.UInt64;
+
+import io.xdag.chain.ext.ChainBlockBuilder;
+import io.xdag.chain.ext.ChainConfigExt;
+import io.xdag.chain.ext.ExtResult;
+import io.xdag.config.Config;
+import io.xdag.core.Block;
+import io.xdag.core.XAmount;
+import io.xdag.core.XUnit;
+import io.xdag.crypto.keys.ECKeyPair;
 
 /**
- * Telnet {@code chain} verbs that read {@link ChainApi}. Block builders
- * ({@code create|deploy|call|bond|unbond|anchor|challenge|claim}) stay on
- * {@code ChainBlockBuilder}; this shell does not sign them.
+ * Telnet {@code chain}. Reads go through {@link ChainApi}. {@code call}, {@code create},
+ * {@code deploy}, {@code bond}, {@code unbond}, {@code challenge}, and the long forms of
+ * {@code anchor} and {@code claim}, are signed with {@link ChainBlockBuilder} and handed to
+ * {@link Signer#submit}.
  */
 public final class ChainCli {
+
+    private static final XAmount FEE = XAmount.of(100, XUnit.MILLI_XDAG);
 
     private ChainCli() {
     }
 
+    /** A key, the nonce to put on the block, and where the signed block plus its chunks go. */
+    public record Signer(Config config, ECKeyPair key, long nonce, long timestamp, Consumer<List<Block>> submit) {
+    }
+
     public static String run(ChainApi api, String... args) {
-        if (api == null) {
-            return "chain";
-        }
+        return run(api, null, args);
+    }
+
+    public static String run(ChainApi api, Signer signer, String... args) {
         if (args == null || args.length == 0) {
             return usage();
+        }
+        if (signs(args)) {
+            if (signer == null) {
+                return "key";
+            }
+            try {
+                return sign(signer, args);
+            } catch (RuntimeException e) {
+                return e.getMessage() == null ? "error" : e.getMessage();
+            }
+        }
+        if (api == null) {
+            return "chain";
         }
         try {
             return switch (args[0]) {
@@ -103,7 +136,75 @@ public final class ChainCli {
     }
 
     public static String usage() {
-        return "chain balance|state|query|head|anchor|receipt|claim|send|subscribe";
+        return "chain balance|state|query|head|anchor|receipt|claim|send|subscribe|call|create|deploy|bond|unbond|challenge";
+    }
+
+    private static boolean signs(String[] args) {
+        return switch (args[0]) {
+            case "call", "create", "deploy", "bond", "unbond", "challenge" -> true;
+            case "anchor" -> args.length > 3;
+            case "claim" -> args.length > 5;
+            default -> false;
+        };
+    }
+
+    private static String sign(Signer signer, String[] args) {
+        ExtResult<ChainBlockBuilder.Built> built = switch (args[0]) {
+            case "call" -> {
+                require(args, 7);
+                yield ChainBlockBuilder.call(signer.config, signer.timestamp, signer.key, UInt64.valueOf(signer.nonce),
+                        address(args[1]), address(args[2]), (int) number(args[3]), number(args[4]),
+                        XAmount.of(number(args[5])), FEE, Bytes.wrap(bytes(args[6])));
+            }
+            case "create" -> {
+                require(args, 6);
+                yield ChainBlockBuilder.deployNewChain(signer.config, signer.timestamp, signer.key,
+                        UInt64.valueOf(signer.nonce), FEE, Bytes.wrap(bytes(args[1])),
+                        new ChainConfigExt(number(args[2]), number(args[3]), number(args[4])), Bytes.EMPTY,
+                        number(args[5]));
+            }
+            case "deploy" -> {
+                require(args, 4);
+                yield ChainBlockBuilder.deployIntoChain(signer.config, signer.timestamp, signer.key,
+                        UInt64.valueOf(signer.nonce), address(args[1]), XAmount.ZERO, FEE, Bytes.wrap(bytes(args[2])),
+                        null, Bytes.EMPTY, number(args[3]));
+            }
+            case "bond", "unbond" -> {
+                require(args, 3);
+                yield ChainBlockBuilder.bond(signer.config, signer.timestamp, signer.key, UInt64.valueOf(signer.nonce),
+                        FEE, "unbond".equals(args[0]), address(args[1]), number(args[2]));
+            }
+            case "anchor" -> {
+                require(args, 11);
+                yield ChainBlockBuilder.anchor(signer.config, signer.timestamp, signer.key,
+                        UInt64.valueOf(signer.nonce), FEE, address(args[1]), number(args[2]), hash(args[3]),
+                        hash(args[4]), number(args[5]), number(args[6]), number(args[7]), hash(args[8]), hash(args[9]),
+                        Bytes.wrap(bytes(args[10])));
+            }
+            case "challenge" -> {
+                require(args, 5);
+                yield ChainBlockBuilder.challenge(signer.config, signer.timestamp, signer.key,
+                        UInt64.valueOf(signer.nonce), FEE, number(args[1]), number(args[2]), hash(args[3]),
+                        Bytes.wrap(bytes(args[4])));
+            }
+            case "claim" -> {
+                require(args, 8);
+                yield ChainBlockBuilder.claim(signer.config, signer.timestamp, signer.key, UInt64.valueOf(signer.nonce),
+                        FEE, false, address(args[1]), number(args[2]), number(args[3]), number(args[4]),
+                        address(args[5]), hash(args[6]), Bytes.wrap(bytes(args[7])));
+            }
+            default -> throw new IllegalArgumentException("verb");
+        };
+        if (!built.isOk()) {
+            return built.error().name();
+        }
+        List<Block> all = new ArrayList<>();
+        all.add(built.value().block());
+        all.addAll(built.value().chunks());
+        if (signer.submit != null) {
+            signer.submit.accept(all);
+        }
+        return built.value().block().getHash().toHexString();
     }
 
     private static void require(String[] args, int n) {

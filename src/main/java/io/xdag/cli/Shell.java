@@ -28,8 +28,12 @@ import io.xdag.Kernel;
 import io.xdag.Wallet;
 import io.xdag.chain.rpc.ChainApi;
 import io.xdag.chain.rpc.ChainCli;
+import io.xdag.config.Config;
 import io.xdag.config.spec.ChainSpec;
+import io.xdag.core.Block;
 import io.xdag.core.BlockWrapper;
+import io.xdag.crypto.keys.ECKeyPair;
+import io.xdag.utils.XdagTime;
 import io.xdag.utils.BasicUtils;
 import io.xdag.utils.WalletUtils;
 import lombok.Setter;
@@ -38,6 +42,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Strings;
 import org.apache.commons.lang3.math.NumberUtils;
 import org.apache.tuweni.bytes.Bytes32;
+import org.apache.tuweni.units.bigints.UInt64;
 import org.jline.builtins.Options;
 import org.jline.builtins.TTop;
 import org.jline.builtins.telnet.Telnet;
@@ -59,6 +64,7 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static io.xdag.crypto.keys.AddressUtils.toBytesAddress;
 import static io.xdag.utils.BasicUtils.address2Hash;
 import static io.xdag.utils.BasicUtils.pubAddress2Hash;
 
@@ -248,7 +254,7 @@ public class Shell extends JlineCommandRegistry implements CommandRegistry, Teln
                 throw new Options.HelpException(opt.usage());
             }
             List<String> argv = opt.args();
-            println(ChainCli.run(chainApi(), argv.toArray(String[]::new)));
+            println(ChainCli.run(chainApi(), signer(), argv.toArray(String[]::new)));
         } catch (Exception e) {
             saveException(e);
         }
@@ -267,6 +273,26 @@ public class Shell extends JlineCommandRegistry implements CommandRegistry, Teln
                 () -> kernel.getChainExecDriver() == null ? null : kernel.getChainExecDriver().executor(),
                 block -> kernel.getSyncMgr().submitBlock(
                         new BlockWrapper(block, kernel.getConfig().getNodeSpec().getTTL())));
+    }
+
+    private ChainCli.Signer signer() {
+        if (kernel == null || kernel.getWallet() == null || kernel.getWallet().getAccounts().isEmpty()) {
+            return null;
+        }
+        ECKeyPair key = kernel.getWallet().getAccounts().get(0);
+        long nonce = 1L;
+        if (kernel.getAddressStore() != null) {
+            UInt64 quantity = kernel.getAddressStore().getTxQuantity(toBytesAddress(key).toArray());
+            if (quantity != null) {
+                nonce = quantity.add(UInt64.ONE).toLong();
+            }
+        }
+        int ttl = kernel.getConfig().getNodeSpec().getTTL();
+        return new ChainCli.Signer((Config) kernel.getConfig(), key, nonce, XdagTime.getCurrentTimestamp(), blocks -> {
+            for (Block block : blocks) {
+                kernel.getSyncMgr().submitBlock(new BlockWrapper(block, ttl));
+            }
+        });
     }
 
     private void processBlock(CommandInput input) {

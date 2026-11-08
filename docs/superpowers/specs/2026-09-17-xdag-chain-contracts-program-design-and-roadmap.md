@@ -36,9 +36,9 @@
 | SP2 | 完成 | `ClaimHandler`（`l1/handlers`）；`ClaimVerifier` / `ClaimProof` / `OutboxEntry` / `WithdrawOutbox` / `AnchorRecord` / `SettlementJournal` / `VaultLedger`（`asset/`）；`BlockchainImpl.chainTransfer`。0x06 只读（`FINAL` 才放行），0x08 `src‖dst‖index`，0x10 journal 进状态哈希。证明体版本 1。`ClaimFlowTest` | 四参 `ClaimHandler` 不限额。提现窗在 SP3 的 `WithdrawWindow` |
 | SP3 | 完成 | `BondHandler` / `AnchorHandler` / `ChallengeHandler`；`HeightTriggers`、`AnchorPublisher`、`DueSegments`、`RewardInputs`（`anchor/`）；`Witness`、`Arbiter`、`E2Replay`、`WitnessBackedStore`、`VerdictCache`、`Challenger`、`InputIndex`（`fraud/`）。E1/E2/E3 都实判。可交付高度上的出箱条目跑 `recv`。源锚定否决后 `onSourceVoided` 把消费链滚回交付前，并把 0x0B 游标退回。`E2ArbitrationBenchTest` 在 `maxCallGas` 下单次仲裁 < 2 s。`AnchorFlowTest`、`E2FlowTest`、`MessageFlowTest` | `D == W` 不回滚。变更集不按 K=128 淘汰。没装上段证明时目的链停住，见 SP4。docker 上的挑战罚没是 M5 |
 | SP4 | 部分 | 订阅集合已经进 `ChainExecDriver`，执行器只跑订阅链。`0x1B–0x1F`；快照页与 SMT 根校验；四种证明体；`Delivery` 的 HOLD；未 `open` 的回复丢弃，每方向最多 64 条；拉取默认 8 MiB。`SegmentIntake` 验过段证明后写入出箱。握手完成后 `ChainPull.wire` 自己发 `0x1E`，同一 request id 等 `0x1F`。有 FINAL 锚定时 `SnapshotSync.gather` 把页装进执行器，根对上才从该 seq 之后接着跑；拉不到就从创建高度重放。`ThreeNodeDrillTest`：D=0 发 `0x1E` 后跑 `recv`，D=W 在 FINAL 之前余额为 0，之后入账；`AnchorFlowTest.slashBadCall` 把坏锚定罚没。`ChainPullTest`、`DeliveryFetchTest` | docker daemon 没在跑，三个矿池容器没启动。**M5 未关** |
-| SP5 | 部分 | `ChainApi` 挂在现有 JSON-RPC 上。激活前 `inactive`。`pending` 仍是已执行的头。`anchored` / `final` 在锚定 seq 上读余额、状态和证明，变更集只在副本上撤销。回执带 seq 和事件；确认级按锚定覆盖面写成 `confirmed` / `anchored` / `final`。`chain_buildClaim` 拼版本 1 的 `ClaimProof`。`/chain` WebSocket 推 `receipts` / `events` / `anchors`。`AbiCodec` 是小端紧凑编码。telnet `chain` 能读余额、状态、头、锚定、回执、证明和提交原始块。`ChainApiTest`、`AbiCodecTest` | 软预执行没有，pending 不是另一份状态。旧 seq 上的 `query` 用当前已加载的代码。telnet 不签名 `create|deploy|call|bond|unbond|anchor|challenge|claim`，这些仍在 `ChainBlockBuilder`。Rust SDK、TS/Rust 客户端、三个参考 DApp 没有。**M6 未关** |
+| SP5 | 部分 | `ChainApi` 挂在现有 JSON-RPC 上。激活前 `inactive`。`pending` 仍是已执行的头。`anchored` / `final` 在锚定 seq 上读余额、状态和证明，变更集只在副本上撤销。`query` 在 `ContractRecord.deployHeight > seq` 时返回 null。回执带 seq 和事件；确认级按锚定覆盖面写成 `confirmed` / `anchored` / `final`。`chain_buildClaim` 拼版本 1 的 `ClaimProof`。`/chain` WebSocket 推 `receipts` / `events` / `anchors`。`AbiCodec` 是小端紧凑编码。telnet `chain` 能读，也能用钱包账户签名 `call|create|deploy|bond|unbond|challenge` 以及长参数的 `anchor`/`claim`（`ChainCli.Signer`），块交给 `submitBlock`。`ChainApiTest`、`AbiCodecTest`、`ChainCliSignTest`、`HistoricalQueryTest` | 软预执行没有，pending 不是另一份状态。合约行只记下一次 `deployHeight`，更早的代码不再可读，`query` 直接拒绝。Rust SDK、TS/Rust 客户端、三个参考 DApp 没有。**M6 未关** |
 
-里程碑：M1、M2、M4 完成。M3 只关掉了导入门禁（19687 块/s），执行吞吐未测。M5、M6、M7 未完成。M5 还差 docker 里真正拉起的三个矿池。M6 有 `chain_*`、`/chain` 推送、ABI 编码和只读 `chain` 命令。SDK、签名 CLI、DApp 没有。进程内三节点演练（D=0、D=W、罚没）已经过。
+里程碑：M1、M2、M4 完成。M3 只关掉了导入门禁（19687 块/s），执行吞吐未测。M5、M6、M7 未完成。M5 还差 docker 里真正拉起的三个矿池。M6 有 `chain_*`、`/chain` 推送、ABI 编码，以及能读、能签名的 `chain` 命令。SDK、DApp 没有。进程内三节点演练（D=0、D=W、罚没）已经过。
 
 ---
 
@@ -162,7 +162,7 @@ io.xdag.chain
 ├── asset/          已建成（SP2）：VaultLedger, WithdrawOutbox, OutboxEntry, ClaimVerifier, ClaimProof, AnchorRecord, Settlement, SettlementJournal
 ├── p2p/            部分（SP4）：ChainSubscriptions, ChainExchange, ChainPull, SnapshotPages, SnapshotSync, ProofBodies, ChainRecords, Delivery。消息在 io.xdag.net.message.chain。docker 三个矿池没启动
 ├── abi/            已建成（SP5）：AbiCodec
-└── rpc/            部分（SP5）：ChainApi, ChainView, ChainInactive, ChainFeed, ChainCli, ChainRequestHandler, ChainSocket。未建：签名 CLI、Rust SDK、DApp
+└── rpc/            部分（SP5）：ChainApi, ChainView, ChainInactive, ChainFeed, ChainCli（含 Signer）, ChainRequestHandler, ChainSocket。未建：Rust SDK、DApp
 ```
 
 ### 4.1 关键接口边界（草案，SP 开工时在子项目 spec 里定稿）
@@ -469,9 +469,9 @@ SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器�
 - 参考 DApp：XRC-20；单链 DEX；跨链消息演示。
 - 文档：开发者指南、运维指南（快照三目录、修复命令、订阅配置）、ABI 附录。
 
-**已落地**：`anchored` / `final` 用变更集在副本上回到锚定 seq，不改活状态。执行器写的回执是 `status ‖ gas ‖ commitment ‖ return ‖ seq ‖ events`。旧回执没有尾部时 seq 为 −1，确认级 `confirmed`。新回执的确认级：FINAL 锚定覆盖该 seq 为 `final`，非 VOIDED 锚定覆盖为 `anchored`，否则 `confirmed`。`chain_buildClaim` 用该 seq 的出箱前缀拼 `ClaimProof`。`/chain` 上文本帧 `receipts|events|anchors` 订阅推送；锚定推送来自 `ChainL1Store.commit`。`AbiCodec`：小端 `u32`/`u64`，`bytes` 为长度前缀，selector 为 `sha256(签名)[0..4]`，事件为 `sha256(签名) ‖ body`。telnet `chain balance|state|query|head|anchor|receipt|claim|send|subscribe`。
+**已落地**：`anchored` / `final` 用变更集在副本上回到锚定 seq，不改活状态。`queryAt` 在合约行的 `deployHeight > seq` 时返回 null，不拿后来部署的代码去跑更早的 seq。执行器写的回执是 `status ‖ gas ‖ commitment ‖ return ‖ seq ‖ events`。旧回执没有尾部时 seq 为 −1，确认级 `confirmed`。新回执的确认级：FINAL 锚定覆盖该 seq 为 `final`，非 VOIDED 锚定覆盖为 `anchored`，否则 `confirmed`。`chain_buildClaim` 用该 seq 的出箱前缀拼 `ClaimProof`。`/chain` 上文本帧 `receipts|events|anchors` 订阅推送；锚定推送来自 `ChainL1Store.commit`。`AbiCodec`：小端 `u32`/`u64`，`bytes` 为长度前缀，selector 为 `sha256(签名)[0..4]`，事件为 `sha256(签名) ‖ body`。telnet `chain` 读 `balance|state|query|head|anchor|receipt|claim|send|subscribe`。`ChainCli.Signer` 用钱包第一个账户签名 `call|create|deploy|bond|unbond|challenge`，以及参数多于读形式的 `anchor`（11 个）和 `claim`（8 个）；块和分片交给 `submitBlock`。nonce 是 `getTxQuantity + 1`。
 
-**还没有**：软预执行（pending = 已执行的头）。旧 seq 的 `query` 用当前代码。签名版 `create|deploy|call|bond|unbond|anchor|challenge|claim`。Rust SDK、客户端库、三个参考 DApp。
+**还没有**：软预执行（pending = 已执行的头）。合约行被后一次部署改写后，更早的代码不在库里，旧 seq 的 `query` 只能拒绝。Rust SDK、客户端库、三个参考 DApp。
 
 **任务量估计**：20–25 个任务（SDK/客户端库为独立仓库或 `tools/` 子目录）。
 
@@ -551,7 +551,7 @@ SP0b 与 SP1 并行（不同包、不同人/会话）；SP2 与 SP3 并行（都
 | **M3 执行** | 未完成 | SP0b-2/2b 的导入门禁已关；SP1-3 完成；SP1-4/5 未开工 | 单链执行吞吐 ≥ 2k 调用/s 未测；两模式一致未测。**导入 ≥ 10k 块/s 已达成**：20000 块负载 `pipeline` 中位 **19687 块/s**，锁内均值 42–49 µs。瓶颈是 `checkMineAndAdd` 对每个块做 secp256k1，不是 AddressStore。见 `docs/benchmarks/2026-11-07-sp0b2b-import.md` |
 | **M4 经济与安全** | 完成 | SP2、SP3 | `ClaimFlowTest` 覆盖 I1/I2。`AnchorFlowTest` 覆盖保证金、终局、E1、E3、顺延、畸形 E2、可交付标记、缓存、发布、挑战组块和否决后退游标。`E2FlowTest` 覆盖解释器重执行。`MessageFlowTest` 覆盖 `recv` 和 `onSourceVoided`。`E2ArbitrationBenchTest` 覆盖 2 秒上限。docker 罚没不在本里程碑 |
 | **M5 网络** | 未完成 | SP0b-3 完成；SP4 的线格式、页、证明、段装入、快照引导、自发 `0x1E` 完成 | 3 个矿池容器没启动（docker daemon 未运行）。进程内 `ThreeNodeDrillTest` 覆盖 D=0、D=W、快照引导和罚没 |
-| **M6 开发者面** | 部分 | `chain_*`、`/chain`、`AbiCodec`、只读 `chain` 命令 | SDK、签名 CLI、三个 DApp 没有 |
+| **M6 开发者面** | 部分 | `chain_*`、`/chain`、`AbiCodec`、能读能签名的 `chain` 命令 | SDK、三个 DApp 没有 |
 | **M7 testnet 激活** | 未开工 | 治理定高度、快照、观察期 | §11.3 |
 
 ### 13.3 每个子项目的固定流程与门禁
