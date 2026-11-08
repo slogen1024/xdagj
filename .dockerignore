@@ -1,0 +1,4 @@
+*
+!target/xdagj-0.9.0-executable.jar
+!docker
+!docker/**

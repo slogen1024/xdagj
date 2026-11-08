@@ -1,0 +1,60 @@
+# Three devnet pools, one image. A subscribes chain ...01, B subscribes chain ...02,
+# C subscribes every chain. D=0 / D=W delivery and the slash are ThreeNodeDrillTest:
+# D=W is a finality window of main blocks, not something this compose waits out.
+services:
+  pool-a:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: xdagj-devnet:0.9.0
+    platform: linux/amd64
+    hostname: pool-a
+    environment:
+      XDAGJ_WALLET_PASSWORD: devnet
+    volumes:
+      - pool-a:/data
+      - ./conf/pool-a.conf:/opt/xdag/xdag-devnet.conf:ro
+    ports:
+      - "6001:6001"
+      - "8001:8001"
+      - "10001:10001"
+    mem_limit: 2g
+
+  pool-b:
+    image: xdagj-devnet:0.9.0
+    platform: linux/amd64
+    hostname: pool-b
+    environment:
+      XDAGJ_WALLET_PASSWORD: devnet
+    volumes:
+      - pool-b:/data
+      - ./conf/pool-b.conf:/opt/xdag/xdag-devnet.conf:ro
+    ports:
+      - "6002:6001"
+      - "8002:8001"
+      - "10003:10001"
+    mem_limit: 2g
+    depends_on:
+      - pool-a
+
+  pool-c:
+    image: xdagj-devnet:0.9.0
+    platform: linux/amd64
+    hostname: pool-c
+    environment:
+      XDAGJ_WALLET_PASSWORD: devnet
+    volumes:
+      - pool-c:/data
+      - ./conf/pool-c.conf:/opt/xdag/xdag-devnet.conf:ro
+    ports:
+      - "6003:6001"
+      - "8003:8001"
+      - "10005:10001"
+    mem_limit: 2g
+    depends_on:
+      - pool-a
+
+volumes:
+  pool-a:
+  pool-b:
+  pool-c:
