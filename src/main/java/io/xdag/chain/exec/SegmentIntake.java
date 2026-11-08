@@ -48,19 +48,23 @@ public final class SegmentIntake {
 
     public static Delivery.Status install(ChainExecStore exec, byte[] src, byte[] dst, long srcSeq, long prevSeq,
             Bytes32 outboxMapRoot, byte[] outboxProof, byte[] segmentProof) {
-        if (exec == null || outboxProof == null || segmentProof == null || outboxMapRoot == null) {
+        if (exec == null || outboxProof == null || outboxMapRoot == null) {
             return Delivery.Status.HOLD;
         }
         SparseMerkleTree.Proof map;
-        ProofBodies.Segment segment;
         try {
             map = ProofBodies.decodeOutbox(outboxProof);
-            segment = ProofBodies.decodeSegment(segmentProof);
         } catch (IllegalArgumentException e) {
             return Delivery.Status.REJECT;
         }
         Bytes32 key = ChainExecutor.chain32(Bytes.wrap(dst));
-        if (!map.verifies(key, outboxMapRoot) || map.value().length != OutboxMap.VALUE_BYTES || !segment.verifies()) {
+        if (!map.verifies(key, outboxMapRoot)) {
+            return Delivery.Status.REJECT;
+        }
+        if (!map.present() || map.value().length == 0) {
+            return zeros(exec, src, key, prevSeq, srcSeq);
+        }
+        if (map.value().length != OutboxMap.VALUE_BYTES) {
             return Delivery.Status.REJECT;
         }
         ByteBuffer value = ByteBuffer.wrap(map.value());
@@ -68,6 +72,32 @@ public final class SegmentIntake {
         value.get(rootBytes);
         Bytes32 mmrRoot = Bytes32.wrap(rootBytes);
         long size = value.getLong();
+        if (size == 0) {
+            return zeros(exec, src, key, prevSeq, srcSeq);
+        }
+        if (segmentProof == null || segmentProof.length == 0) {
+            Bytes32 srcId = ChainExecutor.chain32(Bytes.wrap(src));
+            int have = ChainExecutor.mmrCount(exec.getMmr(srcId, key));
+            if (have < size) {
+                return Delivery.Status.HOLD;
+            }
+            int havePrev = exec.outboxSize(srcId, key, prevSeq);
+            int from = havePrev >= 0 ? havePrev : 0;
+            if (from > size) {
+                return Delivery.Status.REJECT;
+            }
+            writeSizes(exec, srcId, key, prevSeq, srcSeq, from, (int) size);
+            return Delivery.Status.READY;
+        }
+        ProofBodies.Segment segment;
+        try {
+            segment = ProofBodies.decodeSegment(segmentProof);
+        } catch (IllegalArgumentException e) {
+            return Delivery.Status.REJECT;
+        }
+        if (!segment.verifies()) {
+            return Delivery.Status.REJECT;
+        }
         if (!segment.mmrRoot().equals(mmrRoot) || !segment.dst().equals(key) || segment.to() != size
                 || segment.to() > Integer.MAX_VALUE || segment.from() > Integer.MAX_VALUE) {
             return Delivery.Status.REJECT;
@@ -95,6 +125,17 @@ public final class SegmentIntake {
         }
         exec.putMmr(srcId, key, ChainExecutor.encodeMmr(merged));
         writeSizes(exec, srcId, key, prevSeq, srcSeq, from, to);
+        return Delivery.Status.READY;
+    }
+
+    private static Delivery.Status zeros(ChainExecStore exec, byte[] src, Bytes32 dst, long prevSeq, long srcSeq) {
+        Bytes32 srcId = ChainExecutor.chain32(Bytes.wrap(src));
+        int havePrev = exec.outboxSize(srcId, dst, prevSeq);
+        int haveTo = exec.outboxSize(srcId, dst, srcSeq);
+        if (havePrev > 0 || haveTo > 0) {
+            return Delivery.Status.REJECT;
+        }
+        writeSizes(exec, srcId, dst, prevSeq, srcSeq, 0, 0);
         return Delivery.Status.READY;
     }
 

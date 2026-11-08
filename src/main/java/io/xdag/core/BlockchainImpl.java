@@ -403,6 +403,7 @@ public class BlockchainImpl implements Blockchain {
                 ChainExecDriver driver = new ChainExecDriver(executor, spec.getChainSubscriptions(), chainStore,
                         spec.getChainFinalityWindow());
                 chainTriggers.setSourceVoided(driver::onSourceVoided);
+                driver.setNetwork(kernel.getChainPull(), kernel.getChainRecords());
                 kernel.setChainExecDriver(driver);
             }
         }

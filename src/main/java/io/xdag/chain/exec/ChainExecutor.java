@@ -33,6 +33,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.IntFunction;
 
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.tuweni.bytes.Bytes;
@@ -61,7 +62,12 @@ import io.xdag.chain.l1.ChainL1Store;
 import io.xdag.chain.l1.ChainRecord;
 import io.xdag.chain.l1.ContractRecord;
 import io.xdag.chain.l1.InputStatus;
+import io.xdag.chain.exec.state.SparseMerkleTree;
+import io.xdag.chain.p2p.ChainRecords;
 import io.xdag.chain.p2p.ProofBodies;
+import io.xdag.chain.p2p.ProofKind;
+import io.xdag.chain.p2p.SnapshotSync;
+import io.xdag.net.message.chain.ChainSnapshotReplyMessage;
 import io.xdag.core.Address;
 import io.xdag.core.Block;
 import io.xdag.crypto.hash.HashUtils;
@@ -108,6 +114,10 @@ public final class ChainExecutor implements ExecHost.Calls {
         this.inputs = new InputStreamBuilder(l1, store);
     }
 
+    ChainExecStore store() {
+        return store;
+    }
+
     /** False while a deliverable source outbox is not in the exec store yet. */
     public boolean ready(Bytes chain, long seq) {
         return inputs.ready(chain, seq);
@@ -151,6 +161,82 @@ public final class ChainExecutor implements ExecHost.Calls {
             return null;
         }
         return AnchorBody.decode(raw);
+    }
+
+    /**
+     * Install a snapshot of {@code seq} when its rebuilt state root is the anchor's. A pending pull
+     * throws. A missing or disagreeing snapshot returns false and leaves no head.
+     */
+    public boolean bootstrap(Bytes chain, long seq, Bytes32 stateRoot, IntFunction<ChainSnapshotReplyMessage> pages) {
+        if (store == null) {
+            return false;
+        }
+        List<SparseMerkleTree.Kv> kvs;
+        try {
+            kvs = SnapshotSync.gather(pages);
+        } catch (IllegalStateException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            return false;
+        }
+        Bytes32 id = chain32(chain);
+        try {
+            for (SparseMerkleTree.Kv kv : kvs) {
+                store.putState(id, kv.key(), kv.value());
+            }
+            store.putHead(id, seq, stateRoot);
+            chains.remove(chain);
+            Runtime rt = runtime(chain);
+            return rt.seq == seq && rt.world.rootHash().equals(stateRoot);
+        } catch (RuntimeException e) {
+            for (SparseMerkleTree.Kv kv : kvs) {
+                store.deleteState(id, kv.key());
+            }
+            store.deleteHead(id);
+            chains.remove(chain);
+            return false;
+        }
+    }
+
+    /** Snapshot pages and outbox proofs a subscriber can pull for this chain's applied seq. */
+    public void publish(Bytes chain, ChainRecords records, List<Bytes32> dests) {
+        if (store == null || records == null || appliedSeq(chain) < 0) {
+            return;
+        }
+        Runtime rt = runtime(chain);
+        Bytes32 id = chain32(chain);
+        List<SparseMerkleTree.Kv> kvs = new ArrayList<>();
+        for (Pair<Bytes32, byte[]> row : store.readState(id)) {
+            kvs.add(new SparseMerkleTree.Kv(row.getKey(), row.getValue()));
+        }
+        records.putSnapshot(id, rt.seq, kvs);
+        Set<Bytes32> all = new java.util.LinkedHashSet<>();
+        if (dests != null) {
+            all.addAll(dests);
+        }
+        all.addAll(rt.entries.keySet());
+        for (Bytes32 dst : all) {
+            if (dst.equals(id)) {
+                continue;
+            }
+            List<byte[]> list = rt.entries.getOrDefault(dst, List.of());
+            records.putProof(id, rt.seq, ProofKind.OUTBOX_MAP, dst.toArray(),
+                    ProofBodies.encodeOutbox(rt.outbox.proof(dst)));
+            if (list.isEmpty()) {
+                continue;
+            }
+            Mmr mmr = new Mmr();
+            for (byte[] raw : list) {
+                mmr.append(HashUtils.sha256(Bytes.wrap(raw)));
+            }
+            records.putProof(id, rt.seq, ProofKind.SEGMENT, ProofBodies.segmentKey(dst, 0, list.size()),
+                    ProofBodies.encodeSegment(dst, 0, list.size(), mmr, list));
+            int prev = rt.seq == 0L ? 0 : store.outboxSize(id, dst, rt.seq - 1L);
+            if (prev > 0 && prev < list.size()) {
+                records.putProof(id, rt.seq, ProofKind.SEGMENT, ProofBodies.segmentKey(dst, prev, list.size()),
+                        ProofBodies.encodeSegment(dst, prev, list.size(), mmr, list.subList(prev, list.size())));
+            }
+        }
     }
 
     public List<Outcome> step(Bytes chain, long seq, long timestamp) {

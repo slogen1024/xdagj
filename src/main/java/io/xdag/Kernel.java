@@ -28,6 +28,7 @@ import static io.xdag.crypto.keys.AddressUtils.toBytesAddress;
 
 import io.xdag.chain.exec.ChainExecDriver;
 import io.xdag.chain.exec.ChainExecStore;
+import io.xdag.chain.p2p.ChainPull;
 import io.xdag.chain.ext.ExtKind;
 import io.xdag.chain.p2p.ChainRecords;
 import io.xdag.chain.l1.ChainKindHandler;
@@ -101,6 +102,8 @@ public class Kernel {
      * in which case a request is answered ABSENT rather than with a made-up page.
      */
     protected final ChainRecords chainRecords = new ChainRecords();
+    /** Peers this node asks for snapshot pages and segment proofs. Filled as handshakes finish. */
+    protected final ChainPull chainPull = new ChainPull();
     /**
      * Chain extension-kind semantics, keyed by kind. Handlers SP2/SP3 register BEFORE the kernel
      * constructs {@code BlockchainImpl}; consulted once in the {@code BlockchainImpl} constructor,

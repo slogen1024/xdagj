@@ -49,6 +49,7 @@ import io.netty.channel.SimpleChannelInboundHandler;
 import io.xdag.Kernel;
 import io.xdag.chain.ingest.IngestPipeline;
 import io.xdag.chain.p2p.ChainExchange;
+import io.xdag.chain.p2p.ChainPull;
 import io.xdag.config.Config;
 import io.xdag.config.spec.NodeSpec;
 import io.xdag.consensus.SyncManager;
@@ -128,6 +129,7 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
     private final NetDBManager netdbMgr;
     private final MessageQueue msgQueue;
     private final ChainExchange chainExchange;
+    private ChainPull.Peer chainPeer;
 
     private final AtomicBoolean isHandshakeDone = new AtomicBoolean(false);
 
@@ -183,6 +185,10 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
 
         // deactivate the message queue
         msgQueue.deactivate();
+        if (chainPeer != null) {
+            kernel.getChainPull().remove(chainPeer);
+            chainPeer = null;
+        }
 
         // stop scheduled workers
         if (getNodes != null) {
@@ -394,6 +400,7 @@ public class XdagP2pHandler extends SimpleChannelInboundHandler<Message> {
             // Both sides announce which chains they execute. A peer that has not finished its own
             // handshake drops this the same way it drops a block.
             msgQueue.sendMessage(chainExchange.announce());
+            chainPeer = kernel.getChainPull().wire(chainExchange, msgQueue::sendMessage);
         } else {
             msgQueue.disconnect(ReasonCode.HANDSHAKE_EXISTS);
         }

@@ -31,9 +31,14 @@ import java.util.function.LongUnaryOperator;
 import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 
+import io.xdag.chain.anchor.AnchorBody;
+import io.xdag.chain.asset.AnchorRecord;
+import io.xdag.chain.ext.ExtCodec;
 import io.xdag.chain.l1.ChainL1Keys;
 import io.xdag.chain.l1.ChainL1Store;
 import io.xdag.chain.l1.ChainRecord;
+import io.xdag.chain.p2p.ChainPull;
+import io.xdag.chain.p2p.ChainRecords;
 import io.xdag.chain.p2p.ChainSubscriptions;
 
 /**
@@ -53,6 +58,8 @@ public final class ChainExecDriver {
     private final ChainL1Store l1;
     private final long window;
     private SegmentProofs proofs;
+    private ChainPull pull;
+    private ChainRecords records;
     private boolean blocked;
 
     public ChainExecDriver(ChainExecutor executor, ChainSubscriptions subscriptions, ChainL1Store l1) {
@@ -66,9 +73,15 @@ public final class ChainExecDriver {
         this.window = window;
     }
 
-    /** Proofs already pulled from a peer. Null keeps the stall until the source is executed locally. */
+    /** Proofs already pulled from a peer. When set, this wins over {@link #setPull}. */
     public void setProofs(SegmentProofs proofs) {
         this.proofs = proofs;
+    }
+
+    /** Peers to ask with {@code 0x1C} and {@code 0x1E}, and the records this node serves after a step. */
+    public void setNetwork(ChainPull pull, ChainRecords records) {
+        this.pull = pull;
+        this.records = records;
     }
 
     public boolean isBlocked() {
@@ -87,18 +100,22 @@ public final class ChainExecDriver {
                 if (record == null) {
                     continue;
                 }
+                if (executor.appliedSeq(chain) < 0 && !bootstrap(chain, height)) {
+                    continue;
+                }
                 long head = executor.appliedSeq(chain);
                 long seq = head < 0 ? record.createdHeight() : head + 1;
                 if (seq > height) {
                     continue;
                 }
                 if (!executor.ready(chain, seq)) {
-                    executor.fetchDeliveries(chain, seq, proofs);
+                    executor.fetchDeliveries(chain, seq, proofs());
                 }
                 if (!executor.ready(chain, seq)) {
                     continue;
                 }
                 executor.step(chain, seq, timestamp.applyAsLong(seq));
+                executor.publish(chain, records, chainIds());
                 progress = true;
             }
         }
@@ -149,6 +166,76 @@ public final class ChainExecDriver {
                 return;
             }
         }
+    }
+
+    private SegmentProofs proofs() {
+        if (proofs != null) {
+            return proofs;
+        }
+        if (pull == null) {
+            return null;
+        }
+        return (src, seq, dst, root) -> WireProofs.fetch(pull, executor.store(), src, seq, dst, root);
+    }
+
+    /**
+     * Latest FINAL anchor at or before {@code height} becomes the head when its snapshot rebuilds
+     * {@code stateRoot}. No such anchor, or a peer with no snapshot, replays from creation. A pull
+     * that has not answered yet leaves the chain where it is.
+     */
+    private boolean bootstrap(Bytes chain, long height) {
+        if (pull == null) {
+            return true;
+        }
+        Final fin = latestFinal(chain, height);
+        if (fin == null) {
+            return true;
+        }
+        try {
+            executor.bootstrap(chain, fin.seq, fin.body.stateRoot(),
+                    page -> pull.snapshot(ChainExecutor.chain32(chain), fin.seq, page));
+            return true;
+        } catch (IllegalStateException e) {
+            return false;
+        }
+    }
+
+    private Final latestFinal(Bytes chain, long height) {
+        byte[] raw = chain.toArray();
+        Final best = null;
+        for (byte[] key : l1.sortedKeys()) {
+            if (key.length != 29 || key[0] != ChainL1Keys.ANCHOR) {
+                continue;
+            }
+            if (!Arrays.equals(raw, 0, 20, key, 1, 21)) {
+                continue;
+            }
+            long seq = ExtCodec.u64(key, 21);
+            if (Long.compareUnsigned(seq, height) > 0) {
+                continue;
+            }
+            AnchorBody body = AnchorBody.decode(l1.getAnchorRaw(chain, seq));
+            if (body == null || body.status() != AnchorRecord.Status.FINAL) {
+                continue;
+            }
+            if (best == null || Long.compareUnsigned(seq, best.seq) > 0) {
+                best = new Final(seq, body);
+            }
+        }
+        return best;
+    }
+
+    private List<Bytes32> chainIds() {
+        List<Bytes32> ids = new ArrayList<>();
+        for (byte[] key : l1.sortedKeys()) {
+            if (key.length == 21 && key[0] == ChainL1Keys.CHAIN) {
+                ids.add(ChainExecutor.chain32(Bytes.wrap(Arrays.copyOfRange(key, 1, 21))));
+            }
+        }
+        return ids;
+    }
+
+    private record Final(long seq, AnchorBody body) {
     }
 
     private List<Bytes> chains() {

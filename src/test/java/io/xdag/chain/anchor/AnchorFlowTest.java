@@ -194,6 +194,11 @@ public class AnchorFlowTest {
 
     @Test
     public void wrongCallInputVoidsAndSplitsTheBond() {
+        slashBadCall();
+    }
+
+    /** The SP4 three-node drill calls this after the destinations have diverged on delivery. */
+    public static void slashBadCall() {
         World w = new World();
         OpenedAnchor opened = w.openAnchor(w.hashLow("wrong-call"), false);
         w.fund(BondVault.ADDRESS, MIN_BOND + 100L);

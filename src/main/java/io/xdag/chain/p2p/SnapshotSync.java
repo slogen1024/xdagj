@@ -56,6 +56,23 @@ public final class SnapshotSync {
     }
 
     public static List<Kv> pull(Bytes32 expectedRoot, IntFunction<ChainSnapshotReplyMessage> fetch, int maxBytes) {
+        List<Kv> all = gather(fetch, maxBytes);
+        if (!SnapshotPages.root(all).equals(expectedRoot)) {
+            throw new IllegalArgumentException("state root");
+        }
+        return all;
+    }
+
+    /**
+     * Every page, without comparing {@link SnapshotPages#root} to an anchor. A null reply is still
+     * in flight. Page 0 ABSENT is no snapshot. The caller checks the anchor root itself when the
+     * page bytes are the exec-store blobs rather than the SMT leaves.
+     */
+    public static List<Kv> gather(IntFunction<ChainSnapshotReplyMessage> fetch) {
+        return gather(fetch, DEFAULT_MAX_BYTES);
+    }
+
+    public static List<Kv> gather(IntFunction<ChainSnapshotReplyMessage> fetch, int maxBytes) {
         if (maxBytes < 0) {
             throw new IllegalArgumentException("snapshot byte cap");
         }
@@ -65,6 +82,9 @@ public final class SnapshotSync {
         long used = 0;
         for (int page = 0; page < MAX_PAGES; page++) {
             ChainSnapshotReplyMessage reply = fetch.apply(page);
+            if (reply == null) {
+                throw new IllegalStateException("snapshot pending");
+            }
             if (reply.absent()) {
                 if (page == 0) {
                     throw new IllegalArgumentException("no snapshot");
@@ -91,9 +111,6 @@ public final class SnapshotSync {
         }
         if (!ended) {
             throw new IllegalArgumentException("snapshot page cap");
-        }
-        if (!SnapshotPages.root(all).equals(expectedRoot)) {
-            throw new IllegalArgumentException("state root");
         }
         return all;
     }
