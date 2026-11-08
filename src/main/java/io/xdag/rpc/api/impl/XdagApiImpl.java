@@ -29,6 +29,7 @@ import com.google.common.collect.Maps;
 import io.xdag.Kernel;
 import io.xdag.chain.ingest.ChunkFeePolicy;
 import io.xdag.chain.rpc.ChainApi;
+import io.xdag.chain.rpc.ChainFeed;
 import io.xdag.config.spec.ChainSpec;
 import io.xdag.Wallet;
 import io.xdag.config.Config;
@@ -93,13 +94,21 @@ public class XdagApiImpl extends AbstractXdagLifecycle implements XdagApi {
         this.rpcSpec = kernel.getConfig().getRPCSpec();
         long activation = kernel.getConfig() instanceof ChainSpec spec ? spec.getChainActivationHeight()
                 : Long.MAX_VALUE;
+        ChainFeed feed = new ChainFeed();
         ChainApi chainApi = kernel.getChainL1Store() == null ? null : new ChainApi(
                 () -> blockchain == null || blockchain.getXdagStats() == null ? -1L : blockchain.getXdagStats().nmain,
                 activation,
                 kernel.getChainL1Store(),
                 () -> kernel.getChainExecDriver() == null ? null : kernel.getChainExecDriver().executor(),
                 block -> kernel.getSyncMgr().submitBlock(
-                        new BlockWrapper(block, kernel.getConfig().getNodeSpec().getTTL())));
+                        new BlockWrapper(block, kernel.getConfig().getNodeSpec().getTTL())),
+                feed);
+        if (chainApi != null) {
+            kernel.getChainL1Store().setCommitted(feed::anchors);
+            if (kernel.getChainExecDriver() != null) {
+                kernel.getChainExecDriver().executor().setEvents(feed);
+            }
+        }
         this.server = new JsonRpcServer(rpcSpec, this, chainApi);
 
         validateConfiguration();

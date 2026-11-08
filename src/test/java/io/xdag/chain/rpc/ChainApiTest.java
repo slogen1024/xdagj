@@ -23,6 +23,7 @@
  */
 package io.xdag.chain.rpc;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
@@ -114,12 +115,7 @@ public class ChainApiTest {
                 .verifies(ChainLedger.smtKey(w.contract, new byte[] {7}), root));
 
         w.executor.apply(w.chain, 1L, 0L, 1_000_000L, 0L, List.of());
-        try {
-            w.api.getBalance(w.chain, w.who, ChainView.FINAL);
-            throw new AssertionError("view");
-        } catch (IllegalStateException e) {
-            assertEquals("view", e.getMessage());
-        }
+        assertEquals(0L, w.api.getBalance(w.chain, w.who, ChainView.FINAL).seq());
         assertEquals(1L, w.api.getBalance(w.chain, w.who, ChainView.CONFIRMED).seq());
     }
 
@@ -141,8 +137,9 @@ public class ChainApiTest {
         assertEquals("ok", receipt.status());
         assertEquals(12L, receipt.gasUsed());
         assertEquals("0x0405", receipt.returnData());
+        assertEquals(-1L, receipt.seq());
+        assertTrue(receipt.events().isEmpty());
         assertEquals("confirmed", receipt.confirm());
-        assertEquals("0x0908", w.api.buildClaim(w.chain, 0L, 3L));
         assertNull(w.api.getReceipt(Bytes32.repeat((byte) 1)));
 
         List<Block> sent = new ArrayList<>();
@@ -151,12 +148,52 @@ public class ChainApiTest {
         List<String> hashes = live.api.sendCall(List.of(Bytes.wrap(new byte[512]).toHexString()));
         assertEquals(1, sent.size());
         assertEquals(sent.get(0).getHash().toHexString(), hashes.get(0));
-        try {
-            live.api.subscribe("anchors");
-            throw new AssertionError("socket");
-        } catch (IllegalStateException e) {
-            assertEquals("websocket", e.getMessage());
-        }
+        assertEquals("/chain", live.api.subscribe("anchors"));
+    }
+
+    @Test
+    public void anOlderAnchorReadsThatSeqAndAClaimProofRoundTrips() {
+        World w = new World(0L);
+        ChainFeed feed = new ChainFeed();
+        List<String> pushed = new ArrayList<>();
+        feed.subscribe("receipts", pushed::add);
+        w.executor.setEvents(feed);
+        w.l1.setCommitted(feed::anchors);
+        Bytes sender = Bytes.wrap(w.who);
+        w.executor.apply(w.chain, 0L, 0L, 1_000_000L, 0L, List.of(new ChainExecutor.Tx(Bytes32.repeat((byte) 1),
+                io.xdag.chain.exec.ChainInput.Kind.CALL, io.xdag.chain.exec.ExecStatus.OK, sender, w.contract, 50L, 0L, 0,
+                new byte[0], null)));
+        Bytes32 root = w.executor.stateRoot(w.chain);
+        AnchorBody body = new AnchorBody(AnchorRecord.Status.FINAL, Bytes32.repeat((byte) 4), Bytes32.ZERO, root, -1L,
+                0L, 0L, 1L, Bytes32.ZERO, new byte[20], Bytes32.ZERO);
+        ChainL1Batch batch = new ChainL1Batch();
+        batch.putAnchor(w.chain, 0L, body.encode());
+        w.l1.commit(batch);
+        w.executor.apply(w.chain, 1L, 0L, 1_000_000L, 0L, List.of(new ChainExecutor.Tx(Bytes32.repeat((byte) 2),
+                io.xdag.chain.exec.ChainInput.Kind.CALL, io.xdag.chain.exec.ExecStatus.OK, sender, w.contract, 30L, 0L, 0,
+                new byte[0], null)));
+
+        assertEquals("50", w.api.getBalance(w.chain, w.who, ChainView.FINAL).balance());
+        assertEquals("80", w.api.getBalance(w.chain, w.who, ChainView.CONFIRMED).balance());
+        assertEquals(80L, w.executor.balance(w.chain, w.who));
+        assertEquals("final 0 50", ChainCli.run(w.api, "balance", w.chain.toHexString(),
+                Bytes.wrap(w.who).toHexString(), "final"));
+        ChainApi.Receipt first = w.api.getReceipt(Bytes32.repeat((byte) 1));
+        assertEquals(0L, first.seq());
+        assertEquals("final", first.confirm());
+        assertEquals("confirmed", w.api.getReceipt(Bytes32.repeat((byte) 2)).confirm());
+        assertFalse(pushed.isEmpty());
+        assertFalse(feed.recent("anchors").isEmpty());
+
+        Bytes dst = World.address(9);
+        byte[] entry = io.xdag.chain.asset.WithdrawOutbox.send(w.chain, dst.toArray(), w.who, w.contract.toArray(), 1,
+                new byte[0], 0L, 0L, 0L);
+        w.exec.putMmr(ChainExecutor.chain32(w.chain), ChainExecutor.chain32(dst),
+                ChainExecutor.encodeMmr(List.of(entry)));
+        w.exec.putOutboxSize(ChainExecutor.chain32(w.chain), ChainExecutor.chain32(dst), 1L, 1);
+        io.xdag.chain.asset.ClaimProof.Body proof = io.xdag.chain.asset.ClaimProof
+                .decode(Bytes.fromHexString(w.api.buildClaim(w.chain, 1L, 0L, dst)).toArray());
+        assertArrayEquals(entry, proof.entry());
     }
 
     private static void assertInactive(Runnable call) {

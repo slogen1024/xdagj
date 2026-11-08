@@ -82,12 +82,10 @@ public final class ChainRequestHandler implements JsonRpcRequestHandler {
                 case "chain_getAnchor" -> api.getAnchor(address(params, 0), longArg(params, 1));
                 case "chain_getHead" -> api.getHead(address(params, 0));
                 case "chain_getReceipt" -> api.getReceipt(hash(params, 0));
-                case "chain_buildClaim" -> api.buildClaim(address(params, 0), longArg(params, 1), longArg(params, 2));
+                case "chain_buildClaim" -> api.buildClaim(address(params, 0), longArg(params, 1), longArg(params, 2),
+                        params.length > 3 && params[3] != null ? address(params, 3) : null);
                 case "chain_sendCall" -> api.sendCall(strings(params, 0));
-                case "chain_subscribe" -> {
-                    api.subscribe(params.length == 0 || params[0] == null ? "" : params[0].toString());
-                    yield null;
-                }
+                case "chain_subscribe" -> api.subscribe(params.length == 0 || params[0] == null ? "" : params[0].toString());
                 default -> throw JsonRpcException.methodNotFound(request.getMethod());
             };
         } catch (ChainInactive e) {

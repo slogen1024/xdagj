@@ -242,10 +242,25 @@ public final class ChainL1Store implements XdagLifecycle {
 
     // ---- batched writes ----
 
+    private volatile java.util.function.Consumer<List<Pair<byte[], byte[]>>> committed;
+
+    /** Notified after a non-empty commit has been written. A throw here does not undo the write. */
+    public void setCommitted(java.util.function.Consumer<List<Pair<byte[], byte[]>>> committed) {
+        this.committed = committed;
+    }
+
     /** Applies every put and delete in {@code batch} as one atomic write; a no-op for an empty batch. */
     public void commit(ChainL1Batch batch) {
         if (!batch.isEmpty()) {
             source.batchWrite(batch.puts(), batch.deletes());
+            java.util.function.Consumer<List<Pair<byte[], byte[]>>> listener = committed;
+            if (listener != null) {
+                try {
+                    listener.accept(batch.puts());
+                } catch (RuntimeException ignored) {
+                    // The write is already durable. A subscriber must not fail the import.
+                }
+            }
         }
     }
 

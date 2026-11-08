@@ -683,7 +683,7 @@ verify(challenge):
 
 原生 `xdag_*` 全部不变。
 
-**进度**：`ChainApi` 已注册。`pending` 与 `confirmed` 都是已执行的头。`anchored`/`final` 的 seq 必须等于这个头。回执没有事件和 seq，确认级写 `confirmed`。`chain_buildClaim` 返回已存的承诺开解，不是完整 CLAIM 线格式。`chain_subscribe` 没有 WebSocket。SDK、CLI、DApp 未做。
+**进度**：`anchored`/`final` 读锚定 seq 的副本状态。回执带 seq 和事件，确认级按锚定覆盖面写。`chain_buildClaim` 返回版本 1 的 `ClaimProof`。`/chain` 推送。`AbiCodec` 与 telnet 只读 `chain` 已有。pending 仍是已执行的头。签名 CLI、SDK、DApp 未做。
 
 ### 16.2 SDK 与工具
 
@@ -691,6 +691,21 @@ verify(challenge):
 - 客户端库 `xdag-client`（TypeScript + Rust）：构造 CALL/DEPLOY 块与分片链、签名、CLAIM 证明组装、四级状态轮询。
 - CLI：`xdag chain create|deploy|call|query|bond|unbond|anchor|challenge|claim|subscribe`。
 - 参考 DApp：XRC-20 代币；单链 DEX（池 + 代币同链 → 原子撮合）；跨链消息演示（D = 0 与 D = W 对照）。
+
+### 16.3 ABI 附录
+
+紧凑小端，实现是 `io.xdag.chain.abi.AbiCodec`。
+
+| 类型 | 编码 |
+|------|------|
+| `bool` | `u8`，0 或 1 |
+| `u32` / `u64` | 4 / 8 字节小端 |
+| `address` | 20 字节原样 |
+| `bytes` / `string` | `u32` 长度 ‖ 字节。`string` 是 UTF-8 |
+| selector | `sha256(ASCII 方法签名)[0..4]`，大端拼成 `i32` |
+| event | `sha256(ASCII 事件签名) ‖ body` |
+
+执行状态码是 `ExecStatus`：0 ok，1 failed，2 insufficient_gas，3 invalid_code，4 invalid_format，5 invalid_fee，6 code_too_large。
 
 ---
 
@@ -739,7 +754,7 @@ verify(challenge):
 
 顺序：SP0a → SP1 → SP2 / SP3（SP1 后可并行）→ SP4 → SP5；SP0b 与 SP1 并行。
 
-**进度（2026-11-08，细节在路线图 §0）**：SP0a、SP0b（含 2b 的 10k 导入门禁）、SP1-1、SP1-2、SP1-3、SP2、SP3 完成。SP3 含保证金、锚定规范链、终局、E1/E2/E3、罚没、提现窗、奖励输入、可交付消息体（`recv`）、`onSourceVoided` 执行回滚、`AnchorPublisher`、`Challenger`、锁外裁决缓存，以及 `maxCallGas` 下单次 E2 仲裁 < 2 s。变更集不按 K=128 淘汰，`onUnsetMain` 仍只停住。SP4 的订阅、`0x1B–0x1F`、快照页、四种证明体完成；执行器只跑订阅链。握手后节点自己发 `0x1E`。`SegmentIntake` 在段的 MMR 根等于锚定 outboxMap 时把条目装进目的链，否则停住。新订阅者用最近 FINAL 锚定的快照恢复，根对上才从该 seq 之后继续。`ThreeNodeDrillTest` 覆盖 D=0、D=W 和罚没。docker daemon 未运行，三个矿池没启动。SP1-4 未开工。SP5 的 `chain_*` 已挂到现有 JSON-RPC：激活前拒绝，`pending`/`confirmed` 读已执行的头，`anchored`/`final` 只在锚定 seq 等于该头时读状态，`chain_sendCall` 进 `submitBlock`。回执没有事件和 seq。没有 WebSocket、SDK、CLI、DApp。M1、M2、M4 完成；M3 的执行吞吐未测；M5–M7 未完成。
+**进度（2026-11-08，细节在路线图 §0）**：SP0a、SP0b（含 2b 的 10k 导入门禁）、SP1-1、SP1-2、SP1-3、SP2、SP3 完成。SP3 含保证金、锚定规范链、终局、E1/E2/E3、罚没、提现窗、奖励输入、可交付消息体（`recv`）、`onSourceVoided` 执行回滚、`AnchorPublisher`、`Challenger`、锁外裁决缓存，以及 `maxCallGas` 下单次 E2 仲裁 < 2 s。变更集不按 K=128 淘汰，`onUnsetMain` 仍只停住。SP4 的订阅、`0x1B–0x1F`、快照页、四种证明体完成；执行器只跑订阅链。握手后节点自己发 `0x1E`。`SegmentIntake` 在段的 MMR 根等于锚定 outboxMap 时把条目装进目的链，否则停住。新订阅者用最近 FINAL 锚定的快照恢复，根对上才从该 seq 之后继续。`ThreeNodeDrillTest` 覆盖 D=0、D=W 和罚没。docker daemon 未运行，三个矿池没启动。SP1-4 未开工。SP5 的 `chain_*` 已挂到现有 JSON-RPC：激活前拒绝，`pending` 读已执行的头，`anchored`/`final` 在副本上读锚定 seq。回执带 seq 和事件。`/chain` 推送。`AbiCodec` 和 telnet 只读 `chain` 已有。签名 CLI、SDK、DApp 没有。M1、M2、M4 完成；M3 的执行吞吐未测；M5–M7 未完成。
 
 **实施级总体设计与路线图**（各子项目的接口、数据结构、算法、测试、切片与里程碑）见 `2026-09-17-xdag-chain-contracts-program-design-and-roadmap.md`；SP0b 拆为 SP0b-1（基准 + 加固工单）→ SP0b-2（锁外预验证流水线）→ SP0b-3（孤块池分队列/配额/TTL + 导入期费率策略）。
 

@@ -44,8 +44,10 @@ import com.dylibso.chicory.runtime.TrapException;
 import io.xdag.chain.anchor.AnchorBody;
 import io.xdag.chain.anchor.TriggerList;
 import io.xdag.chain.asset.AnchorRecord;
+import io.xdag.chain.asset.ClaimProof;
 import io.xdag.chain.asset.WithdrawOutbox;
 import io.xdag.chain.exec.state.Mmr;
+import io.xdag.chain.exec.state.OutboxMap;
 import io.xdag.chain.exec.state.OutboxMap;
 import io.xdag.chain.exec.state.WitnessRecorder;
 import io.xdag.chain.exec.wasm.ExecResult;
@@ -92,8 +94,11 @@ public final class ChainExecutor implements ExecHost.Calls {
     }
 
     public record Outcome(int index, Bytes32 inputHash, ExecStatus status, long gasUsed, Bytes32 stateRoot,
-            Bytes32 outboxRoot, Bytes32 eventsRoot, Bytes32 commitment, byte[] returnData) {
+            Bytes32 outboxRoot, Bytes32 eventsRoot, Bytes32 commitment, byte[] returnData, List<byte[]> events) {
     }
+
+    /** Pushes a receipt onto {@code chain_subscribe}. Null until the RPC feed is attached. */
+    private ChainEvents events;
 
     private final WasmEngine engine;
     private final ChainL1Store l1;
@@ -410,6 +415,10 @@ public final class ChainExecutor implements ExecHost.Calls {
         return store.findReceipt(blockHash);
     }
 
+    public ChainExecStore.Located locateReceipt(Bytes32 blockHash) {
+        return store.locateReceipt(blockHash);
+    }
+
     @Override
     public ExecHost.Result call(ExecHost caller, byte[] contract, int selector, byte[] args, long value) {
         if (caller.depth >= MAX_CALL_DEPTH) {
@@ -503,7 +512,8 @@ public final class ChainExecutor implements ExecHost.Calls {
         Bytes32 outbox = rt.outbox.root();
         Bytes32 eventsRoot = eventsRoot(events);
         Bytes32 commitment = ProofBodies.commitment(tx.inputHash(), state, outbox, eventsRoot, status.code(), gasUsed);
-        return new Outcome(index, tx.inputHash(), status, gasUsed, state, outbox, eventsRoot, commitment, returnData);
+        return new Outcome(index, tx.inputHash(), status, gasUsed, state, outbox, eventsRoot, commitment, returnData,
+                events);
     }
 
     private ExecHost host(Runtime rt, ExecWorld.Layer layer, byte[] self, byte[] payer, int selector, byte[] args,
@@ -767,8 +777,152 @@ public final class ChainExecutor implements ExecHost.Calls {
             store.putOpening(id, seq, outcome.index(), ProofBodies.encodeCommitment(new ProofBodies.Opened(
                     outcome.inputHash(), outcome.stateRoot(), outcome.outboxRoot(), outcome.eventsRoot(),
                     outcome.status().code(), outcome.gasUsed())));
-            store.putReceipt(id, outcome.inputHash(), receipt(outcome));
+            store.putReceipt(id, outcome.inputHash(), receipt(seq, outcome));
+            if (events != null) {
+                events.onReceipt(chain, seq, outcome.inputHash(), outcome.events());
+            }
         }
+    }
+
+    public void setEvents(ChainEvents events) {
+        this.events = events;
+    }
+
+    /**
+     * Storage, balance and proofs at {@code seq}. {@code seq} equal to the head is the live world.
+     * An earlier seq undoes change-sets on a copy and does not write the store or the live world.
+     */
+    public long balanceAt(Bytes chain, long seq, byte[] address) {
+        return worldAt(chain, seq).root().balance(address);
+    }
+
+    public byte[] storageAt(Bytes chain, long seq, Bytes contract, byte[] userKey) {
+        return worldAt(chain, seq).get(contract, userKey);
+    }
+
+    public SparseMerkleTree.Proof proofAt(Bytes chain, long seq, Bytes contract, byte[] userKey) {
+        return worldAt(chain, seq).proof(ChainLedger.smtKey(contract, userKey == null ? new byte[0] : userKey));
+    }
+
+    public byte[] queryAt(Bytes chain, long seq, Bytes contract, int selector, byte[] args) {
+        Runtime rt = runtime(chain);
+        if (seq == rt.seq) {
+            return query(chain, contract, selector, args);
+        }
+        ExecWorld copy = worldAt(chain, seq);
+        if (!rt.modules.containsKey(contract)) {
+            return null;
+        }
+        current = rt;
+        try {
+            ExecHost host = new ExecHost(copy, copy.root().child(), this, new WitnessRecorder(), rt.chain,
+                    contract.toArray(), ChainLedger.address20(null), selector, args == null ? new byte[0] : args, 0L,
+                    0L, 0L, 1, false);
+            ExecHost.Result result = run(rt, host, "query", GasSchedule.MAX_CALL_GAS);
+            return result.code() == 0 ? result.returnData() : null;
+        } finally {
+            current = null;
+        }
+    }
+
+    /**
+     * Version-1 {@link ClaimProof} for outbox entry {@code index} at {@code seq}. {@code dst} null
+     * is accepted only when one destination's outbox is long enough.
+     */
+    public byte[] claimProof(Bytes chain, long seq, long index, Bytes dst) {
+        if (index < 0 || index > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("index");
+        }
+        Bytes32 id = chain32(chain);
+        Bytes32 dst32 = dst == null ? onlyDest(id, seq, (int) index) : chain32(dst);
+        int size = store.outboxSize(id, dst32, seq);
+        byte[] blob = store.getMmr(id, dst32);
+        if (blob == null || size < 0 || index >= size) {
+            throw new IllegalArgumentException("index");
+        }
+        List<byte[]> entries = decodeMmr(blob);
+        if (index >= entries.size()) {
+            throw new IllegalArgumentException("index");
+        }
+        OutboxMap map = outboxAt(id, seq);
+        SparseMerkleTree.Proof smt = map.proof(dst32);
+        Mmr mmr = mmrOf(entries.subList(0, size));
+        return ClaimProof.encode(dst32.slice(12, 20).toArray(), smt, mmr.proof((int) index), entries.get((int) index));
+    }
+
+    private ExecWorld worldAt(Bytes chain, long seq) {
+        Runtime rt = runtime(chain);
+        if (seq == rt.seq) {
+            return rt.world;
+        }
+        if (seq < 0 || seq > rt.seq) {
+            throw new IllegalArgumentException("seq");
+        }
+        ExecWorld copy = new ExecWorld();
+        Bytes32 id = chain32(chain);
+        copy.load(store.readState(id));
+        long cursor = rt.seq;
+        while (cursor > seq) {
+            ExecChangeSet change = ExecChangeSet.decode(store.getChangeSet(id, cursor));
+            if (change == null) {
+                throw new IllegalStateException("changeset " + cursor);
+            }
+            java.util.Map<Bytes32, byte[]> preimages = new java.util.HashMap<>();
+            for (Pair<Bytes32, byte[]> row : change.state) {
+                byte[] value = row.getValue();
+                preimages.put(row.getKey(), value == null ? new byte[0] : value);
+            }
+            copy.undo(preimages);
+            if (!copy.rootHash().equals(change.prevRoot)) {
+                throw new IllegalStateException("view root");
+            }
+            cursor = change.prevSeq;
+        }
+        if (cursor != seq) {
+            throw new IllegalStateException("view");
+        }
+        return copy;
+    }
+
+    private Bytes32 onlyDest(Bytes32 chain, long seq, int index) {
+        Bytes32 found = null;
+        for (Pair<Bytes32, byte[]> row : store.mmrBlobs(chain)) {
+            if (store.outboxSize(chain, row.getKey(), seq) > index) {
+                if (found != null) {
+                    throw new IllegalArgumentException("dst");
+                }
+                found = row.getKey();
+            }
+        }
+        if (found == null) {
+            throw new IllegalArgumentException("dst");
+        }
+        return found;
+    }
+
+    private OutboxMap outboxAt(Bytes32 chain, long seq) {
+        OutboxMap map = new OutboxMap();
+        for (Pair<Bytes32, byte[]> row : store.mmrBlobs(chain)) {
+            int size = store.outboxSize(chain, row.getKey(), seq);
+            if (size <= 0) {
+                continue;
+            }
+            List<byte[]> entries = decodeMmr(row.getValue());
+            if (entries.size() < size) {
+                throw new IllegalStateException("mmr");
+            }
+            Mmr mmr = mmrOf(entries.subList(0, size));
+            map.put(row.getKey(), mmr.root(), size);
+        }
+        return map;
+    }
+
+    private static Mmr mmrOf(List<byte[]> entries) {
+        Mmr mmr = new Mmr();
+        for (byte[] entry : entries) {
+            mmr.append(HashUtils.sha256(Bytes.wrap(entry)));
+        }
+        return mmr;
     }
 
     private void rebuild(Runtime rt, Bytes32 chain, Bytes32 dst, List<byte[]> list) {
@@ -780,14 +934,25 @@ public final class ChainExecutor implements ExecHost.Calls {
         store.putMmr(chain, dst, encodeMmr(list));
     }
 
-    private static byte[] receipt(Outcome outcome) {
-        byte[] ret = outcome.returnData();
-        ByteBuffer buf = ByteBuffer.allocate(1 + Long.BYTES + Bytes32.SIZE + Integer.BYTES + ret.length);
+    private static byte[] receipt(long seq, Outcome outcome) {
+        byte[] ret = outcome.returnData() == null ? new byte[0] : outcome.returnData();
+        List<byte[]> ev = outcome.events() == null ? List.of() : outcome.events();
+        int size = 1 + Long.BYTES + Bytes32.SIZE + Integer.BYTES + ret.length + Long.BYTES + Integer.BYTES;
+        for (byte[] event : ev) {
+            size += Integer.BYTES + event.length;
+        }
+        ByteBuffer buf = ByteBuffer.allocate(size);
         buf.put((byte) outcome.status().code());
         buf.putLong(outcome.gasUsed());
         buf.put(outcome.commitment().toArray());
         buf.putInt(ret.length);
         buf.put(ret);
+        buf.putLong(seq);
+        buf.putInt(ev.size());
+        for (byte[] event : ev) {
+            buf.putInt(event.length);
+            buf.put(event);
+        }
         return buf.array();
     }
 

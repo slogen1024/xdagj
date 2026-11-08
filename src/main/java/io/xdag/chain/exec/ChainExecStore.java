@@ -220,16 +220,44 @@ public final class ChainExecStore implements XdagLifecycle {
 
     /** Receipt body for {@code blockHash} on any chain, or null. The key tail is the hash. */
     public byte[] findReceipt(Bytes32 blockHash) {
+        Located located = locateReceipt(blockHash);
+        return located == null ? null : located.body();
+    }
+
+    /** The chain id in the receipt key plus the body, or null. */
+    public Located locateReceipt(Bytes32 blockHash) {
         byte[] want = blockHash.toArray();
         for (Pair<byte[], byte[]> row : source.prefixKeyAndValueLookup(new byte[] {RECEIPT})) {
             byte[] key = row.getKey();
             if (key.length == 1 + Bytes32.SIZE + Bytes32.SIZE
                     && Arrays.equals(key, 1 + Bytes32.SIZE, key.length, want, 0, Bytes32.SIZE)) {
                 byte[] value = row.getValue();
-                return value == null ? null : value.clone();
+                return new Located(Bytes32.wrap(Arrays.copyOfRange(key, 1, 1 + Bytes32.SIZE)),
+                        value == null ? new byte[0] : value.clone());
             }
         }
         return null;
+    }
+
+    /** MMR blobs for one chain. The key is the destination chain id. */
+    public List<Pair<Bytes32, byte[]>> mmrBlobs(Bytes32 chain) {
+        byte[] prefix = new byte[1 + Bytes32.SIZE];
+        prefix[0] = MMR;
+        System.arraycopy(chain.toArray(), 0, prefix, 1, Bytes32.SIZE);
+        List<Pair<Bytes32, byte[]>> out = new ArrayList<>();
+        for (Pair<byte[], byte[]> row : source.prefixKeyAndValueLookup(prefix)) {
+            byte[] key = row.getKey();
+            if (key.length != 1 + Bytes32.SIZE + Bytes32.SIZE) {
+                continue;
+            }
+            byte[] value = row.getValue();
+            out.add(Pair.of(Bytes32.wrap(Arrays.copyOfRange(key, 1 + Bytes32.SIZE, key.length)),
+                    value == null ? new byte[0] : value.clone()));
+        }
+        return out;
+    }
+
+    public record Located(Bytes32 chain, byte[] body) {
     }
 
     public void deleteReceipt(Bytes32 chain, Bytes32 blockHash) {

@@ -40,6 +40,7 @@ import org.apache.tuweni.bytes.Bytes32;
 import io.xdag.chain.anchor.AnchorBody;
 import io.xdag.chain.anchor.AnchorHead;
 import io.xdag.chain.asset.AnchorRecord;
+import io.xdag.chain.exec.ChainExecStore;
 import io.xdag.chain.exec.ChainExecutor;
 import io.xdag.chain.exec.ExecStatus;
 import io.xdag.chain.exec.state.SparseMerkleTree;
@@ -50,10 +51,10 @@ import io.xdag.core.Block;
 import io.xdag.core.XdagBlock;
 
 /**
- * {@code chain_*} over the executed head and the 0x06 index. A view whose anchor seq is behind the
- * head is refused: the executor has no historical KV that is not a rewind of the live runtime.
- * Receipts carry status, gas, commitment and return data. Events and the receipt seq are not in
- * that blob. {@code chain_subscribe} has no websocket on this server.
+ * {@code chain_*} over the executed head and the 0x06 index. {@code pending} is that head: soft
+ * pre-exec of unconfirmed calls is still SP1-4. {@code anchored} and {@code final} read the state
+ * at the anchor seq, undoing change-sets on a copy. A receipt written by the executor carries its
+ * seq and events. {@code chain_subscribe} pushes on the {@code /chain} websocket.
  */
 public final class ChainApi {
 
@@ -62,30 +63,41 @@ public final class ChainApi {
     private final ChainL1Store l1;
     private final Supplier<ChainExecutor> executor;
     private final Consumer<Block> send;
+    private final ChainFeed feed;
 
     public ChainApi(LongSupplier height, long activationHeight, ChainL1Store l1, Supplier<ChainExecutor> executor,
             Consumer<Block> send) {
+        this(height, activationHeight, l1, executor, send, new ChainFeed());
+    }
+
+    public ChainApi(LongSupplier height, long activationHeight, ChainL1Store l1, Supplier<ChainExecutor> executor,
+            Consumer<Block> send, ChainFeed feed) {
         this.height = Objects.requireNonNull(height, "height");
         this.activationHeight = activationHeight;
         this.l1 = Objects.requireNonNull(l1, "l1");
         this.executor = Objects.requireNonNull(executor, "executor");
         this.send = send;
+        this.feed = Objects.requireNonNull(feed, "feed");
+    }
+
+    public ChainFeed feed() {
+        return feed;
     }
 
     public Balance getBalance(Bytes chain, byte[] address, ChainView view) {
         long seq = viewSeq(chain, view);
-        return new Balance(view.wire(), seq, Long.toString(ex().balance(chain, address)));
+        return new Balance(view.wire(), seq, Long.toString(ex().balanceAt(chain, seq, address)));
     }
 
     public State getState(Bytes chain, Bytes contract, byte[] key, ChainView view) {
         long seq = viewSeq(chain, view);
-        byte[] value = ex().storage(chain, contract, key);
+        byte[] value = ex().storageAt(chain, seq, contract, key);
         return new State(view.wire(), seq, value == null ? null : Bytes.wrap(value).toHexString());
     }
 
     public Query query(Bytes chain, Bytes contract, int selector, byte[] args, ChainView view) {
         long seq = viewSeq(chain, view);
-        byte[] data = ex().query(chain, contract, selector, args == null ? new byte[0] : args);
+        byte[] data = ex().queryAt(chain, seq, contract, selector, args);
         return new Query(view.wire(), seq, data == null ? null : Bytes.wrap(data).toHexString());
     }
 
@@ -97,7 +109,7 @@ public final class ChainApi {
 
     public Proof getProof(Bytes chain, Bytes contract, byte[] key, ChainView view) {
         long seq = viewSeq(chain, view);
-        SparseMerkleTree.Proof proof = ex().proof(chain, contract, key);
+        SparseMerkleTree.Proof proof = ex().proofAt(chain, seq, contract, key);
         List<String> siblings = new ArrayList<>(proof.siblings().length);
         for (Bytes32 sibling : proof.siblings()) {
             siblings.add(sibling.toHexString());
@@ -128,14 +140,14 @@ public final class ChainApi {
         return new Head(head.seq(), head.anchorHash().toHexString(), applied, root);
     }
 
-    /** Null when this node has no receipt for the hash. {@code confirm} is {@code confirmed}. */
+    /** Null when this node has no receipt for the hash. An old blob without the tail has seq {@code -1}. */
     public Receipt getReceipt(Bytes32 blockHash) {
         gate();
-        byte[] raw = ex().receiptByHash(blockHash);
-        if (raw == null || raw.length < 1 + Long.BYTES + Bytes32.SIZE + Integer.BYTES) {
+        ChainExecStore.Located located = ex().locateReceipt(blockHash);
+        if (located == null || located.body().length < 1 + Long.BYTES + Bytes32.SIZE + Integer.BYTES) {
             return null;
         }
-        ByteBuffer buf = ByteBuffer.wrap(raw);
+        ByteBuffer buf = ByteBuffer.wrap(located.body());
         int status = buf.get() & 0xff;
         long gas = buf.getLong();
         byte[] commitment = new byte[Bytes32.SIZE];
@@ -146,6 +158,27 @@ public final class ChainApi {
         }
         byte[] ret = new byte[len];
         buf.get(ret);
+        long seq = -1L;
+        List<String> events = new ArrayList<>();
+        if (buf.remaining() >= Long.BYTES + Integer.BYTES) {
+            seq = buf.getLong();
+            int n = buf.getInt();
+            if (n < 0) {
+                throw new IllegalArgumentException("receipt");
+            }
+            for (int i = 0; i < n; i++) {
+                if (buf.remaining() < Integer.BYTES) {
+                    throw new IllegalArgumentException("receipt");
+                }
+                int elen = buf.getInt();
+                if (elen < 0 || buf.remaining() < elen) {
+                    throw new IllegalArgumentException("receipt");
+                }
+                byte[] event = new byte[elen];
+                buf.get(event);
+                events.add(Bytes.wrap(event).toHexString());
+            }
+        }
         String name;
         try {
             name = ExecStatus.fromCode(status).name().toLowerCase();
@@ -153,17 +186,13 @@ public final class ChainApi {
             name = Integer.toString(status);
         }
         return new Receipt(name, gas, Bytes32.wrap(commitment).toHexString(), Bytes.wrap(ret).toHexString(),
-                "confirmed");
+                List.copyOf(events), seq, confirm(located.chain().slice(12, 20), seq));
     }
 
-    /** The stored commitment opening. A missing opening is an argument error. */
-    public String buildClaim(Bytes chain, long seq, long index) {
+    /** Version-1 claim proof. {@code dst} may be null when only one outbox covers {@code index}. */
+    public String buildClaim(Bytes chain, long seq, long index, Bytes dst) {
         gate();
-        byte[] body = ex().opening(chain, seq, index);
-        if (body == null) {
-            throw new IllegalArgumentException("opening");
-        }
-        return Bytes.wrap(body).toHexString();
+        return Bytes.wrap(ex().claimProof(chain, seq, index, dst)).toHexString();
     }
 
     public List<String> sendCall(List<String> rawBlocks) {
@@ -180,9 +209,10 @@ public final class ChainApi {
         return hashes;
     }
 
-    public void subscribe(String kind) {
+    public String subscribe(String kind) {
         gate();
-        throw new IllegalStateException("websocket");
+        ChainFeed.check(kind);
+        return ChainFeed.PATH;
     }
 
     private long viewSeq(Bytes chain, ChainView view) {
@@ -195,10 +225,22 @@ public final class ChainApi {
         if (hit == null) {
             throw new IllegalArgumentException("anchor");
         }
-        if (hit.seq != applied) {
-            throw new IllegalStateException("view");
+        return hit.seq;
+    }
+
+    private String confirm(Bytes chain, long seq) {
+        if (seq < 0) {
+            return "confirmed";
         }
-        return applied;
+        Hit fin = latest(chain, true, Long.MAX_VALUE);
+        if (fin != null && Long.compareUnsigned(fin.seq, seq) >= 0) {
+            return "final";
+        }
+        Hit anchored = latest(chain, false, Long.MAX_VALUE);
+        if (anchored != null && Long.compareUnsigned(anchored.seq, seq) >= 0) {
+            return "anchored";
+        }
+        return "confirmed";
     }
 
     private long requireHead(Bytes chain) {
@@ -282,6 +324,7 @@ public final class ChainApi {
     public record Head(long anchorSeq, String anchorHash, long appliedSeq, String stateRoot) {
     }
 
-    public record Receipt(String status, long gasUsed, String commitment, String returnData, String confirm) {
+    public record Receipt(String status, long gasUsed, String commitment, String returnData, List<String> events,
+            long seq, String confirm) {
     }
 }

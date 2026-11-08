@@ -26,6 +26,10 @@ package io.xdag.cli;
 
 import io.xdag.Kernel;
 import io.xdag.Wallet;
+import io.xdag.chain.rpc.ChainApi;
+import io.xdag.chain.rpc.ChainCli;
+import io.xdag.config.spec.ChainSpec;
+import io.xdag.core.BlockWrapper;
 import io.xdag.utils.BasicUtils;
 import io.xdag.utils.WalletUtils;
 import lombok.Setter;
@@ -91,6 +95,7 @@ public class Shell extends JlineCommandRegistry implements CommandRegistry, Teln
         commandExecute.put("address", new CommandMethods(this::processAddress, this::defaultCompleter));
         commandExecute.put("oldbalance", new CommandMethods(this::processOldBalance, this::defaultCompleter));
         commandExecute.put("txQuantity", new CommandMethods(this::processTxQuantity, this::defaultCompleter));
+        commandExecute.put("chain", new CommandMethods(this::processChain, this::defaultCompleter));
         registerCommands(commandExecute);
     }
 
@@ -229,6 +234,39 @@ public class Shell extends JlineCommandRegistry implements CommandRegistry, Teln
         } catch (Exception error) {
             saveException(error);
         }
+    }
+
+    private void processChain(CommandInput input) {
+        final String[] usage = {
+                "chain -  read a contract chain\n",
+                "Usage: chain balance|state|query|head|anchor|receipt|claim|send|subscribe ...",
+                "  -? --help                    Show help",
+        };
+        try {
+            Options opt = parseOptions(usage, input.args());
+            if (opt.isSet("help")) {
+                throw new Options.HelpException(opt.usage());
+            }
+            List<String> argv = opt.args();
+            println(ChainCli.run(chainApi(), argv.toArray(String[]::new)));
+        } catch (Exception e) {
+            saveException(e);
+        }
+    }
+
+    private ChainApi chainApi() {
+        if (kernel == null || kernel.getChainL1Store() == null) {
+            return null;
+        }
+        long activation = kernel.getConfig() instanceof ChainSpec spec ? spec.getChainActivationHeight()
+                : Long.MAX_VALUE;
+        return new ChainApi(
+                () -> kernel.getBlockchain() == null || kernel.getBlockchain().getXdagStats() == null ? -1L
+                        : kernel.getBlockchain().getXdagStats().nmain,
+                activation, kernel.getChainL1Store(),
+                () -> kernel.getChainExecDriver() == null ? null : kernel.getChainExecDriver().executor(),
+                block -> kernel.getSyncMgr().submitBlock(
+                        new BlockWrapper(block, kernel.getConfig().getNodeSpec().getTTL())));
     }
 
     private void processBlock(CommandInput input) {

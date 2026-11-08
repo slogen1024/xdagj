@@ -37,10 +37,12 @@ import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.logging.LogLevel;
 import io.netty.handler.logging.LoggingHandler;
+import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler;
 import io.xdag.chain.rpc.ChainApi;
 import io.xdag.config.spec.RPCSpec;
 import io.xdag.rpc.api.XdagApi;
 import io.xdag.rpc.server.handler.ChainRequestHandler;
+import io.xdag.rpc.server.handler.ChainSocket;
 import io.xdag.rpc.server.handler.CorsHandler;
 import io.xdag.rpc.server.handler.JsonRequestHandler;
 import io.xdag.rpc.server.handler.JsonRpcHandler;
@@ -120,6 +122,10 @@ public class JsonRpcServer {
                             p.addLast(new HttpObjectAggregator(rpcSpec.getRpcHttpMaxContentLength()));
                             // CORS handler
                             p.addLast(new CorsHandler(rpcSpec.getRpcHttpCorsOrigins()));
+                            if (chainApi != null) {
+                                p.addLast(new WebSocketServerProtocolHandler("/chain", null, true, 65536));
+                                p.addLast(new ChainSocket(chainApi.feed()));
+                            }
                             // JSON-RPC handler
                             p.addLast(new JsonRpcHandler(rpcSpec, handlers));
                         }
