@@ -34,11 +34,11 @@
 | SP1-3 | 完成 | `InputStreamBuilder`（奖励在前，高度上可交付的出箱条目展开成 `recv`，再是调用）；`ChainExecutor.step/apply`（预扣、回滚帧、退款、`C_k`，奖励把费用池划给认证者）；`ExecChangeSet` 记每个 seq 的前像；`ChainExecDriver` 跟 `onSetMainEnd`，源出箱还没执行就等。根与承诺钉在 `ChainExecutorTest`。`MessageFlowTest` | K=128 淘汰、快照间隔、软预执行仍是 SP1-4。`onUnsetMain` 之后执行停住，不回滚 |
 | SP1-4 / 5 | 未开工 | — | 回滚、快照落库、两模式吞吐 |
 | SP2 | 完成 | `ClaimHandler`（`l1/handlers`）；`ClaimVerifier` / `ClaimProof` / `OutboxEntry` / `WithdrawOutbox` / `AnchorRecord` / `SettlementJournal` / `VaultLedger`（`asset/`）；`BlockchainImpl.chainTransfer`。0x06 只读（`FINAL` 才放行），0x08 `src‖dst‖index`，0x10 journal 进状态哈希。证明体版本 1。`ClaimFlowTest` | 四参 `ClaimHandler` 不限额。提现窗在 SP3 的 `WithdrawWindow` |
-| SP3 | 完成 | `BondHandler` / `AnchorHandler` / `ChallengeHandler`；`HeightTriggers`、`AnchorPublisher`、`DueSegments`、`RewardInputs`（`anchor/`）；`Witness`、`Arbiter`、`E2Replay`、`WitnessBackedStore`、`VerdictCache`、`Challenger`、`InputIndex`（`fraud/`）。E1/E2/E3 都实判。可交付高度上的出箱条目跑 `recv`。源锚定否决后 `onSourceVoided` 把消费链滚回交付前，并把 0x0B 游标退回。`E2ArbitrationBenchTest` 在 `maxCallGas` 下单次仲裁 < 2 s。`AnchorFlowTest`、`E2FlowTest`、`MessageFlowTest` | 源链没在本地执行时，目的链停在该高度，不编造消息体。`D == W` 不回滚。变更集不按 K=128 淘汰。docker 上的挑战罚没是 M5 |
-| SP4 | 部分 | 订阅集合；`0x1B–0x1F`；快照页与 SMT 根校验；四种证明体；`Delivery` 的 HOLD；未 `open` 的回复丢弃，每方向最多 64 条；拉取默认 8 MiB。进程内三节点见 `ThreeNodeDevnetTest` | 执行器只跑订阅链；docker 上的 D=0/D=W 与挑战罚没还没有。**M5 未关** |
+| SP3 | 完成 | `BondHandler` / `AnchorHandler` / `ChallengeHandler`；`HeightTriggers`、`AnchorPublisher`、`DueSegments`、`RewardInputs`（`anchor/`）；`Witness`、`Arbiter`、`E2Replay`、`WitnessBackedStore`、`VerdictCache`、`Challenger`、`InputIndex`（`fraud/`）。E1/E2/E3 都实判。可交付高度上的出箱条目跑 `recv`。源锚定否决后 `onSourceVoided` 把消费链滚回交付前，并把 0x0B 游标退回。`E2ArbitrationBenchTest` 在 `maxCallGas` 下单次仲裁 < 2 s。`AnchorFlowTest`、`E2FlowTest`、`MessageFlowTest` | `D == W` 不回滚。变更集不按 K=128 淘汰。没装上段证明时目的链停住，见 SP4。docker 上的挑战罚没是 M5 |
+| SP4 | 部分 | 订阅集合已经进 `ChainExecDriver`，执行器只跑订阅链。`0x1B–0x1F`；快照页与 SMT 根校验；四种证明体；`Delivery` 的 HOLD；未 `open` 的回复丢弃，每方向最多 64 条；拉取默认 8 MiB。`SegmentIntake` 用锚定的 outboxMap 根验段证明，通过后写入 `CHAIN_EXEC` 的 MMR 和出箱长度，目的链不用本地执行源链就能跑 `recv`。拉不到就停在该高度，下次 `onSetMainEnd` 再试。`DeliveryFetchTest`、`ThreeNodeDevnetTest` | 新订阅者的快照引导没接到执行器。节点不会自己发 0x1E，证明要 `ChainExecDriver.setProofs` 塞进来。docker 上的 D=0/D=W 与挑战罚没还没有。**M5 未关** |
 | SP5 | 未开工 | — | RPC、SDK、CLI、DApp |
 
-里程碑：M1、M2、M4 完成。M3 只关掉了导入门禁（19687 块/s），执行吞吐未测。M5、M6、M7 未完成。M5 还差 docker 上的跨链和挑战罚没。
+里程碑：M1、M2、M4 完成。M3 只关掉了导入门禁（19687 块/s），执行吞吐未测。M5、M6、M7 未完成。M5 还差 docker 上的跨链和挑战罚没。进程内目的链靠段证明交货已经能跑。
 
 ---
 
@@ -154,7 +154,7 @@ io.xdag.chain
 ├── ingest/         已建成（SP0b-2/3）：PreValidator, IngestPipeline, ChunkFeePolicy
 ├── orphan/         已建成（SP0b-3）：ChainOrphanPool
 ├── repair/         已建成（SP0b-1）：ChainConsistencyCheck, ChainRepairTool
-├── exec/           已建成 ChainExecStore（SP1-2），ChainExecutor, InputStreamBuilder, ChainLedger, ChainExecDriver（SP1-3），ExecChangeSet（源锚定否决回滚）。未建：K=128 淘汰、快照间隔、软预执行
+├── exec/           已建成 ChainExecStore（SP1-2），ChainExecutor, InputStreamBuilder, ChainLedger, ChainExecDriver（SP1-3），ExecChangeSet（源锚定否决回滚），SegmentProofs、SegmentIntake（SP4，段证明装入出箱）。未建：K=128 淘汰、快照间隔、软预执行、快照引导
 │   ├── wasm/       已建成（SP1-1）：WasmEngine, ChicoryEngine, ModuleValidator, GasInstrumenter, HostAbi
 │   └── state/      已建成（SP1-2）：SparseMerkleTree, StateTree, Mmr, OutboxMap, WitnessRecorder
 ├── anchor/         已建成（SP3）：BondVault, BondAccount, AnchorHead, AnchorBody, CommitmentChain, SegmentCursor, ChallengeRecord, TriggerList, TriggerOps, WithdrawWindow, HeightTriggers, DueSegments, RewardInputs, AnchorPublisher
@@ -434,7 +434,7 @@ SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器�
 
 ---
 
-## 9. SP4：订阅与 P2P（2026-11-07：线格式、快照页、四种证明体已实施。三节点交换见 `ThreeNodeDevnetTest`。docker 上的 D=0/D=W 与挑战罚没还没有）
+## 9. SP4：订阅与 P2P（2026-11-08：执行器只跑订阅链。`SegmentIntake` 把验过的段证明装进目的链出箱，`DeliveryFetchTest`。快照引导没接。节点不自己发 0x1E。docker 上的 D=0/D=W 与挑战罚没还没有）
 
 ### 9.1 订阅集合与过渡模式
 
@@ -450,11 +450,11 @@ SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器�
 | 0x1E/0x1F | CHAIN_PROOF_REQUEST/REPLY | (chain, seq, kind, key) → 段内容 + MMR 证明 / outboxMap SMT 证明 / C_k 开解 / 事件 | 订阅者 |
 
 - 新订阅者引导：最近 final 锚定 → 拉快照页 → 校验根 == 锚定 `stateRoot` → 从 seq 重放本地 L1 输入流；无锚定链从 DEPLOY 重放。
-- 跨链交付：目标链执行者在 `h_deliver` 前通过 0x1E 拉取源段内容与证明；拉不到 → 该链执行停在该高度（活性，不影响共识），并持续重试。
+- 跨链交付：目标链执行者在 `h_deliver` 前通过 0x1E 拉取源段内容与证明；拉不到 → 该链执行停在该高度（活性，不影响共识），并持续重试。落地：`ChainExecDriver.setProofs` 提供已经拉到的 outboxMap 证明和段证明。`SegmentIntake` 要求段的 MMR 根等于该锚定 outboxMap 里这个目的链的值，`from` 前面有缺口则 HOLD，根对不上则 REJECT 且不写。通过后写 MMR 和两个出箱长度（`prevSeq` 的 `from`、源锚定 seq 的 `to`），不写源链 head。没设 proofs 时仍要等本地把源链执行完。
 
 ### 9.3 多节点 devnet
 
-- 3 节点 docker-compose（复用现有 devnet 配置），2 条链，节点订阅不同链；跨链消息 D=0 与 D=W 对照；一次人为错误锚定的完整挑战-罚没流程脚本化。锚定和仲裁还没有，这一条没做。现在能跑的是进程内三节点：A 只订 S、B 只订 X、C 全订；C 向 A 拉快照并核对 SMT 根，段证明核对 MMR 根，未订阅或没有该段则 HOLD（`ThreeNodeDevnetTest`）。
+- 3 节点 docker-compose（复用现有 devnet 配置），2 条链，节点订阅不同链；跨链消息 D=0 与 D=W 对照；一次人为错误锚定的完整挑战-罚没流程脚本化。仓库里没有 compose，这一条没跑。进程内：`ThreeNodeDevnetTest` 覆盖订阅分裂、拉页对 SMT 根、段证明对 MMR 根、未订阅或没有该段则 HOLD。`DeliveryFetchTest` 覆盖只订目的链的节点装入段证明后跑 `recv`，源链 seq 保持 -1；证明没到则停住；MMR 根不是锚定承诺的则拒绝。`D == W` 不回滚在 `MessageFlowTest`。挑战罚没在 `AnchorFlowTest` / `E2FlowTest`，没有串进 docker。
 
 **任务量估计**：15–18 个任务。
 
@@ -529,11 +529,11 @@ SP0a ✅ ─┬─► SP0b-1 ✅ ─► SP0b-2 ✅ ─► SP0b-2b ✅ ─► SP0
                                           │
                                           ├─► SP2 ✅ ─┐
                                           └─► SP3 ✅ ─┤
-                                                   ├─► SP4（线格式/页/证明）─► SP5
+                                                   ├─► SP4（线格式/页/证明/段装入）─► SP5
 SP0b-3 ✅ ─────────────────────────────────────────┘
 ```
 
-SP0b 与 SP1 并行（不同包、不同人/会话）；SP2 与 SP3 并行（都依赖 SP1-3）。SP4 里不碰执行状态的那一层（订阅、消息、页、证明校验）已经做了，不依赖 SP2/SP3。M5 要的 docker 跨链和挑战罚没仍然依赖 SP2+SP3。
+SP0b 与 SP1 并行（不同包、不同人/会话）；SP2 与 SP3 并行（都依赖 SP1-3）。SP4 的订阅、消息、页、证明校验，以及把验过的段装进目的链出箱，已经做了。M5 要的 docker 跨链和挑战罚没仍然没跑。
 
 **SP0b-2b（§5.2.1）插在 SP0b-2 与 SP0b-3 之间，并且已经做完**：SP0b-2 自己的验收（导入 ≥ 10k 块/s）当时未达成，缺口在锁内"其余"；SP0b-2b 把锁内均值压到 42–49 µs，中位 19687 块/s，门禁关闭。它与 SP0b-3 在孤块池上有重叠，顺序可换。SP0b-3 也已经做完。M5 还差 SP4 里的 docker 演练，不是整段 SP4。
 
@@ -545,7 +545,7 @@ SP0b 与 SP1 并行（不同包、不同人/会话）；SP2 与 SP3 并行（都
 | **M2 引擎** | 完成 | SP1-1/2 完成 | 白名单/插桩测试向量已钉死。§8.3 不等式：随机读写的 `witnessBytes` ≤ `estimateFromGas(gasUsed)`（`StateAndWitnessTest`） |
 | **M3 执行** | 未完成 | SP0b-2/2b 的导入门禁已关；SP1-3 完成；SP1-4/5 未开工 | 单链执行吞吐 ≥ 2k 调用/s 未测；两模式一致未测。**导入 ≥ 10k 块/s 已达成**：20000 块负载 `pipeline` 中位 **19687 块/s**，锁内均值 42–49 µs。瓶颈是 `checkMineAndAdd` 对每个块做 secp256k1，不是 AddressStore。见 `docs/benchmarks/2026-11-07-sp0b2b-import.md` |
 | **M4 经济与安全** | 完成 | SP2、SP3 | `ClaimFlowTest` 覆盖 I1/I2。`AnchorFlowTest` 覆盖保证金、终局、E1、E3、顺延、畸形 E2、可交付标记、缓存、发布、挑战组块和否决后退游标。`E2FlowTest` 覆盖解释器重执行。`MessageFlowTest` 覆盖 `recv` 和 `onSourceVoided`。`E2ArbitrationBenchTest` 覆盖 2 秒上限。docker 罚没不在本里程碑 |
-| **M5 网络** | 未完成 | SP0b-3 完成；SP4 的线格式、页、证明完成 | 3 节点 devnet 跨链 + 挑战演练脚本仍未通过。进程内三节点只覆盖订阅分裂和拉页/拉证明 |
+| **M5 网络** | 未完成 | SP0b-3 完成；SP4 的线格式、页、证明、段装入完成 | 3 节点 docker 跨链 + 挑战演练仍未通过。进程内：`ThreeNodeDevnetTest` 覆盖订阅分裂和拉页/拉证明；`DeliveryFetchTest` 覆盖目的链装入段证明后跑 `recv`。快照引导未接 |
 | **M6 开发者面** | 未开工 | SP5 | RPC/SDK/CLI/DApp；文档 |
 | **M7 testnet 激活** | 未开工 | 治理定高度、快照、观察期 | §11.3 |
 

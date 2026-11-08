@@ -235,20 +235,24 @@ public final class ChainExecStore implements XdagLifecycle {
         source.delete(headKey(chain));
     }
 
-    /** Entry count of {@code dst}'s outbox at {@code seq}. {@code -1} when this chain has not executed {@code seq}. */
+    /**
+     * Entry count of {@code dst}'s outbox at {@code seq}. A size row written by execution or by a
+     * fetched segment wins. {@code -1} when there is no row and this chain has not executed
+     * {@code seq}. An executed seq with no row is {@code 0}.
+     */
     public int outboxSize(Bytes32 chain, Bytes32 dst, long seq) {
         if (seq < 0) {
             return 0;
+        }
+        byte[] raw = source.get(sizeKey(chain, dst, seq));
+        if (raw != null && raw.length == Integer.BYTES) {
+            return ByteBuffer.wrap(raw).getInt();
         }
         Head head = getHead(chain);
         if (head == null || Long.compareUnsigned(head.seq(), seq) < 0) {
             return -1;
         }
-        byte[] raw = source.get(sizeKey(chain, dst, seq));
-        if (raw == null || raw.length != Integer.BYTES) {
-            return 0;
-        }
-        return ByteBuffer.wrap(raw).getInt();
+        return 0;
     }
 
     public void putOutboxSize(Bytes32 chain, Bytes32 dst, long seq, int size) {

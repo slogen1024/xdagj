@@ -40,6 +40,9 @@ import org.apache.tuweni.bytes.Bytes32;
 
 import com.dylibso.chicory.runtime.TrapException;
 
+import io.xdag.chain.anchor.AnchorBody;
+import io.xdag.chain.anchor.TriggerList;
+import io.xdag.chain.asset.AnchorRecord;
 import io.xdag.chain.asset.WithdrawOutbox;
 import io.xdag.chain.exec.state.Mmr;
 import io.xdag.chain.exec.state.OutboxMap;
@@ -108,6 +111,46 @@ public final class ChainExecutor implements ExecHost.Calls {
     /** False while a deliverable source outbox is not in the exec store yet. */
     public boolean ready(Bytes chain, long seq) {
         return inputs.ready(chain, seq);
+    }
+
+    /**
+     * Pull segment proofs for deliverable marks whose outbox is not local yet. HOLD leaves the
+     * store alone. REJECT writes nothing. A verified segment becomes the outbox the next
+     * {@link #ready} call sees.
+     */
+    public void fetchDeliveries(Bytes chain, long seq, SegmentProofs proofs) {
+        if (proofs == null || store == null) {
+            return;
+        }
+        for (TriggerList.Item mark : inputs.marks(chain, seq)) {
+            AnchorBody body = anchor(mark.attester(), mark.seq());
+            if (body == null) {
+                continue;
+            }
+            Bytes32 src = chain32(mark.attester());
+            Bytes32 dst = chain32(chain);
+            if (store.outboxSize(src, dst, mark.seq()) >= 0 && store.outboxSize(src, dst, body.prevSeq()) >= 0) {
+                continue;
+            }
+            SegmentProofs.Bodies got = proofs.pull(mark.attester(), mark.seq(), chain.toArray(), body.outboxMapRoot());
+            if (got == null) {
+                continue;
+            }
+            SegmentIntake.install(store, mark.attester(), chain.toArray(), mark.seq(), body.prevSeq(),
+                    body.outboxMapRoot(), got.outbox(), got.segment());
+        }
+    }
+
+    private AnchorBody anchor(byte[] src, long seq) {
+        byte[] raw = l1.getAnchorRaw(Bytes.wrap(src), seq);
+        if (raw == null) {
+            return null;
+        }
+        AnchorRecord stored = AnchorRecord.decode(raw);
+        if (stored == null || stored.status() == AnchorRecord.Status.VOIDED) {
+            return null;
+        }
+        return AnchorBody.decode(raw);
     }
 
     public List<Outcome> step(Bytes chain, long seq, long timestamp) {

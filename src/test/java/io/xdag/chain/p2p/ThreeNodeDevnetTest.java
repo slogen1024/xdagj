@@ -43,9 +43,10 @@ import org.apache.tuweni.bytes.Bytes32;
 import org.junit.Test;
 
 /**
- * Three subscribers, two chains. A runs S, B runs X, C runs both. What can be drilled without an
- * anchor or an arbiter: the announcement, a snapshot whose root is the caller's, a segment proof,
- * and the stall when the segment is not served. The slash of a bad anchor is SP3.
+ * Three subscribers, two chains. A runs S, B runs X, C runs both. This drill is the announcement,
+ * a snapshot whose root is the caller's, a segment proof, and the stall when the segment is not
+ * served. Installing that segment into a destination executor is {@code DeliveryFetchTest}. The
+ * slash of a bad anchor is {@code AnchorFlowTest}. Docker is not this test.
  */
 public class ThreeNodeDevnetTest {
 

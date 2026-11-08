@@ -88,7 +88,7 @@
 | 锁 | `tryToConnect` 全局 `synchronized`，验签与递归结算都在锁内 | L1 导入流水线必须并行化（SP0） |
 | 孤块池 | `MAX_ORPHAN_SIZE = 3750`，满则拒绝账户交易块 | 需改为按链分队列/提高上限（SP0） |
 | 原生账本 | `AddressStore`：20B 地址 → 余额/nonce | 链金库、保证金库都是普通 20B 地址（无私钥）；用户在链内沿用同一地址 |
-| P2P | `0x1B–0x1F` 已占用。快照页是排序 KV，根是 256 层 SHA-256 SMT；证明体四种（段+MMR、outboxMap SMT、C_k 开解、事件 MMR）。块传播仍走 `NEW_BLOCK` | 请求方拿自己的锚定根来验，不信对端报的根。执行器还没往 `ChainRecords` 写，空库回 ABSENT。docker 挑战罚没未做 |
+| P2P | `0x1B–0x1F` 已占用。快照页是排序 KV，根是 256 层 SHA-256 SMT；证明体四种（段+MMR、outboxMap SMT、C_k 开解、事件 MMR）。块传播仍走 `NEW_BLOCK` | 请求方拿锚定的 outboxMap 根验段证明（`SegmentIntake`），对上才写入 `CHAIN_EXEC`。执行器不写 `ChainRecords`，空库回 ABSENT，也不自己发 0x1E。docker 挑战罚没未做 |
 | 存储 | 8 个 RocksDB 实例，1 字节前缀分区，只有 `batchWrite` 原子 | 新增 `CHAIN_L1`（全网小状态）与 `CHAIN_EXEC`（订阅链状态）两个实例 |
 
 ---
@@ -737,7 +737,7 @@ verify(challenge):
 
 顺序：SP0a → SP1 → SP2 / SP3（SP1 后可并行）→ SP4 → SP5；SP0b 与 SP1 并行。
 
-**进度（2026-11-08，细节在路线图 §0）**：SP0a、SP0b（含 2b 的 10k 导入门禁）、SP1-1、SP1-2、SP1-3、SP2、SP3 完成。SP3 含保证金、锚定规范链、终局、E1/E2/E3、罚没、提现窗、奖励输入、可交付消息体（`recv`）、`onSourceVoided` 执行回滚、`AnchorPublisher`、`Challenger`、锁外裁决缓存，以及 `maxCallGas` 下单次 E2 仲裁 < 2 s。源链 MMR 不在本地时目的链停住，不编造消息。变更集不按 K=128 淘汰，`onUnsetMain` 仍只停住。SP4 的订阅、`0x1B–0x1F`、快照页、四种证明体完成；docker 上的挑战罚没还没有。SP1-4 起、SP5 未开工。M1、M2、M4 完成；M3 的执行吞吐未测；M5–M7 未完成。
+**进度（2026-11-08，细节在路线图 §0）**：SP0a、SP0b（含 2b 的 10k 导入门禁）、SP1-1、SP1-2、SP1-3、SP2、SP3 完成。SP3 含保证金、锚定规范链、终局、E1/E2/E3、罚没、提现窗、奖励输入、可交付消息体（`recv`）、`onSourceVoided` 执行回滚、`AnchorPublisher`、`Challenger`、锁外裁决缓存，以及 `maxCallGas` 下单次 E2 仲裁 < 2 s。变更集不按 K=128 淘汰，`onUnsetMain` 仍只停住。SP4 的订阅、`0x1B–0x1F`、快照页、四种证明体完成；执行器只跑订阅链。`SegmentIntake` 在段的 MMR 根等于锚定 outboxMap 时把条目装进目的链，否则停住，不编造消息。快照引导没接，节点不自己发 0x1E。docker 上的挑战罚没还没有。SP1-4 起、SP5 未开工。M1、M2、M4 完成；M3 的执行吞吐未测；M5–M7 未完成。
 
 **实施级总体设计与路线图**（各子项目的接口、数据结构、算法、测试、切片与里程碑）见 `2026-09-17-xdag-chain-contracts-program-design-and-roadmap.md`；SP0b 拆为 SP0b-1（基准 + 加固工单）→ SP0b-2（锁外预验证流水线）→ SP0b-3（孤块池分队列/配额/TTL + 导入期费率策略）。
 

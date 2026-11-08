@@ -52,6 +52,7 @@ public final class ChainExecDriver {
     private final ChainSubscriptions subscriptions;
     private final ChainL1Store l1;
     private final long window;
+    private SegmentProofs proofs;
     private boolean blocked;
 
     public ChainExecDriver(ChainExecutor executor, ChainSubscriptions subscriptions, ChainL1Store l1) {
@@ -63,6 +64,11 @@ public final class ChainExecDriver {
         this.subscriptions = subscriptions;
         this.l1 = l1;
         this.window = window;
+    }
+
+    /** Proofs already pulled from a peer. Null keeps the stall until the source is executed locally. */
+    public void setProofs(SegmentProofs proofs) {
+        this.proofs = proofs;
     }
 
     public boolean isBlocked() {
@@ -83,7 +89,13 @@ public final class ChainExecDriver {
                 }
                 long head = executor.appliedSeq(chain);
                 long seq = head < 0 ? record.createdHeight() : head + 1;
-                if (seq > height || !executor.ready(chain, seq)) {
+                if (seq > height) {
+                    continue;
+                }
+                if (!executor.ready(chain, seq)) {
+                    executor.fetchDeliveries(chain, seq, proofs);
+                }
+                if (!executor.ready(chain, seq)) {
                     continue;
                 }
                 executor.step(chain, seq, timestamp.applyAsLong(seq));

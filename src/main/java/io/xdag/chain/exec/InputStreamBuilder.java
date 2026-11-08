@@ -143,9 +143,14 @@ public final class InputStreamBuilder {
         return out;
     }
 
+    List<TriggerList.Item> marks(Bytes chain, long height) {
+        return deliverableMarks(chain, height);
+    }
+
     /**
-     * False when a live deliverable mark's source outbox is not in the exec store yet. The driver
-     * waits and steps that source first. No exec store is ready only when this height has no marks.
+     * False when a live deliverable mark's source outbox is not in the exec store yet. A fetched
+     * segment fills that gap; until it does the driver leaves the chain at the previous seq.
+     * No exec store is ready only when this height has no marks.
      */
     public boolean ready(Bytes chain, long height) {
         if (exec == null) {
