@@ -15,7 +15,7 @@ import {
   subscribe,
   u32,
   u64,
-} from "./abi.mjs";
+} from "./abi.js";
 
 test("selector and lengths match AbiCodec", () => {
   assert.equal(selector("balanceOf(address)"), 1531377910);

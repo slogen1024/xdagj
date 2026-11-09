@@ -1,0 +1,29 @@
+[package]
+name = "xdag-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "no_std contracts compiled to wasm the XDAG executor accepts"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "token"
+path = "src/bin/token.rs"
+
+[[bin]]
+name = "pool"
+path = "src/bin/pool.rs"
+
+[[bin]]
+name = "inbox"
+path = "src/bin/inbox.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

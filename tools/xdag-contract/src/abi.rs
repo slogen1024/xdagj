@@ -44,6 +44,8 @@ mod tests {
         assert_eq!(selector("balanceOf(address)"), 1_531_377_910);
         assert_eq!(selector("transfer(address,u64)"), 1_433_710_159);
         assert_eq!(selector("Transfer(address,address,u64)"), -2_021_979_357);
+        assert_eq!(selector("mint(address,u64)"), -617_361_918);
+        assert_eq!(selector("seed(u64,u64)"), 671_297_210);
         assert_eq!(u32_le(2), [2, 0, 0, 0]);
         assert_eq!(u64_le(1), [1, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(bytes(&[9, 8]), vec![2, 0, 0, 0, 9, 8]);

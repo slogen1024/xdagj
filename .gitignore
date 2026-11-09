@@ -19,6 +19,7 @@ mainnet
 target
 logs
 dist
+node_modules
 #for macos
 .DS_Store
 src/c/
