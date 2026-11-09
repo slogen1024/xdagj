@@ -26,11 +26,14 @@ package io.xdag.chain;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+import java.util.List;
+
 import org.apache.tuweni.bytes.Bytes32;
 import org.junit.Test;
 
 import io.xdag.chain.ActivationObservation.Record;
 import io.xdag.chain.ActivationObservation.Shot;
+import io.xdag.chain.repair.ChainConsistencyCheck;
 
 public class ActivationObservationTest {
 
@@ -68,6 +71,19 @@ public class ActivationObservationTest {
         assertEquals("refused mainnet-height", ActivationObservation.mainnet(H, ready(H), NOW, H));
         assertEquals("refused mainnet-height", ActivationObservation.mainnet(H, ready(H), NOW, Long.MAX_VALUE));
         assertTrue(ActivationObservation.mainnet(Long.MAX_VALUE, ready(Long.MAX_VALUE), NOW, 5000L).startsWith("refused "));
+    }
+
+    @Test
+    public void aCleanConsistencyReportClosesAndAStuckOneDoesNot() {
+        ChainConsistencyCheck.Report clean = new ChainConsistencyCheck.Report(10, 10, List.of(), false, false);
+        assertEquals("ready", ActivationObservation.describe(H,
+                ActivationObservation.fromReport(H, 0, new Shot(H - 1, BEFORE), new Shot(H, AFTER), clean, true), NOW));
+        ChainConsistencyCheck.Report stuck = new ChainConsistencyCheck.Report(10, 9,
+                List.of(new ChainConsistencyCheck.Stuck(9, null, "setMain incomplete")), false, false);
+        assertEquals("open consistency-hits", ActivationObservation.describe(H,
+                ActivationObservation.fromReport(H, 0, new Shot(H - 1, BEFORE), new Shot(H, AFTER), stuck, true), NOW));
+        assertEquals("open consistency", ActivationObservation.describe(H,
+                ActivationObservation.fromReport(H, 0, new Shot(H - 1, BEFORE), new Shot(H, AFTER), null, true), NOW));
     }
 
     private static Record ready(long height) {

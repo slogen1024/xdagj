@@ -24,6 +24,7 @@
 
 package io.xdag.chain;
 
+import io.xdag.chain.repair.ChainConsistencyCheck;
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.tuweni.bytes.Bytes32;
@@ -51,6 +52,14 @@ public final class ActivationObservation {
      */
     public record Record(long activationHeight, long startedAtMillis, Shot before, Shot after,
             boolean consistencyRan, int consistencyHits, boolean challengeDrilled) {
+    }
+
+    /** Hits are {@code report.stuck().size()}. A missing report is not a clean scan. */
+    public static Record fromReport(long activationHeight, long startedAtMillis, Shot before, Shot after,
+            ChainConsistencyCheck.Report report, boolean challengeDrilled) {
+        boolean ran = report != null;
+        return new Record(activationHeight, startedAtMillis, before, after, ran, ran ? report.stuck().size() : 0,
+                challengeDrilled);
     }
 
     public static List<String> gaps(long networkHeight, Record record, long nowMillis) {
