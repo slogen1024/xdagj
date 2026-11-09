@@ -46,3 +46,49 @@ export function query(chain, contract, selectorValue, args, view) {
 export function sendCall(rawBlocks) {
   return request("chain_sendCall", [rawBlocks]);
 }
+
+export const VIEWS = ["pending", "confirmed", "anchored", "final"];
+
+export function getState(chain, contract, keyHex, view) {
+  return request("chain_getState", [chain, contract, keyHex, view]);
+}
+
+export function getProof(chain, contract, keyHex, view) {
+  return request("chain_getProof", [chain, contract, keyHex, view]);
+}
+
+/** chain_estimateGas has no view. The node tries the pending copy. */
+export function estimateGas(chain, contract, selectorValue, args) {
+  return request("chain_estimateGas", [chain, contract, selectorValue, Buffer.from(args).toString("hex")]);
+}
+
+export function getAnchor(chain, seq) {
+  return request("chain_getAnchor", [chain, seq]);
+}
+
+export function getHead(chain) {
+  return request("chain_getHead", [chain]);
+}
+
+export function getReceipt(blockHash) {
+  return request("chain_getReceipt", [blockHash]);
+}
+
+/** Omit dst and the node builds the claim without a destination. */
+export function buildClaim(chain, seq, index, dst) {
+  const params = dst == null ? [chain, seq, index] : [chain, seq, index, dst];
+  return request("chain_buildClaim", params);
+}
+
+export function subscribe(kind) {
+  return request("chain_subscribe", [kind]);
+}
+
+export function pollBalance(chain, account) {
+  return VIEWS.map((view) => getBalance(chain, account, view));
+}
+
+/** Words after the chain verb: deploy, chain hex, wasm hex, gas. */
+export function deployWords(chainHex, wasm, gas) {
+  return ["deploy", chainHex, Buffer.from(wasm).toString("hex"), String(gas)];
+}

@@ -683,7 +683,7 @@ verify(challenge):
 
 原生 `xdag_*` 全部不变。
 
-**进度**：`pending` 在副本上跑未确认调用。`anchored`/`final` 读锚定 seq 的副本状态，窗口外的 seq 用快照页。`query` 在 `deployHeight > seq` 时返回 null。回执带 seq 和事件，确认级按锚定覆盖面写。`chain_buildClaim` 返回版本 1 的 `ClaimProof`。`/chain` 推送。`AbiCodec` 与 telnet `chain`（读，以及 `ChainCli.Signer` 签名）已有。`tools/xdag-contract` 与 `tools/xdag-client` 钉了同一组 selector，并组 `chain_getBalance` / `chain_query` / `chain_sendCall`。`#[xdag::contract]` 在内存宿主上分发 selector。SDK 写出三个 wasm，`ReferenceDappsTest` 跑它们，`SdkDeployTest` 经 `chain deploy` 组块后拼回原字节再跑。没有把 Rust 编译成 wasm。`chain activation` 只报告高度，不设定它。
+**进度**：`pending` 在副本上跑未确认调用。`anchored`/`final` 读锚定 seq 的副本状态，窗口外的 seq 用快照页。`query` 在 `deployHeight > seq` 时返回 null。回执带 seq 和事件，确认级按锚定覆盖面写。`chain_buildClaim` 返回版本 1 的 `ClaimProof`。`/chain` 推送。`AbiCodec` 与 telnet `chain`（读，以及 `ChainCli.Signer` 签名）已有。`tools/xdag-contract` 与 `tools/xdag-client` 钉了同一组 selector，并组齐 `ChainRequestHandler` 上的 `chain_*`，按四级视图轮询余额。`#[xdag::contract]` 在内存宿主上分发 selector。SDK 写出三个 wasm，`ReferenceDappsTest` 跑它们，`SdkDeployTest` 经 `chain deploy` 组块后拼回原字节再跑。没有把 Rust 编译成 wasm。`chain activation` 只报告高度，不设定它。
 
 ### 16.2 SDK 与工具
 

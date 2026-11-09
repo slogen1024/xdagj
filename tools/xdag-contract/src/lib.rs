@@ -17,7 +17,10 @@ pub use abi::{address, bytes, event, selector, string, u32_le, u64_le};
 pub use dex::Pool;
 pub use host::Host;
 pub use message::Inbox;
-pub use rpc::{get_balance, query, send_call};
+pub use rpc::{
+    build_claim, deploy_words, estimate_gas, get_anchor, get_balance, get_head, get_proof, get_receipt, get_state,
+    poll_balance, query, send_call, subscribe, VIEWS,
+};
 pub use storage::{Map, Set, VecStore};
 pub use wasm::{inbox, pool, token};
 pub use xrc20::Token;
