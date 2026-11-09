@@ -1,0 +1,9 @@
+[package]
+name = "xdag-contract"
+version = "0.1.0"
+edition = "2021"
+description = "ABI, memory host, and the three reference contracts for the XDAG chain protocol"
+license = "MIT"
+
+[dependencies]
+sha2 = "0.10"

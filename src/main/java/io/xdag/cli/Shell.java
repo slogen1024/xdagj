@@ -245,7 +245,7 @@ public class Shell extends JlineCommandRegistry implements CommandRegistry, Teln
     private void processChain(CommandInput input) {
         final String[] usage = {
                 "chain -  read a contract chain\n",
-                "Usage: chain balance|state|query|head|anchor|receipt|claim|send|subscribe ...",
+                "Usage: chain balance|state|query|head|anchor|receipt|claim|send|subscribe|activation ...",
                 "  -? --help                    Show help",
         };
         try {

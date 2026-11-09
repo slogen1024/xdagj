@@ -35,6 +35,7 @@ import org.junit.Test;
 import io.xdag.chain.ext.ChainBlockClassifier;
 import io.xdag.chain.ext.ExtKind;
 import io.xdag.config.DevnetConfig;
+import io.xdag.config.TestnetConfig;
 import io.xdag.core.Block;
 import io.xdag.crypto.SampleKeys;
 import io.xdag.crypto.keys.ECKeyPair;
@@ -63,5 +64,16 @@ public class ChainCliSignTest {
         assertEquals(ExtKind.BOND, ChainBlockClassifier.classify(sent.get(0)).kind());
         assertTrue(ChainCli.run(null, signer, "create", Bytes.wrap(new byte[32]).toHexString(), "1", "0", "1000000",
                 "1000").startsWith("0x"));
+    }
+
+    @Test
+    public void activationSaysWhetherAHeightHasBeenScheduled() {
+        ChainCli.Signer devnet = new ChainCli.Signer(new DevnetConfig(),
+                ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY), 1L, TS, blocks -> { });
+        assertEquals("scheduled 0", ChainCli.run(null, devnet, "activation"));
+        ChainCli.Signer testnet = new ChainCli.Signer(new TestnetConfig(),
+                ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY), 1L, TS, blocks -> { });
+        assertEquals("unscheduled " + Long.MAX_VALUE, ChainCli.run(null, testnet, "activation"));
+        assertEquals("chain", ChainCli.run(null, "activation"));
     }
 }

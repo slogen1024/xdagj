@@ -65,6 +65,13 @@ public final class ChainCli {
         if (args == null || args.length == 0) {
             return usage();
         }
+        if ("activation".equals(args[0])) {
+            if (signer == null || signer.config == null) {
+                return "chain";
+            }
+            long height = signer.config.getChainSpec().getChainActivationHeight();
+            return height == Long.MAX_VALUE ? "unscheduled " + height : "scheduled " + height;
+        }
         if (signs(args)) {
             if (signer == null) {
                 return "key";
@@ -136,7 +143,7 @@ public final class ChainCli {
     }
 
     public static String usage() {
-        return "chain balance|state|query|head|anchor|receipt|claim|send|subscribe|call|create|deploy|bond|unbond|challenge";
+        return "chain balance|state|query|head|anchor|receipt|claim|send|subscribe|activation|call|create|deploy|bond|unbond|challenge";
     }
 
     private static boolean signs(String[] args) {

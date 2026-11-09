@@ -37,7 +37,8 @@ public class AbiCodecTest {
         assertArrayEquals(new byte[] {2, 0, 0, 0, 9, 8}, AbiCodec.bytes(new byte[] {9, 8}));
         byte[] event = AbiCodec.event("Transfer(address,address,u64)", AbiCodec.u64(7));
         assertEquals(40, event.length);
-        assertEquals(AbiCodec.selector("balanceOf(address)"), AbiCodec.selector("balanceOf(address)"));
+        assertEquals(1531377910, AbiCodec.selector("balanceOf(address)"));
+        assertEquals(-2021979357, AbiCodec.selector("Transfer(address,address,u64)"));
         assertEquals(20, AbiCodec.address(new byte[20]).length);
     }
 }
