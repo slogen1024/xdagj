@@ -1,19 +1,21 @@
-use crate::abi::{bytes, selector};
+use crate::abi::bytes;
 use crate::host::Host;
-
 /// Cross-chain ping. `ping(bytes)` appends one outbox row. It does not wait for D.
 pub struct Inbox;
 
+#[xdag::contract]
 impl Inbox {
     pub const PING: &'static str = "ping(bytes)";
 
-    pub fn call(host: &mut Host, dst_chain: [u8; 20], contract: [u8; 20]) -> bool {
-        if host.selector != selector(Self::PING) {
-            return false;
-        }
+    /// Destination is `host.dst_chain` / `host.dst_contract`. Args are length-prefixed.
+    #[xdag::method("ping(bytes)", reentrant)]
+    pub fn ping(host: &mut Host) -> bool {
         let args = bytes(&host.input);
         let value = host.value;
-        host.send(dst_chain, contract, host.selector, args, value);
+        let dst = host.dst_chain;
+        let contract = host.dst_contract;
+        let selector = host.selector;
+        host.send(dst, contract, selector, args, value);
         true
     }
 }
@@ -21,6 +23,7 @@ impl Inbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::abi::selector;
 
     #[test]
     fn ping_is_one_outbox_row() {
@@ -28,12 +31,13 @@ mod tests {
         host.selector = selector(Inbox::PING);
         host.input = vec![9, 8];
         host.value = 50;
-        let dst = [3u8; 20];
-        let contract = [4u8; 20];
-        assert!(Inbox::call(&mut host, dst, contract));
+        host.dst_chain = [3u8; 20];
+        host.dst_contract = [4u8; 20];
+        assert!(Inbox::call(&mut host));
         assert_eq!(host.outbox.len(), 1);
-        assert_eq!(host.outbox[0].dst_chain, dst);
+        assert_eq!(host.outbox[0].dst_chain, [3u8; 20]);
         assert_eq!(host.outbox[0].value, 50);
         assert_eq!(host.outbox[0].args, vec![2, 0, 0, 0, 9, 8]);
+        assert_eq!(Inbox::reentrant_selectors(), &[selector(Inbox::PING)]);
     }
 }

@@ -1,0 +1,16 @@
+[package]
+name = "xdag"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "#[xdag::contract] selector dispatch for the XDAG memory host"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+sha2 = "0.10"
+syn = { version = "2", features = ["full"] }

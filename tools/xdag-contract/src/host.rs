@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 pub struct Host {
     storage: BTreeMap<Vec<u8>, Vec<u8>>,
     pub caller: [u8; 20],
+    pub dst_chain: [u8; 20],
+    pub dst_contract: [u8; 20],
     pub selector: i32,
     pub input: Vec<u8>,
     pub value: u64,
@@ -29,6 +31,10 @@ impl Host {
 
     pub fn storage_set(&mut self, key: &[u8], value: &[u8]) {
         self.storage.insert(key.to_vec(), value.to_vec());
+    }
+
+    pub fn storage_remove(&mut self, key: &[u8]) {
+        self.storage.remove(key);
     }
 
     pub fn emit(&mut self, body: Vec<u8>) {

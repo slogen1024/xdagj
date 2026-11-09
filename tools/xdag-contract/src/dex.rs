@@ -1,9 +1,9 @@
-use crate::abi::{selector, u64_le};
+use crate::abi::u64_le;
 use crate::host::Host;
-
 /// Constant-product pool. Reserves live in this host. Fee is zero.
 pub struct Pool;
 
+#[xdag::contract]
 impl Pool {
     pub const SWAP: &'static str = "swap(u64,u64)";
 
@@ -13,8 +13,9 @@ impl Pool {
     }
 
     /// `input` is `amount_in ‖ min_out`, both u64 LE. Output amount is written to `returns`.
-    pub fn call(host: &mut Host) -> bool {
-        if host.selector != selector(Self::SWAP) || host.input.len() != 16 {
+    #[xdag::method("swap(u64,u64)")]
+    pub fn swap(host: &mut Host) -> bool {
+        if host.input.len() != 16 {
             return false;
         }
         let amount_in = read(&host.input[..8]);
@@ -52,6 +53,7 @@ fn read(raw: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::abi::selector;
 
     #[test]
     fn swap_keeps_the_product() {

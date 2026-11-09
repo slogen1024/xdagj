@@ -1,9 +1,10 @@
-use crate::abi::{event, selector, u64_le};
+use crate::abi::{event, u64_le};
 use crate::host::Host;
-
+use crate::storage::Map;
 /// XRC-20 balances under this host. `transfer(address,u64)` and `balanceOf(address)`.
 pub struct Token;
 
+#[xdag::contract]
 impl Token {
     pub const TRANSFER: &'static str = "transfer(address,u64)";
     pub const BALANCE_OF: &'static str = "balanceOf(address)";
@@ -11,28 +12,27 @@ impl Token {
 
     pub fn mint(host: &mut Host, to: [u8; 20], amount: u64) {
         let next = Self::balance(host, &to).saturating_add(amount);
-        host.storage_set(&key(&to), &u64_le(next));
+        balances().set(host, &to, &u64_le(next));
     }
 
     pub fn balance(host: &Host, account: &[u8; 20]) -> u64 {
-        host.storage_get(&key(account))
-            .map(read_u64)
-            .unwrap_or(0)
+        balances().get(host, account).map(read_u64).unwrap_or(0)
     }
 
-    /// Dispatches on `host.selector`. Returns false when the selector is unknown or the
-    /// caller cannot cover the transfer.
-    pub fn call(host: &mut Host) -> bool {
-        if host.selector == selector(Self::BALANCE_OF) {
-            if host.input.len() != 20 {
-                return false;
-            }
-            let mut account = [0u8; 20];
-            account.copy_from_slice(&host.input);
-            host.returns = u64_le(Self::balance(host, &account)).to_vec();
-            return true;
+    #[xdag::method("balanceOf(address)")]
+    pub fn balance_of(host: &mut Host) -> bool {
+        if host.input.len() != 20 {
+            return false;
         }
-        if host.selector != selector(Self::TRANSFER) || host.input.len() != 28 {
+        let mut account = [0u8; 20];
+        account.copy_from_slice(&host.input);
+        host.returns = u64_le(Self::balance(host, &account)).to_vec();
+        true
+    }
+
+    #[xdag::method("transfer(address,u64)")]
+    pub fn transfer(host: &mut Host) -> bool {
+        if host.input.len() != 28 {
             return false;
         }
         let mut to = [0u8; 20];
@@ -43,19 +43,16 @@ impl Token {
         if have < amount {
             return false;
         }
-        host.storage_set(&key(&from), &u64_le(have - amount));
+        balances().set(host, &from, &u64_le(have - amount));
         let dest = Self::balance(host, &to).saturating_add(amount);
-        host.storage_set(&key(&to), &u64_le(dest));
+        balances().set(host, &to, &u64_le(dest));
         host.emit(event(Self::TRANSFER_EVENT, &u64_le(amount)));
         true
     }
 }
 
-fn key(account: &[u8; 20]) -> Vec<u8> {
-    let mut raw = Vec::with_capacity(21);
-    raw.push(1);
-    raw.extend_from_slice(account);
-    raw
+fn balances() -> Map {
+    Map::new(&[1])
 }
 
 fn read_u64(raw: &[u8]) -> u64 {
@@ -67,6 +64,7 @@ fn read_u64(raw: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::abi::selector;
 
     #[test]
     fn transfer_moves_balance_and_emits() {
@@ -89,5 +87,6 @@ mod tests {
         host.input = bob.to_vec();
         assert!(Token::call(&mut host));
         assert_eq!(host.returns, u64_le(20));
+        assert!(Token::reentrant_selectors().is_empty());
     }
 }
