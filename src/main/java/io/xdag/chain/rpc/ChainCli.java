@@ -31,6 +31,7 @@ import org.apache.tuweni.bytes.Bytes;
 import org.apache.tuweni.bytes.Bytes32;
 import org.apache.tuweni.units.bigints.UInt64;
 
+import io.xdag.chain.ActivationObservation;
 import io.xdag.chain.ext.ChainBlockBuilder;
 import io.xdag.chain.ext.ChainConfigExt;
 import io.xdag.chain.ext.ExtResult;
@@ -70,6 +71,9 @@ public final class ChainCli {
                 return "chain";
             }
             long height = signer.config.getChainSpec().getChainActivationHeight();
+            if (args.length > 1 && ("watch".equals(args[1]) || "mainnet".equals(args[1]))) {
+                return observe(height, args);
+            }
             return height == Long.MAX_VALUE ? "unscheduled " + height : "scheduled " + height;
         }
         if (signs(args)) {
@@ -144,6 +148,19 @@ public final class ChainCli {
 
     public static String usage() {
         return "chain balance|state|query|head|anchor|receipt|claim|send|subscribe|activation|call|create|deploy|bond|unbond|challenge";
+    }
+
+    private static String observe(long networkHeight, String[] args) {
+        int width = "mainnet".equals(args[1]) ? 12 : 11;
+        require(args, width);
+        boolean ran = !"-".equals(args[8]);
+        ActivationObservation.Record record = new ActivationObservation.Record(number(args[2]), number(args[3]),
+                new ActivationObservation.Shot(number(args[4]), hash(args[5])),
+                new ActivationObservation.Shot(number(args[6]), hash(args[7])),
+                ran, ran ? Integer.parseInt(args[8]) : 0, number(args[9]) == 1L);
+        return "mainnet".equals(args[1])
+                ? ActivationObservation.mainnet(networkHeight, record, number(args[10]), number(args[11]))
+                : ActivationObservation.describe(networkHeight, record, number(args[10]));
     }
 
     private static boolean signs(String[] args) {

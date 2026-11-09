@@ -39,7 +39,7 @@
 | SP4 | 完成 | 订阅集合已经进 `ChainExecDriver`，执行器只跑订阅链。`0x1B–0x1F`；快照页与 SMT 根校验；四种证明体；`Delivery` 的 HOLD；未 `open` 的回复丢弃，每方向最多 64 条；拉取默认 8 MiB。`SegmentIntake` 验过段证明后写入出箱。握手完成后 `ChainPull.wire` 自己发 `0x1E`，同一 request id 等 `0x1F`。有 FINAL 锚定时 `SnapshotSync.gather` 把页装进执行器，根对上才从该 seq 之后接着跑；拉不到就从创建高度重放。`ThreeNodeDrillTest`：D=0 发 `0x1E` 后跑 `recv`，D=W 在 FINAL 之前余额为 0，之后入账；`AnchorFlowTest.slashBadCall` 把坏锚定罚没。`ChainPullTest`、`DeliveryFetchTest`。2026-11-09 `sh docker/up.sh` 退出 0 | 三个池在项目 `xdagj-devnet` 里互连，8001 为 ESTABLISHED。conf 里的链号是字面量，不是 `chainIdOf` |
 | SP5 | 部分 | `ChainApi` 挂在现有 JSON-RPC 上。激活前 `inactive`。`pending` 是已执行的头加上未确认调用的副本，不写主状态。`anchored` / `final` 在锚定 seq 上读余额、状态和证明，变更集只在副本上撤销；窗口外的 seq 用快照页。`query` 在 `ContractRecord.deployHeight > seq` 时返回 null。回执带 seq 和事件；确认级按锚定覆盖面写成 `confirmed` / `anchored` / `final`。`chain_buildClaim` 拼版本 1 的 `ClaimProof`。`/chain` WebSocket 推 `receipts` / `events` / `anchors`。`AbiCodec` 是小端紧凑编码。telnet `chain` 能读，也能用钱包账户签名 `call|create|deploy|bond|unbond|challenge` 以及长参数的 `anchor`/`claim`（`ChainCli.Signer`），块交给 `submitBlock`。`ChainApiTest`、`AbiCodecTest`、`ChainCliSignTest`、`HistoricalQueryTest` | 合约行只记下一次 `deployHeight`，更早的代码不再可读，`query` 直接拒绝。`tools/xdag-contract` 与 `tools/xdag-client` 已钉 ABI，并组 `chain_getBalance` / `chain_query` / `chain_sendCall`。`#[xdag::contract]` 在内存宿主上分发 selector。SDK 写出三个 wasm，`ReferenceDappsTest` 跑它们，`SdkDeployTest` 经 `chain deploy` 组块后拼回原字节再跑。`tools/xdag-wasm` 用 rustc 编出 token、pool、inbox，`RustWasmTest` 在编译器上跑 mint、transfer、swap、ping，并把 token 经 `chain deploy` 拼回原字节。签名仍是 `ChainCli`。客户端源是 `tools/xdag-client/abi.ts`。**M6 未关** |
 
-里程碑：M1、M2、M3、M4、M5 完成。M3 的执行中位是解释器 14814 调用/s、编译 15376 调用/s，导入门禁仍是 19687 块/s。M5：`xdagj-devnet` 三个池已启动并对上 8001。D=0、D=W、罚没仍是进程内 `ThreeNodeDrillTest`，没有在这条 devnet 上跑。M6 部分：`#[xdag::contract]` 在内存宿主上分发 selector。手写 wasm 由 `ReferenceDappsTest` 跑。`tools/xdag-wasm` 用 rustc 编出另外三份，`RustWasmTest` 在编译器上跑 mint、transfer、swap、ping，并把 token 经 `chain deploy` 拼回原字节。客户端源是 `abi.ts`。签名仍是 `ChainCli`。M7 开工：`chain activation` 能看出高度有没有排期，testnet / mainnet 仍是 `Long.MAX_VALUE`。
+里程碑：M1、M2、M3、M4、M5 完成。M3 的执行中位是解释器 14814 调用/s、编译 15376 调用/s，导入门禁仍是 19687 块/s。M5：`xdagj-devnet` 三个池已启动并对上 8001。D=0、D=W、罚没仍是进程内 `ThreeNodeDrillTest`，没有在这条 devnet 上跑。M6 部分：`#[xdag::contract]` 在内存宿主上分发 selector。手写 wasm 由 `ReferenceDappsTest` 跑。`tools/xdag-wasm` 用 rustc 编出另外三份，`RustWasmTest` 在编译器上跑 mint、transfer、swap、ping，并把 token 经 `chain deploy` 拼回原字节。客户端源是 `abi.ts`。签名仍是 `ChainCli`。M7 开工：`chain activation` 能看出高度有没有排期。`activation watch` 在未来高度、H 前后两份不同快照、一致性零命中、一次挑战和 28 天齐之前回答 `open`；`activation mainnet` 在那之前回答 `refused`，不写高度。testnet / mainnet 仍是 `Long.MAX_VALUE`。
 
 ---
 
@@ -506,7 +506,7 @@ SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器�
 1. testnet：`chain.activation.height` 由治理定为未来高度 H；所有节点升级到含 SP0–SP5 的版本；H 前 `ChainActivation` 门控钱包/RPC。
 2. 快照发布者在 H 前后各发布一次三目录快照。
 3. 观察期（建议 ≥ 4 周）：一致性检查零命中、随机 reorg 属性测试在真实数据上抽样运行、至少一次演练挑战。
-4. 主网重复上述流程。
+4. 主网重复上述流程。`ActivationObservation` 把 1–3 收成一个谓词：`chain activation watch` 在未来高度、两份哈希不同的快照、零命中、一次挑战和 28 天都齐时回答 `ready`，否则 `open`。`chain activation mainnet` 只在 `ready` 且提议高度是另一个未来高度时回答 `allowed`。它不调用 `setChainActivationHeight`，也不往 conf 里写 `chain.activation.height`。
 
 ### 11.4 快照
 
@@ -559,7 +559,7 @@ SP0b 与 SP1 并行（不同包、不同人/会话）；SP2 与 SP3 并行（都
 | **M4 经济与安全** | 完成 | SP2、SP3 | `ClaimFlowTest` 覆盖 I1/I2。`AnchorFlowTest` 覆盖保证金、终局、E1、E3、顺延、畸形 E2、可交付标记、缓存、发布、挑战组块和否决后退游标。`E2FlowTest` 覆盖解释器重执行。`MessageFlowTest` 覆盖 `recv` 和 `onSourceVoided`。`E2ArbitrationBenchTest` 覆盖 2 秒上限。docker 罚没不在本里程碑 |
 | **M5 网络** | 完成 | SP0b-3 完成；SP4 的线格式、页、证明、段装入、快照引导、自发 `0x1E` 完成；`docker/up.sh` 拉起三个池 | 2026-11-09 三个容器对上过 8001，之后已停。进程内 `ThreeNodeDrillTest` 覆盖 D=0、D=W、快照引导和罚没。devnet 上没跑这三步 |
 | **M6 开发者面** | 部分 | `chain_*`、`/chain`、`AbiCodec`、能读能签名的 `chain` 命令。`#[xdag::contract]` 分发内存宿主。手写 wasm 和 rustc wasm 都在编译器上跑过。`abi.ts` 组齐请求体 | 签名仍是 `ChainCli`。Rust 和 TypeScript 都不组块 |
-| **M7 testnet 激活** | 开工 | `chain activation` 打印 `scheduled <h>` 或 `unscheduled <Long.MAX_VALUE>` | 治理还没定 H。testnet / mainnet 仍是 `Long.MAX_VALUE`。快照和观察期没开始 |
+| **M7 testnet 激活** | 开工 | `chain activation` 打印排期。`ActivationObservation` 在 §11.3 齐之前是 `open` / `refused`，不写高度 | 治理还没定 H。testnet / mainnet 仍是 `Long.MAX_VALUE`。观察期没有在网上跑过 |
 
 ### 13.3 每个子项目的固定流程与门禁
 

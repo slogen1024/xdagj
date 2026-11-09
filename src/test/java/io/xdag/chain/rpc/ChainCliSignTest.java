@@ -34,7 +34,9 @@ import org.junit.Test;
 
 import io.xdag.chain.ext.ChainBlockClassifier;
 import io.xdag.chain.ext.ExtKind;
+import io.xdag.chain.ActivationObservation;
 import io.xdag.config.DevnetConfig;
+import io.xdag.config.MainnetConfig;
 import io.xdag.config.TestnetConfig;
 import io.xdag.core.Block;
 import io.xdag.crypto.SampleKeys;
@@ -75,5 +77,24 @@ public class ChainCliSignTest {
                 ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY), 1L, TS, blocks -> { });
         assertEquals("unscheduled " + Long.MAX_VALUE, ChainCli.run(null, testnet, "activation"));
         assertEquals("chain", ChainCli.run(null, "activation"));
+    }
+
+    @Test
+    public void watchRefusesMainnetUntilTheObservationClosesAndDoesNotScheduleIt() {
+        DevnetConfig config = new DevnetConfig();
+        config.getChainSpec().setChainActivationHeight(1000L);
+        ChainCli.Signer signer = new ChainCli.Signer(config,
+                ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY), 1L, TS, blocks -> { });
+        String now = Long.toString(ActivationObservation.MIN_WINDOW_MS);
+        String[] watch = {"activation", "watch", "1000", "0", "999", "11".repeat(32), "1000", "22".repeat(32),
+                "0", "1", now};
+        assertEquals("ready", ChainCli.run(null, signer, watch));
+        String[] mainnet = {"activation", "mainnet", "1000", "0", "999", "11".repeat(32), "1000", "22".repeat(32),
+                "0", "1", now, "5000"};
+        assertEquals("allowed 5000", ChainCli.run(null, signer, mainnet));
+        assertEquals(Long.MAX_VALUE, new TestnetConfig().getChainActivationHeight());
+        assertEquals(Long.MAX_VALUE, new MainnetConfig().getChainActivationHeight());
+        assertEquals("scheduled 0", ChainCli.run(null, new ChainCli.Signer(new DevnetConfig(),
+                ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY), 1L, TS, blocks -> { }), "activation"));
     }
 }
