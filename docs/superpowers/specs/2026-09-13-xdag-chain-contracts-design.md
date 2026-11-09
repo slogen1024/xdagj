@@ -88,7 +88,7 @@
 | 锁 | `tryToConnect` 全局 `synchronized`，验签与递归结算都在锁内 | L1 导入流水线必须并行化（SP0） |
 | 孤块池 | `MAX_ORPHAN_SIZE = 3750`，满则拒绝账户交易块 | 需改为按链分队列/提高上限（SP0） |
 | 原生账本 | `AddressStore`：20B 地址 → 余额/nonce | 链金库、保证金库都是普通 20B 地址（无私钥）；用户在链内沿用同一地址 |
-| P2P | `0x1B–0x1F` 已占用。快照页是排序 KV，根是 256 层 SHA-256 SMT；证明体四种（段+MMR、outboxMap SMT、C_k 开解、事件 MMR）。块传播仍走 `NEW_BLOCK` | 握手后 `ChainPull` 自己发 `0x1C`/`0x1E`。执行过的链把快照和段证明写进 `ChainRecords`。请求方拿锚定的 outboxMap 根验段，对上才写入 `CHAIN_EXEC`；快照装回后状态根必须等于锚定 `stateRoot`。docker 三个矿池没启动 |
+| P2P | `0x1B–0x1F` 已占用。快照页是排序 KV，根是 256 层 SHA-256 SMT；证明体四种（段+MMR、outboxMap SMT、C_k 开解、事件 MMR）。块传播仍走 `NEW_BLOCK` | 握手后 `ChainPull` 自己发 `0x1C`/`0x1E`。执行过的链把快照和段证明写进 `ChainRecords`。请求方拿锚定的 outboxMap 根验段，对上才写入 `CHAIN_EXEC`；快照装回后状态根必须等于锚定 `stateRoot`。2026-11-09 三个矿池在 `xdagj-devnet` 里对上 8001 |
 | 存储 | 8 个 RocksDB 实例，1 字节前缀分区，只有 `batchWrite` 原子 | 新增 `CHAIN_L1`（全网小状态）与 `CHAIN_EXEC`（订阅链状态）两个实例 |
 
 ---
@@ -754,7 +754,7 @@ verify(challenge):
 
 顺序：SP0a → SP1 → SP2 / SP3（SP1 后可并行）→ SP4 → SP5；SP0b 与 SP1 并行。
 
-**进度（2026-11-08，细节在路线图 §0）**：SP0a、SP0b（含 2b 的 10k 导入门禁）、SP1-1、SP1-2、SP1-3、SP1-4、SP1-5、SP2、SP3 完成。SP3 含保证金、锚定规范链、终局、E1/E2/E3、罚没、提现窗、奖励输入、可交付消息体（`recv`）、`onSourceVoided` 执行回滚、`AnchorPublisher`、`Challenger`、锁外裁决缓存，以及 `maxCallGas` 下单次 E2 仲裁 < 2 s。变更集只留最近 128 个 seq，`seq % 64 == 0` 落快照页，`onUnsetMain` 滚到被撤高度的前一个 seq。SP1-4 完成。SP1-5 完成：两模式同根同承诺，编译器拒绝时退回解释器；执行中位解释器 14814 调用/s、编译 15376 调用/s；E10 定死 SHA-256。节点执行用编译模式，仲裁仍用解释器。SP4 的订阅、`0x1B–0x1F`、快照页、四种证明体完成；执行器只跑订阅链。握手后节点自己发 `0x1E`。`SegmentIntake` 在段的 MMR 根等于锚定 outboxMap 时把条目装进目的链，否则停住。新订阅者用最近 FINAL 锚定的快照恢复，根对上才从该 seq 之后继续。`ThreeNodeDrillTest` 覆盖 D=0、D=W 和罚没。docker daemon 未运行，三个矿池没启动。SP5 的 `chain_*` 已挂到现有 JSON-RPC：激活前拒绝，`pending` 在副本上跑未确认调用，`anchored`/`final` 在副本上读锚定 seq，窗口外用快照页，`query` 在 `deployHeight > seq` 时返回 null。回执带 seq 和事件。`/chain` 推送。`AbiCodec` 和 telnet `chain` 已有，`ChainCli.Signer` 用钱包账户签名 `call|create|deploy|bond|unbond|challenge` 以及长参数的 `anchor`/`claim`。SDK、DApp 没有。M1、M2、M3、M4 完成；M5–M7 未完成。
+**进度（2026-11-08，细节在路线图 §0）**：SP0a、SP0b（含 2b 的 10k 导入门禁）、SP1-1、SP1-2、SP1-3、SP1-4、SP1-5、SP2、SP3 完成。SP3 含保证金、锚定规范链、终局、E1/E2/E3、罚没、提现窗、奖励输入、可交付消息体（`recv`）、`onSourceVoided` 执行回滚、`AnchorPublisher`、`Challenger`、锁外裁决缓存，以及 `maxCallGas` 下单次 E2 仲裁 < 2 s。变更集只留最近 128 个 seq，`seq % 64 == 0` 落快照页，`onUnsetMain` 滚到被撤高度的前一个 seq。SP1-4 完成。SP1-5 完成：两模式同根同承诺，编译器拒绝时退回解释器；执行中位解释器 14814 调用/s、编译 15376 调用/s；E10 定死 SHA-256。节点执行用编译模式，仲裁仍用解释器。SP4 的订阅、`0x1B–0x1F`、快照页、四种证明体完成；执行器只跑订阅链。握手后节点自己发 `0x1E`。`SegmentIntake` 在段的 MMR 根等于锚定 outboxMap 时把条目装进目的链，否则停住。新订阅者用最近 FINAL 锚定的快照恢复，根对上才从该 seq 之后继续。`ThreeNodeDrillTest` 覆盖 D=0、D=W 和罚没。2026-11-09 `sh docker/up.sh` 退出 0：项目 `xdagj-devnet` 三个池在跑，pool-b 与 pool-c 对 8001 有 ESTABLISHED。订阅是 conf 里的字面量链号，不是 `chainIdOf`。这条 devnet 没有跑 D=0 / D=W / 罚没。SP5 的 `chain_*` 已挂到现有 JSON-RPC：激活前拒绝，`pending` 在副本上跑未确认调用，`anchored`/`final` 在副本上读锚定 seq，窗口外用快照页，`query` 在 `deployHeight > seq` 时返回 null。回执带 seq 和事件。`/chain` 推送。`AbiCodec` 和 telnet `chain` 已有，`ChainCli.Signer` 用钱包账户签名 `call|create|deploy|bond|unbond|challenge` 以及长参数的 `anchor`/`claim`。SDK、DApp 没有。M1、M2、M3、M4、M5 完成；M6、M7 未完成。
 
 **实施级总体设计与路线图**（各子项目的接口、数据结构、算法、测试、切片与里程碑）见 `2026-09-17-xdag-chain-contracts-program-design-and-roadmap.md`；SP0b 拆为 SP0b-1（基准 + 加固工单）→ SP0b-2（锁外预验证流水线）→ SP0b-3（孤块池分队列/配额/TTL + 导入期费率策略）。
 

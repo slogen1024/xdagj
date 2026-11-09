@@ -35,11 +35,11 @@
 | SP1-4 | 完成 | 变更集只留最近 `K=128`（`CHANGESET_WINDOW`）。`seq % 64 == 0` 把全量 KV 写成 `0x04` 快照页。窗口外的 seq 从快照页装回，根与当时的状态根一致。`onUnsetMain(h)` 把已执行到该高度的订阅链滚到 `h-1`，缺变更集才停住。`setPending` 在副本上跑未确认调用，不写 `CHAIN_EXEC`；`pending` 视图和 `estimateGas` 读这份副本。节点从当前 top 按 `applyBlock` 的后序收集 CALL（`PendingCalls`）。`RetentionTest` | 不在候选主链上的孤块不进 pending |
 | SP1-5 | 完成 | 同一笔 `storage_set` 在解释器和编译模式上根与承诺都是 `ChainExecutorTest` 的钉。编译器抛异常时 `PreparedModule.fellBack()`，解释器接着跑，根不变。节点执行用 `ChicoryEngine.compiler()`，仲裁仍是解释器。`transfer_from_caller` 三轮中位：解释器 14814 调用/s，编译 15376 调用/s。SHA-256 一次 161 ns，256 次 9208 ns，约占一笔转账的 14%。E10 定死继续用 SHA-256。`GasSchedule.V1` 不改。`TwoModeTest`、`ExecBenchTest`。见 `docs/benchmarks/2026-11-08-sp1-5-exec.md` | — |
 | SP2 | 完成 | `ClaimHandler`（`l1/handlers`）；`ClaimVerifier` / `ClaimProof` / `OutboxEntry` / `WithdrawOutbox` / `AnchorRecord` / `SettlementJournal` / `VaultLedger`（`asset/`）；`BlockchainImpl.chainTransfer`。0x06 只读（`FINAL` 才放行），0x08 `src‖dst‖index`，0x10 journal 进状态哈希。证明体版本 1。`ClaimFlowTest` | 四参 `ClaimHandler` 不限额。提现窗在 SP3 的 `WithdrawWindow` |
-| SP3 | 完成 | `BondHandler` / `AnchorHandler` / `ChallengeHandler`；`HeightTriggers`、`AnchorPublisher`、`DueSegments`、`RewardInputs`（`anchor/`）；`Witness`、`Arbiter`、`E2Replay`、`WitnessBackedStore`、`VerdictCache`、`Challenger`、`InputIndex`（`fraud/`）。E1/E2/E3 都实判。可交付高度上的出箱条目跑 `recv`。源锚定否决后 `onSourceVoided` 把消费链滚回交付前，并把 0x0B 游标退回。`E2ArbitrationBenchTest` 在 `maxCallGas` 下单次仲裁 < 2 s。`AnchorFlowTest`、`E2FlowTest`、`MessageFlowTest` | `D == W` 不回滚。没装上段证明时目的链停住，见 SP4。docker 上的挑战罚没是 M5 |
-| SP4 | 部分 | 订阅集合已经进 `ChainExecDriver`，执行器只跑订阅链。`0x1B–0x1F`；快照页与 SMT 根校验；四种证明体；`Delivery` 的 HOLD；未 `open` 的回复丢弃，每方向最多 64 条；拉取默认 8 MiB。`SegmentIntake` 验过段证明后写入出箱。握手完成后 `ChainPull.wire` 自己发 `0x1E`，同一 request id 等 `0x1F`。有 FINAL 锚定时 `SnapshotSync.gather` 把页装进执行器，根对上才从该 seq 之后接着跑；拉不到就从创建高度重放。`ThreeNodeDrillTest`：D=0 发 `0x1E` 后跑 `recv`，D=W 在 FINAL 之前余额为 0，之后入账；`AnchorFlowTest.slashBadCall` 把坏锚定罚没。`ChainPullTest`、`DeliveryFetchTest` | docker daemon 没在跑，三个矿池容器没启动。**M5 未关** |
+| SP3 | 完成 | `BondHandler` / `AnchorHandler` / `ChallengeHandler`；`HeightTriggers`、`AnchorPublisher`、`DueSegments`、`RewardInputs`（`anchor/`）；`Witness`、`Arbiter`、`E2Replay`、`WitnessBackedStore`、`VerdictCache`、`Challenger`、`InputIndex`（`fraud/`）。E1/E2/E3 都实判。可交付高度上的出箱条目跑 `recv`。源锚定否决后 `onSourceVoided` 把消费链滚回交付前，并把 0x0B 游标退回。`E2ArbitrationBenchTest` 在 `maxCallGas` 下单次仲裁 < 2 s。`AnchorFlowTest`、`E2FlowTest`、`MessageFlowTest` | `D == W` 不回滚。三个矿池已互连，挑战罚没没有在这条 devnet 上跑 |
+| SP4 | 完成 | 订阅集合已经进 `ChainExecDriver`，执行器只跑订阅链。`0x1B–0x1F`；快照页与 SMT 根校验；四种证明体；`Delivery` 的 HOLD；未 `open` 的回复丢弃，每方向最多 64 条；拉取默认 8 MiB。`SegmentIntake` 验过段证明后写入出箱。握手完成后 `ChainPull.wire` 自己发 `0x1E`，同一 request id 等 `0x1F`。有 FINAL 锚定时 `SnapshotSync.gather` 把页装进执行器，根对上才从该 seq 之后接着跑；拉不到就从创建高度重放。`ThreeNodeDrillTest`：D=0 发 `0x1E` 后跑 `recv`，D=W 在 FINAL 之前余额为 0，之后入账；`AnchorFlowTest.slashBadCall` 把坏锚定罚没。`ChainPullTest`、`DeliveryFetchTest`。2026-11-09 `sh docker/up.sh` 退出 0 | 三个池在项目 `xdagj-devnet` 里互连，8001 为 ESTABLISHED。conf 里的链号是字面量，不是 `chainIdOf` |
 | SP5 | 部分 | `ChainApi` 挂在现有 JSON-RPC 上。激活前 `inactive`。`pending` 是已执行的头加上未确认调用的副本，不写主状态。`anchored` / `final` 在锚定 seq 上读余额、状态和证明，变更集只在副本上撤销；窗口外的 seq 用快照页。`query` 在 `ContractRecord.deployHeight > seq` 时返回 null。回执带 seq 和事件；确认级按锚定覆盖面写成 `confirmed` / `anchored` / `final`。`chain_buildClaim` 拼版本 1 的 `ClaimProof`。`/chain` WebSocket 推 `receipts` / `events` / `anchors`。`AbiCodec` 是小端紧凑编码。telnet `chain` 能读，也能用钱包账户签名 `call|create|deploy|bond|unbond|challenge` 以及长参数的 `anchor`/`claim`（`ChainCli.Signer`），块交给 `submitBlock`。`ChainApiTest`、`AbiCodecTest`、`ChainCliSignTest`、`HistoricalQueryTest` | 合约行只记下一次 `deployHeight`，更早的代码不再可读，`query` 直接拒绝。Rust SDK、TS/Rust 客户端、三个参考 DApp 没有。**M6 未关** |
 
-里程碑：M1、M2、M3、M4 完成。M3 的执行中位是解释器 14814 调用/s、编译 15376 调用/s，导入门禁仍是 19687 块/s。M5、M6、M7 未完成。M5 还差 docker 里真正拉起的三个矿池。M6 有 `chain_*`、`/chain` 推送、ABI 编码，以及能读、能签名的 `chain` 命令。SDK、DApp 没有。进程内三节点演练（D=0、D=W、罚没）已经过。
+里程碑：M1、M2、M3、M4、M5 完成。M3 的执行中位是解释器 14814 调用/s、编译 15376 调用/s，导入门禁仍是 19687 块/s。M5：`xdagj-devnet` 三个池已启动并对上 8001。D=0、D=W、罚没仍是进程内 `ThreeNodeDrillTest`，没有在这条 devnet 上跑。M6、M7 未完成。M6 有 `chain_*`、`/chain` 推送、ABI 编码，以及能读、能签名的 `chain` 命令。SDK、DApp 没有。
 
 ---
 
@@ -161,7 +161,7 @@ io.xdag.chain
 ├── anchor/         已建成（SP3）：BondVault, BondAccount, AnchorHead, AnchorBody, CommitmentChain, SegmentCursor, ChallengeRecord, TriggerList, TriggerOps, WithdrawWindow, HeightTriggers, DueSegments, RewardInputs, AnchorPublisher
 ├── fraud/          已建成（SP3）：Witness, Arbiter, E2Replay, WitnessBackedStore, VerdictCache, Challenger, InputIndex。缓存由 `BlockchainImpl.precomputeChallenge` 在进锁前填
 ├── asset/          已建成（SP2）：VaultLedger, WithdrawOutbox, OutboxEntry, ClaimVerifier, ClaimProof, AnchorRecord, Settlement, SettlementJournal
-├── p2p/            部分（SP4）：ChainSubscriptions, ChainExchange, ChainPull, SnapshotPages, SnapshotSync, ProofBodies, ChainRecords, Delivery。消息在 io.xdag.net.message.chain。docker 三个矿池没启动
+├── p2p/            SP4：ChainSubscriptions, ChainExchange, ChainPull, SnapshotPages, SnapshotSync, ProofBodies, ChainRecords, Delivery。消息在 io.xdag.net.message.chain。三个矿池见 `docker/`
 ├── abi/            已建成（SP5）：AbiCodec
 └── rpc/            部分（SP5）：ChainApi, ChainView, ChainInactive, ChainFeed, ChainCli（含 Signer）, ChainRequestHandler, ChainSocket。未建：Rust SDK、DApp
 ```
@@ -442,7 +442,7 @@ SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器�
 
 ---
 
-## 9. SP4：订阅与 P2P（2026-11-08：执行器只跑订阅链。段证明、快照引导、自发 `0x1E` 已接到执行器。`ThreeNodeDrillTest` 覆盖 D=0、D=W 和罚没。docker daemon 未启动，三个矿池容器没跑）
+## 9. SP4：订阅与 P2P（2026-11-09：执行器只跑订阅链。段证明、快照引导、自发 `0x1E` 已接到执行器。`ThreeNodeDrillTest` 覆盖 D=0、D=W 和罚没。`sh docker/up.sh` 退出 0，三个池在 8001 上互连）
 
 ### 9.1 订阅集合与过渡模式
 
@@ -462,7 +462,7 @@ SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器�
 
 ### 9.3 多节点 devnet
 
-- 3 节点 docker-compose（复用现有 devnet 配置），2 条链，节点订阅不同链；跨链消息 D=0 与 D=W 对照；一次人为错误锚定的完整挑战-罚没流程脚本化。本机 docker daemon 没在听 `/Users/slogen/.docker/run/docker.sock`，三个矿池容器没启动。进程内演练是 `ThreeNodeDrillTest`：A 发布源链段证明；B（D=0）自己发 `0x1E`，`recv` 入账 50；C（D=W）在高度 4 余额仍是 0，锚定改成 FINAL 后在高度 5 入账。同一条测试调用 `AnchorFlowTest.slashBadCall`：E1 对不上就把保证金劈成挑战者和销毁地址，锚定 VOIDED。`ThreeNodeDevnetTest` 仍覆盖订阅分裂和拉页。新订阅者从 FINAL 快照恢复状态，不重放那一截，也在 `ThreeNodeDrillTest`。
+- 3 节点 compose 在 `docker/`，项目名 `xdagj-devnet`，复用 devnet 的非共识项。pool-a 只订 `…0001`，pool-b 只订 `…0002`，pool-c `chain.subscribeAll = true`。这三份 id 是 conf 字面量，不是 `chainIdOf` 算出来的链。2026-11-09 `sh docker/up.sh` 退出 0：三个容器在跑，pool-b 和 pool-c 对端口 8001 有 ESTABLISHED（连接在 `/proc/net/tcp6`）。进程内演练仍是 `ThreeNodeDrillTest`：A 发布源链段证明；B（D=0）自己发 `0x1E`，`recv` 入账 50；C（D=W）在高度 4 余额仍是 0，锚定改成 FINAL 后在高度 5 入账。同一条测试调用 `AnchorFlowTest.slashBadCall`：E1 对不上就把保证金劈成挑战者和销毁地址，锚定 VOIDED。这条 devnet 没有跑 D=0 / D=W / 罚没。`ThreeNodeDevnetTest` 仍覆盖订阅分裂和拉页。新订阅者从 FINAL 快照恢复状态，不重放那一截，也在 `ThreeNodeDrillTest`。
 
 **任务量估计**：15–18 个任务。
 
@@ -545,9 +545,9 @@ SP0a ✅ ─┬─► SP0b-1 ✅ ─► SP0b-2 ✅ ─► SP0b-2b ✅ ─► SP0
 SP0b-3 ✅ ─────────────────────────────────────────┘
 ```
 
-SP0b 与 SP1 并行（不同包、不同人/会话）；SP2 与 SP3 并行（都依赖 SP1-3）。SP4 的订阅、消息、页、证明校验，以及把验过的段装进目的链出箱，已经做了。M5 要的 docker 跨链和挑战罚没仍然没跑。
+SP0b 与 SP1 并行（不同包、不同人/会话）；SP2 与 SP3 并行（都依赖 SP1-3）。SP4 的订阅、消息、页、证明校验，以及把验过的段装进目的链出箱，已经做了。三个矿池已在 `xdagj-devnet` 里互连。D=0 / D=W 和挑战罚没没有在这条 devnet 上跑。
 
-**SP0b-2b（§5.2.1）插在 SP0b-2 与 SP0b-3 之间，并且已经做完**：SP0b-2 自己的验收（导入 ≥ 10k 块/s）当时未达成，缺口在锁内"其余"；SP0b-2b 把锁内均值压到 42–49 µs，中位 19687 块/s，门禁关闭。它与 SP0b-3 在孤块池上有重叠，顺序可换。SP0b-3 也已经做完。M5 还差 SP4 里的 docker 演练，不是整段 SP4。
+**SP0b-2b（§5.2.1）插在 SP0b-2 与 SP0b-3 之间，并且已经做完**：SP0b-2 自己的验收（导入 ≥ 10k 块/s）当时未达成，缺口在锁内"其余"；SP0b-2b 把锁内均值压到 42–49 µs，中位 19687 块/s，门禁关闭。它与 SP0b-3 在孤块池上有重叠，顺序可换。SP0b-3 也已经做完。M5 的三个矿池已经拉起并对上 8001。D=0 / D=W / 罚没仍是进程内测试。
 
 ### 13.2 里程碑
 
@@ -557,7 +557,7 @@ SP0b 与 SP1 并行（不同包、不同人/会话）；SP2 与 SP3 并行（都
 | **M2 引擎** | 完成 | SP1-1/2 完成 | 白名单/插桩测试向量已钉死。§8.3 不等式：随机读写的 `witnessBytes` ≤ `estimateFromGas(gasUsed)`（`StateAndWitnessTest`） |
 | **M3 执行** | 完成 | SP0b-2/2b 导入门禁；SP1-3、SP1-4、SP1-5 | 单链执行：解释器中位 **14814** 调用/s，编译中位 **15376** 调用/s（4000 笔转账，三轮）。两模式同根同承诺。**导入 ≥ 10k 块/s 已达成**：20000 块负载 `pipeline` 中位 **19687 块/s**。见 `docs/benchmarks/2026-11-08-sp1-5-exec.md` 与 `docs/benchmarks/2026-11-07-sp0b2b-import.md` |
 | **M4 经济与安全** | 完成 | SP2、SP3 | `ClaimFlowTest` 覆盖 I1/I2。`AnchorFlowTest` 覆盖保证金、终局、E1、E3、顺延、畸形 E2、可交付标记、缓存、发布、挑战组块和否决后退游标。`E2FlowTest` 覆盖解释器重执行。`MessageFlowTest` 覆盖 `recv` 和 `onSourceVoided`。`E2ArbitrationBenchTest` 覆盖 2 秒上限。docker 罚没不在本里程碑 |
-| **M5 网络** | 未完成 | SP0b-3 完成；SP4 的线格式、页、证明、段装入、快照引导、自发 `0x1E` 完成 | 3 个矿池容器没启动（docker daemon 未运行）。进程内 `ThreeNodeDrillTest` 覆盖 D=0、D=W、快照引导和罚没 |
+| **M5 网络** | 完成 | SP0b-3 完成；SP4 的线格式、页、证明、段装入、快照引导、自发 `0x1E` 完成；`docker/up.sh` 拉起三个池 | 2026-11-09 三个容器在跑，8001 为 ESTABLISHED。进程内 `ThreeNodeDrillTest` 覆盖 D=0、D=W、快照引导和罚没。devnet 上没跑这三步 |
 | **M6 开发者面** | 部分 | `chain_*`、`/chain`、`AbiCodec`、能读能签名的 `chain` 命令 | SDK、三个 DApp 没有 |
 | **M7 testnet 激活** | 未开工 | 治理定高度、快照、观察期 | §11.3 |
 

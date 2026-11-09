@@ -13,7 +13,9 @@ docker compose build pool-a
 docker compose up -d
 
 ready() {
-    docker compose logs "$1" 2>/dev/null | grep -q "Block Store init."
+    # log4j writes "Block Store init." to ./logs, not stdout. Telnet's listen line is
+    # stdout and comes after the peer server is up.
+    docker compose logs "$1" 2>/dev/null | grep -q "Listening to Port"
 }
 
 i=0
@@ -28,10 +30,10 @@ while ! ready pool-a || ! ready pool-b || ! ready pool-c; do
     sleep 2
 done
 
-# /proc/net/tcp state 01 is ESTABLISHED. 1F41 is port 8001.
+# State 01 is ESTABLISHED. 1F41 is port 8001. Linux dual-stack sockets show up in tcp6.
 peered() {
-    docker compose exec -T "$1" awk 'NR>1 && $4=="01" && ($2 ~ /:1F41$/ || $3 ~ /:1F41$/)' /proc/net/tcp \
-        | grep -q .
+    docker compose exec -T "$1" awk 'NR>1 && $4=="01" && ($2 ~ /:1F41$/ || $3 ~ /:1F41$/)' \
+        /proc/net/tcp /proc/net/tcp6 | grep -q .
 }
 
 i=0

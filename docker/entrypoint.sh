@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 cd /data
+mkdir -p /data/logs
 
 # node.whiteIPs is resolved once at startup. Wait until every pool name exists.
 i=0

@@ -1,6 +1,8 @@
 # Three devnet pools, one image. A subscribes chain ...01, B subscribes chain ...02,
 # C subscribes every chain. D=0 / D=W delivery and the slash are ThreeNodeDrillTest:
 # D=W is a finality window of main blocks, not something this compose waits out.
+# Explicit project name: the directory is "docker", which collides with other compose projects.
+name: xdagj-devnet
 services:
   pool-a:
     build:
