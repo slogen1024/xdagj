@@ -32,3 +32,20 @@ export declare function subscribe(kind: string): RpcRequest;
 export declare function pollBalance(chain: string, account: string): RpcRequest[];
 /** Words after the chain verb: deploy, chain hex, wasm hex, gas. */
 export declare function deployWords(chainHex: string, wasm: Uint8Array | readonly number[], gas: number): string[];
+/**
+ * Inline CALL, 512 bytes, same layout as ChainBlockBuilder. Chunked args throw.
+ * header 8 is devnet/testnet (XDAG_FIELD_HEAD_TEST). fee and value are nano.
+ */
+export declare function signCall(call: {
+    header: number;
+    timestamp: bigint;
+    nonce: bigint;
+    chain: Uint8Array;
+    contract: Uint8Array;
+    selector: number;
+    gasLimit: number;
+    value: bigint;
+    fee: bigint;
+    privateKey: Uint8Array;
+    args: Uint8Array;
+}): Uint8Array;

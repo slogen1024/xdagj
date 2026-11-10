@@ -6,5 +6,11 @@ description = "ABI, memory host, and the three reference contracts for the XDAG 
 license = "MIT"
 
 [dependencies]
+k256 = { version = "0.13", features = ["ecdsa"] }
+ripemd = "0.1"
 sha2 = "0.10"
 xdag = { path = "macros" }
+
+[[bin]]
+name = "sign-call"
+path = "src/bin/sign-call.rs"

@@ -1,10 +1,12 @@
 //! Encoding matches `io.xdag.chain.abi.AbiCodec`. [`xdag::contract`] dispatches the memory host.
-//! [`wasm`] emits the three modules the node runs. [`rpc`] builds JSON-RPC bodies. Signing and
-//! `chain deploy` stay in `ChainCli`. This crate does not compile Rust down to wasm.
+//! [`wasm`] emits the three modules the node runs. [`rpc`] builds JSON-RPC bodies. [`block`] signs
+//! an inline CALL. Chunk chains and `chain deploy` stay in `ChainCli`. This crate does not compile
+//! Rust down to wasm.
 
 pub extern crate xdag;
 
 mod abi;
+pub mod block;
 mod dex;
 mod host;
 mod message;

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 import {
   buildClaim,
@@ -12,6 +13,7 @@ import {
   query,
   selector,
   sendCall,
+  signCall,
   subscribe,
   u32,
   u64,
@@ -25,6 +27,32 @@ test("selector and lengths match AbiCodec", () => {
   assert.deepEqual([...u64(1)], [1, 0, 0, 0, 0, 0, 0, 0]);
   assert.deepEqual([...bytes([9, 8])], [2, 0, 0, 0, 9, 8]);
   assert.equal(event("Transfer(address,address,u64)", u64(7)).length, 40);
+});
+
+test("typescript call matches the rust block", () => {
+  const priv = "a392604efc2fad9c0b3da43b5f698a2e3f270f170d859912be0d54742275c5f6";
+  const chain = "0102030405060708090a0b0c0d0e0f1011121314";
+  const contract = "14131211100f0e0d0c0b0a090807060504030201";
+  const rust = execFileSync(
+    "cargo",
+    ["run", "--quiet", "--offline", "--manifest-path", "../xdag-contract/Cargo.toml", "--bin", "sign-call", "--",
+      priv, "1556925644800", "1", chain, contract, "7", "0", "100", "100000000", "8", "0102"],
+    { cwd: new URL(".", import.meta.url), encoding: "utf8" },
+  ).trim();
+  const block = signCall({
+    header: 8,
+    timestamp: 1556925644800n,
+    nonce: 1n,
+    chain: Buffer.from(chain, "hex"),
+    contract: Buffer.from(contract, "hex"),
+    selector: 7,
+    gasLimit: 0,
+    value: 100n,
+    fee: 100000000n,
+    privateKey: Buffer.from(priv, "hex"),
+    args: Buffer.from("0102", "hex"),
+  });
+  assert.equal(Buffer.from(block).toString("hex"), rust);
 });
 
 test("rpc bodies use the chain_* names", () => {

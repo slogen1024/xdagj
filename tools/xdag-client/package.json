@@ -5,6 +5,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json"
   },
+  "dependencies": {
+    "@noble/curves": "1.8.1",
+    "@noble/hashes": "1.7.1"
+  },
   "devDependencies": {
     "@types/node": "18.19.64",
     "typescript": "5.6.3"
