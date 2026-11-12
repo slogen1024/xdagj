@@ -51,7 +51,34 @@ public class ClientCallSignTest {
                 Bytes.wrap(contract), 7, 0L, XAmount.of(100), XAmount.of(100, XUnit.MILLI_XDAG), args).value();
         String rust = cargo(SampleKeys.PRIVATE_KEY_STRING, Long.toString(TS), "1", hex(chain), hex(contract), "7",
                 "0", "100", "100000000", "8", "0102");
-        String java = Bytes.wrap(built.block().toBytes()).toHexString().substring(2);
+        assertSame(rust, Bytes.wrap(built.block().toBytes()).toHexString().substring(2));
+    }
+
+    @Test
+    public void rustChunkedCallMatchesTheBuilder() throws Exception {
+        byte[] chain = address(1);
+        byte[] contract = address(20);
+        byte[] raw = new byte[353];
+        for (int i = 0; i < raw.length; i++) {
+            raw[i] = (byte) (i + 1);
+        }
+        Bytes args = Bytes.wrap(raw);
+        ChainBlockBuilder.Built built = ChainBlockBuilder.call(new DevnetConfig(), TS,
+                ECKeyPair.fromPrivateKey(SampleKeys.SRIVATE_KEY), UInt64.valueOf(1), Bytes.wrap(chain),
+                Bytes.wrap(contract), 7, 0L, XAmount.of(100), XAmount.of(100, XUnit.MILLI_XDAG), args).value();
+        String rust = cargo(SampleKeys.PRIVATE_KEY_STRING, Long.toString(TS), "1", hex(chain), hex(contract), "7",
+                "0", "100", "100000000", "8", hex(raw));
+        String[] lines = rust.split("\n");
+        assertSame(lines[0], Bytes.wrap(built.block().toBytes()).toHexString().substring(2));
+        if (lines.length - 1 != built.chunks().size()) {
+            throw new AssertionError("chunks rust " + (lines.length - 1) + " java " + built.chunks().size());
+        }
+        for (int i = 0; i < built.chunks().size(); i++) {
+            assertSame(lines[i + 1], built.chunks().get(i).getXdagBlock().getData().toHexString().substring(2));
+        }
+    }
+
+    private static void assertSame(String rust, String java) {
         int mismatch = -1;
         int n = Math.min(rust.length(), java.length());
         for (int i = 0; i < n; i++) {
@@ -88,7 +115,7 @@ public class ClientCallSignTest {
         process.getErrorStream().transferTo(err);
         int code = process.waitFor();
         String hex = out.toString(StandardCharsets.US_ASCII).trim();
-        if (code != 0 || hex.length() != 1024) {
+        if (code != 0 || hex.isEmpty() || hex.split("\n")[0].length() != 1024) {
             throw new AssertionError("sign-call " + code + " " + err.toString(StandardCharsets.UTF_8) + hex);
         }
         return hex;

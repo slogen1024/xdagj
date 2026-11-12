@@ -52,7 +52,37 @@ test("typescript call matches the rust block", () => {
     privateKey: Buffer.from(priv, "hex"),
     args: Buffer.from("0102", "hex"),
   });
-  assert.equal(Buffer.from(block).toString("hex"), rust);
+  assert.equal(Buffer.from(block.block).toString("hex"), rust);
+  assert.equal(block.chunks.length, 0);
+});
+
+test("typescript chunk chain matches rust", () => {
+  const priv = "a392604efc2fad9c0b3da43b5f698a2e3f270f170d859912be0d54742275c5f6";
+  const chain = "0102030405060708090a0b0c0d0e0f1011121314";
+  const contract = "14131211100f0e0d0c0b0a090807060504030201";
+  const args = Buffer.alloc(353, 0);
+  for (let i = 0; i < args.length; i++) args[i] = (i + 1) & 0xff;
+  const rust = execFileSync(
+    "cargo",
+    ["run", "--quiet", "--offline", "--manifest-path", "../xdag-contract/Cargo.toml", "--bin", "sign-call", "--",
+      priv, "1556925644800", "1", chain, contract, "7", "0", "100", "100000000", "8", args.toString("hex")],
+    { cwd: new URL(".", import.meta.url), encoding: "utf8" },
+  ).trim().split("\n");
+  const signed = signCall({
+    header: 8,
+    timestamp: 1556925644800n,
+    nonce: 1n,
+    chain: Buffer.from(chain, "hex"),
+    contract: Buffer.from(contract, "hex"),
+    selector: 7,
+    gasLimit: 0,
+    value: 100n,
+    fee: 100000000n,
+    privateKey: Buffer.from(priv, "hex"),
+    args,
+  });
+  assert.equal(Buffer.from(signed.block).toString("hex"), rust[0]);
+  assert.deepEqual(signed.chunks.map((c) => Buffer.from(c).toString("hex")), rust.slice(1));
 });
 
 test("rpc bodies use the chain_* names", () => {

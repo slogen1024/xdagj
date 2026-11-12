@@ -117,8 +117,9 @@ export function deployWords(chainHex: string, wasm: Uint8Array | readonly number
 }
 
 /**
- * Inline CALL, 512 bytes, same layout as ChainBlockBuilder. Chunked args throw.
+ * CALL, same layout as ChainBlockBuilder. Args longer than 256 bytes are one CHUNK chain.
  * header 8 is devnet/testnet (XDAG_FIELD_HEAD_TEST). fee and value are nano.
+ * `block` is the paying block. `chunks` is head-first.
  */
 export function signCall(call: {
   header: number;
@@ -132,10 +133,10 @@ export function signCall(call: {
   fee: bigint;
   privateKey: Uint8Array;
   args: Uint8Array;
-}): Uint8Array {
-  if (call.args.length > 256) {
-    throw new Error("args need a chunk chain");
-  }
+}): { block: Uint8Array; chunks: Uint8Array[] } {
+  const chunks = call.args.length > 256 ? splitChunks(call.header, call.timestamp, call.args) : [];
+  const head = chunks.length === 0 ? null : hashLow(chunks[0]);
+  const inline = head === null ? call.args : Buffer.alloc(0);
   const compressed = secp256k1.getPublicKey(call.privateKey, true);
   const sender = hash160(compressed);
   const pubkeyType = compressed[0] === 0x03 ? 0x07 : 0x06;
@@ -149,21 +150,24 @@ export function signCall(call: {
   put(0x0e);
   put(0x0c);
   put(0x0d);
+  if (head !== null) put(0x03);
   put(0x0f);
-  const payloadFields = Math.ceil(call.args.length / 32);
+  const payloadFields = Math.ceil(inline.length / 32);
   for (let i = 0; i < payloadFields; i++) put(0x0f);
   put(pubkeyType);
   put(0x05);
   put(0x05);
-  const body = Buffer.concat([
+  const parts = [
     header(typeBits, call.timestamp, call.fee),
     reversed(bePad(call.nonce)),
     amountField(xdagAmount(call.value), sender),
     amountField(xdagAmount(call.value), call.chain),
-    extHeader(call.contract, call.selector, call.gasLimit, call.args.length),
-    ...payload(call.args),
-    Buffer.from(compressed.subarray(1, 33)),
-  ]);
+  ];
+  if (head !== null) parts.push(reversed(Buffer.from(head)));
+  parts.push(extHeader(call.contract, call.selector, call.gasLimit, inline.length, head !== null));
+  parts.push(...payload(inline));
+  parts.push(Buffer.from(compressed.subarray(1, 33)));
+  const body = Buffer.concat(parts);
   const preimage = Buffer.alloc(512);
   body.copy(preimage);
   const hash = sha256(sha256(Buffer.concat([preimage, Buffer.from(compressed)])));
@@ -171,7 +175,7 @@ export function signCall(call: {
   const block = Buffer.alloc(512);
   body.copy(block);
   Buffer.from(sig.toCompactRawBytes()).copy(block, body.length);
-  return block;
+  return { block, chunks };
 }
 
 function header(typeBits: bigint, timestamp: bigint, fee: bigint): Buffer {
@@ -182,14 +186,71 @@ function header(typeBits: bigint, timestamp: bigint, fee: bigint): Buffer {
   return raw;
 }
 
-function extHeader(contract: Uint8Array, selector: number, gasLimit: number, argsLen: number): Buffer {
+function extHeader(contract: Uint8Array, selector: number, gasLimit: number, argsLen: number, chained: boolean): Buffer {
   const raw = Buffer.alloc(32);
   raw[0] = 1;
+  if (chained) raw[1] = 1;
   Buffer.from(contract).copy(raw, 2);
   raw.writeUInt32LE(selector >>> 0, 22);
   raw.writeUInt32LE(gasLimit >>> 0, 26);
   raw.writeUInt16LE(argsLen, 30);
   return raw;
+}
+
+function splitChunks(headerType: number, timestamp: bigint, args: Uint8Array): Buffer[] {
+  const n = Math.ceil(args.length / 352);
+  let head = timestamp - 1n;
+  if ((head & 0xffffn) === 0xffffn) head -= 1n;
+  if ((head & 0xffffn) < BigInt(n - 1)) head = (head & ~0xffffn) - 2n;
+  let next: Buffer | null = null;
+  const tailFirst: Buffer[] = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const off = i * 352;
+    const data = args.subarray(off, Math.min(off + 352, args.length));
+    const block = chunkBlock(headerType, head - BigInt(i), i, args.length, data, next);
+    next = hashLow(block);
+    tailFirst.push(block);
+  }
+  tailFirst.reverse();
+  return tailFirst;
+}
+
+function chunkBlock(headerType: number, timestamp: bigint, seq: number, total: number, data: Uint8Array, next: Buffer | null): Buffer {
+  let typeBits = 0n;
+  let n = 0n;
+  const put = (field: number) => {
+    typeBits |= BigInt(field) << (n * 4n);
+    n += 1n;
+  };
+  put(headerType);
+  if (next !== null) put(0x03);
+  put(0x0f);
+  const fields = Math.ceil(data.length / 32);
+  for (let i = 0; i < fields; i++) put(0x0f);
+  put(0x05);
+  put(0x05);
+  const ext = Buffer.alloc(32);
+  ext[0] = 3;
+  ext.writeUInt32LE(seq, 1);
+  ext.writeUInt32LE(total, 5);
+  ext.writeUInt16LE(data.length, 9);
+  const body = Buffer.concat([
+    header(typeBits, timestamp, 0n),
+    ...(next === null ? [] : [reversed(next)]),
+    ext,
+    ...payload(data),
+  ]);
+  const block = Buffer.alloc(512);
+  body.copy(block);
+  return block;
+}
+
+function hashLow(block: Uint8Array): Buffer {
+  const digest = Buffer.from(sha256(sha256(block)));
+  digest.reverse();
+  const low = Buffer.alloc(32);
+  digest.copy(low, 8, 8, 32);
+  return low;
 }
 
 function amountField(amount: bigint, address: Uint8Array): Buffer {

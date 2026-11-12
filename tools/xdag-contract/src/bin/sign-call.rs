@@ -19,11 +19,18 @@ fn main() {
         header: args[9].parse::<u8>().unwrap(),
         args: hex_bytes(&args[10]),
     };
-    let block = sign_call(&call).unwrap_or_else(|e| {
+    let signed = sign_call(&call).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1);
     });
-    println!("{}", block.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    println!("{}", hex(&signed.block));
+    for chunk in &signed.chunks {
+        println!("{}", hex(chunk));
+    }
+}
+
+fn hex(block: &[u8]) -> String {
+    block.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn hex_bytes(raw: &str) -> Vec<u8> {
