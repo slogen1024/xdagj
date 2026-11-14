@@ -31,6 +31,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import io.xdag.chain.InMemoryKVSource;
+import io.xdag.chain.anchor.WithdrawWindow;
 import io.xdag.chain.exec.ChainExecutor;
 import io.xdag.chain.exec.state.Mmr;
 import io.xdag.chain.exec.state.OutboxMap;
@@ -170,7 +171,7 @@ public class ClaimFlowTest {
         assertTrue(h.current().isEmpty());
         assertEquals(XAmount.ZERO, h.balance(h.user));
         h.fund(h.src, XAmount.of(5, XUnit.XDAG));
-        ClaimHandler blind = new ClaimHandler(h.store, hash -> null, 64, h.settlement);
+        ClaimHandler blind = new ClaimHandler(h.store, hash -> null, 64, h.settlement, WithdrawWindow.unlimited());
         ChainL1Batch batch = new ChainL1Batch();
         blind.onApplied(built.block, built.classified, CTX, batch);
         assertTrue(batch.isEmpty());
@@ -208,7 +209,7 @@ public class ClaimFlowTest {
         ChainL1Store imported = new ChainL1Store(new InMemoryKVSource());
         imported.importSnapshot(snap);
         assertEquals(a.store.stateHash(), imported.stateHash());
-        ClaimHandler replay = new ClaimHandler(imported, hash -> null, 64, a.settlement);
+        ClaimHandler replay = new ClaimHandler(imported, hash -> null, 64, a.settlement, WithdrawWindow.unlimited());
         assertFalse(replay.settle(built.claim, built.proof, Bytes32.repeat((byte) 9), new ChainL1Batch()));
         assertNotNull(imported.getClaimed(a.src, Bytes.wrap(new byte[20]), 0L));
     }
@@ -309,7 +310,8 @@ public class ClaimFlowTest {
         Harness() {
             store.start();
             addresses.start();
-            handler = new ClaimHandler(store, chunks::get, config.getChainSpec().getChainMaxChunksPerChain(), settlement);
+            handler = new ClaimHandler(store, chunks::get, config.getChainSpec().getChainMaxChunksPerChain(),
+                    settlement, WithdrawWindow.unlimited());
         }
 
         void fund(Bytes address, XAmount amount) {

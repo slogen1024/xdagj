@@ -13,7 +13,12 @@ import {
   query,
   selector,
   sendCall,
+  signAnchor,
   signCall,
+  signChallenge,
+  signClaim,
+  signDeployInto,
+  signDeployNew,
   subscribe,
   u32,
   u64,
@@ -84,6 +89,60 @@ test("typescript chunk chain matches rust", () => {
   assert.equal(Buffer.from(signed.block).toString("hex"), rust[0]);
   assert.deepEqual(signed.chunks.map((c) => Buffer.from(c).toString("hex")), rust.slice(1));
 });
+
+test("typescript deploy anchor claim and challenge match rust", () => {
+  const priv = "a392604efc2fad9c0b3da43b5f698a2e3f270f170d859912be0d54742275c5f6";
+  const chain = Buffer.from("0102030405060708090a0b0c0d0e0f1011121314", "hex");
+  const recipient = Buffer.from("14131211100f0e0d0c0b0a090807060504030201", "hex");
+  const wasm = fill(40, 3);
+  const init = fill(20, 4);
+  const base = { header: 8, timestamp: 1556925644800n, nonce: 1n, fee: 100000000n, privateKey: Buffer.from(priv, "hex") };
+  same(signDeployNew({ ...base, gasLimit: 1000n, gasPrice: 7n, deliveryDelay: 8n, maxCallGas: 9n, wasm, initArgs: init }),
+    rust(["deploy-new", priv, "1556925644800", "1", "100000000", "1000", "7", "8", "9", "8", wasm.toString("hex"), init.toString("hex")]));
+  const hash = Buffer.alloc(32, 0);
+  hash[0] = 9;
+  const longArgs = fill(225, 2);
+  same(signDeployInto({ ...base, chain, value: 250n, gasLimit: 1000n, codeHash: hash, wasm: null, initArgs: longArgs }),
+    rust(["deploy-into", priv, "1556925644800", "1", "100000000", "250", "1000", chain.toString("hex"), hash.toString("hex"), "8", "-", longArgs.toString("hex")]));
+  const state = word(1);
+  const outbox = word(2);
+  const prev = word(3);
+  const main = word(4);
+  same(signAnchor({ ...base, chain, seq: 11n, stateRoot: state, outboxRoot: outbox, prevSeq: 4n, inputCount: 5n, segmentCount: 6n, prevAnchor: prev, mainBlock: main, commitment: Buffer.alloc(0) }),
+    rust(["anchor", priv, "1556925644800", "1", "100000000", chain.toString("hex"), "11", state.toString("hex"), outbox.toString("hex"), "4", "5", "6", prev.toString("hex"), main.toString("hex"), "8", "-"]));
+  const anchor = word(7);
+  const proof = fill(353, 9);
+  same(signClaim({ ...base, toChainVault: true, srcChain: chain, seq: 11n, index: 3n, amount: 9n, recipient, anchor, proof }),
+    rust(["claim", priv, "1556925644800", "1", "100000000", "1", chain.toString("hex"), "11", "3", "9", recipient.toString("hex"), anchor.toString("hex"), "8", proof.toString("hex")]));
+  const witness = fill(10, 1);
+  same(signChallenge({ ...base, inputIndex: 6n, deposit: 50n, anchor, witness }),
+    rust(["challenge", priv, "1556925644800", "1", "100000000", "6", "50", anchor.toString("hex"), "8", witness.toString("hex")]));
+});
+
+function rust(args) {
+  return execFileSync(
+    "cargo",
+    ["run", "--quiet", "--offline", "--manifest-path", "../xdag-contract/Cargo.toml", "--bin", "sign-ext", "--", ...args],
+    { cwd: new URL(".", import.meta.url), encoding: "utf8" },
+  ).trim().split("\n");
+}
+
+function same(signed, lines) {
+  assert.equal(Buffer.from(signed.block).toString("hex"), lines[0]);
+  assert.deepEqual(signed.chunks.map((c) => Buffer.from(c).toString("hex")), lines.slice(1));
+}
+
+function fill(len, seed) {
+  const raw = Buffer.alloc(len);
+  for (let i = 0; i < len; i++) raw[i] = (seed + i) & 0xff;
+  return raw;
+}
+
+function word(b) {
+  const raw = Buffer.alloc(32);
+  for (let i = 0; i < raw.length; i++) raw[i] = (b + i) & 0xff;
+  return raw;
+}
 
 test("rpc bodies use the chain_* names", () => {
   assert.equal(getBalance("aa", "bb", "final").method, "chain_getBalance");

@@ -14,3 +14,7 @@ xdag = { path = "macros" }
 [[bin]]
 name = "sign-call"
 path = "src/bin/sign-call.rs"
+
+[[bin]]
+name = "sign-ext"
+path = "src/bin/sign-ext.rs"

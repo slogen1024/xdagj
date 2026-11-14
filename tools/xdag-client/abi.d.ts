@@ -53,3 +53,87 @@ export declare function signCall(call: {
     block: Uint8Array;
     chunks: Uint8Array[];
 };
+export declare function signDeployNew(deploy: {
+    header: number;
+    timestamp: bigint;
+    nonce: bigint;
+    fee: bigint;
+    gasLimit: bigint;
+    gasPrice: bigint;
+    deliveryDelay: bigint;
+    maxCallGas: bigint;
+    privateKey: Uint8Array;
+    wasm: Uint8Array;
+    initArgs: Uint8Array;
+}): {
+    block: Uint8Array;
+    chunks: Uint8Array[];
+};
+export declare function signDeployInto(deploy: {
+    header: number;
+    timestamp: bigint;
+    nonce: bigint;
+    chain: Uint8Array;
+    value: bigint;
+    fee: bigint;
+    gasLimit: bigint;
+    codeHash: Uint8Array | null;
+    privateKey: Uint8Array;
+    wasm: Uint8Array | null;
+    initArgs: Uint8Array;
+}): {
+    block: Uint8Array;
+    chunks: Uint8Array[];
+};
+export declare function signAnchor(anchor: {
+    header: number;
+    timestamp: bigint;
+    nonce: bigint;
+    fee: bigint;
+    chain: Uint8Array;
+    seq: bigint;
+    stateRoot: Uint8Array;
+    outboxRoot: Uint8Array;
+    prevSeq: bigint;
+    inputCount: bigint;
+    segmentCount: bigint;
+    prevAnchor: Uint8Array;
+    mainBlock: Uint8Array;
+    privateKey: Uint8Array;
+    commitment: Uint8Array;
+}): {
+    block: Uint8Array;
+    chunks: Uint8Array[];
+};
+export declare function signClaim(claim: {
+    header: number;
+    timestamp: bigint;
+    nonce: bigint;
+    fee: bigint;
+    toChainVault: boolean;
+    srcChain: Uint8Array;
+    seq: bigint;
+    index: bigint;
+    amount: bigint;
+    recipient: Uint8Array;
+    anchor: Uint8Array;
+    privateKey: Uint8Array;
+    proof: Uint8Array;
+}): {
+    block: Uint8Array;
+    chunks: Uint8Array[];
+};
+export declare function signChallenge(challenge: {
+    header: number;
+    timestamp: bigint;
+    nonce: bigint;
+    fee: bigint;
+    inputIndex: bigint;
+    deposit: bigint;
+    anchor: Uint8Array;
+    privateKey: Uint8Array;
+    witness: Uint8Array;
+}): {
+    block: Uint8Array;
+    chunks: Uint8Array[];
+};

@@ -89,4 +89,44 @@ mod tests {
         assert_eq!(host.returns, u64_le(20));
         assert!(Token::reentrant_selectors().is_empty());
     }
+
+    #[test]
+    fn transfer_rejects_a_short_balance_and_a_short_input() {
+        let mut host = Host::default();
+        let alice = [1u8; 20];
+        let bob = [2u8; 20];
+        Token::mint(&mut host, alice, 50);
+        host.caller = alice;
+        host.selector = selector(Token::TRANSFER);
+        host.input = {
+            let mut raw = bob.to_vec();
+            raw.extend_from_slice(&u64_le(51));
+            raw
+        };
+        assert!(!Token::call(&mut host));
+        assert_eq!(Token::balance(&host, &alice), 50);
+        assert_eq!(Token::balance(&host, &bob), 0);
+        assert!(host.events.is_empty());
+
+        host.input = vec![1];
+        assert!(!Token::call(&mut host));
+        assert_eq!(Token::balance(&host, &alice), 50);
+
+        host.selector = selector(Token::BALANCE_OF);
+        host.input = vec![1];
+        assert!(!Token::call(&mut host));
+
+        host.selector = 1;
+        host.input.clear();
+        assert!(!Token::call(&mut host));
+    }
+
+    #[test]
+    fn mint_saturates() {
+        let mut host = Host::default();
+        let alice = [1u8; 20];
+        Token::mint(&mut host, alice, u64::MAX);
+        Token::mint(&mut host, alice, 1);
+        assert_eq!(Token::balance(&host, &alice), u64::MAX);
+    }
 }

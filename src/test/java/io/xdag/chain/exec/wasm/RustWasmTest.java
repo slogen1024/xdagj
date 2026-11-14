@@ -26,12 +26,14 @@ package io.xdag.chain.exec.wasm;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -42,6 +44,7 @@ import org.apache.tuweni.bytes.Bytes32;
 import org.junit.Test;
 
 import io.xdag.chain.InMemoryKVSource;
+import io.xdag.crypto.hash.HashUtils;
 import io.xdag.chain.abi.AbiCodec;
 import io.xdag.chain.exec.ChainExecStore;
 import io.xdag.chain.exec.ChainExecutor;
@@ -61,8 +64,10 @@ import io.xdag.crypto.keys.ECKeyPair;
 
 /**
  * Modules from {@code tools/xdag-wasm}, compiled with rustc for wasm32. {@code mint} credits 50,
- * {@code transfer} moves 20 and ignores a short balance, {@code seed}/{@code swap} leave 125/80,
- * {@code ping} appends one outbox row. The token bytes also survive {@code chain deploy}.
+ * {@code transfer} moves 20, emits one {@code Transfer}, and ignores a short balance or a short argument.
+ * {@code balanceOf} reads 20 back. {@code seed}/{@code swap}
+ * leave 125/80 and ignore a zero input or a min-out above the quote, {@code ping} appends one outbox
+ * row and ignores more than 64 argument bytes. The token bytes also survive {@code chain deploy}.
  */
 public class RustWasmTest {
 
@@ -95,6 +100,7 @@ public class RustWasmTest {
         txs.add(tx(4, POOL, AbiCodec.selector("seed(u64,u64)"), pair(100, 100), pool));
         txs.add(tx(5, POOL, AbiCodec.selector("swap(u64,u64)"), pair(25, 1), pool));
         txs.add(tx(6, INBOX, AbiCodec.selector("ping(bytes)"), new byte[] {9, 8}, inbox));
+        txs.add(tx(7, TOKEN, AbiCodec.selector("balanceOf(address)"), BOB.toArray(), deployed));
         ChainExecutor exec = executor();
         List<ChainExecutor.Outcome> out = exec.apply(CHAIN, 0L, 1L, GAS, 0L, txs);
         for (int i = 0; i < out.size(); i++) {
@@ -102,9 +108,41 @@ public class RustWasmTest {
         }
         assertEquals(30L, le(exec.storage(CHAIN, TOKEN, balanceKey(SENDER))));
         assertEquals(20L, le(exec.storage(CHAIN, TOKEN, balanceKey(BOB))));
+        assertArrayEquals(leBytes(20), out.get(6).returnData());
+        assertArrayEquals(transferEvent(20), out.get(1).events().get(0));
+        assertTrue(out.get(2).events().isEmpty());
         assertEquals(125L, le(exec.storage(CHAIN, POOL, new byte[] {'r', '0'})));
         assertEquals(80L, le(exec.storage(CHAIN, POOL, new byte[] {'r', '1'})));
         assertFalse(out.get(4).outboxRoot().equals(out.get(5).outboxRoot()));
+    }
+
+    @Test
+    public void rustcModulesLeaveStateOnARejectedCall() throws IOException {
+        byte[] token = wasm("token.wasm");
+        byte[] pool = wasm("pool.wasm");
+        byte[] inbox = wasm("inbox.wasm");
+        List<ChainExecutor.Tx> txs = new ArrayList<>();
+        txs.add(tx(1, TOKEN, AbiCodec.selector("mint(address,u64)"), new byte[27], token));
+        txs.add(tx(2, TOKEN, AbiCodec.selector("mint(address,u64)"), addressAmount(SENDER, 50), token));
+        txs.add(tx(3, TOKEN, AbiCodec.selector("transfer(address,u64)"), new byte[] {1}, token));
+        txs.add(tx(4, TOKEN, AbiCodec.selector("transfer(address,u64)"), addressAmount(BOB, 100), token));
+        txs.add(tx(5, TOKEN, 1, new byte[0], token));
+        txs.add(tx(6, POOL, AbiCodec.selector("seed(u64,u64)"), new byte[8], pool));
+        txs.add(tx(7, POOL, AbiCodec.selector("swap(u64,u64)"), pair(25, 1), pool));
+        txs.add(tx(8, POOL, AbiCodec.selector("seed(u64,u64)"), pair(100, 100), pool));
+        txs.add(tx(9, POOL, AbiCodec.selector("swap(u64,u64)"), pair(0, 1), pool));
+        txs.add(tx(10, POOL, AbiCodec.selector("swap(u64,u64)"), pair(25, 21), pool));
+        txs.add(tx(11, INBOX, AbiCodec.selector("ping(bytes)"), new byte[65], inbox));
+        ChainExecutor exec = executor();
+        List<ChainExecutor.Outcome> out = exec.apply(CHAIN, 0L, 1L, GAS, 0L, txs);
+        for (int i = 0; i < out.size(); i++) {
+            assertEquals("tx " + i + " gas " + out.get(i).gasUsed(), ExecStatus.OK, out.get(i).status());
+        }
+        assertEquals(50L, le(exec.storage(CHAIN, TOKEN, balanceKey(SENDER))));
+        assertNull(exec.storage(CHAIN, TOKEN, balanceKey(BOB)));
+        assertEquals(100L, le(exec.storage(CHAIN, POOL, new byte[] {'r', '0'})));
+        assertEquals(100L, le(exec.storage(CHAIN, POOL, new byte[] {'r', '1'})));
+        assertEquals(out.get(9).outboxRoot(), out.get(10).outboxRoot());
     }
 
     private static byte[] deploy(byte[] wasm) {
@@ -166,6 +204,23 @@ public class RustWasmTest {
 
     private static long le(byte[] raw) {
         return ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN).getLong();
+    }
+
+    private static byte[] leBytes(long value) {
+        byte[] raw = new byte[8];
+        ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN).putLong(value);
+        return raw;
+    }
+
+    /** `ExecHost.emit` stores a big-endian topic length, then the topic, then the data. */
+    private static byte[] transferEvent(long amount) {
+        byte[] topic = HashUtils.sha256(Bytes.wrap("Transfer(address,address,u64)".getBytes(StandardCharsets.US_ASCII)))
+                .toArray();
+        byte[] raw = new byte[4 + topic.length + 8];
+        ByteBuffer.wrap(raw).putInt(topic.length);
+        System.arraycopy(topic, 0, raw, 4, topic.length);
+        ByteBuffer.wrap(raw, 4 + topic.length, 8).order(ByteOrder.LITTLE_ENDIAN).putLong(amount);
+        return raw;
     }
 
     private static ChainExecutor executor() {

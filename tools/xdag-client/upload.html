@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>合约测试上传</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; font: 14px/1.45 ui-sans-serif, system-ui, sans-serif; background: #121417; color: #e7e4dc; }
+  main { max-width: 820px; margin: 0 auto; padding: 28px 20px 64px; }
+  h1 { font-size: 22px; font-weight: 650; margin: 0 0 8px; }
+  h2 { font-size: 15px; margin: 28px 0 8px; }
+  p, li { color: #c8c4ba; }
+  code, textarea, input { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  code { color: #f2e7c4; }
+  ol { padding-left: 18px; }
+  label { display: block; margin: 10px 0 4px; color: #9d998e; }
+  input[type="text"], input[type="number"] { width: 100%; box-sizing: border-box; background: #1c2026; color: #e7e4dc; border: 1px solid #343a44; border-radius: 6px; padding: 8px; }
+  textarea { width: 100%; box-sizing: border-box; min-height: 88px; background: #1c2026; color: #e7e4dc; border: 1px solid #343a44; border-radius: 6px; padding: 8px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  button, .file { background: #e7e4dc; color: #121417; border: 0; border-radius: 6px; padding: 8px 12px; font-weight: 650; cursor: pointer; }
+  button.ghost { background: transparent; color: #e7e4dc; border: 1px solid #343a44; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .drop { border: 1px dashed #5c6572; border-radius: 8px; padding: 18px; text-align: center; }
+  .drop.over { border-color: #e7e4dc; }
+  .ok { color: #9ddeaf; }
+  .bad { color: #f0a3a0; }
+  .meta { color: #9d998e; }
+</style>
+</head>
+<body>
+<main>
+  <h1>合约测试上传</h1>
+  <p>网页不连节点，也不收私钥。把生成的命令贴进节点 telnet（默认端口 6001）。节点用已解锁的钱包签名。激活前 JSON-RPC 回 <code>inactive</code>；没钱包时 telnet 回 <code>key</code>。</p>
+  <ol>
+    <li>上传 <code>.wasm</code>。参考模块在 <code>src/test/resources/chain-sdk/rust/</code>：<code>token.wasm</code>、<code>pool.wasm</code>、<code>inbox.wasm</code>。</li>
+    <li>新链用 <code>chain create</code>。节点打印块哈希后，贴回本页，得到链号和合约号。链号是 <code>sha256("xdag-chain" || 块哈希)[0..20]</code>，合约号是 <code>sha256("xdag-contract" || 块哈希)[0..20]</code>。</li>
+    <li>已有链用 <code>chain deploy</code>。CLI 的 value 和 init 参数都是空的。要带 init 参数，用 <code>tools/xdag-contract</code> 的 <code>sign-ext deploy-into</code>。</li>
+    <li>调用：<code>chain call &lt;链&gt; &lt;合约&gt; &lt;selector&gt; &lt;gas&gt; &lt;valueNano&gt; &lt;参数hex&gt;</code>。只读：<code>chain query &lt;链&gt; &lt;合约&gt; &lt;selector&gt; &lt;参数hex&gt; confirmed</code>。</li>
+  </ol>
+  <p class="meta">rustc 的 token：<code>mint(address,u64)</code> = -617361918，<code>transfer(address,u64)</code> = 1433710159，<code>balanceOf(address)</code> = 1531377910。转账成功会发 <code>Transfer</code>。pool：<code>seed(u64,u64)</code> = 671297210，<code>swap(u64,u64)</code> = -488097224。inbox：<code>ping(bytes)</code> = -150857028。参数是小端紧凑编码，地址 20 字节。</p>
+  <p id="pin" class="meta">正在核对链号算法…</p>
+
+  <h2>1. 上传 wasm</h2>
+  <div id="drop" class="drop">
+    <input id="file" type="file" accept=".wasm,application/wasm">
+    <div id="fileMeta" class="meta">还没有文件</div>
+  </div>
+  <div class="row">
+    <div>
+      <label for="gas">gasLimit</label>
+      <input id="gas" type="number" value="500000" min="1">
+    </div>
+    <div>
+      <label for="chain">已有链号，40 个 hex</label>
+      <input id="chain" type="text" spellcheck="false" placeholder="deploy 用，create 不用">
+    </div>
+  </div>
+  <div class="row">
+    <div>
+      <label for="price">gasPriceNano</label>
+      <input id="price" type="number" value="1" min="0">
+    </div>
+    <div>
+      <label for="delay">deliveryDelay D</label>
+      <input id="delay" type="number" value="0" min="0">
+    </div>
+  </div>
+  <label for="maxGas">maxCallGas，1 到 10000000</label>
+  <input id="maxGas" type="number" value="1000000" min="1" max="10000000">
+  <div class="actions">
+    <button id="make" type="button">生成命令</button>
+    <button id="copyCmd" class="ghost" type="button">复制命令</button>
+  </div>
+  <label for="cmd">贴进 telnet 的命令</label>
+  <textarea id="cmd" readonly></textarea>
+
+  <h2>2. 用块哈希算链号和合约号</h2>
+  <label for="blockHash">create 或 deploy 返回的块哈希，64 个 hex</label>
+  <input id="blockHash" type="text" spellcheck="false" placeholder="可带 0x">
+  <div class="actions">
+    <button id="ids" type="button">计算</button>
+    <button id="copyIds" class="ghost" type="button">复制链号和合约号</button>
+  </div>
+  <p id="idOut" class="meta">还没算</p>
+
+  <h2>3. 调用和查询</h2>
+  <div class="row">
+    <div>
+      <label for="selector">selector，有符号十进制</label>
+      <input id="selector" type="number" value="-617361918">
+    </div>
+    <div>
+      <label for="args">参数 hex，mint 是 20 字节地址加 u64 小端</label>
+      <input id="args" type="text" spellcheck="false" value="">
+    </div>
+  </div>
+  <label for="value">call 的 value，nano</label>
+  <input id="value" type="number" value="0" min="0">
+  <div class="actions">
+    <button id="calls" type="button">生成 call / query</button>
+    <button id="copyCall" class="ghost" type="button">复制</button>
+  </div>
+  <textarea id="callOut" readonly></textarea>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let wasm = null;
+
+function hexOf(bytes) {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+
+function fromHex(raw) {
+  const s = raw.trim().replace(/^0x/i, "");
+  if (s.length % 2 !== 0 || /[^0-9a-f]/i.test(s)) throw new Error("hex");
+  const out = new Uint8Array(s.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(s.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+async function tagged(tag, hash) {
+  const prefix = new TextEncoder().encode(tag);
+  const buf = new Uint8Array(prefix.length + hash.length);
+  buf.set(prefix, 0);
+  buf.set(hash, prefix.length);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", buf));
+  return hexOf(digest.slice(0, 20));
+}
+
+function num(id) {
+  const n = Number($("" + id).value);
+  if (!Number.isSafeInteger(n) || n < 0) throw new Error(id);
+  return n;
+}
+
+function setFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    wasm = new Uint8Array(reader.result);
+    $("fileMeta").textContent = file.name + "  " + wasm.length + " 字节";
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+$("file").addEventListener("change", (ev) => setFile(ev.target.files[0]));
+const drop = $("drop");
+drop.addEventListener("dragover", (ev) => { ev.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (ev) => {
+  ev.preventDefault();
+  drop.classList.remove("over");
+  setFile(ev.dataTransfer.files[0]);
+});
+
+$("make").addEventListener("click", () => {
+  try {
+    if (!wasm || wasm.length === 0) throw new Error("先上传 wasm");
+    const gas = num("gas");
+    const price = num("price");
+    const delay = num("delay");
+    const maxGas = num("maxGas");
+    if (maxGas < 1 || maxGas > 10000000) throw new Error("maxCallGas 要在 1 到 10000000");
+    const body = hexOf(wasm);
+    const create = "chain create " + [body, price, delay, maxGas, gas].join(" ");
+    let deploy = "chain deploy 需要 40 hex 的链号";
+    const chain = $("chain").value.trim();
+    if (chain) {
+      const raw = fromHex(chain);
+      if (raw.length !== 20) throw new Error("链号要 20 字节");
+      deploy = "chain deploy " + hexOf(raw) + " " + body + " " + gas;
+    }
+    $("cmd").value = create + "\n" + deploy;
+  } catch (e) {
+    $("cmd").value = String(e.message || e);
+  }
+});
+
+$("ids").addEventListener("click", async () => {
+  try {
+    const hash = fromHex($("blockHash").value);
+    if (hash.length !== 32) throw new Error("块哈希要 32 字节");
+    const chain = await tagged("xdag-chain", hash);
+    const contract = await tagged("xdag-contract", hash);
+    $("chain").value = chain;
+    $("idOut").textContent = "链号 " + chain + "    合约号 " + contract;
+    $("idOut").className = "ok";
+  } catch (e) {
+    $("idOut").textContent = String(e.message || e);
+    $("idOut").className = "bad";
+  }
+});
+
+$("calls").addEventListener("click", () => {
+  try {
+    const chain = fromHex($("chain").value);
+    if (chain.length !== 20) throw new Error("先填链号，或先用块哈希算出来");
+    const contract = $("idOut").textContent.includes("合约号")
+      ? $("idOut").textContent.split("合约号 ")[1].trim()
+      : "";
+    if (!/^[0-9a-f]{40}$/.test(contract)) throw new Error("先计算合约号");
+    const selector = Number($("selector").value);
+    if (!Number.isSafeInteger(selector)) throw new Error("selector");
+    const args = $("args").value.trim() === "" ? "" : hexOf(fromHex($("args").value));
+    const gas = num("gas");
+    const value = num("value");
+    const chainHex = hexOf(chain);
+    $("callOut").value = [
+      "chain call " + [chainHex, contract, selector, gas, value, args].join(" "),
+      "chain query " + [chainHex, contract, selector, args, "confirmed"].join(" ")
+    ].join("\n");
+  } catch (e) {
+    $("callOut").value = String(e.message || e);
+  }
+});
+
+async function copy(id) {
+  await navigator.clipboard.writeText($(id).value);
+}
+
+$("copyCmd").addEventListener("click", () => copy("cmd"));
+$("copyCall").addEventListener("click", () => copy("callOut"));
+$("copyIds").addEventListener("click", () => copyText($("idOut").textContent));
+
+function copyText(text) {
+  return navigator.clipboard.writeText(text);
+}
+
+tagged("xdag-chain", new Uint8Array(32)).then(async (chain) => {
+  const contract = await tagged("xdag-contract", new Uint8Array(32));
+  const ok = chain === "90da1e6b86f5a876cca811d05efd7b164c9bae69"
+    && contract === "40b50e4b989e5b3bcc7febaaa591368788b1c0d2";
+  $("pin").textContent = ok
+    ? "链号算法与 ChainIds 的零哈希钉一致。"
+    : "链号算法和 ChainIds 不一致。";
+  $("pin").className = ok ? "ok" : "bad";
+});
+</script>
+</body>
+</html>

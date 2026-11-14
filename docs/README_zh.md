@@ -8,6 +8,7 @@
 ## 目录
   - [系统环境](#系统环境)
   - [安装与用法](#安装与用法)
+    - [合约测试](#合约测试)
   - [发展](#发展)
     - [火星计划](#火星计划)
   - [代码规范](#代码规范)
@@ -39,6 +40,18 @@ XDAGJ教程可以让您快速加入并体验XDAGJ的钱包及挖矿功能，私�
 [XDAGJ私有链搭建教程](XDAGJ_Devnet_Tutorial_zh.md)
 
 [XDAGJ测试网区块浏览器](http://146.56.240.230/)
+
+### 合约测试
+
+用浏览器打开 `tools/xdag-client/upload.html`。把 `.wasm` 拖进去，把生成的命令贴进节点 telnet（默认端口 `6001`）。网页不连节点，也不收私钥。节点用已解锁的钱包签名。
+
+参考模块在 `src/test/resources/chain-sdk/rust/`：`token.wasm`、`pool.wasm`、`inbox.wasm`。
+
+1. 新链执行 `chain create <wasm十六进制> <gasPriceNano> <D> <maxCallGas> <gasLimit>`。已有链执行 `chain deploy <链号> <wasm十六进制> <gasLimit>`。这条 CLI deploy 的 value 和 init 参数都是空的。要带 init 参数，用 `tools/xdag-contract` 里的 `sign-ext deploy-into`。
+2. 节点打印块哈希后贴回网页。链号是 `sha256("xdag-chain" || 块哈希)[0..20]`，合约号是 `sha256("xdag-contract" || 块哈希)[0..20]`。
+3. 调用用 `chain call <链> <合约> <selector> <gas> <valueNano> <参数hex>`。只读用 `chain query <链> <合约> <selector> <参数hex> confirmed`。
+
+rustc token 的 `mint(address,u64)` 是 `-617361918`，`transfer(address,u64)` 是 `1433710159`，`balanceOf(address)` 是 `1531377910`。转账成功会发 `Transfer`。参数是小端紧凑编码，地址 20 字节。钱包没解锁时 telnet 回 `key`。激活前 JSON-RPC 回 `inactive`。
 
 ## 发展
 

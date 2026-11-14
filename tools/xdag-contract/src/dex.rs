@@ -22,11 +22,21 @@ impl Pool {
         let min_out = read(&host.input[8..]);
         let r0 = reserve(host, b"r0");
         let r1 = reserve(host, b"r1");
-        if amount_in == 0 || r0 == 0 || r1 == 0 {
+        let Some(prod) = r0.checked_mul(r1) else {
+            return false;
+        };
+        let Some(denom) = r0.checked_add(amount_in) else {
+            return false;
+        };
+        if amount_in == 0 || denom == 0 || r1 == 0 {
             return false;
         }
-        let out = r1 - product(r0, r1) / (r0 + amount_in);
-        if out < min_out || out > r1 {
+        let new_r1 = prod / denom;
+        if new_r1 > r1 {
+            return false;
+        }
+        let out = r1 - new_r1;
+        if out < min_out {
             return false;
         }
         host.storage_set(b"r0", &u64_le(r0 + amount_in));
@@ -34,10 +44,6 @@ impl Pool {
         host.returns = u64_le(out).to_vec();
         true
     }
-}
-
-fn product(r0: u64, r1: u64) -> u64 {
-    r0.saturating_mul(r1)
 }
 
 fn reserve(host: &Host, key: &[u8]) -> u64 {
@@ -70,5 +76,59 @@ mod tests {
         assert_eq!(out, 20);
         assert_eq!(reserve(&host, b"r0"), 125);
         assert_eq!(reserve(&host, b"r1"), 80);
+    }
+
+    #[test]
+    fn swap_rejects_before_it_writes() {
+        let mut host = Host::default();
+        host.selector = selector(Pool::SWAP);
+        host.input = {
+            let mut raw = u64_le(25).to_vec();
+            raw.extend_from_slice(&u64_le(1));
+            raw
+        };
+        assert!(!Pool::call(&mut host));
+
+        Pool::seed(&mut host, 100, 100);
+        host.input = vec![1];
+        assert!(!Pool::call(&mut host));
+        assert_eq!(reserve(&host, b"r0"), 100);
+        assert_eq!(reserve(&host, b"r1"), 100);
+
+        host.input = {
+            let mut raw = u64_le(0).to_vec();
+            raw.extend_from_slice(&u64_le(1));
+            raw
+        };
+        assert!(!Pool::call(&mut host));
+
+        host.input = {
+            let mut raw = u64_le(25).to_vec();
+            raw.extend_from_slice(&u64_le(21));
+            raw
+        };
+        assert!(!Pool::call(&mut host));
+        assert_eq!(reserve(&host, b"r0"), 100);
+        assert_eq!(reserve(&host, b"r1"), 100);
+
+        host.selector = 1;
+        assert!(!Pool::call(&mut host));
+        assert_eq!(reserve(&host, b"r0"), 100);
+        assert_eq!(reserve(&host, b"r1"), 100);
+    }
+
+    #[test]
+    fn swap_rejects_an_overflowing_product() {
+        let mut host = Host::default();
+        Pool::seed(&mut host, u64::MAX, 2);
+        host.selector = selector(Pool::SWAP);
+        host.input = {
+            let mut raw = u64_le(1).to_vec();
+            raw.extend_from_slice(&u64_le(0));
+            raw
+        };
+        assert!(!Pool::call(&mut host));
+        assert_eq!(reserve(&host, b"r0"), u64::MAX);
+        assert_eq!(reserve(&host, b"r1"), 2);
     }
 }

@@ -9,6 +9,7 @@
 
 - [System environment](#system-environment)
   - [Installation and usage](#installation-and-usage)
+    - [Contract testing](#contract-testing)
   - [Develop](#develop)
     - [XDAG Mars Project](#XDAG-Mars-Project)
   - [Code](#code)
@@ -40,6 +41,18 @@ The XDAGJ Testnet Tutorial can help you quickly access XDAGJ testnet by using wa
 [XDAGJ_Devnet_Tutorial](./docs/XDAGJ_Devnet_Tutorial_en.md)
 
 [XDAGJ TestNet Explorer](http://146.56.240.230/)
+
+### Contract testing
+
+Open `tools/xdag-client/upload.html` in a browser. Drop a `.wasm` file and paste the generated lines into the node telnet port (default `6001`). The page does not connect to a node and does not take a private key. The unlocked node wallet signs the blocks.
+
+Reference modules are in `src/test/resources/chain-sdk/rust/`: `token.wasm`, `pool.wasm`, `inbox.wasm`.
+
+1. New chain: `chain create <wasmHex> <gasPriceNano> <D> <maxCallGas> <gasLimit>`. Existing chain: `chain deploy <chainId> <wasmHex> <gasLimit>`. This CLI deploy sends an empty value and empty init args. Pass init args with `sign-ext deploy-into` in `tools/xdag-contract`.
+2. Paste the block hash the node prints back into the page. The chain id is `sha256("xdag-chain" || blockHash)[0..20]`. The contract id is `sha256("xdag-contract" || blockHash)[0..20]`.
+3. Call with `chain call <chain> <contract> <selector> <gas> <valueNano> <argsHex>`. Read with `chain query <chain> <contract> <selector> <argsHex> confirmed`.
+
+The rustc token selectors are `mint(address,u64)` = `-617361918`, `transfer(address,u64)` = `1433710159`, and `balanceOf(address)` = `1531377910`. A successful transfer emits `Transfer`. Args are little-endian and compact. An address is 20 bytes. Telnet answers `key` when the wallet is locked. JSON-RPC answers `inactive` before activation.
 
 ## Develop
 

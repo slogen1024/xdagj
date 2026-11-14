@@ -178,6 +178,292 @@ export function signCall(call: {
   return { block, chunks };
 }
 
+const MIN_GAS_NANO = 100000000n;
+const FLAG_NEW_CHAIN = 0x01;
+const FLAG_CODE_CHAIN = 0x02;
+const FLAG_DEPLOY_ARGS = 0x04;
+
+export function signDeployNew(deploy: {
+  header: number;
+  timestamp: bigint;
+  nonce: bigint;
+  fee: bigint;
+  gasLimit: bigint;
+  gasPrice: bigint;
+  deliveryDelay: bigint;
+  maxCallGas: bigint;
+  privateKey: Uint8Array;
+  wasm: Uint8Array;
+  initArgs: Uint8Array;
+}): { block: Uint8Array; chunks: Uint8Array[] } {
+  const code = splitChunks(deploy.header, deploy.timestamp, deploy.wasm);
+  const codeHead = hashLow(code[0]);
+  let flags = FLAG_NEW_CHAIN | FLAG_CODE_CHAIN;
+  let chunks = code.slice();
+  let inline = Buffer.from(deploy.initArgs);
+  let argsHead: Buffer | null = null;
+  if (deploy.initArgs.length > 160) {
+    const args = splitChunks(deploy.header, deploy.timestamp, deploy.initArgs);
+    argsHead = hashLow(args[0]);
+    chunks = chunks.concat(args);
+    flags |= FLAG_DEPLOY_ARGS;
+    inline = Buffer.alloc(0);
+  }
+  const paid = requiredValue(deploy.fee, argsHead === null ? 1n : 2n);
+  const sender = hash160(secp256k1.getPublicKey(deploy.privateKey, true));
+  const links: Link[] = [
+    { kind: 0x0c, address: sender, nano: paid },
+    { kind: 0x0d, address: sender, nano: paid },
+    { kind: 0x03, head: codeHead },
+  ];
+  if (argsHead !== null) links.push({ kind: 0x03, head: argsHead });
+  const ext = [
+    deployHeader(flags, Buffer.alloc(20), deploy.gasLimit, inline.length),
+    Buffer.from(sha256(deploy.wasm)),
+    chainConfig(deploy.gasPrice, deploy.deliveryDelay, deploy.maxCallGas),
+    ...payload(inline),
+  ];
+  return signTx(deploy, links, ext, dedupe(chunks));
+}
+
+export function signDeployInto(deploy: {
+  header: number;
+  timestamp: bigint;
+  nonce: bigint;
+  chain: Uint8Array;
+  value: bigint;
+  fee: bigint;
+  gasLimit: bigint;
+  codeHash: Uint8Array | null;
+  privateKey: Uint8Array;
+  wasm: Uint8Array | null;
+  initArgs: Uint8Array;
+}): { block: Uint8Array; chunks: Uint8Array[] } {
+  if (deploy.wasm == null && deploy.codeHash == null) throw new Error("need wasm or code hash");
+  let flags = 0;
+  let chunks: Buffer[] = [];
+  let codeHead: Buffer | null = null;
+  let hash: Buffer;
+  if (deploy.wasm != null) {
+    const code = splitChunks(deploy.header, deploy.timestamp, deploy.wasm);
+    codeHead = hashLow(code[0]);
+    chunks = code;
+    flags |= FLAG_CODE_CHAIN;
+    hash = Buffer.from(sha256(deploy.wasm));
+  } else {
+    hash = Buffer.from(deploy.codeHash as Uint8Array);
+  }
+  const cap = codeHead === null ? 224 : 192;
+  let inline = Buffer.from(deploy.initArgs);
+  let argsHead: Buffer | null = null;
+  if (deploy.initArgs.length > cap) {
+    const args = splitChunks(deploy.header, deploy.timestamp, deploy.initArgs);
+    argsHead = hashLow(args[0]);
+    chunks = chunks.concat(args);
+    flags |= FLAG_DEPLOY_ARGS;
+    inline = Buffer.alloc(0);
+  }
+  const sender = hash160(secp256k1.getPublicKey(deploy.privateKey, true));
+  const links: Link[] = [
+    { kind: 0x0c, address: sender, nano: deploy.value },
+    { kind: 0x0d, address: Buffer.from(deploy.chain), nano: deploy.value },
+  ];
+  if (codeHead !== null) links.push({ kind: 0x03, head: codeHead });
+  if (argsHead !== null) links.push({ kind: 0x03, head: argsHead });
+  const ext = [deployHeader(flags, deploy.chain, deploy.gasLimit, inline.length), hash, ...payload(inline)];
+  return signTx(deploy, links, ext, dedupe(chunks));
+}
+
+export function signAnchor(anchor: {
+  header: number;
+  timestamp: bigint;
+  nonce: bigint;
+  fee: bigint;
+  chain: Uint8Array;
+  seq: bigint;
+  stateRoot: Uint8Array;
+  outboxRoot: Uint8Array;
+  prevSeq: bigint;
+  inputCount: bigint;
+  segmentCount: bigint;
+  prevAnchor: Uint8Array;
+  mainBlock: Uint8Array;
+  privateKey: Uint8Array;
+  commitment: Uint8Array;
+}): { block: Uint8Array; chunks: Uint8Array[] } {
+  let chunks: Buffer[] = [];
+  let head = Buffer.alloc(32);
+  if (anchor.commitment.length > 0) {
+    chunks = splitChunks(anchor.header, anchor.timestamp, anchor.commitment);
+    head = hashLow(chunks[0]);
+  }
+  const paid = requiredValue(anchor.fee, 3n);
+  const sender = hash160(secp256k1.getPublicKey(anchor.privateKey, true));
+  const links: Link[] = [
+    { kind: 0x0c, address: sender, nano: paid },
+    { kind: 0x0d, address: sender, nano: paid },
+    { kind: 0x03, head: Buffer.from(anchor.prevAnchor) },
+    { kind: 0x03, head: Buffer.from(anchor.mainBlock) },
+    { kind: 0x03, head },
+  ];
+  const hdr = Buffer.alloc(32);
+  hdr[0] = 4;
+  Buffer.from(anchor.chain).copy(hdr, 2);
+  hdr.writeBigUInt64LE(anchor.seq, 22);
+  const counts = Buffer.alloc(32);
+  counts.writeBigUInt64LE(anchor.prevSeq, 0);
+  counts.writeUInt32LE(Number(anchor.inputCount), 8);
+  counts.writeUInt32LE(Number(anchor.segmentCount), 12);
+  const ext = [hdr, Buffer.from(anchor.stateRoot), Buffer.from(anchor.outboxRoot), counts];
+  return signTx(anchor, links, ext, chunks);
+}
+
+export function signClaim(claim: {
+  header: number;
+  timestamp: bigint;
+  nonce: bigint;
+  fee: bigint;
+  toChainVault: boolean;
+  srcChain: Uint8Array;
+  seq: bigint;
+  index: bigint;
+  amount: bigint;
+  recipient: Uint8Array;
+  anchor: Uint8Array;
+  privateKey: Uint8Array;
+  proof: Uint8Array;
+}): { block: Uint8Array; chunks: Uint8Array[] } {
+  const chunks = splitChunks(claim.header, claim.timestamp, claim.proof);
+  const paid = requiredValue(claim.fee, 2n);
+  const sender = hash160(secp256k1.getPublicKey(claim.privateKey, true));
+  const links: Link[] = [
+    { kind: 0x0c, address: sender, nano: paid },
+    { kind: 0x0d, address: sender, nano: paid },
+    { kind: 0x03, head: Buffer.from(claim.anchor) },
+    { kind: 0x03, head: hashLow(chunks[0]) },
+  ];
+  const hdr = Buffer.alloc(32);
+  hdr[0] = 7;
+  if (claim.toChainVault) hdr[1] = 1;
+  Buffer.from(claim.srcChain).copy(hdr, 2);
+  hdr.writeBigUInt64LE(claim.seq, 22);
+  const p0 = Buffer.alloc(32);
+  p0.writeBigUInt64LE(claim.index, 0);
+  p0.writeBigUInt64LE(claim.amount, 8);
+  const p1 = Buffer.alloc(32);
+  Buffer.from(claim.recipient).copy(p1, 0);
+  return signTx(claim, links, [hdr, p0, p1], chunks);
+}
+
+export function signChallenge(challenge: {
+  header: number;
+  timestamp: bigint;
+  nonce: bigint;
+  fee: bigint;
+  inputIndex: bigint;
+  deposit: bigint;
+  anchor: Uint8Array;
+  privateKey: Uint8Array;
+  witness: Uint8Array;
+}): { block: Uint8Array; chunks: Uint8Array[] } {
+  const chunks = splitChunks(challenge.header, challenge.timestamp, challenge.witness);
+  const feeBack = requiredValue(challenge.fee, 2n);
+  const sender = hash160(secp256k1.getPublicKey(challenge.privateKey, true));
+  const links: Link[] = [
+    { kind: 0x0c, address: sender, nano: feeBack + challenge.deposit },
+    { kind: 0x0d, address: bondVault(), nano: challenge.deposit },
+    { kind: 0x0d, address: sender, nano: feeBack },
+    { kind: 0x03, head: Buffer.from(challenge.anchor) },
+    { kind: 0x03, head: hashLow(chunks[0]) },
+  ];
+  const hdr = Buffer.alloc(32);
+  hdr[0] = 6;
+  hdr.writeUInt32LE(Number(challenge.inputIndex), 2);
+  hdr.writeBigUInt64LE(challenge.deposit, 6);
+  return signTx(challenge, links, [hdr], chunks);
+}
+
+type Link = { kind: number; address?: Uint8Array; nano?: bigint; head?: Uint8Array };
+
+function signTx(
+  tx: { header: number; timestamp: bigint; nonce: bigint; fee: bigint; privateKey: Uint8Array },
+  links: Link[],
+  ext: Buffer[],
+  chunks: Buffer[],
+): { block: Uint8Array; chunks: Uint8Array[] } {
+  if (2 + links.length + 3 + ext.length > 16) throw new Error("bad length");
+  const compressed = secp256k1.getPublicKey(tx.privateKey, true);
+  const pubkeyType = compressed[0] === 0x03 ? 0x07 : 0x06;
+  let typeBits = 0n;
+  let n = 0n;
+  const put = (field: number) => {
+    typeBits |= BigInt(field) << (n * 4n);
+    n += 1n;
+  };
+  put(tx.header);
+  put(0x0e);
+  for (const link of links) put(link.kind);
+  for (let i = 0; i < ext.length; i++) put(0x0f);
+  put(pubkeyType);
+  put(0x05);
+  put(0x05);
+  const parts = [header(typeBits, tx.timestamp, tx.fee), reversed(bePad(tx.nonce))];
+  for (const link of links) {
+    if (link.head != null) parts.push(reversed(Buffer.from(link.head)));
+    else parts.push(amountField(xdagAmount(link.nano as bigint), link.address as Uint8Array));
+  }
+  parts.push(...ext);
+  parts.push(Buffer.from(compressed.subarray(1, 33)));
+  const body = Buffer.concat(parts);
+  const preimage = Buffer.alloc(512);
+  body.copy(preimage);
+  const hash = sha256(sha256(Buffer.concat([preimage, Buffer.from(compressed)])));
+  const sig = secp256k1.sign(hash, tx.privateKey);
+  const block = Buffer.alloc(512);
+  body.copy(block);
+  Buffer.from(sig.toCompactRawBytes()).copy(block, body.length);
+  return { block, chunks };
+}
+
+function requiredValue(fee: bigint, chainLinks: bigint): bigint {
+  return fee + MIN_GAS_NANO * (1n + chainLinks);
+}
+
+function deployHeader(flags: number, chain: Uint8Array, gas: bigint, argsLen: number): Buffer {
+  const raw = Buffer.alloc(32);
+  raw[0] = 2;
+  raw[1] = flags;
+  Buffer.from(chain).copy(raw, 2);
+  raw.writeUInt32LE(Number(gas), 22);
+  raw.writeUInt16LE(argsLen, 26);
+  return raw;
+}
+
+function chainConfig(price: bigint, delay: bigint, maxGas: bigint): Buffer {
+  const raw = Buffer.alloc(32);
+  raw.writeBigUInt64LE(price, 0);
+  raw.writeUInt32LE(Number(delay), 8);
+  raw.writeUInt32LE(Number(maxGas), 12);
+  return raw;
+}
+
+function bondVault(): Buffer {
+  return Buffer.from(sha256(Buffer.from("xdag-chain-bond"))).subarray(0, 20);
+}
+
+function dedupe(chunks: Buffer[]): Buffer[] {
+  const seen = new Set<string>();
+  const out: Buffer[] = [];
+  for (const chunk of chunks) {
+    const key = hashLow(chunk).toString("hex");
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(chunk);
+    }
+  }
+  return out;
+}
+
 function header(typeBits: bigint, timestamp: bigint, fee: bigint): Buffer {
   const raw = Buffer.alloc(32);
   raw.writeBigUInt64LE(typeBits, 8);

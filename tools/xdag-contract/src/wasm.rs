@@ -1,6 +1,6 @@
-//! Wasm the node executes. Same bodies as the old hand-built modules: selector 0 mints 50
-//! or seeds 100/100, `transfer` moves a balance, `swap` takes 25 of asset 0, `send` appends
-//! one outbox row with value 0. This is an emitter, not a Rust-to-wasm compiler.
+//! Old fixture bytes, selector 0, not the on-chain ABI. Selector 0 mints 50 or seeds 100/100,
+//! `transfer` moves a balance, `swap` takes 25 of asset 0, `send` appends one outbox row with
+//! value 0. This is an emitter, not a Rust-to-wasm compiler. The chain reference is `xdag-wasm`.
 
 const TRANSFER: i32 = 1433710159;
 const SWAP: i32 = -488097224;

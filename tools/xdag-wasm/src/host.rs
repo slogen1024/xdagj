@@ -9,6 +9,8 @@ extern "C" {
     pub fn storage_get(key: i32, key_len: i32, val: i32, val_cap: i32) -> i32;
     pub fn storage_set(key: i32, key_len: i32, val: i32, val_len: i32);
     pub fn send(dst: i32, contract: i32, selector: i32, args: i32, args_len: i32, value: i64) -> i32;
+    pub fn emit(topic: i32, topic_len: i32, data: i32, data_len: i32);
+    pub fn return_data(ptr: i32, len: i32);
 }
 
 static mut SCRATCH: [u8; 256] = [0; 256];
@@ -36,6 +38,11 @@ pub unsafe fn copy(dst: isize, src: isize, n: usize) {
 
 pub unsafe fn set_byte(off: isize, value: u8) {
     *core::ptr::addr_of_mut!(SCRATCH).cast::<u8>().offset(off) = value;
+}
+
+pub unsafe fn write_bytes(off: isize, bytes: &[u8]) {
+    let p = core::ptr::addr_of_mut!(SCRATCH).cast::<u8>().offset(off);
+    core::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
 }
 
 pub unsafe fn fill(off: isize, n: usize, value: u8) {

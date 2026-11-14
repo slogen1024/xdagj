@@ -66,10 +66,6 @@ public final class ClaimHandler implements ChainKindHandler {
     private final Settlement settlement;
     private final WithdrawWindow window;
 
-    public ClaimHandler(ChainL1Store store, ChunkChain.RawBlockLookup lookup, int maxChunks, Settlement settlement) {
-        this(store, lookup, maxChunks, settlement, WithdrawWindow.unlimited());
-    }
-
     public ClaimHandler(ChainL1Store store, ChunkChain.RawBlockLookup lookup, int maxChunks, Settlement settlement,
             WithdrawWindow window) {
         this.store = store;

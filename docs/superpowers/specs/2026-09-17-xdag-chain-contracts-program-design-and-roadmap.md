@@ -32,14 +32,14 @@
 | SP1-1 | 完成 | Chicory 1.7.5，`io.xdag.chain.exec.wasm` | — |
 | SP1-2 | 完成 | `StateTree` 的 get/put/remove；`OutboxMap`；`WitnessRecorder`（同 key 只计一次，`estimateFromGas` = gas/10 + 32KiB）；`ChainExecStore`（`CHAIN_EXEC`，快照页键多一个 `page u32`）。§8.3 不等式在 `StateAndWitnessTest` | 哈希函数仍是无状态的 `SparseMerkleTree` |
 | SP1-3 | 完成 | `InputStreamBuilder`（奖励在前，高度上可交付的出箱条目展开成 `recv`，再是调用）；`ChainExecutor.step/apply`（预扣、回滚帧、退款、`C_k`，奖励把费用池划给认证者）；`ExecChangeSet` 记每个 seq 的前像；`ChainExecDriver` 跟 `onSetMainEnd`，源出箱还没执行就等。根与承诺钉在 `ChainExecutorTest`。`MessageFlowTest` | — |
-| SP1-4 | 完成 | 变更集只留最近 `K=128`（`CHANGESET_WINDOW`）。`seq % 64 == 0` 把全量 KV 写成 `0x04` 快照页。窗口外的 seq 从快照页装回，根与当时的状态根一致。`onUnsetMain(h)` 把已执行到该高度的订阅链滚到 `h-1`，缺变更集才停住。`setPending` 在副本上跑未确认调用，不写 `CHAIN_EXEC`；`pending` 视图和 `estimateGas` 读这份副本。节点从当前 top 按 `applyBlock` 的后序收集 CALL（`PendingCalls`）。`RetentionTest` | 不在候选主链上的孤块不进 pending |
+| SP1-4 | 完成 | 变更集只留最近 `K=128`（`CHANGESET_WINDOW`）。`seq % 64 == 0` 把全量 KV 写成 `0x04` 快照页。窗口外的 seq 从快照页装回，根与当时的状态根一致。`onUnsetMain(h)` 把已执行到该高度的订阅链滚到 `h-1`，缺变更集才停住。`setPending` 在副本上跑未确认调用，不写 `CHAIN_EXEC`；`pending` 视图和 `estimateGas` 读这份副本。节点从当前 top 按 `applyBlock` 的后序收集 CALL（`PendingCalls`）。`RetentionTest`。已决：不在候选主链上的孤块不进这份 pending，不改 `PendingCalls.dfs` | — |
 | SP1-5 | 完成 | 同一笔 `storage_set` 在解释器和编译模式上根与承诺都是 `ChainExecutorTest` 的钉。编译器抛异常时 `PreparedModule.fellBack()`，解释器接着跑，根不变。节点执行用 `ChicoryEngine.compiler()`，仲裁仍是解释器。`transfer_from_caller` 三轮中位：解释器 14814 调用/s，编译 15376 调用/s。SHA-256 一次 161 ns，256 次 9208 ns，约占一笔转账的 14%。E10 定死继续用 SHA-256。`GasSchedule.V1` 不改。`TwoModeTest`、`ExecBenchTest`。见 `docs/benchmarks/2026-11-08-sp1-5-exec.md` | — |
-| SP2 | 完成 | `ClaimHandler`（`l1/handlers`）；`ClaimVerifier` / `ClaimProof` / `OutboxEntry` / `WithdrawOutbox` / `AnchorRecord` / `SettlementJournal` / `VaultLedger`（`asset/`）；`BlockchainImpl.chainTransfer`。0x06 只读（`FINAL` 才放行），0x08 `src‖dst‖index`，0x10 journal 进状态哈希。证明体版本 1。`ClaimFlowTest` | 四参 `ClaimHandler` 不限额。提现窗在 SP3 的 `WithdrawWindow` |
-| SP3 | 完成 | `BondHandler` / `AnchorHandler` / `ChallengeHandler`；`HeightTriggers`、`AnchorPublisher`、`DueSegments`、`RewardInputs`（`anchor/`）；`Witness`、`Arbiter`、`E2Replay`、`WitnessBackedStore`、`VerdictCache`、`Challenger`、`InputIndex`（`fraud/`）。E1/E2/E3 都实判。可交付高度上的出箱条目跑 `recv`。源锚定否决后 `onSourceVoided` 把消费链滚回交付前，并把 0x0B 游标退回。`E2ArbitrationBenchTest` 在 `maxCallGas` 下单次仲裁 < 2 s。`AnchorFlowTest`、`E2FlowTest`、`MessageFlowTest` | `D == W` 不回滚。三个矿池已互连，挑战罚没没有在这条 devnet 上跑 |
-| SP4 | 完成 | 订阅集合已经进 `ChainExecDriver`，执行器只跑订阅链。`0x1B–0x1F`；快照页与 SMT 根校验；四种证明体；`Delivery` 的 HOLD；未 `open` 的回复丢弃，每方向最多 64 条；拉取默认 8 MiB。`SegmentIntake` 验过段证明后写入出箱。握手完成后 `ChainPull.wire` 自己发 `0x1E`，同一 request id 等 `0x1F`。有 FINAL 锚定时 `SnapshotSync.gather` 把页装进执行器，根对上才从该 seq 之后接着跑；拉不到就从创建高度重放。`ThreeNodeDrillTest`：D=0 发 `0x1E` 后跑 `recv`，D=W 在 FINAL 之前余额为 0，之后入账；`AnchorFlowTest.slashBadCall` 把坏锚定罚没。`ChainPullTest`、`DeliveryFetchTest`。2026-11-09 `sh docker/up.sh` 退出 0 | 三个池在项目 `xdagj-devnet` 里互连，8001 为 ESTABLISHED。conf 里的链号是字面量，不是 `chainIdOf` |
-| SP5 | 部分 | `ChainApi` 挂在现有 JSON-RPC 上。激活前 `inactive`。`pending` 是已执行的头加上未确认调用的副本，不写主状态。`anchored` / `final` 在锚定 seq 上读余额、状态和证明，变更集只在副本上撤销；窗口外的 seq 用快照页。`query` 在 `ContractRecord.deployHeight > seq` 时返回 null。回执带 seq 和事件；确认级按锚定覆盖面写成 `confirmed` / `anchored` / `final`。`chain_buildClaim` 拼版本 1 的 `ClaimProof`。`/chain` WebSocket 推 `receipts` / `events` / `anchors`。`AbiCodec` 是小端紧凑编码。telnet `chain` 能读，也能用钱包账户签名 `call|create|deploy|bond|unbond|challenge` 以及长参数的 `anchor`/`claim`（`ChainCli.Signer`），块交给 `submitBlock`。`ChainApiTest`、`AbiCodecTest`、`ChainCliSignTest`、`HistoricalQueryTest` | 合约行只记下一次 `deployHeight`，更早的代码不再可读，`query` 直接拒绝。`tools/xdag-contract` 与 `tools/xdag-client` 已钉 ABI，并组 `chain_getBalance` / `chain_query` / `chain_sendCall`。`#[xdag::contract]` 在内存宿主上分发 selector。SDK 写出三个 wasm，`ReferenceDappsTest` 跑它们，`SdkDeployTest` 经 `chain deploy` 组块后拼回原字节再跑。`tools/xdag-wasm` 用 rustc 编出 token、pool、inbox，`RustWasmTest` 在编译器上跑 mint、transfer、swap、ping，并把 token 经 `chain deploy` 拼回原字节。行内 CALL 和超过 256 字节的 CALL 分片链由 `sign_call` 和 `signCall` 组出，与 `ChainBlockBuilder.call` 一致。DEPLOY 等分片链仍是 `ChainBlockBuilder`。客户端源是 `tools/xdag-client/abi.ts`。**M6 完成** |
+| SP2 | 完成 | `ClaimHandler`（`l1/handlers`）；`ClaimVerifier` / `ClaimProof` / `OutboxEntry` / `WithdrawOutbox` / `AnchorRecord` / `SettlementJournal` / `VaultLedger`（`asset/`）；`BlockchainImpl.chainTransfer`。0x06 只读（`FINAL` 才放行），0x08 `src‖dst‖index`，0x10 journal 进状态哈希。证明体版本 1。`ClaimFlowTest` | 已决：`ClaimHandler` 必须传入 `WithdrawWindow`。生产路径用 `WithdrawWindow.of`。`ClaimFlowTest` 显式传 `WithdrawWindow.unlimited()` |
+| SP3 | 完成 | `BondHandler` / `AnchorHandler` / `ChallengeHandler`；`HeightTriggers`、`AnchorPublisher`、`DueSegments`、`RewardInputs`（`anchor/`）；`Witness`、`Arbiter`、`E2Replay`、`WitnessBackedStore`、`VerdictCache`、`Challenger`、`InputIndex`（`fraud/`）。E1/E2/E3 都实判。可交付高度上的出箱条目跑 `recv`。源锚定否决后 `onSourceVoided` 把消费链滚回交付前，并把 0x0B 游标退回。`E2ArbitrationBenchTest` 在 `maxCallGas` 下单次仲裁 < 2 s。`AnchorFlowTest`、`E2FlowTest`、`MessageFlowTest` | 已决：`D == W` 不回滚，原因在 `ChainExecDriver`。不拉起 `xdagj-devnet`。D=0、D=W、罚没以 `ThreeNodeDrillTest` 和 `AnchorFlowTest.slashBadCall` 为准 |
+| SP4 | 完成 | 订阅集合已经进 `ChainExecDriver`，执行器只跑订阅链。`0x1B–0x1F`；快照页与 SMT 根校验；四种证明体；`Delivery` 的 HOLD；未 `open` 的回复丢弃，每方向最多 64 条；拉取默认 8 MiB。`SegmentIntake` 验过段证明后写入出箱。握手完成后 `ChainPull.wire` 自己发 `0x1E`，同一 request id 等 `0x1F`。有 FINAL 锚定时 `SnapshotSync.gather` 把页装进执行器，根对上才从该 seq 之后接着跑；拉不到就从创建高度重放。`ThreeNodeDrillTest`：D=0 发 `0x1E` 后跑 `recv`，D=W 在 FINAL 之前余额为 0，之后入账；`AnchorFlowTest.slashBadCall` 把坏锚定罚没。`ChainPullTest`、`DeliveryFetchTest`。2026-11-09 `sh docker/up.sh` 退出 0 | 已决：不拉起 `xdagj-devnet`。有 `chain create` 块之前算不出 `chainIdOf`，conf 继续用字面量链号 |
+| SP5 | 部分 | `ChainApi` 挂在现有 JSON-RPC 上。激活前 `inactive`。`pending` 是已执行的头加上未确认调用的副本，不写主状态。`anchored` / `final` 在锚定 seq 上读余额、状态和证明，变更集只在副本上撤销；窗口外的 seq 用快照页。`query` 在 `ContractRecord.deployHeight > seq` 时返回 null。回执带 seq 和事件；确认级按锚定覆盖面写成 `confirmed` / `anchored` / `final`。`chain_buildClaim` 拼版本 1 的 `ClaimProof`。`/chain` WebSocket 推 `receipts` / `events` / `anchors`。`AbiCodec` 是小端紧凑编码。telnet `chain` 能读，也能用钱包账户签名 `call|create|deploy|bond|unbond|challenge` 以及长参数的 `anchor`/`claim`（`ChainCli.Signer`），块交给 `submitBlock`。`ChainApiTest`、`AbiCodecTest`、`ChainCliSignTest`、`HistoricalQueryTest` | 已决：合约地址是 `sha256("xdag-contract" ‖ 部署块哈希)[0..20]`，每笔 DEPLOY 是新地址，`putContract` 不改写另一行。`queryAt` 在 `deployHeight > seq` 时返回 null，表示那时还没有这份合约。不加 `0x11`。`tools/xdag-contract` 与 `tools/xdag-client` 已钉 ABI，并组 `chain_getBalance` / `chain_query` / `chain_sendCall`。`#[xdag::contract]` 在内存宿主上分发 selector。SDK 的三个 wasm 是旧夹具，selector 0，不是链上 ABI，`ReferenceDappsTest` 跑它们，`SdkDeployTest` 经 `chain deploy` 组块后拼回原字节再跑。`tools/xdag-wasm` 用 rustc 编出 token、pool、inbox，`RustWasmTest` 在编译器上跑 mint、transfer、balanceOf、Transfer、swap、ping，并把 token 经 `chain deploy` 拼回原字节。行内 CALL、超过 256 字节的 CALL 分片链，以及 DEPLOY、ANCHOR、CLAIM、CHALLENGE 由 Rust 和 TypeScript 组出，与 `ChainBlockBuilder` 一致（`ClientCallSignTest`、`ClientExtSignTest`）。客户端源是 `tools/xdag-client/abi.ts`。**M6 完成** |
 
-里程碑：M1、M2、M3、M4、M5 完成。M3 的执行中位是解释器 14814 调用/s、编译 15376 调用/s，导入门禁仍是 19687 块/s。M5：`xdagj-devnet` 三个池已启动并对上 8001。D=0、D=W、罚没仍是进程内 `ThreeNodeDrillTest`，没有在这条 devnet 上跑。M6 完成：`#[xdag::contract]` 在内存宿主上分发 selector。手写 wasm 由 `ReferenceDappsTest` 跑。`tools/xdag-wasm` 用 rustc 编出另外三份，`RustWasmTest` 在编译器上跑 mint、transfer、swap、ping，并把 token 经 `chain deploy` 拼回原字节。客户端源是 `abi.ts`。行内 CALL 和超过 256 字节的 CALL 分片链由 `sign_call` 和 `signCall` 组出，与 `ChainBlockBuilder.call` 一致。DEPLOY 等分片链仍是 `ChainBlockBuilder`。M7 完成：`ActivationObservation.fromReport` 用 `ChainConsistencyCheck` 的 stuck 数当命中。`activation watch` 在未来高度、H 前后两份不同快照、零命中、一次挑战和 28 天齐了才回答 `ready`；`activation mainnet` 才回答 `allowed`。不写高度。testnet / mainnet 仍是 `Long.MAX_VALUE`，28 天没有在共享网上走过。
+里程碑：M1、M2、M3、M4、M5 完成。M3 的执行中位是解释器 14814 调用/s、编译 15376 调用/s，导入门禁仍是 19687 块/s。M5：已决不拉起 `xdagj-devnet`。2026-11-09 对上过 8001 之后已停。D=0、D=W、罚没以 `ThreeNodeDrillTest` 和 `AnchorFlowTest.slashBadCall` 为准。M6 完成：`#[xdag::contract]` 在内存宿主上分发 selector。手写 wasm 是旧夹具，selector 0，不是链上 ABI，由 `ReferenceDappsTest` 跑。`tools/xdag-wasm` 用 rustc 编出另外三份，`RustWasmTest` 在编译器上跑 mint、transfer、balanceOf、Transfer、swap、ping，并把 token 经 `chain deploy` 拼回原字节。客户端源是 `abi.ts`。行内 CALL、超过 256 字节的 CALL 分片链，以及 DEPLOY、ANCHOR、CLAIM、CHALLENGE 由 Rust 和 TypeScript 组出，与 `ChainBlockBuilder` 一致（`ClientCallSignTest`、`ClientExtSignTest`）。M7 完成：`ActivationObservation.fromReport` 用 `ChainConsistencyCheck` 的 stuck 数当命中。`activation watch` 在未来高度、H 前后两份不同快照、零命中、一次挑战和 28 天齐了才回答 `ready`；`activation mainnet` 才回答 `allowed`。不写高度。testnet / mainnet 仍是 `Long.MAX_VALUE`，28 天没有在共享网上走过。
 
 ---
 
@@ -94,7 +94,7 @@ v1 = 链合约在 testnet 激活并稳定运行一个观察期后，主网以硬
 11. `ChainKindHandler` 注册只能通过 `Kernel.getChainKindHandlers()` 在构造 `BlockchainImpl` 之前完成；`onUnapplied` 可能收到从未 `onApplied` 的块，实现必须以自己的记录为准做幂等撤销。
 12. 快照三目录；`ChainL1SnapshotGate` 是每次快照启动的第一条语句；标记路径必须证明"同一快照 + 本地未漂移"。
 13. `chain.activation.height`、`chain.chunk.maxPerChain`、`chain.wasm.maxBytes`、`chain.chunk.feeMilliXdag` 是共识参数，共享网络上绝不设置；不往任何 `.conf` 里加 `chain.*` 键。
-14. 合入 `develop` 的前置：字段码 0x0F 与 dev-evm 的取舍（D3 归档必须落实）。
+14. 已决：合入 `develop` 前归档 dev-evm。本分支不重编码 `0x0F`，不删任何分支。
 
 ### 2.3 转交工单
 
@@ -396,7 +396,7 @@ SP2 引入第一批 **共识 handler**（`ClaimHandler`）与第一处 **系统�
 - `BlockchainImpl.precomputeChallenge` 在 `tryToConnect` 进锁之前调用 `HeightTriggers.preview`。`SyncManager.importBlock` 和 `importPreValidated` 同样先预计算。锚定还不是规范、见证拼不起来，就不写缓存，`fire` 再算。
 - `AnchorPublisher.publish` 用调用方给的承诺列表和 `DueSegments` 组 ANCHOR，不负责导入。`Challenger.diverge` 找第一处分歧，`Challenger.file` 组 CHALLENGE。
 - 罚没打的是该链保证金，这条为 0 才打全局保证金。一半给挑战者，余数进 `sha256("xdag-chain-burn")[0..20]`，奇数 nano 归销毁。挑战押金另退。否决从链头往回把被挑战锚定和它的规范后代改成 `VOIDED`，链头回到父锚定。
-- 提现窗在 `WithdrawWindow`，不在 `ClaimVerifier.verify`。`f` 是本链全部保证金加上全部全局保证金。窗口按 CLAIM 的确认高度向下对齐到 W。没有链头就拒绝。SP2 的四参 `ClaimHandler` 不限额。
+- 提现窗在 `WithdrawWindow`，不在 `ClaimVerifier.verify`。`f` 是本链全部保证金加上全部全局保证金。窗口按 CLAIM 的确认高度向下对齐到 W。没有链头就拒绝。`ClaimHandler` 必须传入 `WithdrawWindow`。生产路径用 `WithdrawWindow.of`。`ClaimFlowTest` 显式传 `WithdrawWindow.unlimited()`。
 - 高度 `h` 的输入是奖励、然后 `confirmHeight + D == h` 的出箱条目、然后调用。条目在源链 `CHAIN_EXEC` 的 MMR 里，叶子是 `sha256(entry)`。交付先把 `value` 记给原发送者，再跑 `recv`；`recv` 失败只回滚帧，钱留在发送者。源链还没执行到该 seq 时 `ready` 为假，驱动先跑源链。没有条目就不编造。
 - 每个 seq 写一条 `ExecChangeSet`（状态前像、出箱旧长度、opening 和回执）。`HeightTriggers` 在否决提交之后调 `ChainExecDriver.onSourceVoided`：消费链的 `appliedSeq` 已经到达 `confirmHeight + D` 就滚回到该高度之前。本链自己的执行不滚。`D == W` 不滚。L1 把 `srcSeq` 不小于被否决 seq 的 0x0B 游标退到仍活着的段的 `from`，没有这样的段就删掉游标。`onUnsetMain` 仍然只停住。
 - `E2ArbitrationBenchTest` 用解释器重执行一笔 `gasLimit = maxCallGas`（10_000_000）的 `loop/br`，gas 打满上限。断言的是 `E2Replay.replay` 本身 < 2 s。整段测试 0.985 s，含未计时的第一次执行。承诺一致时裁决是失败（押金给认证者）。
@@ -462,7 +462,7 @@ SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器�
 
 ### 9.3 多节点 devnet
 
-- 3 节点 compose 在 `docker/`，项目名 `xdagj-devnet`，复用 devnet 的非共识项。pool-a 只订 `…0001`，pool-b 只订 `…0002`，pool-c `chain.subscribeAll = true`。这三份 id 是 conf 字面量，不是 `chainIdOf` 算出来的链。2026-11-09 `sh docker/up.sh` 退出 0：三个容器对上过端口 8001（ESTABLISHED，连接在 `/proc/net/tcp6`），之后已停。进程内演练仍是 `ThreeNodeDrillTest`：A 发布源链段证明；B（D=0）自己发 `0x1E`，`recv` 入账 50；C（D=W）在高度 4 余额仍是 0，锚定改成 FINAL 后在高度 5 入账。同一条测试调用 `AnchorFlowTest.slashBadCall`：E1 对不上就把保证金劈成挑战者和销毁地址，锚定 VOIDED。这条 devnet 没有跑 D=0 / D=W / 罚没。`ThreeNodeDevnetTest` 仍覆盖订阅分裂和拉页。新订阅者从 FINAL 快照恢复状态，不重放那一截，也在 `ThreeNodeDrillTest`。
+- 3 节点 compose 在 `docker/`，项目名 `xdagj-devnet`，复用 devnet 的非共识项。pool-a 只订 `…0001`，pool-b 只订 `…0002`，pool-c `chain.subscribeAll = true`。这三份 id 是 conf 字面量，不是 `chainIdOf` 算出来的链。2026-11-09 `sh docker/up.sh` 退出 0：三个容器对上过端口 8001（ESTABLISHED，连接在 `/proc/net/tcp6`），之后已停。进程内演练仍是 `ThreeNodeDrillTest`：A 发布源链段证明；B（D=0）自己发 `0x1E`，`recv` 入账 50；C（D=W）在高度 4 余额仍是 0，锚定改成 FINAL 后在高度 5 入账。同一条测试调用 `AnchorFlowTest.slashBadCall`：E1 对不上就把保证金劈成挑战者和销毁地址，锚定 VOIDED。已决：不拉起 `xdagj-devnet`。有 `chain create` 块之前算不出 `chainIdOf`，conf 继续用字面量。D=0、D=W、罚没以 `ThreeNodeDrillTest` 和 `AnchorFlowTest.slashBadCall` 为准。`D == W` 不回滚，`ChainExecDriver` 已说明原因。`ThreeNodeDevnetTest` 仍覆盖订阅分裂和拉页。新订阅者从 FINAL 快照恢复状态，不重放那一截，也在 `ThreeNodeDrillTest`。
 
 **任务量估计**：15–18 个任务。
 
@@ -478,7 +478,7 @@ SP3 引入 `BondHandler / AnchorHandler / ChallengeHandler` 与高度触发器�
 
 **已落地**：`anchored` / `final` 用变更集在副本上回到锚定 seq，不改活状态。`queryAt` 在合约行的 `deployHeight > seq` 时返回 null，不拿后来部署的代码去跑更早的 seq。执行器写的回执是 `status ‖ gas ‖ commitment ‖ return ‖ seq ‖ events`。旧回执没有尾部时 seq 为 −1，确认级 `confirmed`。新回执的确认级：FINAL 锚定覆盖该 seq 为 `final`，非 VOIDED 锚定覆盖为 `anchored`，否则 `confirmed`。`chain_buildClaim` 用该 seq 的出箱前缀拼 `ClaimProof`。`/chain` 上文本帧 `receipts|events|anchors` 订阅推送；锚定推送来自 `ChainL1Store.commit`。`AbiCodec`：小端 `u32`/`u64`，`bytes` 为长度前缀，selector 为 `sha256(签名)[0..4]`，事件为 `sha256(签名) ‖ body`。telnet `chain` 读 `balance|state|query|head|anchor|receipt|claim|send|subscribe`。`ChainCli.Signer` 用钱包第一个账户签名 `call|create|deploy|bond|unbond|challenge`，以及参数多于读形式的 `anchor`（11 个）和 `claim`（8 个）；块和分片交给 `submitBlock`。nonce 是 `getTxQuantity + 1`。
 
-**还没有**：合约行被后一次部署改写后，更早的代码不在库里，旧 seq 的 `query` 只能拒绝。`#[xdag::contract]` / `#[xdag::method]` 给内存宿主生成 `call` 和 `reentrant_selectors`。`Map` / `VecStore` / `Set` 在同一宿主。`wasm::token` / `pool` / `inbox` 写出三个模块，钉在 `src/test/resources/chain-sdk/`。`ReferenceDappsTest` 跑这三份：转账后余额 30/20，兑换后储备 125/80，`send` 改写出箱根。`SdkDeployTest` 用 `chain deploy` 组块，`ChunkChain.assemble` 拼回原字节后再跑。行内 CALL 和超过 256 字节的 CALL 分片链由 `sign_call` 和 `signCall` 组出，与 `ChainBlockBuilder.call` 一致。DEPLOY 等分片链仍是 `ChainBlockBuilder`。`tools/xdag-wasm` 用 rustc 编出 token、pool、inbox，钉在 `src/test/resources/chain-sdk/rust/`。`RustWasmTest` 在编译器上跑 mint、transfer、swap、ping，并把 token 经 `chain deploy` 拼回原字节。客户端源是 `tools/xdag-client/abi.ts`，`abi.js` 是 `tsc` 的输出，测试导入它。
+**还没有**：已决，合约地址不可覆盖。`contractIdOf` 是 `sha256("xdag-contract" ‖ 部署块哈希)[0..20]`。每笔 DEPLOY 都是新地址，`applyDeploy` 的 `putContract` 不改写另一笔部署的行。`queryAt` 在 `deployHeight > seq` 时返回 null，表示那时还没有这份合约；之后跑的是这一行指向的代码。不加 `0x11`。`#[xdag::contract]` / `#[xdag::method]` 给内存宿主生成 `call` 和 `reentrant_selectors`。`Map` / `VecStore` / `Set` 在同一宿主。`wasm::token` / `pool` / `inbox` 是旧夹具，selector 0，不是链上 ABI，钉在 `src/test/resources/chain-sdk/`。`ReferenceDappsTest` 跑这三份：转账后余额 30/20，兑换后储备 125/80，`send` 改写出箱根。`SdkDeployTest` 用 `chain deploy` 组块，`ChunkChain.assemble` 拼回原字节后再跑。行内 CALL、超过 256 字节的 CALL 分片链，以及 DEPLOY、ANCHOR、CLAIM、CHALLENGE 由 Rust 和 TypeScript 组出，与 `ChainBlockBuilder` 一致（`ClientCallSignTest`、`ClientExtSignTest`）。`tools/xdag-wasm` 用 rustc 编出 token、pool、inbox，钉在 `src/test/resources/chain-sdk/rust/`。`RustWasmTest` 在编译器上跑 mint、transfer、balanceOf、Transfer、swap、ping，并把 token 经 `chain deploy` 拼回原字节。客户端源是 `tools/xdag-client/abi.ts`，`abi.js` 是 `tsc` 的输出，测试导入它。
 
 **任务量估计**：20–25 个任务（SDK/客户端库为独立仓库或 `tools/` 子目录）。
 
@@ -545,9 +545,9 @@ SP0a ✅ ─┬─► SP0b-1 ✅ ─► SP0b-2 ✅ ─► SP0b-2b ✅ ─► SP0
 SP0b-3 ✅ ─────────────────────────────────────────┘
 ```
 
-SP0b 与 SP1 并行（不同包、不同人/会话）；SP2 与 SP3 并行（都依赖 SP1-3）。SP4 的订阅、消息、页、证明校验，以及把验过的段装进目的链出箱，已经做了。三个矿池已在 `xdagj-devnet` 里互连。D=0 / D=W 和挑战罚没没有在这条 devnet 上跑。
+SP0b 与 SP1 并行（不同包、不同人/会话）；SP2 与 SP3 并行（都依赖 SP1-3）。SP4 的订阅、消息、页、证明校验，以及把验过的段装进目的链出箱，已经做了。已决不拉起 `xdagj-devnet`。D=0 / D=W 和挑战罚没以 `ThreeNodeDrillTest` 和 `AnchorFlowTest.slashBadCall` 为准。
 
-**SP0b-2b（§5.2.1）插在 SP0b-2 与 SP0b-3 之间，并且已经做完**：SP0b-2 自己的验收（导入 ≥ 10k 块/s）当时未达成，缺口在锁内"其余"；SP0b-2b 把锁内均值压到 42–49 µs，中位 19687 块/s，门禁关闭。它与 SP0b-3 在孤块池上有重叠，顺序可换。SP0b-3 也已经做完。M5 的三个矿池已经拉起并对上 8001。D=0 / D=W / 罚没仍是进程内测试。
+**SP0b-2b（§5.2.1）插在 SP0b-2 与 SP0b-3 之间，并且已经做完**：SP0b-2 自己的验收（导入 ≥ 10k 块/s）当时未达成，缺口在锁内"其余"；SP0b-2b 把锁内均值压到 42–49 µs，中位 19687 块/s，门禁关闭。它与 SP0b-3 在孤块池上有重叠，顺序可换。SP0b-3 也已经做完。已决不拉起 `xdagj-devnet`。2026-11-09 对上过 8001 之后已停。D=0 / D=W / 罚没以进程内测试为准。
 
 ### 13.2 里程碑
 
@@ -557,8 +557,8 @@ SP0b 与 SP1 并行（不同包、不同人/会话）；SP2 与 SP3 并行（都
 | **M2 引擎** | 完成 | SP1-1/2 完成 | 白名单/插桩测试向量已钉死。§8.3 不等式：随机读写的 `witnessBytes` ≤ `estimateFromGas(gasUsed)`（`StateAndWitnessTest`） |
 | **M3 执行** | 完成 | SP0b-2/2b 导入门禁；SP1-3、SP1-4、SP1-5 | 单链执行：解释器中位 **14814** 调用/s，编译中位 **15376** 调用/s（4000 笔转账，三轮）。两模式同根同承诺。**导入 ≥ 10k 块/s 已达成**：20000 块负载 `pipeline` 中位 **19687 块/s**。见 `docs/benchmarks/2026-11-08-sp1-5-exec.md` 与 `docs/benchmarks/2026-11-07-sp0b2b-import.md` |
 | **M4 经济与安全** | 完成 | SP2、SP3 | `ClaimFlowTest` 覆盖 I1/I2。`AnchorFlowTest` 覆盖保证金、终局、E1、E3、顺延、畸形 E2、可交付标记、缓存、发布、挑战组块和否决后退游标。`E2FlowTest` 覆盖解释器重执行。`MessageFlowTest` 覆盖 `recv` 和 `onSourceVoided`。`E2ArbitrationBenchTest` 覆盖 2 秒上限。docker 罚没不在本里程碑 |
-| **M5 网络** | 完成 | SP0b-3 完成；SP4 的线格式、页、证明、段装入、快照引导、自发 `0x1E` 完成；`docker/up.sh` 拉起三个池 | 2026-11-09 三个容器对上过 8001，之后已停。进程内 `ThreeNodeDrillTest` 覆盖 D=0、D=W、快照引导和罚没。devnet 上没跑这三步 |
-| **M6 开发者面** | 完成 | `chain_*`、`/chain`、`AbiCodec`、能读能签名的 `chain` 命令。`#[xdag::contract]` 分发内存宿主。手写 wasm 和 rustc wasm 都在编译器上跑过。`abi.ts` 和 Rust `sign_call` 组行内 CALL，也组超过 256 字节的 CALL 分片链 | 这两类 CALL 与 `ChainBlockBuilder.call` 字节一致（`ClientCallSignTest`、`abi.test.mjs`）。DEPLOY、ANCHOR、CLAIM、CHALLENGE 的分片链仍是 `ChainBlockBuilder` |
+| **M5 网络** | 完成 | SP0b-3 完成；SP4 的线格式、页、证明、段装入、快照引导、自发 `0x1E` 完成；`docker/up.sh` 拉起三个池 | 已决：不拉起 `xdagj-devnet`。2026-11-09 对上过 8001 之后已停。D=0、D=W、罚没以 `ThreeNodeDrillTest` 和 `AnchorFlowTest.slashBadCall` 为准 |
+| **M6 开发者面** | 完成 | `chain_*`、`/chain`、`AbiCodec`、能读能签名的 `chain` 命令。`#[xdag::contract]` 分发内存宿主。手写 wasm 是旧夹具，selector 0，不是链上 ABI。rustc wasm 在编译器上跑过。`abi.ts` 和 Rust 组行内 CALL、超 256 字节的 CALL 分片链，以及 DEPLOY、ANCHOR、CLAIM、CHALLENGE | CALL、DEPLOY、ANCHOR、CLAIM、CHALLENGE 与 `ChainBlockBuilder` 字节一致（`ClientCallSignTest`、`ClientExtSignTest`、`abi.test.mjs`） |
 | **M7 testnet 激活** | 完成 | `ActivationObservation`：未来高度、H 前后两份快照、`ChainConsistencyCheck` 零命中、一次挑战、28 天。`watch` 齐了才 `ready`，`mainnet` 齐了才 `allowed`，不写高度 | 治理没有把 H 写进 testnet / mainnet，两者仍是 `Long.MAX_VALUE`。28 天没有在共享网上走过；测试把时钟拨过 `MIN_WINDOW_MS` |
 
 ### 13.3 每个子项目的固定流程与门禁
@@ -582,7 +582,7 @@ brainstorming（子项目 spec，以本文对应章节为起点）→ writing-pl
 
 | # | 事项 | 影响子项目 | 决策时点 | 当前倾向 |
 |---|------|-----------|---------|---------|
-| R1 | 字段码 0x0F 与 dev-evm 冲突（E11/D3） | 合入 develop | SP0b-1 前 | 归档 dev-evm 并记录；若需保留 dev-evm 则本方向改用 0x0E 之类需重编码——代价极大，故倾向归档 |
+| R1 | 字段码 0x0F 与 dev-evm 冲突（E11/D3） | 合入 develop | SP0b-1 前 | 已决：合入 develop 前归档 dev-evm。本分支不重编码 `0x0F`，不删任何分支 |
 | R2 | Chicory 版本、编译模式退化、`-Xss`（E4） | SP1-1 | SP1 spec | 解释器为仲裁真相；`WasmEngine` 可替换 |
 | R3 | SHA-256 vs blake3（E10） | SP1-2 | M3 前 | 基准决定；激活前定死 |
 | R4 | 经济参数（`minBond`、罚没比例、`maxWithdrawPerWindow` 公式）（E9/S2） | SP3 | M4 前 | SP3 经济分析 + testnet 数据 |
@@ -590,7 +590,7 @@ brainstorming（子项目 spec，以本文对应章节为起点）→ writing-pl
 | R6 | `canUseInput` 与 `AddressStore` 耦合限制锁外验签覆盖率 | SP0b-2 | SP0b-1 基线后 | 先覆盖块内公钥路径 |
 | R7 | 矿池即排序者（S3）、可组合性引力（S4） | 产品 | v2 | 反 MEV 排序模式与编织锚定留 v2 |
 | R8 | 过渡模式 `subscribeAll` 下单节点承担全部执行 | SP4/运营 | M5 | 多核并行执行不同链；testnet 负载测试 |
-| R9 | `unApplyBlock` 费用反向修复（SP0a 规格 G11，提交 79705de6）不修既有存储：在旧代码上 unwind 过 chain 块的节点留着静默偏低的发送方余额（或偏高的金库），以后可能拒绝同行接受的交易而分歧 | devnet/testnet 运维 | 主网激活前 | 见过这种 reorg 的存储重新同步或从快照重灌；主网无存量（chain 块只在激活后出现）；修复本身无条件生效、不设激活高度 |
+| R9 | `unApplyBlock` 费用反向修复（SP0a 规格 G11，提交 79705de6）只修以后的回滚。没有标记能认出哪些块用过旧除数，不写费用重放工具。见过旧回滚的库留着静默偏低的发送方余额（或偏高的金库） | devnet/testnet 运维 | 主网激活前 | 已决：见过旧回滚的库重同步或从快照重灌。主网无存量。修复无条件生效，不设激活高度 |
 
 ---
 
